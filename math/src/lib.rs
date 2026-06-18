@@ -1,20 +1,18 @@
-use borsh::{BorshDeserialize, BorshSerialize};
-use wasm_bindgen::JsValue;
-use workflow_core::sendable::Sendable;
-
 pub mod int;
 pub mod uint;
+#[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
-construct_uint!(Uint192, 3, BorshSerialize, BorshDeserialize);
+construct_uint!(Uint192, 3);
 construct_uint!(Uint256, 4);
 construct_uint!(Uint320, 5);
 construct_uint!(Uint3072, 48);
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    #[cfg(target_arch = "wasm32")]
     #[error("{0:?}")]
-    JsValue(Sendable<JsValue>),
+    JsValue(String),
 
     #[error("Invalid hex string: {0}")]
     Hex(#[from] faster_hex::Error),
@@ -25,37 +23,41 @@ pub enum Error {
     #[error("Utf8 error: {0}")]
     Utf8(#[from] std::str::Utf8Error),
 
-    #[error(transparent)]
-    WorkflowWasm(#[from] workflow_wasm::error::Error),
-
+    #[cfg(target_arch = "wasm32")]
     #[error(transparent)]
     SerdeWasmBindgen(#[from] serde_wasm_bindgen::Error),
 
+    #[cfg(target_arch = "wasm32")]
     #[error("{0:?}")]
-    JsSys(Sendable<js_sys::Error>),
+    JsSys(String),
 
+    #[cfg(target_arch = "wasm32")]
     #[error("Supplied value is not compatible with this type")]
     NotCompatible,
 
+    #[cfg(target_arch = "wasm32")]
     #[error("range error: {0:?}")]
-    Range(Sendable<js_sys::RangeError>),
+    Range(String),
 }
 
+#[cfg(target_arch = "wasm32")]
 impl From<js_sys::Error> for Error {
     fn from(err: js_sys::Error) -> Self {
-        Error::JsSys(Sendable(err))
+        Error::JsSys(format!("{err:?}"))
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 impl From<js_sys::RangeError> for Error {
     fn from(err: js_sys::RangeError) -> Self {
-        Error::Range(Sendable(err))
+        Error::Range(format!("{err:?}"))
     }
 }
 
-impl From<JsValue> for Error {
-    fn from(err: JsValue) -> Self {
-        Error::JsValue(Sendable(err))
+#[cfg(target_arch = "wasm32")]
+impl From<wasm_bindgen::JsValue> for Error {
+    fn from(err: wasm_bindgen::JsValue) -> Self {
+        Error::JsValue(format!("{err:?}"))
     }
 }
 

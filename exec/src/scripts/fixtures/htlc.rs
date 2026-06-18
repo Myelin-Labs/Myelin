@@ -16,7 +16,7 @@
 //! - [0..32]:  secret_hash (blake3 hash of the secret)
 //! - [32..64]: recipient_pubkey (32 bytes for Schnorr)
 //! - [64..96]: sender_pubkey (32 bytes for Schnorr)
-//! - [96]:     lock_type (0=absolute DAA, 1=absolute timestamp, 2=relative DAA, 3=relative timestamp)
+//! - [96]:     lock_type (0=absolute block number, 1=absolute timestamp, 2=relative block number, 3=relative timestamp)
 //! - [97..105]: lock_value (u64, target timestamp or delta)
 //!
 //! Witness format:
@@ -43,9 +43,9 @@ const EXIT_SUCCESS: usize = 0;
 const EXIT_FAILURE: usize = 1;
 
 // Lock types
-const LOCK_ABSOLUTE_DAA: u8 = 0;
+const LOCK_ABSOLUTE_block number: u8 = 0;
 const LOCK_ABSOLUTE_TIMESTAMP: u8 = 1;
-const LOCK_RELATIVE_DAA: u8 = 2;
+const LOCK_RELATIVE_block number: u8 = 2;
 const LOCK_RELATIVE_TIMESTAMP: u8 = 3;
 
 // Since flags
@@ -53,8 +53,8 @@ const SINCE_RELATIVE: u64 = 1 << 63;
 const SINCE_TIMESTAMP: u64 = 1 << 62;
 const SINCE_VALUE_MASK: u64 = 0x00FFFFFFFFFFFFFF;
 
-const SIG_DOMAIN_A: &[u8] = b"spora-htlc-fixture-sig-a";
-const SIG_DOMAIN_B: &[u8] = b"spora-htlc-fixture-sig-b";
+const SIG_DOMAIN_A: &[u8] = b"myelin-htlc-fixture-sig-a";
+const SIG_DOMAIN_B: &[u8] = b"myelin-htlc-fixture-sig-b";
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -212,7 +212,7 @@ fn verify_timelock(since: u64, lock_type: u8, lock_value: u64) -> bool {
     let since_value = since & SINCE_VALUE_MASK;
 
     match lock_type {
-        LOCK_ABSOLUTE_DAA => {
+        LOCK_ABSOLUTE_block number => {
             // bit63=0, bit62=0
             if is_relative || is_timestamp {
                 return false;
@@ -226,7 +226,7 @@ fn verify_timelock(since: u64, lock_type: u8, lock_value: u64) -> bool {
             }
             since_value >= lock_value
         }
-        LOCK_RELATIVE_DAA => {
+        LOCK_RELATIVE_block number => {
             // bit63=1, bit62=0
             if !is_relative || is_timestamp {
                 return false;

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Segment storage: 1GB data segments for DA layer
 
 use crate::{
+    molecule,
     store::proof::{compute_segment_root, MerkleTreeBuilder},
     Result, SegmentInfo, StateError,
 };
-use borsh::{BorshDeserialize, BorshSerialize};
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -20,14 +20,14 @@ const SEGMENT_SIZE: u64 = 1024 * 1024 * 1024;
 /// Maximum segments in memory before forcing seal
 const MAX_OPEN_SEGMENTS: usize = 8;
 
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct AppendRecord {
     offset: u64,
     length: u32,
 }
 
 /// Segment metadata
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentMeta {
     /// Segment ID
     pub segment_id: u32,
@@ -43,6 +43,52 @@ pub struct SegmentMeta {
     pub created_at: u64,
     /// Sealed timestamp
     pub sealed_at: Option<u64>,
+}
+
+fn encode_append_record(record: &AppendRecord) -> Vec<u8> {
+    molecule::encode_table(&[molecule::encode_u64(record.offset), molecule::encode_u32(record.length)])
+}
+
+fn decode_append_record(bytes: &[u8]) -> Result<AppendRecord> {
+    let fields = molecule::decode_table(bytes, 2, "AppendRecord")?;
+    Ok(AppendRecord {
+        offset: molecule::decode_u64(fields[0], "AppendRecord.offset")?,
+        length: molecule::decode_u32(fields[1], "AppendRecord.length")?,
+    })
+}
+
+fn encode_append_records(records: &[AppendRecord]) -> Vec<u8> {
+    let items = records.iter().map(encode_append_record).collect::<Vec<_>>();
+    molecule::encode_dynvec(&items)
+}
+
+fn decode_append_records(bytes: &[u8]) -> Result<Vec<AppendRecord>> {
+    molecule::decode_dynvec(bytes, "AppendRecordVec")?.into_iter().map(decode_append_record).collect()
+}
+
+fn encode_segment_meta(meta: &SegmentMeta) -> Vec<u8> {
+    molecule::encode_table(&[
+        molecule::encode_u32(meta.segment_id),
+        molecule::encode_u64(meta.size),
+        molecule::encode_u32(meta.cell_count),
+        meta.merkle_root.to_vec(),
+        molecule::encode_bool(meta.sealed),
+        molecule::encode_u64(meta.created_at),
+        meta.sealed_at.map(molecule::encode_u64).unwrap_or_default(),
+    ])
+}
+
+fn decode_segment_meta(bytes: &[u8]) -> Result<SegmentMeta> {
+    let fields = molecule::decode_table(bytes, 7, "SegmentMeta")?;
+    Ok(SegmentMeta {
+        segment_id: molecule::decode_u32(fields[0], "SegmentMeta.segment_id")?,
+        size: molecule::decode_u64(fields[1], "SegmentMeta.size")?,
+        cell_count: molecule::decode_u32(fields[2], "SegmentMeta.cell_count")?,
+        merkle_root: molecule::decode_array32(fields[3], "SegmentMeta.merkle_root")?,
+        sealed: molecule::decode_bool(fields[4], "SegmentMeta.sealed")?,
+        created_at: molecule::decode_u64(fields[5], "SegmentMeta.created_at")?,
+        sealed_at: if fields[6].is_empty() { None } else { Some(molecule::decode_u64(fields[6], "SegmentMeta.sealed_at")?) },
+    })
 }
 
 /// Segment writer (append-only)
@@ -222,15 +268,13 @@ impl SegmentWriter {
     /// Save segment metadata
     fn save_segment_meta(&self, meta: &SegmentMeta) -> Result<()> {
         let path = self.segment_meta_path(meta.segment_id);
-        let data = borsh::to_vec(meta).map_err(|e| StateError::Serialization(e.to_string()))?;
-        std::fs::write(path, data)?;
+        std::fs::write(path, encode_segment_meta(meta))?;
         Ok(())
     }
 
     fn save_chunk_index(&self, segment_id: u32, chunks: &[AppendRecord]) -> Result<()> {
         let path = self.segment_index_path(segment_id);
-        let data = borsh::to_vec(chunks).map_err(|e| StateError::Serialization(e.to_string()))?;
-        std::fs::write(path, data)?;
+        std::fs::write(path, encode_append_records(chunks))?;
         Ok(())
     }
 
@@ -285,7 +329,7 @@ impl SegmentWriter {
     fn load_chunk_index(base_dir: &Path, segment_id: u32) -> Result<Vec<AppendRecord>> {
         let path = Self::segment_index_path_for(base_dir, segment_id);
         match std::fs::read(path) {
-            Ok(data) => Vec::<AppendRecord>::try_from_slice(&data).map_err(|e| StateError::Serialization(e.to_string())),
+            Ok(data) => decode_append_records(&data),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(err) => Err(StateError::Database(err.to_string())),
         }
@@ -341,7 +385,7 @@ impl SegmentReader {
     pub fn load_meta(&self, segment_id: u32) -> Result<SegmentMeta> {
         let path = self.segment_meta_path(segment_id);
         let data = std::fs::read(path).map_err(|_| StateError::SegmentNotFound(segment_id))?;
-        SegmentMeta::try_from_slice(&data).map_err(|e| StateError::Serialization(e.to_string()))
+        decode_segment_meta(&data)
     }
 
     fn build_merkle_builder(&self, segment_id: u32, chunk_index: &[AppendRecord]) -> Result<MerkleTreeBuilder> {

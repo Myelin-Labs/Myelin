@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Serialization Validation
 //
@@ -14,7 +14,7 @@
 //! - 数据完整性校验
 //! - 大小限制检查
 
-use crate::serialization::SerializationError;
+use crate::serialization::{SerializationError, VersionedEnvelope};
 
 /// 验证配置
 #[derive(Clone, Debug)]
@@ -23,9 +23,7 @@ pub struct ValidationConfig {
     pub min_schema_version: u8,
     /// 最大允许的 schema 版本
     pub max_schema_version: u8,
-    /// 允许 Borsh 格式
-    pub allow_borsh: bool,
-    /// 允许 Molecule 格式
+    /// Allow Molecule-compatible envelope bytes.
     pub allow_molecule: bool,
     /// 最大 payload 大小 (字节)
     pub max_payload_size: usize,
@@ -38,8 +36,7 @@ impl Default for ValidationConfig {
         Self {
             min_schema_version: 1,
             max_schema_version: 255,
-            allow_borsh: true,
-            allow_molecule: false,              // Molecule not yet supported
+            allow_molecule: true,
             max_payload_size: 10 * 1024 * 1024, // 10MB default
             strict_mode: false,
         }
@@ -52,7 +49,6 @@ impl ValidationConfig {
         Self {
             min_schema_version: 0,
             max_schema_version: 255,
-            allow_borsh: true,
             allow_molecule: true,
             max_payload_size: 100 * 1024 * 1024, // 100MB
             strict_mode: false,
@@ -64,8 +60,7 @@ impl ValidationConfig {
         Self {
             min_schema_version: 1,
             max_schema_version: 1,
-            allow_borsh: true,
-            allow_molecule: false,
+            allow_molecule: true,
             max_payload_size: 1024 * 1024, // 1MB
             strict_mode: true,
         }
@@ -154,13 +149,13 @@ impl SerializerValidator {
 
     /// 验证 VersionedEnvelope 字节
     pub fn validate_envelope(&self, bytes: &[u8]) -> ValidationResult {
-        // Check minimum size
-        if bytes.len() < 3 {
-            return ValidationResult::Invalid(format!("Data too short: {} bytes, minimum 3", bytes.len()));
-        }
+        let envelope = match VersionedEnvelope::<()>::from_bytes(bytes) {
+            Ok(envelope) => envelope,
+            Err(error) => return ValidationResult::Invalid(error.to_string()),
+        };
 
-        let format_version = bytes[0];
-        let schema_version = bytes[1];
+        let format_version = envelope.format_version();
+        let schema_version = envelope.schema_version();
 
         // Validate format version
         let format_result = self.validate_format_version(format_version);
@@ -174,11 +169,10 @@ impl SerializerValidator {
             return schema_result;
         }
 
-        // Validate payload size (approximate)
-        if bytes.len() > self.config.max_payload_size + 10 {
+        if envelope.payload_size() > self.config.max_payload_size {
             return ValidationResult::Invalid(format!(
                 "Payload too large: {} bytes, max {}",
-                bytes.len(),
+                envelope.payload_size(),
                 self.config.max_payload_size
             ));
         }
@@ -202,10 +196,9 @@ impl SerializerValidator {
     /// 验证格式版本
     fn validate_format_version(&self, version: u8) -> ValidationResult {
         match version {
-            0x00 if self.config.allow_borsh => ValidationResult::Valid,
-            0x00 => ValidationResult::Invalid("Borsh format not allowed".to_string()),
+            0x00 => ValidationResult::Invalid("Legacy format not allowed".to_string()),
             0x80..=0x8F if self.config.allow_molecule => ValidationResult::Valid,
-            0x80..=0x8F => ValidationResult::Warning("Molecule format requires an ABI-specific payload validator".to_string()),
+            0x80..=0x8F => ValidationResult::Invalid("Molecule format not allowed".to_string()),
             _ => ValidationResult::Invalid(format!("Unknown format version: 0x{:02X}", version)),
         }
     }
@@ -260,13 +253,16 @@ pub fn is_valid_envelope(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    fn test_envelope_bytes(format_version: u8, schema_version: u8, payload_len: usize) -> Vec<u8> {
+        VersionedEnvelope::<()>::from_parts(format_version, schema_version, vec![0u8; payload_len]).to_bytes()
+    }
+
     #[test]
     fn test_validation_config_default() {
         let config = ValidationConfig::default();
         assert_eq!(config.min_schema_version, 1);
         assert_eq!(config.max_schema_version, 255);
-        assert!(config.allow_borsh);
-        assert!(!config.allow_molecule);
+        assert!(config.allow_molecule);
         assert_eq!(config.max_payload_size, 10 * 1024 * 1024);
         assert!(!config.strict_mode);
     }
@@ -284,6 +280,7 @@ mod tests {
         let config = ValidationConfig::strict();
         assert_eq!(config.min_schema_version, 1);
         assert_eq!(config.max_schema_version, 1);
+        assert!(config.allow_molecule);
         assert!(config.strict_mode);
         assert_eq!(config.max_payload_size, 1024 * 1024);
     }
@@ -298,12 +295,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_envelope_valid_borsh() {
+    fn test_validate_envelope_rejects_legacy_format_by_default() {
         let validator = SerializerValidator::default();
-        // Borsh format (0x00), schema version 1, minimal payload
-        let data = vec![0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+        // Explicit legacy/custom format (0x00), schema version 1, minimal payload
+        let data = test_envelope_bytes(0x00, 0x01, 0);
         let result = validator.validate_envelope(&data);
-        assert!(result.is_valid());
+        assert!(result.is_invalid());
+        assert!(result.error_message().unwrap().contains("Legacy format not allowed"));
     }
 
     #[test]
@@ -311,40 +309,39 @@ mod tests {
         let validator = SerializerValidator::default();
         let result = validator.validate_envelope(&[0x00, 0x01]);
         assert!(result.is_invalid());
-        assert!(result.error_message().unwrap().contains("too short"));
+        assert!(result.error_message().unwrap().contains("invalid VersionedEnvelope"));
     }
 
     #[test]
     fn test_validate_envelope_invalid_format() {
         let validator = SerializerValidator::default();
-        let data = vec![0xFF, 0x01, 0x00]; // Invalid format version
+        let data = test_envelope_bytes(0xFF, 0x01, 0); // Invalid format version
         let result = validator.validate_envelope(&data);
         assert!(result.is_invalid());
         assert!(result.error_message().unwrap().contains("Unknown format"));
     }
 
     #[test]
-    fn test_validate_envelope_molecule_warning() {
+    fn test_validate_envelope_molecule_valid() {
         let validator = SerializerValidator::default();
-        let data = vec![0x80, 0x01, 0x00]; // Molecule format
+        let data = test_envelope_bytes(0x80, 0x01, 0); // Molecule format
         let result = validator.validate_envelope(&data);
-        assert!(result.is_warning());
+        assert!(result.is_valid());
     }
 
     #[test]
     fn test_validate_envelope_molecule_allowed() {
         let config = ValidationConfig::default().with_min_schema_version(0);
         let validator = SerializerValidator::new(config);
-        let data = vec![0x80, 0x01, 0x00];
+        let data = test_envelope_bytes(0x80, 0x01, 0);
         let result = validator.validate_envelope(&data);
-        // Still warning because allow_molecule is false by default
-        assert!(result.is_warning());
+        assert!(result.is_valid());
     }
 
     #[test]
     fn test_validate_envelope_schema_too_low() {
         let validator = SerializerValidator::default();
-        let data = vec![0x00, 0x00, 0x00]; // Schema version 0
+        let data = test_envelope_bytes(0x80, 0x00, 0); // Schema version 0
         let result = validator.validate_envelope(&data);
         assert!(result.is_invalid());
         assert!(result.error_message().unwrap().contains("below minimum"));
@@ -354,7 +351,7 @@ mod tests {
     fn test_validate_envelope_schema_too_high_strict() {
         let config = ValidationConfig::strict();
         let validator = SerializerValidator::new(config);
-        let data = vec![0x00, 0x02, 0x00]; // Schema version 2
+        let data = test_envelope_bytes(0x80, 0x02, 0); // Schema version 2
         let result = validator.validate_envelope(&data);
         assert!(result.is_invalid());
         assert!(result.error_message().unwrap().contains("above maximum"));
@@ -364,7 +361,7 @@ mod tests {
     fn test_validate_envelope_schema_too_high_non_strict() {
         let config = ValidationConfig::default().with_max_schema_version(1);
         let validator = SerializerValidator::new(config);
-        let data = vec![0x00, 0x02, 0x00];
+        let data = test_envelope_bytes(0x80, 0x02, 0);
         let result = validator.validate_envelope(&data);
         assert!(result.is_warning());
         assert!(result.error_message().is_none()); // Warning doesn't have error_message
@@ -407,16 +404,16 @@ mod tests {
     #[test]
     fn test_is_valid_envelope() {
         let validator = SerializerValidator::default();
-        let valid_data = vec![0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+        let valid_data = test_envelope_bytes(0x80, 0x01, 0);
         assert!(validator.is_valid_envelope(&valid_data));
 
-        let invalid_data = vec![0xFF, 0x01, 0x00];
+        let invalid_data = test_envelope_bytes(0xFF, 0x01, 0);
         assert!(!validator.is_valid_envelope(&invalid_data));
     }
 
     #[test]
     fn test_global_validate_functions() {
-        let valid_data = vec![0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+        let valid_data = test_envelope_bytes(0x80, 0x01, 0);
         assert!(is_valid_envelope(&valid_data));
         assert!(validate_envelope(&valid_data).is_valid());
     }

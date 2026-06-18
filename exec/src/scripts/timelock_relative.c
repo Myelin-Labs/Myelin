@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Relative time lock script for CKB-VM
 //
@@ -10,7 +10,7 @@
 //
 // The `since` field encoding:
 // - Bit 63: 1 (relative lock)
-// - Bit 62: 0 (DAA score, not timestamp)
+// - Bit 62: 0 (block number, not timestamp)
 // - Bits 0-55: delta value
 //
 // Build:
@@ -23,7 +23,7 @@
 #include <stddef.h>
 
 // ============================================================================
-// Spora Syscall Definitions
+// Myelin Syscall Definitions
 // ============================================================================
 
 #define LOAD_INPUT_BY_FIELD_SYSCALL 2083
@@ -154,14 +154,14 @@ int main() {
     // 2. Parse the since value (little-endian)
     uint64_t since = read_u64_le(since_buf);
     
-    // 3. Check that this is a relative DAA score lock
+    // 3. Check that this is a relative block number lock
     // Bit 63 must be 1 (relative)
-    // Bit 62 must be 0 (DAA score, not timestamp)
+    // Bit 62 must be 0 (block number, not timestamp)
     if ((since & 0x8000000000000000) == 0) {
         return 1;  // Not a relative lock
     }
     if ((since & 0x4000000000000000) != 0) {
-        return 1;  // Timestamp lock not allowed for DAA-based relative lock
+        return 1;  // Timestamp lock not allowed for block number-based relative lock
     }
     
     // 4. Extract the delta value (bits 0-55)

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Load script syscall
 
@@ -7,7 +7,6 @@ use super::utils::store_data;
 use super::{CKB_LOAD_SCRIPT_SYSCALL_NUMBER, LOAD_SCRIPT_HASH_SYSCALL_NUMBER, LOAD_SCRIPT_SYSCALL_NUMBER};
 use crate::celltx::Script;
 use crate::serialization::molecule_compat::{ckb_script_hash_molecule, serialize_script_molecule};
-use crate::serialization::vm_abi::serialize_script;
 use crate::serialization::VmAbiFormat;
 use crate::vm::{transferred_byte_cycles, VmSemantics};
 use ckb_vm::{
@@ -18,7 +17,7 @@ use std::sync::Arc;
 
 /// Syscall: Load Script
 ///
-/// Syscall number: 2075 under Spora semantics, 2052 under CKB strict semantics.
+/// Syscall number: 2075 under Myelin semantics, 2052 under CKB strict semantics.
 ///
 /// Loads the current script being executed
 pub struct LoadScript {
@@ -29,7 +28,7 @@ pub struct LoadScript {
 
 impl LoadScript {
     pub fn new(script: Arc<Script>) -> Self {
-        Self { script, abi_format: VmAbiFormat::Molecule, semantics: VmSemantics::SporaExtended }
+        Self { script, abi_format: VmAbiFormat::Molecule, semantics: VmSemantics::MyelinExtended }
     }
 
     /// Select the VM ABI wire format used by full script loads.
@@ -46,21 +45,20 @@ impl LoadScript {
 
     fn serialize_script(&self) -> Result<Vec<u8>, VMError> {
         match self.abi_format {
-            VmAbiFormat::Legacy => Ok(serialize_script(&self.script)),
             VmAbiFormat::Molecule => serialize_script_molecule(&self.script).map_err(|e| VMError::External(e.to_string())),
         }
     }
 
     fn script_hash(&self) -> Result<[u8; 32], VMError> {
         match self.semantics {
-            VmSemantics::SporaExtended => Ok(self.script.hash()),
+            VmSemantics::MyelinExtended => Ok(self.script.hash()),
             VmSemantics::CkbStrict => ckb_script_hash_molecule(&self.script).map_err(|e| VMError::External(e.to_string())),
         }
     }
 
     fn load_script_syscall_number(&self) -> u64 {
         match self.semantics {
-            VmSemantics::SporaExtended => LOAD_SCRIPT_SYSCALL_NUMBER,
+            VmSemantics::MyelinExtended => LOAD_SCRIPT_SYSCALL_NUMBER,
             VmSemantics::CkbStrict => CKB_LOAD_SCRIPT_SYSCALL_NUMBER,
         }
     }
@@ -122,13 +120,14 @@ mod tests {
         machine.set_register(A2, 33);
         machine.set_register(A7, LOAD_SCRIPT_SYSCALL_NUMBER);
 
-        let mut syscall = LoadScript::new(script).with_abi_format(VmAbiFormat::Legacy);
+        let mut syscall = LoadScript::new(Arc::clone(&script)).with_abi_format(VmAbiFormat::Molecule);
         let handled = syscall.ecall(&mut machine).expect("load script syscall should succeed");
 
         assert!(handled);
         assert_eq!(machine.registers()[A0].to_u64(), SUCCESS as u64);
-        assert_eq!(machine.memory_mut().load64(&SIZE_ADDR).unwrap().to_u64(), 7);
-        assert_eq!(machine.memory_mut().load_bytes(BUFFER_ADDR, 7).unwrap().as_ref(), &[3, 0, 0, 0, 0x10, 0x20, 0x30]);
+        let expected = serialize_script_molecule(&script).unwrap();
+        assert_eq!(machine.memory_mut().load64(&SIZE_ADDR).unwrap().to_u64(), (expected.len() - 33) as u64);
+        assert_eq!(machine.memory_mut().load_bytes(BUFFER_ADDR, 7).unwrap().as_ref(), &expected[33..40]);
     }
 
     #[test]
@@ -178,12 +177,14 @@ mod tests {
         let mut ckb_machine = ScriptVersion::V2.init_core_machine(10_000);
         ckb_machine.set_register(A7, LOAD_SCRIPT_SYSCALL_NUMBER);
         let mut ckb_syscall = LoadScript::new(Arc::clone(&script)).with_semantics(VmSemantics::CkbStrict);
-        assert!(!ckb_syscall.ecall(&mut ckb_machine).expect("spora load_script number should be unhandled under ckb strict"));
+        assert!(!ckb_syscall.ecall(&mut ckb_machine).expect("myelin load_script number should be unhandled under ckb strict"));
 
-        let mut spora_machine = ScriptVersion::V2.init_core_machine(10_000);
-        spora_machine.set_register(A7, CKB_LOAD_SCRIPT_SYSCALL_NUMBER);
-        let mut spora_syscall = LoadScript::new(script).with_semantics(VmSemantics::SporaExtended);
-        assert!(!spora_syscall.ecall(&mut spora_machine).expect("ckb load_script number should be unhandled under spora semantics"));
+        let mut myelin_machine = ScriptVersion::V2.init_core_machine(10_000);
+        myelin_machine.set_register(A7, CKB_LOAD_SCRIPT_SYSCALL_NUMBER);
+        let mut myelin_syscall = LoadScript::new(script).with_semantics(VmSemantics::MyelinExtended);
+        assert!(!myelin_syscall
+            .ecall(&mut myelin_machine)
+            .expect("ckb load_script number should be unhandled under myelin semantics"));
     }
 
     #[test]

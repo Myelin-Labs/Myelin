@@ -81,6 +81,36 @@ function activate(context) {
         await runRegistryVerify(document, output, status, true);
       }
     }),
+    vscode.commands.registerCommand("cellscript.showBuilderAssumptions", async () => {
+      const document = activeCellScriptDocument();
+      if (document) {
+        await runCompilerReport(document, output, status, "builder-assumptions");
+      }
+    }),
+    vscode.commands.registerCommand("cellscript.showTxTemplate", async () => {
+      const document = activeCellScriptDocument();
+      if (document) {
+        await runCompilerReport(document, output, status, "tx-template");
+      }
+    }),
+    vscode.commands.registerCommand("cellscript.showDeployPlan", async () => {
+      const document = activeCellScriptDocument();
+      if (document) {
+        await runCompilerReport(document, output, status, "deploy-plan");
+      }
+    }),
+    vscode.commands.registerCommand("cellscript.showProfile", async () => {
+      const document = activeCellScriptDocument();
+      if (document) {
+        await runCompilerReport(document, output, status, "profile");
+      }
+    }),
+    vscode.commands.registerCommand("cellscript.generateAuditBundle", async () => {
+      const document = activeCellScriptDocument();
+      if (document) {
+        await runCompilerReport(document, output, status, "audit-bundle");
+      }
+    }),
     vscode.commands.registerCommand("cellscript.showProductionReport", async () => {
       const document = activeCellScriptDocument();
       if (document) {
@@ -103,7 +133,7 @@ function deactivate() {
 
 async function startLanguageServer(context, output, status) {
   const config = vscode.workspace.getConfiguration("cellscript");
-  const serverPath = resolveServerPath(config);
+  const serverPath = resolveServerPath(config, output);
 
   if (!serverPath) {
     status.text = "$(warning) CellScript";
@@ -148,7 +178,7 @@ async function startLanguageServer(context, output, status) {
   }
 }
 
-function resolveServerPath(config) {
+function resolveServerPath(config, output) {
   const compilerPath = config.get("compilerPath", "cellc");
 
   // Direct cellc path.
@@ -162,7 +192,7 @@ function resolveServerPath(config) {
   }
 
   // Cargo fallback.
-  if (config.get("useCargoRunFallback", true)) {
+  if (canUseCargoRunFallback(config)) {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (workspaceFolder) {
       const cwd = workspaceFolder.uri.fsPath;
@@ -178,9 +208,15 @@ function resolveServerPath(config) {
         }
       }
     }
+  } else if (config.get("useCargoRunFallback", true)) {
+    output.appendLine("[cellscript] Cargo fallback is disabled until this workspace is trusted.");
   }
 
   return null;
+}
+
+function canUseCargoRunFallback(config) {
+  return config.get("useCargoRunFallback", true) && vscode.workspace.isTrusted === true;
 }
 
 // ============================================================================
@@ -199,7 +235,6 @@ function activeCellScriptDocument() {
 async function resolveCompilerCommand(document) {
   const config = vscode.workspace.getConfiguration("cellscript", document.uri);
   const compilerPath = config.get("compilerPath", "cellc");
-  const useCargoRunFallback = config.get("useCargoRunFallback", true);
   const options = {
     timeout: Math.max(config.get("commandTimeoutMs", 15000), 1000),
     maxBuffer: Math.max(config.get("maxOutputBytes", 4 * 1024 * 1024), 64 * 1024)
@@ -209,7 +244,7 @@ async function resolveCompilerCommand(document) {
     return { command: compilerPath, args: [], cwd: undefined, options };
   }
 
-  if (!useCargoRunFallback) {
+  if (!canUseCargoRunFallback(config)) {
     return null;
   }
 
@@ -612,6 +647,47 @@ function buildReportPlan(document, kind, cwd) {
     };
   }
 
+  if (kind === "builder-assumptions") {
+    return {
+      args: ["explain-assumptions", document.uri.fsPath, ...targetProfileArgs(document), "--json"],
+      outputPath: null,
+      source: "cellc explain-assumptions"
+    };
+  }
+
+  if (kind === "tx-template") {
+    return {
+      args: ["solve-tx", document.uri.fsPath, ...targetProfileArgs(document), "--json"],
+      outputPath: null,
+      source: "cellc solve-tx"
+    };
+  }
+
+  if (kind === "deploy-plan") {
+    return {
+      args: ["deploy-plan", document.uri.fsPath, ...targetProfileArgs(document), "--json"],
+      outputPath: null,
+      source: "cellc deploy-plan"
+    };
+  }
+
+  if (kind === "profile") {
+    return {
+      args: ["profile", document.uri.fsPath, ...targetProfileArgs(document), "--json"],
+      outputPath: null,
+      source: "cellc profile"
+    };
+  }
+
+  if (kind === "audit-bundle") {
+    const outputPath = getScratchDirectoryPath(document, cwd, "audit-bundle");
+    return {
+      args: ["audit-bundle", document.uri.fsPath, ...targetProfileArgs(document), "--output", outputPath, "--json"],
+      outputPath,
+      source: "cellc audit-bundle"
+    };
+  }
+
   const target = compilerTarget(document);
   const outputPath = getScratchOutputPath(document, cwd, `compile.${targetFileExtension(target)}`);
   return {
@@ -714,6 +790,17 @@ function targetFileExtension(target) {
 }
 
 function getScratchOutputPath(document, cwd, suffix) {
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+  const baseDir = workspaceFolder
+    ? path.join(workspaceFolder.uri.fsPath, ".cellscript-vscode")
+    : path.join(cwd || path.dirname(document.uri.fsPath) || os.tmpdir(), ".cellscript-vscode");
+
+  fs.mkdirSync(baseDir, { recursive: true });
+  const stem = path.basename(document.uri.fsPath, path.extname(document.uri.fsPath));
+  return path.join(baseDir, `${stem}.${process.pid}.${Date.now()}.${suffix}`);
+}
+
+function getScratchDirectoryPath(document, cwd, suffix) {
   const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
   const baseDir = workspaceFolder
     ? path.join(workspaceFolder.uri.fsPath, ".cellscript-vscode")

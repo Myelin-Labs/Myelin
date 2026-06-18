@@ -7,11 +7,43 @@
   package verification, registry verification, and live registry verification.
 - Added extension settings for generated builder output, CKB RPC URL,
   deployment network filtering, and registry trust metadata gates.
+
+## 0.17.0
+
 - Updated grammar, snippets, and README examples for the canonical
   `verification` action/lock surface and removed the legacy authoring model
   from current guidance.
 - Aligned the extension release boundary with the 0.19 grammar-governance
   matrix and syntax-combo known-bug-class gate.
+- Updated extension package metadata for the CellScript 0.17.0 nightly line.
+- Kept the extension validation manifest aligned with the compiler and
+  documentation changes inherited from the 0.16 release branch.
+
+## 0.16.1
+
+- Aligned documentation with the CellScript 0.16.1 release.
+
+## 0.16.0
+
+- Updated extension package metadata for the CellScript 0.16.0 release.
+- Kept the extension aligned with `cellc --lsp` while the compiler adds the
+  v0.16 assurance surface: ProofPlan soundness, builder assumptions, transaction
+  template reports, deployment reports, and audit bundle metadata.
+- Added active-file commands for `cellc explain-assumptions`, `solve-tx`,
+  `deploy-plan`, `profile`, and `audit-bundle` so the editor command surface
+  matches the 0.16 freeze tooling.
+- Refreshed README wording for the current 0.16 authoring surface.
+- Validated the package against the 0.16 crate version and release manifest.
+
+## 0.15.0
+
+- Updated extension package metadata for the CellScript 0.15.0 release.
+- Corrected the documented LSP entrypoint to `cellc --lsp`.
+- Aligned README feature claims with the current LSP capabilities; rename stays
+  disabled until scoped workspace edits are implemented.
+- Added TextMate highlighting, snippets, and validation coverage for 0.15
+  identity-aware lifecycle forms, destruction-policy forms, aggregate invariant
+  primitives, and kernel capability vocabulary.
 - Updated lock snippets for the 0.14 lock-boundary surface:
   `protected`, `lock_args`, `witness`, and `require`.
 - Added LSP completions for `lock_args`, CKB source views, witness fields,
@@ -45,14 +77,14 @@
 ## 0.12.0
 
 - Replaced direct CLI diagnostics with a full LSP language server integration
-  (`cellc lsp --stdio`) using `vscode-languageclient`.
+  (`cellc --lsp`) using `vscode-languageclient`.
 - LSP-powered features: real-time diagnostics (open/edit/save with incremental
   sync), context-aware completion, hover, go-to-definition, find-references,
-  rename, signature help, document highlight, folding ranges, selection ranges,
-  document symbols, code actions, and document formatting.
+  signature help, document highlight, folding ranges, selection ranges, document
+  symbols, code actions, and document formatting.
 - CLI-backed commands continue to work for compile, metadata, constraints,
   production report, and CKB target-profile arguments.
-- Updated extension architecture: VS Code → LanguageClient → `cellc lsp --stdio`
+- Updated extension architecture: VS Code → LanguageClient → `cellc --lsp`
   → `CellScriptBackend` (tower-lsp) → in-process `LspServer`.
 - Removed stale validation-mode and validation-debounce settings (diagnostics
   are now driven by the language server, not by CLI polling).

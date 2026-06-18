@@ -1,4 +1,4 @@
-//! Implements domain-separated hashing for Spora blockchain.
+//! Implements domain-separated hashing for Myelin blockchain.
 //!
 //! ⚠️ **Modified for the radical transition from blake2b & sha256 to full-scale BLAKE3 adoption.**
 //!

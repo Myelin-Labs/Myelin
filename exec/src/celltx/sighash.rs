@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Cell transaction signature hashing (blake3 with domain separation)
 
 use super::types::{CellOutput, CellTx, OutPoint};
-use spora_hashes::{CellTxSigningHash, CellTxSigningHashEcdsa, Hash, Hasher, HasherBase, SchnorrSigningHash, ZERO_HASH};
+use myelin_hashes::{CellTxSigningHash, CellTxSigningHashEcdsa, Hash, Hasher, HasherBase, SchnorrSigningHash, ZERO_HASH};
 
 /// Domain constant for TXID hashing
-pub const CELL_TXID_DOMAIN: &[u8] = b"spora-cell/txid";
+pub const CELL_TXID_DOMAIN: &[u8] = b"myelin-cell/txid";
 /// Domain constant for WTXID hashing
-pub const CELL_WTXID_DOMAIN: &[u8] = b"spora-cell/wtxid";
+pub const CELL_WTXID_DOMAIN: &[u8] = b"myelin-cell/wtxid";
 /// Domain constant for signature hashing
-pub const CELL_SIG_DOMAIN: &[u8] = b"spora-cell/sig";
+pub const CELL_SIG_DOMAIN: &[u8] = b"myelin-cell/sig";
 
 /// Minimal resolved input data required by the canonical standard-lock sighash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,7 +249,7 @@ pub fn compute_wtxid(tx: &CellTx) -> [u8; 32] {
 ///
 /// This helper is specific to the exec-side lock path that binds a CellTx to a
 /// network id and an RW-set commitment. It is not the same as the consensus-side
-/// standard-lock sighash used by wallet signing and `SigHashType`.
+/// standard-lock sighash used by signer tooling and `SigHashType`.
 ///
 /// ⚠️ network_id MUST be u32 (4 bytes little-endian)
 ///
@@ -425,7 +425,8 @@ fn hash_standard_signing_input(hasher: &mut impl Hasher, signing_input: &Standar
     hasher.update(signing_input.data_hash).write_u64(signing_input.data_bytes);
 }
 
-/// Canonical CellTx standard-lock sighash shared by wallet, consensus, and native lock verification.
+/// Canonical CellTx standard-lock sighash shared by signer tooling,
+/// consensus, and native lock verification.
 pub fn calc_standard_signature_hash(
     tx: &CellTx,
     input_index: usize,
@@ -471,7 +472,7 @@ pub fn calc_standard_ecdsa_signature_hash(
 mod tests {
     use super::*;
     use crate::celltx::types::{CellDep, CellInput, CellOutput, DepType, OutPoint, Script};
-    use spora_hashes::CellTxSigningHashEcdsa;
+    use myelin_hashes::CellTxSigningHashEcdsa;
 
     #[derive(Clone, Copy)]
     struct TestSigHashType(u8);
@@ -631,9 +632,9 @@ mod tests {
         // ... (same serialization as txid)
 
         // This would produce a different hash due to domain separation
-        assert_eq!(CELL_TXID_DOMAIN, b"spora-cell/txid");
-        assert_eq!(CELL_WTXID_DOMAIN, b"spora-cell/wtxid");
-        assert_eq!(CELL_SIG_DOMAIN, b"spora-cell/sig");
+        assert_eq!(CELL_TXID_DOMAIN, b"myelin-cell/txid");
+        assert_eq!(CELL_WTXID_DOMAIN, b"myelin-cell/wtxid");
+        assert_eq!(CELL_SIG_DOMAIN, b"myelin-cell/sig");
     }
 
     #[test]

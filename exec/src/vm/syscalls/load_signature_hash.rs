@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Load canonical per-input signature hash syscall
 
@@ -17,11 +17,11 @@ use ckb_vm::{
     registers::{A0, A3, A4, A5, A7},
     Error as VMError, Register, SupportMachine, Syscalls,
 };
-use spora_hashes::Hash;
+use myelin_hashes::Hash;
 use std::{cell::Cell, sync::Arc};
 
 pub const LOAD_SIGNATURE_HASH_BASE_CYCLES: u64 = 25_000;
-const DATA_HASH_DOMAIN: &[u8] = b"spora-cell/data";
+const DATA_HASH_DOMAIN: &[u8] = b"myelin-cell/data";
 
 #[derive(Clone, Copy)]
 struct VmSigHashType(u8);

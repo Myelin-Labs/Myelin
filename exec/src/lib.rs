@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
-// This file is part of Spora, a DAG-based blockchain with Cell model.
+// This file is part of Myelin, a finite off-chain Cell ledger runtime.
 // Portions adapted from Nervos CKB (MIT License).
 
-//! # Spora 执行层 (Cell Execution Layer)
+//! # Myelin 执行层 (Cell Execution Layer)
 //!
 //! This crate implements the execution layer for Cell transactions, including:
 //! - Cell transaction types (CellTx, CellInput, CellOutput, Script)
-//! - Parallel scheduler with RW-Set DAG
+//! - Parallel scheduler with explicit read/write Cell dependencies
 //! - VM integration (CKB-VM for script verification)
 //! - Standard scripts (secp256k1 lock, capacity type)
 //!
@@ -20,17 +20,17 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────┐
-//! │  Layer 3: VM/Script ABI 层 (Molecule v1 public + legacy v1)     │
+//! │  Layer 3: VM/Script ABI 层 (Molecule v1 public)                 │
 //! │  - ResolvedHeader, ResolvedCell, Witness Payload                │
 //! │  - 脚本可见的所有数据结构                                        │
 //! │  - 需要: canonical, partial read, version兼容                  │
 //! ├─────────────────────────────────────────────────────────────────┤
-//! │  Layer 2: 内部通信/存储层 (保持 Borsh + Version Envelope)       │
-//! │  - P2P消息 (Protobuf 已覆盖)                                    │
-//! │  - 钱包/节点 RPC (已有 JSON/Borsh 双轨)                         │
-//! │  - RocksDB 存储 (加 version envelope)                          │
+//! │  Layer 2: 内部工具/存储层 (Molecule-compatible envelopes)       │
+//! │  - Active state records use explicit Molecule-compatible bytes   │
+//! │  - VersionedEnvelope is encoded as a Molecule-style table        │
+//! │  - Active records use explicit non-derived payload codecs         │
 //! ├─────────────────────────────────────────────────────────────────┤
-//! │  Layer 1: 共识关键路径 (已绕过 Borsh，保持现状)                 │
+//! │  Layer 1: 共识关键路径 (CKB/Molecule-shaped bytes)              │
 //! │  - Block Hash, TxID, SigHash (自定义流式哈希)                   │
 //! │  - 完全不受影响，继续用 domain-separated Blake3                 │
 //! └─────────────────────────────────────────────────────────────────┘
@@ -38,13 +38,13 @@
 //!
 //! ### 重要保证
 //!
-//! 1. **Borsh bytes 不是 canonical consensus bytes**
+//! 1. **Molecule-compatible bytes are the public/default protocol boundary**
 //!    - 所有共识关键哈希 (block hash, txid, sighash) 使用自定义流式哈希
-//!    - Borsh 仅用于内部通信和存储，不参与共识
+//!    - Native Myelin execution does not carry a legacy serializer dependency or ABI path
 //!
 //! 2. **VM-facing ABI 必须经过显式格式边界**
 //!    - Molecule v1 (`0x8001`) 是 launch/public VM ABI
-//!    - Borsh/custom v1 只保留为显式 legacy 兼容路径
+//!    - Non-Molecule VM object ABI versions are rejected
 //!
 //! 3. **VM ABI 是独立抽象层**
 //!    - 通过 [`VmSerializable`](serialization::VmSerializable) trait 抽象序列化实现
@@ -62,6 +62,10 @@
 
 /// Cell transaction types and operations
 pub mod celltx;
+/// Deterministic execution reports for Cell transactions.
+pub mod execution_report;
+/// CKB-style projection reports for Cell transactions.
+pub mod projection;
 /// Parallel transaction scheduler
 pub mod scheduler;
 /// Standard scripts (secp256k1 lock, capacity type)
@@ -72,16 +76,18 @@ pub mod serialization;
 #[cfg(feature = "vm")]
 pub mod vm;
 #[cfg(feature = "vm")]
-pub use vm::{ResolvedCell, ResolvedHeader};
+pub use vm::{ResolvedCell, ResolvedHeader, ScriptVersion, SimpleDataProvider, TransactionScriptVerifier, VmSemantics};
 
 pub use celltx::{
-    compute_conflict_hash, compute_typed_data_hash, encode_ckb_dep_group_data, encode_dep_group_data,
-    encode_dep_group_data_for_abi, parse_ckb_dep_group_data, parse_dep_group_data, parse_dep_group_data_for_abi,
-    CapacityError, CellAccounting, CellDep, CellIdentity, CellInput, CellMutability, CellOutput, CellOwnership, CellTx,
-    ConflictKeySpec, DepGroupDataAbi, DepType, InMemoryTypedCellStore, OutPoint, RuntimeCellSemantics, Script,
-    ScriptHashVersion, ScriptId, TypedCellDecl, TypedCellDeclError, TypedCellSemanticMetadata, TypedCellStore,
-    CELLTX_SCHEMA_VERSION,
+    compute_conflict_hash, compute_typed_data_hash, encode_ckb_dep_group_data, encode_dep_group_data, encode_dep_group_data_for_abi,
+    parse_ckb_dep_group_data, parse_dep_group_data, parse_dep_group_data_for_abi, CapacityError, CellAccounting, CellDep,
+    CellIdentity, CellInput, CellMutability, CellOutput, CellOwnership, CellTx, ConflictKeySpec, DepGroupDataAbi, DepType,
+    InMemoryTypedCellStore, OutPoint, RuntimeCellSemantics, Script, ScriptHashVersion, ScriptId, TypedCellDecl, TypedCellDeclError,
+    TypedCellSemanticMetadata, TypedCellStore, CELLTX_SCHEMA_VERSION,
 };
+
+pub use execution_report::{build_cell_tx_execution_report, CellTxExecutionReport, ExecutionReportStatus};
+pub use projection::{project_cell_tx_to_ckb, CkbProjectionReport, ProjectionBlocker, ProjectionWarning, SemanticProfile};
 
 // Re-export serialization framework
 pub use serialization::{
@@ -127,9 +133,8 @@ pub use serialization::molecule_compat::{
     ckb_apply_type_id_args_to_output_molecule, ckb_apply_type_id_script_to_output_molecule, ckb_blake160, ckb_blake2b_256,
     ckb_cell_data_hash, ckb_dep_group_cell_dep, ckb_epoch_number_with_fraction_from_full_value,
     ckb_epoch_number_with_fraction_full_value, ckb_header_epoch_index, ckb_header_epoch_length, ckb_header_epoch_number,
-    ckb_header_epoch_start_block_number, ckb_header_hash_molecule, ckb_raw_transaction_hash_molecule,
-    ckb_script_hash_molecule, ckb_secp256k1_blake160_pubkey_hash,
-    ckb_secp256k1_blake160_sighash_all_lock_script, ckb_secp256k1_blake160_sighash_all_type_hash,
+    ckb_header_epoch_start_block_number, ckb_header_hash_molecule, ckb_raw_transaction_hash_molecule, ckb_script_hash_molecule,
+    ckb_secp256k1_blake160_pubkey_hash, ckb_secp256k1_blake160_sighash_all_lock_script, ckb_secp256k1_blake160_sighash_all_type_hash,
     ckb_sighash_all_message_from_witness_args_molecule, ckb_sighash_all_message_molecule,
     ckb_sighash_all_message_with_zeroed_witness_lock_molecule, ckb_sign_secp256k1_blake160_sighash_all_input_molecule,
     ckb_sign_secp256k1_blake160_sighash_all_lock_group_molecule, ckb_sign_secp256k1_blake160_sighash_all_molecule,

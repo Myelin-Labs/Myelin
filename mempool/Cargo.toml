@@ -1,5 +1,5 @@
 [package]
-name = "spora-mempool"
+name = "myelin-mempool"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -7,7 +7,7 @@ description = "Cell transaction memory pool"
 
 [dependencies]
 # Core dependencies
-spora-exec = { path = "../exec", version = "0.1.0" }
+myelin-exec = { path = "../exec", version = "0.1.0" }
 
 # Collections (deterministic)
 indexmap = "=2.2.6"

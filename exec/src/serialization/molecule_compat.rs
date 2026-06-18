@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // VM Molecule ABI compatibility layer.
 
 //! VM-visible Molecule ABI support.
 //!
-//! This module implements the canonical Molecule wire layout for Spora's
+//! This module implements the canonical Molecule wire layout for Myelin's
 //! CKB-style VM-facing structures. Molecule ABI `0x8001` is the launch/public
-//! VM ABI; Borsh/custom v1 remains available only through explicit legacy
-//! selection for old tooling and tests.
+//! VM ABI. Non-Molecule VM object ABI versions are rejected by the runtime
+//! negotiator.
 
 use crate::celltx::{CellDep, CellInput, CellOutput, CellTx, DepType, OutPoint, Script};
 use crate::serialization::{SerializationError, VmAbiError};
@@ -48,7 +48,7 @@ pub const CKB_TYPE_ID_CODE_HASH: [u8; 32] =
 /// CKB standard lock scripts use the deployed system cell's type hash as
 /// `code_hash` with `hash_type = Type`. The exact type hash and dependency
 /// OutPoint come from the target chain spec/genesis, so callers must supply them
-/// explicitly instead of relying on a Spora hard-coded value.
+/// explicitly instead of relying on a Myelin hard-coded value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CkbSecp256k1Blake160SighashAllLockConfig {
     /// Type hash of the deployed `secp256k1_blake160_sighash_all` system script.
@@ -80,7 +80,7 @@ impl CkbSecp256k1Blake160SighashAllLockConfig {
 }
 
 /// Identity helper that documents that the argument must be the CKB system
-/// script type hash, not a Spora Blake3 script hash.
+/// script type hash, not a Myelin Blake3 script hash.
 pub fn ckb_secp256k1_blake160_sighash_all_type_hash(type_hash: [u8; 32]) -> [u8; 32] {
     type_hash
 }
@@ -129,7 +129,7 @@ pub enum MoleculeError {
         /// Concrete validation failure.
         reason: String,
     },
-    /// Schema does not match the expected Spora VM ABI schema.
+    /// Schema does not match the expected Myelin VM ABI schema.
     #[error("schema mismatch: {0}")]
     SchemaMismatch(String),
     /// Validation failed after decoding.
@@ -149,55 +149,55 @@ impl From<MoleculeError> for VmAbiError {
     }
 }
 
-/// Serialize `ResolvedHeader` as a Spora Molecule table.
+/// Serialize `ResolvedHeader` as a Myelin Molecule table.
 pub fn serialize_resolved_header_molecule(header: &ResolvedHeader) -> Result<Vec<u8>, MoleculeError> {
     Ok(encode_table(&[
         header.hash.to_vec(),
         encode_u32(header.version),
-        encode_parents_by_level(&header.parents_by_level),
-        header.hash_merkle_root.to_vec(),
-        header.accepted_id_merkle_root.to_vec(),
+        header.parent_hash.to_vec(),
+        encode_u64(header.number),
+        encode_u64(header.epoch),
+        header.transactions_root.to_vec(),
+        header.proposals_hash.to_vec(),
+        header.uncles_hash.to_vec(),
+        header.dao.to_vec(),
         header.cell_commitment.to_vec(),
         header.cell_root.to_vec(),
         header.segment_root.to_vec(),
         encode_u64(header.timestamp),
-        encode_u32(header.bits),
-        encode_u64(header.nonce),
-        encode_u64(header.daa_score),
-        header.blue_work.to_vec(),
-        encode_u64(header.blue_score),
-        header.pruning_point.to_vec(),
+        encode_u32(header.compact_target),
+        encode_u128(header.nonce),
     ]))
 }
 
-/// Deserialize `ResolvedHeader` from the Spora Molecule table layout.
+/// Deserialize `ResolvedHeader` from the Myelin Molecule table layout.
 pub fn deserialize_resolved_header_molecule(bytes: &[u8]) -> Result<ResolvedHeader, MoleculeError> {
     let fields = decode_table(bytes, 15, "ResolvedHeader")?;
     Ok(ResolvedHeader {
         hash: decode_array_32(fields[0], "ResolvedHeader.hash")?,
         version: decode_u32(fields[1], "ResolvedHeader.version")?,
-        parents_by_level: decode_parents_by_level(fields[2])?,
-        hash_merkle_root: decode_array_32(fields[3], "ResolvedHeader.hash_merkle_root")?,
-        accepted_id_merkle_root: decode_array_32(fields[4], "ResolvedHeader.accepted_id_merkle_root")?,
-        cell_commitment: decode_array_32(fields[5], "ResolvedHeader.cell_commitment")?,
-        cell_root: decode_array_32(fields[6], "ResolvedHeader.cell_root")?,
-        segment_root: decode_array_32(fields[7], "ResolvedHeader.segment_root")?,
-        timestamp: decode_u64(fields[8], "ResolvedHeader.timestamp")?,
-        bits: decode_u32(fields[9], "ResolvedHeader.bits")?,
-        nonce: decode_u64(fields[10], "ResolvedHeader.nonce")?,
-        daa_score: decode_u64(fields[11], "ResolvedHeader.daa_score")?,
-        blue_work: decode_array_24(fields[12], "ResolvedHeader.blue_work")?,
-        blue_score: decode_u64(fields[13], "ResolvedHeader.blue_score")?,
-        pruning_point: decode_array_32(fields[14], "ResolvedHeader.pruning_point")?,
+        parent_hash: decode_array_32(fields[2], "ResolvedHeader.parent_hash")?,
+        number: decode_u64(fields[3], "ResolvedHeader.number")?,
+        epoch: decode_u64(fields[4], "ResolvedHeader.epoch")?,
+        transactions_root: decode_array_32(fields[5], "ResolvedHeader.transactions_root")?,
+        proposals_hash: decode_array_32(fields[6], "ResolvedHeader.proposals_hash")?,
+        uncles_hash: decode_array_32(fields[7], "ResolvedHeader.uncles_hash")?,
+        dao: decode_array_32(fields[8], "ResolvedHeader.dao")?,
+        cell_commitment: decode_array_32(fields[9], "ResolvedHeader.cell_commitment")?,
+        cell_root: decode_array_32(fields[10], "ResolvedHeader.cell_root")?,
+        segment_root: decode_array_32(fields[11], "ResolvedHeader.segment_root")?,
+        timestamp: decode_u64(fields[12], "ResolvedHeader.timestamp")?,
+        compact_target: decode_u32(fields[13], "ResolvedHeader.compact_target")?,
+        nonce: decode_u128(fields[14], "ResolvedHeader.nonce")?,
     })
 }
 
-/// Serialize `ResolvedCell` as a Spora Molecule table.
+/// Serialize `ResolvedCell` as a Myelin Molecule table.
 pub fn serialize_resolved_cell_molecule(cell: &ResolvedCell) -> Result<Vec<u8>, MoleculeError> {
     Ok(encode_table(&[serialize_cell_output_molecule(&cell.cell_output)?, encode_bytes_opt(cell.data.as_deref())]))
 }
 
-/// Deserialize `ResolvedCell` from the Spora Molecule table layout.
+/// Deserialize `ResolvedCell` from the Myelin Molecule table layout.
 pub fn deserialize_resolved_cell_molecule(bytes: &[u8]) -> Result<ResolvedCell, MoleculeError> {
     let fields = decode_table(bytes, 2, "ResolvedCell")?;
     Ok(ResolvedCell { cell_output: deserialize_cell_output_molecule(fields[0])?, data: decode_bytes_opt(fields[1])? })
@@ -555,7 +555,7 @@ pub fn deserialize_outpoint_molecule(bytes: &[u8]) -> Result<OutPoint, MoleculeE
 ///
 /// Molecule encodes a fixvec of fixed-size `OutPoint` structs as:
 /// `u32 count || count * OutPoint`. CKB treats an empty DepGroup as invalid,
-/// so this helper rejects empty input instead of mirroring Spora's permissive
+/// so this helper rejects empty input instead of mirroring Myelin's permissive
 /// count-prefixed DepGroup helper.
 pub fn serialize_ckb_outpoint_vec_molecule(outpoints: &[OutPoint]) -> Result<Vec<u8>, MoleculeError> {
     if outpoints.is_empty() {
@@ -1056,6 +1056,10 @@ fn encode_u64(value: u64) -> Vec<u8> {
     value.to_le_bytes().to_vec()
 }
 
+fn encode_u128(value: u128) -> Vec<u8> {
+    value.to_le_bytes().to_vec()
+}
+
 fn pack_number(value: usize) -> [u8; NUMBER_SIZE] {
     (value as u32).to_le_bytes()
 }
@@ -1315,15 +1319,6 @@ fn decode_dynvec<'a>(bytes: &'a [u8], ty: &'static str) -> Result<Vec<&'a [u8]>,
     Ok(offsets.windows(2).map(|pair| &bytes[pair[0]..pair[1]]).collect())
 }
 
-fn encode_parents_by_level(levels: &[Vec<[u8; 32]>]) -> Vec<u8> {
-    let encoded_levels = levels.iter().map(|level| encode_fixvec_byte32(level)).collect::<Vec<_>>();
-    encode_dynvec(&encoded_levels)
-}
-
-fn decode_parents_by_level(bytes: &[u8]) -> Result<Vec<Vec<[u8; 32]>>, MoleculeError> {
-    decode_dynvec(bytes, "ParentsByLevel")?.into_iter().map(|level| decode_fixvec_byte32(level, "ParentLevel")).collect()
-}
-
 fn decode_u32(bytes: &[u8], ty: &'static str) -> Result<u32, MoleculeError> {
     if bytes.len() != 4 {
         return invalid(ty, format!("expected 4 bytes, got {}", bytes.len()));
@@ -1363,15 +1358,6 @@ fn decode_array_32(bytes: &[u8], ty: &'static str) -> Result<[u8; 32], MoleculeE
     Ok(out)
 }
 
-fn decode_array_24(bytes: &[u8], ty: &'static str) -> Result<[u8; 24], MoleculeError> {
-    if bytes.len() != 24 {
-        return invalid(ty, format!("expected 24 bytes, got {}", bytes.len()));
-    }
-    let mut out = [0u8; 24];
-    out.copy_from_slice(bytes);
-    Ok(out)
-}
-
 fn invalid<T>(ty: &'static str, reason: impl Into<String>) -> Result<T, MoleculeError> {
     Err(MoleculeError::InvalidFormat { ty, reason: reason.into() })
 }
@@ -1384,10 +1370,10 @@ pub mod schema {
     /// ResolvedCell schema version.
     pub const RESOLVED_CELL_SCHEMA_VERSION: u8 = 1;
 
-    /// Number of fields in the Spora Molecule `ResolvedHeader` table.
+    /// Number of fields in the Myelin Molecule `ResolvedHeader` table.
     pub const RESOLVED_HEADER_FIELD_COUNT: usize = 15;
 
-    /// Number of fields in the Spora Molecule `ResolvedCell` table.
+    /// Number of fields in the Myelin Molecule `ResolvedCell` table.
     pub const RESOLVED_CELL_FIELD_COUNT: usize = 2;
 }
 
@@ -1403,19 +1389,19 @@ mod tests {
         ResolvedHeader {
             hash: [1; 32],
             version: 2,
-            parents_by_level: vec![vec![[3; 32], [4; 32]], vec![[5; 32]]],
-            hash_merkle_root: [6; 32],
-            accepted_id_merkle_root: [7; 32],
+            parent_hash: [3; 32],
+            transactions_root: [6; 32],
+            proposals_hash: [7; 32],
             cell_commitment: [8; 32],
             cell_root: [9; 32],
             segment_root: [10; 32],
             timestamp: 11,
-            bits: 12,
+            compact_target: 12,
             nonce: 13,
-            daa_score: 14,
-            blue_work: [15; 24],
-            blue_score: 16,
-            pruning_point: [17; 32],
+            number: 14,
+            dao: [15; 32],
+            epoch: 16,
+            uncles_hash: [17; 32],
         }
     }
 
@@ -1540,8 +1526,8 @@ mod tests {
         let ckb_pubkey_hash = ckb_secp256k1_blake160_pubkey_hash(&pubkey.serialize());
         assert!(ckb_verify_secp256k1_blake160_recoverable_signature(&ckb_pubkey_hash, &signature_bytes, &message_hash));
 
-        let spora_pubkey_hash = crate::celltx::sighash::pubkey_hash(&pubkey.serialize());
-        assert!(!ckb_verify_secp256k1_blake160_recoverable_signature(&spora_pubkey_hash, &signature_bytes, &message_hash));
+        let myelin_pubkey_hash = crate::celltx::sighash::pubkey_hash(&pubkey.serialize());
+        assert!(!ckb_verify_secp256k1_blake160_recoverable_signature(&myelin_pubkey_hash, &signature_bytes, &message_hash));
 
         signature_bytes[64] = 4;
         assert!(!ckb_verify_secp256k1_blake160_recoverable_signature(&ckb_pubkey_hash, &signature_bytes, &message_hash));
@@ -1864,7 +1850,7 @@ mod tests {
     #[test]
     fn ckb_cell_data_hash_matches_ckb_empty_special_case() {
         assert_eq!(ckb_cell_data_hash(&[]), [0u8; 32]);
-        assert_eq!(ckb_cell_data_hash(b"spora"), ckb_blake2b_256(b"spora"));
+        assert_eq!(ckb_cell_data_hash(b"myelin"), ckb_blake2b_256(b"myelin"));
         assert_ne!(ckb_blake2b_256(&[]), [0u8; 32]);
     }
 
@@ -2069,7 +2055,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_header_roundtrip_preserves_dag_parent_levels() {
+    fn resolved_header_roundtrip_preserves_session_header_fields() {
         let header = sample_header();
         let bytes = serialize_resolved_header_molecule(&header).unwrap();
         assert_eq!(deserialize_resolved_header_molecule(&bytes).unwrap(), header);

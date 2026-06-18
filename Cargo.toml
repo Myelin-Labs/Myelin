@@ -2,6 +2,8 @@
 resolver = "2"
 exclude = ["cellscript"]
 members = [
+    "cli",
+    "consensus",
     "crypto/hashes",
     "exec",
     "math",
@@ -32,13 +34,15 @@ include = [
 [workspace.dependencies]
 blake3 = { version = "1.8.2"}
 log = "0.4.20"
-spora-exec = { version = "0.1.0", path = "exec" }
-spora-hashes = { version = "0.1.0", path = "crypto/hashes" }
-spora-math = { version = "0.1.0", path = "math" }
-spora-mempool = { version = "0.1.0", path = "mempool" }
-spora-muhash = { version = "0.1.0", path = "crypto/muhash" }
-spora-state = { version = "0.1.0", path = "state" }
-spora-utils = { version = "0.1.0", path = "utils" }
+myelin-exec = { version = "0.1.0", path = "exec" }
+myelin-consensus = { version = "0.1.0", path = "consensus" }
+myelin-cli = { version = "0.1.0", path = "cli" }
+myelin-hashes = { version = "0.1.0", path = "crypto/hashes" }
+myelin-math = { version = "0.1.0", path = "math" }
+myelin-mempool = { version = "0.1.0", path = "mempool" }
+myelin-muhash = { version = "0.1.0", path = "crypto/muhash" }
+myelin-state = { version = "0.1.0", path = "state" }
+myelin-utils = { version = "0.1.0", path = "utils" }
 
 # external
 aes = "0.8.3"
@@ -51,10 +55,8 @@ async-stream = "0.3.5"
 async-trait = "0.1.74"
 base64 = "0.22.1"
 bech32 = { version = "0.11.0" }
-bincode = { version = "1.3.3", default-features = false }
 blake2b_simd = "=1.0.3"
 bitcoin = "0.32.6"
-borsh = { version = "1.5.1", features = ["derive", "rc"] }
 bs58 = { version = "0.5.0", features = ["check"], default-features = false }
 bytes = "1.7.1"
 cc = "1.0.83"
@@ -176,65 +178,8 @@ tower-http = { version = "0.5.2", features = [
 tower = "0.5.1"
 chrono = "0.4.31"
 indexed_db_futures = "0.5.0"
-# workflow dependencies that are not a part of core libraries
-
-# workflow-perf-monitor = { path = "../../../workflow-perf-monitor-rs" }
-workflow-perf-monitor = "0.0.2"
-nw-sys = "0.1.6"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
-# workflow dependencies
-workflow-core = { version = "0.18.0" }
-workflow-d3 = { version = "0.18.0" }
-workflow-dom = { version = "0.18.0" }
-workflow-http = { version = "0.18.0", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "charset", "macos-system-configuration"] }
-workflow-log = { version = "0.18.0" }
-workflow-node = { version = "0.18.0" }
-workflow-nw = { version = "0.18.0" }
-workflow-rpc = { version = "0.18.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
-workflow-serializer = { version = "0.18.0" }
-workflow-store = { version = "0.18.0" }
-workflow-terminal = { version = "0.18.0" }
-workflow-wasm = { version = "0.18.0" }
-workflow-websocket = { version = "0.18.0", default-features = false }
-
-# if below is enabled, this means that there is an ongoing work
-# on the workflow-rs crate. This requires that you clone workflow-rs
-# into a sibling folder from https://github.com/workflow-rs/workflow-rs
-# workflow-core = { path = "../workflow-rs/core" }
-# workflow-d3 = { path = "../workflow-rs/d3" }
-# workflow-dom = { path = "../workflow-rs/dom" }
-# # Same features as default but with rustls-tls-webpki-roots instead of native-tls
-# workflow-http = { path = "../workflow-rs/http", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "charset", "macos-system-configuration"] }
-# workflow-log = { path = "../workflow-rs/log" }
-# workflow-node = { path = "../workflow-rs/node" }
-# workflow-nw = { path = "../workflow-rs/nw" }
-# workflow-rpc = { path = "../workflow-rs/rpc", default-features = false, features = ["rustls-tls-webpki-roots"] }
-# workflow-serializer = { path = "../workflow-rs/serializer" }
-# workflow-store = { path = "../workflow-rs/store" }
-# workflow-terminal = { path = "../workflow-rs/terminal" }
-# workflow-wasm = { path = "../workflow-rs/wasm" }
-
-
-# ---
-# workflow-core = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master" }
-# workflow-d3 = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master" }
-# workflow-dom = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master" }
-# workflow-http = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "charset", "macos-system-configuration"] }
-# workflow-log = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master" }
-# workflow-node = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master" }
-# workflow-nw = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master" }
-# workflow-rpc = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master", default-features = false, features = ["rustls-tls-webpki-roots"]  }
-# workflow-serializer = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master" }
-# workflow-store = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master" }
-# workflow-terminal = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master" }
-# workflow-wasm = { git = "https://github.com/workflow-rs/workflow-rs.git", branch = "master" }
-# https://github.com/aspectron/nw-sys
-# nw-sys = { path = "../nw-sys" }
-
-[patch.crates-io]
-workflow-node = { path = "vendor/workflow-node" }
-workflow-perf-monitor = { path = "vendor/workflow-perf-monitor" }
 
 [profile.release]
 lto = "thin"

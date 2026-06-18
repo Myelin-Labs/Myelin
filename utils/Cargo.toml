@@ -1,6 +1,6 @@
 [package]
-name = "spora-utils"
-description = "Spora utilities"
+name = "myelin-utils"
+description = "Myelin utilities"
 rust-version.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -15,7 +15,6 @@ duct = "0.13.7"
 [dependencies]
 arc-swap.workspace = true
 async-channel.workspace = true
-borsh.workspace = true
 cfg-if.workspace = true
 event-listener.workspace = true
 faster-hex.workspace = true
@@ -41,7 +40,6 @@ mac_address.workspace = true
 rlimit.workspace = true
 
 [dev-dependencies]
-bincode.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true

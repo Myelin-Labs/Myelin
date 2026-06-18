@@ -17,10 +17,17 @@ import shutil
 import subprocess
 import sys
 import textwrap
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised only by older Python runners.
+    try:
+        import tomli as tomllib  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -225,7 +232,57 @@ class AuditCase:
 def read_matrix() -> dict[str, Any]:
     if not MATRIX.exists():
         return {}
-    return tomllib.loads(MATRIX.read_text(encoding="utf-8"))
+    text = MATRIX.read_text(encoding="utf-8")
+    if tomllib is not None:
+        return tomllib.loads(text)
+    return parse_matrix_toml_subset(text)
+
+
+def parse_matrix_toml_subset(text: str) -> dict[str, Any]:
+    """Parse the matrix file subset needed by this runner.
+
+    This fallback intentionally supports only the simple TOML shapes used by
+    tests/syntax_combo/matrix.toml: dotted tables, scalar ints/bools/strings,
+    and string arrays.
+    """
+    root: dict[str, Any] = {}
+    current = root
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        raw = lines[index].strip()
+        index += 1
+        if not raw or raw.startswith("#"):
+            continue
+        if raw.startswith("[") and raw.endswith("]"):
+            current = root
+            for part in raw[1:-1].split("."):
+                current = current.setdefault(part, {})
+            continue
+        if "=" not in raw:
+            continue
+        key, value = [part.strip() for part in raw.split("=", 1)]
+        if value == "[":
+            items: list[str] = []
+            while index < len(lines):
+                item = lines[index].strip()
+                index += 1
+                if item == "]":
+                    break
+                item = item.rstrip(",")
+                if item.startswith('"') and item.endswith('"'):
+                    items.append(item[1:-1])
+            current[key] = items
+        elif value.startswith("[") and value.endswith("]"):
+            raw_items = value[1:-1].strip()
+            current[key] = [] if not raw_items else [item.strip().strip('"') for item in raw_items.split(",")]
+        elif value.startswith('"') and value.endswith('"'):
+            current[key] = value[1:-1]
+        elif value in {"true", "false"}:
+            current[key] = value == "true"
+        else:
+            current[key] = int(value)
+    return root
 
 
 def compact(text: str, limit: int = 1200) -> str:
@@ -947,6 +1004,58 @@ def generated_cases() -> list[AuditCase]:
             expected=Expected("accept"),
         ),
         AuditCase(
+            name="if-tuple-projection",
+            source=module_source(
+                "if_tuple_projection",
+                """
+                action choose(flag: bool) -> u64 {
+                    verification
+                    let pair = if flag { (1, 2) } else { (3, 4) }
+                    return pair.0
+                }
+                """,
+            ),
+            expected=Expected("accept"),
+            origin="matrix:edge/tuple-projection",
+        ),
+        AuditCase(
+            name="match-tuple-projection",
+            source=module_source(
+                "match_tuple_projection",
+                """
+                enum Flag {
+                    Off,
+                    On,
+                }
+
+                action choose(flag: Flag) -> u64 {
+                    verification
+                    let pair = match flag {
+                        Flag::Off => { (1, 2) },
+                        _ => { (3, 4) },
+                    }
+                    return pair.1
+                }
+                """,
+            ),
+            expected=Expected("accept"),
+            origin="matrix:edge/tuple-projection",
+        ),
+        AuditCase(
+            name="byte-string-fixed-length",
+            source=module_source(
+                "byte_string_fixed_length",
+                """
+                action symbol() -> [u8; 4] {
+                    verification
+                    return b"TEST"
+                }
+                """,
+            ),
+            expected=Expected("accept"),
+            origin="matrix:edge/bytestring-length",
+        ),
+        AuditCase(
             name="reject-require-block-lifecycle",
             source=module_source(
                 "reject_require_block_lifecycle",
@@ -963,6 +1072,42 @@ def generated_cases() -> list[AuditCase]:
                 """,
             ),
             expected=Expected("reject_compile", ("require block", "verifier-boundary syntax")),
+        ),
+        AuditCase(
+            name="reject-wildcard-match-non-last",
+            source=module_source(
+                "reject_wildcard_match_non_last",
+                """
+                enum Flag {
+                    Off,
+                    On,
+                }
+
+                action bad(flag: Flag) -> u64 {
+                    verification
+                    return match flag {
+                        _ => { 1 },
+                        Flag::Off => { 2 },
+                    }
+                }
+                """,
+            ),
+            expected=Expected("reject_compile", ("wildcard pattern '_'", "last match arm")),
+            origin="matrix:edge/wildcard-match-order",
+        ),
+        AuditCase(
+            name="reject-byte-string-length-mismatch",
+            source=module_source(
+                "reject_byte_string_length_mismatch",
+                """
+                action bad() -> [u8; 3] {
+                    verification
+                    return b"TEST"
+                }
+                """,
+            ),
+            expected=Expected("reject_compile", ("type mismatch",)),
+            origin="matrix:edge/bytestring-length",
         ),
         AuditCase(
             name="reject-preserve-type-mismatch",
@@ -1567,7 +1712,7 @@ def main(argv: list[str]) -> int:
     require_tool("python3")
     cellc = cellc_bin()
 
-    timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d-%H%M%S")
+    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     run_dir = ROOT / "target" / "syntax-combo-audit" / f"{timestamp}-{args.mode}-{args.seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
 

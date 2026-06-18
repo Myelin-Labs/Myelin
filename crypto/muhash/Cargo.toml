@@ -1,6 +1,6 @@
 [package]
-name = "spora-muhash"
-description = "Spora Muhash library"
+name = "myelin-muhash"
+description = "Myelin Muhash library"
 rust-version.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -10,8 +10,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-spora-hashes.workspace = true
-spora-math.workspace = true
+myelin-hashes.workspace = true
+myelin-math.workspace = true
 rand_chacha.workspace = true
 serde.workspace = true
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Load transaction hash syscall
 // Reference: ckb/script/src/syscalls/load_tx.rs

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Absolute timestamp lock script test
 
@@ -125,12 +125,12 @@ mod tests {
     }
 
     #[test]
-    fn test_timelock_absolute_rejects_daa_lock() {
+    fn test_timelock_absolute_rejects_block_number_lock() {
         let code_hash = timelock_absolute_code_hash();
         let input_out_point = OutPoint::new([0x15; 32], 0);
         let provider = build_provider(code_hash, input_out_point.clone());
 
-        // Use DAA lock instead of timestamp (bit62 = 0)
+        // Use block number lock instead of timestamp (bit62 = 0)
         let since = (0u64 << 63) | (0u64 << 62) | TARGET_TIMESTAMP;
         let tx = CellTx {
             version: 0xC001,

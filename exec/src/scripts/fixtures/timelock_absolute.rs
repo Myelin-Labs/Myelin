@@ -76,7 +76,7 @@ pub extern "C" fn _start() -> ! {
 
     // Check flags:
     // - bit63 must be 0 (absolute lock)
-    // - bit62 must be 1 (timestamp, not DAA)
+    // - bit62 must be 1 (timestamp, not block number)
     let is_relative = (since & (1u64 << 63)) != 0;
     let is_timestamp = (since & (1u64 << 62)) != 0;
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Absolute time lock script for CKB-VM
 //
@@ -18,7 +18,7 @@
 #include <stddef.h>
 
 // ============================================================================
-// Spora Syscall Definitions
+// Myelin Syscall Definitions
 // ============================================================================
 
 #define LOAD_INPUT_BY_FIELD_SYSCALL 2083
@@ -155,7 +155,7 @@ int main() {
     
     // 3. Extract the value portion (bits 0-55)
     // Bit 63: relative flag
-    // Bit 62: timestamp flag (1 = timestamp, 0 = DAA score)
+    // Bit 62: timestamp flag (1 = timestamp, 0 = block number)
     // Bits 0-55: value
     uint64_t since_value = since & 0x00FFFFFFFFFFFFFF;
     uint64_t since_flags = since & 0xFF00000000000000;
@@ -166,7 +166,7 @@ int main() {
         return 1;  // Relative lock not allowed for absolute time lock script
     }
     if ((since_flags & 0x4000000000000000) == 0) {
-        return 1;  // DAA score lock not allowed for timestamp lock script
+        return 1;  // block number lock not allowed for timestamp lock script
     }
     
     // 4. Get target timestamp from script args

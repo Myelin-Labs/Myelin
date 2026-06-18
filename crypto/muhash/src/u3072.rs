@@ -1,6 +1,6 @@
 use crate::ELEMENT_BYTE_SIZE;
+use myelin_math::Uint3072;
 use serde::{Deserialize, Serialize};
-use spora_math::Uint3072;
 use std::ops::{DivAssign, MulAssign};
 
 // TODO: Add u32 support for optimization on 32 bit machines.

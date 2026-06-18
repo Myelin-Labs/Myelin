@@ -45,7 +45,7 @@ Priority order (deterministic):
 ## References
 
 - CKB TxPool: `/home/arthur/RustRoverProjects/ckb/tx-pool/src/`
-- Spec: `spora.md` Section 9
+- Spec: `myelin.md` Section 9
 
 ## Status
 

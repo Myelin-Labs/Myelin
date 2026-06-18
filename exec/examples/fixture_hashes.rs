@@ -6,7 +6,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let mut args = env::args().skip(1).peekable();
     if args.peek().is_none() {
-        eprintln!("usage: cargo run -p spora-exec --example fixture_hashes -- <file> [file...]");
+        eprintln!("usage: cargo run -p myelin-exec --example fixture_hashes -- <file> [file...]");
         return ExitCode::from(2);
     }
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Edge-case syscall scenario tests
 //
@@ -216,19 +216,19 @@ mod tests {
         ResolvedHeader {
             hash,
             version: 1,
-            parents_by_level: vec![vec![[0x99; 32]]],
-            hash_merkle_root: [0x11; 32],
-            accepted_id_merkle_root: [0x12; 32],
+            parent_hash: [0x99; 32],
+            transactions_root: [0x11; 32],
+            proposals_hash: [0x12; 32],
             cell_commitment: [0x13; 32],
             cell_root: [0x14; 32],
             segment_root: [0x15; 32],
             timestamp: 1_700_000_000,
-            bits: 0x1d00_ffff,
+            compact_target: 0x1d00_ffff,
             nonce: 42,
-            daa_score: 100,
-            blue_work: [0x16; 24],
-            blue_score: 7,
-            pruning_point: [0x17; 32],
+            number: 100,
+            dao: [0x16; 32],
+            epoch: 7,
+            uncles_hash: [0x17; 32],
         }
     }
 
@@ -395,7 +395,7 @@ mod tests {
             );
         }
 
-        // --- 4) LOAD_HEADER_BY_FIELD: read daa_score via HeaderDep ---
+        // --- 4) LOAD_HEADER_BY_FIELD: read block_number via HeaderDep ---
         {
             let mut machine = ScriptVersion::V2.init_core_machine(10_000);
             machine.memory_mut().store64(&SIZE_ADDR, &8u64).unwrap();
@@ -404,14 +404,14 @@ mod tests {
             machine.set_register(A2, 0);
             machine.set_register(A3, 0);
             machine.set_register(A4, Source::HeaderDep as u64);
-            machine.set_register(A5, HeaderField::DaaScore as u64);
+            machine.set_register(A5, HeaderField::Number as u64);
             machine.set_register(A7, LOAD_HEADER_BY_FIELD_SYSCALL_NUMBER);
 
             let mut syscall = LoadHeader::new(tx.clone(), provider.clone(), vec![0], vec![]);
             let handled = syscall.ecall(&mut machine).unwrap();
             assert!(handled);
             assert_eq!(machine.registers()[A0].to_u64(), SUCCESS as u64);
-            assert_eq!(machine.memory_mut().load_bytes(BUFFER_ADDR, 8).unwrap().as_ref(), &header.daa_score.to_le_bytes());
+            assert_eq!(machine.memory_mut().load_bytes(BUFFER_ADDR, 8).unwrap().as_ref(), &header.number.to_le_bytes());
         }
     }
 

@@ -3340,8 +3340,14 @@ impl<'a> TypeChecker<'a> {
 
         for arm in &match_expr.arms {
             if arm.pattern == "_" {
+                if has_wildcard {
+                    return Err(CompileError::new("duplicate wildcard match arm", arm.span));
+                }
                 has_wildcard = true;
                 continue;
+            }
+            if has_wildcard {
+                return Err(CompileError::new("wildcard pattern '_' must be the last match arm", arm.span));
             }
             let Some(variant) = match_pattern_variant(enum_name, &arm.pattern) else {
                 return Err(CompileError::new(
@@ -4405,6 +4411,23 @@ impl<'a> TypeChecker<'a> {
                             }
                             Type::Hash
                         }
+                        ("ckb", "hash_data_packed") => {
+                            self.validate_builtin_arity(name, 1, arg_types, call.span)?;
+                            if matches!(arg_types[0], Type::Unit) {
+                                return Err(CompileError::new("ckb::hash_data_packed expects packed data", call.span));
+                            }
+                            Type::Hash
+                        }
+                        ("ckb", "cell_data_hash_at") => {
+                            self.validate_builtin_arity(name, 2, arg_types, call.span)?;
+                            if arg_types[0] != Type::U64 || arg_types[1] != Type::U64 {
+                                return Err(CompileError::new(
+                                    "ckb::cell_data_hash_at expects (source_view: u64, offset: u64)",
+                                    call.span,
+                                ));
+                            }
+                            Type::Hash
+                        }
                         ("ckb", "cell_data_u32_le" | "cell_data_u64_le") => {
                             self.validate_builtin_arity(name, 2, arg_types, call.span)?;
                             if arg_types[0] != Type::U64 || arg_types[1] != Type::U64 {
@@ -4416,6 +4439,7 @@ impl<'a> TypeChecker<'a> {
                             "ckb",
                             "cell_lock_hash"
                             | "cell_type_hash"
+                            | "cell_data_hash"
                             | "cell_lock_code_hash"
                             | "cell_type_code_hash"
                             | "cell_lock_args_hash"
@@ -4508,6 +4532,18 @@ impl<'a> TypeChecker<'a> {
                                             "(source_view: u64, expected_hash: Hash)"
                                         }
                                     ),
+                                    call.span,
+                                ));
+                            }
+                            Type::Unit
+                        }
+                        ("verifier::btc::bip340", "require_signature") => {
+                            self.validate_builtin_arity(name, 3, arg_types, call.span)?;
+                            let pubkey_ty = Type::Array(Box::new(Type::U8), 32);
+                            let signature_ty = Type::Array(Box::new(Type::U8), 64);
+                            if arg_types[0] != Type::Hash || arg_types[1] != pubkey_ty || arg_types[2] != signature_ty {
+                                return Err(CompileError::new(
+                                    "verifier::btc::bip340::require_signature expects (message_hash: Hash, pubkey: [u8; 32], signature: [u8; 64])",
                                     call.span,
                                 ));
                             }
@@ -4830,6 +4866,13 @@ impl<'a> TypeChecker<'a> {
                         self.validate_builtin_arity(name, 1, arg_types, call.span)?;
                         if arg_types[0] != Type::Hash {
                             return Err(CompileError::new("hash_chain expects Hash input", call.span));
+                        }
+                        return Ok(Type::Hash);
+                    }
+                    "hash_pair" => {
+                        self.validate_builtin_arity(name, 2, arg_types, call.span)?;
+                        if arg_types[0] != Type::Hash || arg_types[1] != Type::Hash {
+                            return Err(CompileError::new("hash_pair expects (Hash, Hash)", call.span));
                         }
                         return Ok(Type::Hash);
                     }
@@ -6403,6 +6446,49 @@ action hidden_mutation(flag: bool) {
 
         let err = check(&module).unwrap_err();
         assert!(err.message.contains("require block contains assignment"), "unexpected error: {}", err.message);
+    }
+
+    #[test]
+    fn byte_string_literal_infers_exact_fixed_array_length() {
+        let module = source_module(
+            r#"
+module test
+
+action symbol() -> [u8; 4]
+{
+    verification
+        return b"TEST"
+}
+"#,
+        );
+
+        check(&module).unwrap();
+    }
+
+    #[test]
+    fn match_wildcard_arm_must_be_last() {
+        let module = source_module(
+            r#"
+module test
+
+enum Flag {
+    Off,
+    On,
+}
+
+action bad(flag: Flag) -> u64
+{
+    verification
+        return match flag {
+            _ => { 1 },
+            Flag::Off => { 2 },
+        }
+}
+"#,
+        );
+
+        let err = check(&module).unwrap_err();
+        assert!(err.message.contains("wildcard pattern '_' must be the last match arm"), "unexpected error: {}", err.message);
     }
 
     #[test]

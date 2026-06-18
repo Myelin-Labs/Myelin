@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Serialization Layer Integration Tests
 //
 // These tests verify the integration of serialization components
 // across the exec crate.
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use spora_exec::{
+use myelin_exec::SerializationError;
+use myelin_exec::{
     CellDep, CellInput, CellOutput, CellTx, DepType, OutPoint, Script, VersionedEnvelope, VersionedSerializable, VmAbiNegotiator,
     CELLTX_SCHEMA_VERSION,
 };
@@ -87,11 +87,11 @@ fn test_versioned_envelope_format() {
     let tx = create_sample_tx();
     let envelope = VersionedEnvelope::new(&tx).expect("should create envelope");
 
-    // Serialize envelope to bytes
-    let bytes = borsh::to_vec(&envelope).expect("should serialize envelope");
+    // Serialize envelope to Molecule-compatible bytes
+    let bytes = envelope.to_bytes();
 
     // Deserialize back
-    let restored: VersionedEnvelope<CellTx> = borsh::from_slice(&bytes).expect("should deserialize envelope");
+    let restored = VersionedEnvelope::<CellTx>::from_bytes(&bytes).expect("should deserialize envelope");
 
     // Parse the content
     let restored_tx: CellTx = restored.parse().expect("should parse content");
@@ -101,23 +101,22 @@ fn test_versioned_envelope_format() {
 /// Test ABI version negotiation scenarios
 #[test]
 fn test_abi_version_negotiation_scenarios() {
-    // Scenario 1: Exact match
-    let caps = vec![VmAbiNegotiator::ABI_VERSION_BORSH_V1];
-    let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_BORSH_V1, &caps);
-    assert_eq!(result.unwrap(), VmAbiNegotiator::ABI_VERSION_BORSH_V1);
+    // Scenario 1: Molecule exact match
+    let caps = vec![VmAbiNegotiator::ABI_VERSION_MOLECULE_V1];
+    let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, &caps);
+    assert_eq!(result.unwrap(), VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
 
-    // Scenario 2: Molecule request when VM only supports Borsh → version mismatch
-    // (no implicit downgrade — caller must explicitly try a lower version)
-    let caps = vec![VmAbiNegotiator::ABI_VERSION_BORSH_V1];
+    // Scenario 2: Molecule request when VM only advertises an obsolete ABI
+    let caps = vec![0x0001];
     let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, &caps);
     assert!(result.is_err());
 
-    // Scenario 3: Multiple capabilities with preferred match
+    // Scenario 3: Multiple capabilities with Molecule present
     let caps = vec![0x0001, 0x0002, VmAbiNegotiator::ABI_VERSION_MOLECULE_V1];
-    let result = VmAbiNegotiator::negotiate(0x0002, &caps);
-    assert_eq!(result.unwrap(), 0x0002);
+    let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, &caps);
+    assert_eq!(result.unwrap(), VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
 
-    // Scenario 4: No compatible version
+    // Scenario 4: Non-Molecule script request is unsupported
     let caps = vec![0x0002, 0x0003];
     let result = VmAbiNegotiator::negotiate(0x0001, &caps);
     assert!(result.is_err());
@@ -127,18 +126,33 @@ fn test_abi_version_negotiation_scenarios() {
 #[test]
 fn test_default_vm_capabilities() {
     let caps = VmAbiNegotiator::default_capabilities();
-    assert!(!caps.is_empty());
-    assert!(caps.contains(&VmAbiNegotiator::ABI_VERSION_BORSH_V1));
+    assert_eq!(caps, vec![VmAbiNegotiator::ABI_VERSION_MOLECULE_V1]);
+    assert!(!caps.contains(&0x0001));
 }
 
 /// Test that VersionedEnvelope can handle empty payloads gracefully
 #[test]
 fn test_versioned_envelope_empty_payload() {
-    #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct EmptyData;
 
     impl VersionedSerializable for EmptyData {
         const CURRENT_VERSION: u8 = 1;
+
+        fn to_versioned_payload(&self) -> Result<Vec<u8>, SerializationError> {
+            Ok(Vec::new())
+        }
+
+        fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
+            if version != Self::CURRENT_VERSION {
+                return Err(SerializationError::UpgradePathNotAvailable { from: version, to: Self::CURRENT_VERSION });
+            }
+            if bytes.is_empty() {
+                Ok(Self)
+            } else {
+                Err(SerializationError::DeserializationFailed("EmptyData payload must be empty".to_string()))
+            }
+        }
     }
 
     let data = EmptyData;
@@ -150,13 +164,25 @@ fn test_versioned_envelope_empty_payload() {
 /// Test large payload handling
 #[test]
 fn test_versioned_envelope_large_payload() {
-    #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct LargeData {
         data: Vec<u8>,
     }
 
     impl VersionedSerializable for LargeData {
         const CURRENT_VERSION: u8 = 1;
+
+        fn to_versioned_payload(&self) -> Result<Vec<u8>, SerializationError> {
+            Ok(self.data.clone())
+        }
+
+        fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
+            if version == Self::CURRENT_VERSION {
+                Ok(Self { data: bytes.to_vec() })
+            } else {
+                Err(SerializationError::UpgradePathNotAvailable { from: version, to: Self::CURRENT_VERSION })
+            }
+        }
     }
 
     let large_data = LargeData {
@@ -176,14 +202,14 @@ fn test_multiple_roundtrips() {
 
     // First roundtrip
     let envelope1 = VersionedEnvelope::new(&tx).unwrap();
-    let bytes1 = borsh::to_vec(&envelope1).unwrap();
-    let restored1: VersionedEnvelope<CellTx> = borsh::from_slice(&bytes1).unwrap();
+    let bytes1 = envelope1.to_bytes();
+    let restored1 = VersionedEnvelope::<CellTx>::from_bytes(&bytes1).unwrap();
     let tx1 = restored1.parse().unwrap();
 
     // Second roundtrip
     let envelope2 = VersionedEnvelope::new(&tx1).unwrap();
-    let bytes2 = borsh::to_vec(&envelope2).unwrap();
-    let restored2: VersionedEnvelope<CellTx> = borsh::from_slice(&bytes2).unwrap();
+    let bytes2 = envelope2.to_bytes();
+    let restored2 = VersionedEnvelope::<CellTx>::from_bytes(&bytes2).unwrap();
     let tx2 = restored2.parse().unwrap();
 
     // All should be equal

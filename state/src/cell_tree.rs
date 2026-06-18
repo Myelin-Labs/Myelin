@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2024 Spora developers
+// Copyright (C) 2024 Myelin developers
 //
 // Cell State Tree - Merkle tree for live cells
 // Provides state root for lightweight client verification
 
-use spora_exec::{OutPoint, Script};
-use spora_hashes::{Hash, HasherBase, MerkleBranchHash};
-use spora_muhash::MuHash;
+use myelin_exec::{OutPoint, Script};
+use myelin_hashes::{Hash, HasherBase, MerkleBranchHash};
+use myelin_muhash::MuHash;
 use std::{
     collections::BTreeMap,
     ops::Bound::{Excluded, Included, Unbounded},
@@ -25,8 +25,8 @@ pub struct CellEntry {
     pub type_hash: Option<Hash>,
     /// Data hash
     pub data_hash: Hash,
-    /// Block DAA score where this cell was created
-    pub block_daa_score: u64,
+    /// Block number where this cell was created
+    pub created_block_number: u64,
     /// Whether this cell was created by a cellbase transaction
     pub is_cellbase: bool,
     /// Full lock script when the live state source can retain it.
@@ -52,7 +52,7 @@ impl CellEntry {
         lock_hash: Hash,
         type_hash: Option<Hash>,
         data_hash: Hash,
-        block_daa_score: u64,
+        created_block_number: u64,
         is_cellbase: bool,
     ) -> Self {
         Self {
@@ -61,7 +61,7 @@ impl CellEntry {
             lock_hash,
             type_hash,
             data_hash,
-            block_daa_score,
+            created_block_number,
             is_cellbase,
             lock_script: None,
             type_script: None,
@@ -101,8 +101,8 @@ impl CellEntry {
         // Data hash (32 bytes)
         bytes.extend_from_slice(&self.data_hash.as_bytes());
 
-        // Creation DAA score (8 bytes)
-        bytes.extend_from_slice(&self.block_daa_score.to_le_bytes());
+        // Creation block number (8 bytes)
+        bytes.extend_from_slice(&self.created_block_number.to_le_bytes());
 
         // Cellbase flag (1 byte)
         bytes.push(u8::from(self.is_cellbase));
@@ -114,7 +114,7 @@ impl CellEntry {
     pub fn hash(&self) -> Hash {
         let serialized = self.serialize();
         let mut hasher = MerkleBranchHash::new();
-        hasher.update(b"spora-cell/entry"); // Domain separation
+        hasher.update(b"myelin-cell/entry"); // Domain separation
         hasher.update(&serialized);
         hasher.finalize()
     }
@@ -256,7 +256,7 @@ impl CellStateTree {
     fn compute_leaf_hash(outpoint_hash: &Hash, entry: &CellEntry) -> Hash {
         let cell_hash = entry.hash();
         let mut hasher = MerkleBranchHash::new();
-        hasher.update(b"spora-cell/leaf");
+        hasher.update(b"myelin-cell/leaf");
         hasher.update(&outpoint_hash.as_bytes());
         hasher.update(&cell_hash.as_bytes());
         hasher.finalize()
@@ -345,7 +345,7 @@ mod tests {
         let entry = create_test_entry(100000);
         let serialized = entry.serialize();
 
-        // 8 (capacity) + 8 (data bytes) + 32 (lock) + 1 (type flag) + 32 (data hash) + 8 (daa) + 1 (cellbase) = 90 bytes
+        // 8 (capacity) + 8 (data bytes) + 32 (lock) + 1 (type flag) + 32 (data hash) + 8 (block_number) + 1 (cellbase) = 90 bytes
         assert_eq!(serialized.len(), 90);
 
         // Verify capacity
@@ -400,7 +400,7 @@ mod tests {
         assert!(tree.is_empty());
 
         // Empty tree root is EMPTY_MUHASH
-        assert_eq!(tree.root(), spora_muhash::EMPTY_MUHASH);
+        assert_eq!(tree.root(), myelin_muhash::EMPTY_MUHASH);
     }
 
     #[test]

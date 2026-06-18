@@ -40,6 +40,37 @@ const ICKB_REQUIRED_PRODUCTION_EVIDENCE: [&str; 8] = [
 const ICKB_REQUIRED_HARDENING_EVIDENCE: [&str; 5] =
     ["mutation_coverage", "deterministic_fuzz_seed", "normalized_fixture_generator", "max_cellscript_cycles", "max_tx_size_bytes"];
 const CELLSCRIPT_CKB_RPC_URL_ENV: &str = "CELLSCRIPT_CKB_RPC_URL";
+const NOVASEAL_CERTIFICATION_PLUGIN: &str = "novaseal-profile-v0";
+const NOVASEAL_CERTIFICATION_REPORT_SCHEMA: &str = "cellscript-certification-report-v0.1";
+const NOVASEAL_PLUGIN_REPORT_SCHEMA: &str = "novaseal-production-gates-v0.4";
+const NOVASEAL_PROFILE_CERTIFICATION_SCHEMA: &str = "novaseal-profile-certification-v0.1";
+const NOVASEAL_AGREEMENT_PROFILE: &str = "agreement-profile-v0";
+const NOVASEAL_CANONICAL_SCHEMA: &str = "NovaSealCanonicalV0";
+const NOVASEAL_PROFILE_CERTIFICATION_GATE: &str = "agreement_profile_public_ecosystem_certification_v0";
+const NOVASEAL_LOCAL_V1_DIMENSIONS: &[&str] = &[
+    "architecture_and_profile_conformance",
+    "planned_profiles_and_business_scenarios",
+    "security_audit_coverage",
+    "devnet_multi_profile_coverage",
+    "multi_business_scenario_coverage",
+    "full_stateful_acceptance",
+    "wallet_signing_vectors",
+    "profile_operator_fixtures",
+    "service_builder_fixtures",
+    "btc_spv_evidence_adapter",
+    "external_attestation_adapter",
+    "external_evidence_handoff",
+    "local_bip340_tcb_review",
+    "local_v1_gate",
+];
+const NOVASEAL_EXTERNAL_V1_DIMENSIONS: &[&str] = &[
+    "external_btc_fiber_endpoint_acceptance",
+    "all_profiles_production_completeness",
+    "public_shared_cell_dep_attestation",
+    "external_bip340_tcb_review_attestation",
+    "public_btc_spv_evidence",
+    "rwa_legal_registry_review_evidence",
+];
 
 #[derive(Debug)]
 pub enum Command {
@@ -88,6 +119,7 @@ pub enum Command {
     RegistryVerify(RegistryVerifyArgs),
     PackageVerify(PackageVerifyArgs),
     RegistryAdd(RegistryAddArgs),
+    Certify(CertifyArgs),
     Update,
     Info(InfoArgs),
     Login(LoginArgs),
@@ -395,6 +427,7 @@ pub struct ActionBuildArgs {
     pub output: Option<PathBuf>,
     pub target: Option<String>,
     pub target_profile: Option<String>,
+    pub fabric_intent: bool,
     pub json: bool,
 }
 
@@ -492,6 +525,16 @@ pub struct RegistryAddArgs {
     pub source: String,
 }
 
+#[derive(Debug, Default)]
+pub struct CertifyArgs {
+    pub plugin: String,
+    pub repo_root: Option<PathBuf>,
+    pub report: Option<PathBuf>,
+    pub output: Option<PathBuf>,
+    pub json: bool,
+    pub require_production: bool,
+}
+
 pub struct CommandExecutor;
 
 impl CommandExecutor {
@@ -548,6 +591,7 @@ impl CommandExecutor {
             Command::RegistryVerify(args) => Self::registry_verify(args),
             Command::PackageVerify(args) => Self::package_verify(args),
             Command::RegistryAdd(args) => Self::registry_add(args),
+            Command::Certify(args) => Self::certify(args),
         }
     }
 
@@ -1224,6 +1268,7 @@ impl CommandExecutor {
             if !args.json {
                 println!("{} {} to {}", "Adding".cyan(), crate_name, target);
             }
+            validate_not_self_dependency(crate_name, &dependency, &manifest)?;
             dependency_map_mut(&mut manifest, args.dev, args.build).insert(crate_name.clone(), dependency.clone());
             added.push(crate_name.clone());
         }
@@ -2420,7 +2465,8 @@ impl CommandExecutor {
                 "script references keep code_hash, hash_type, and args visible",
                 "TYPE_ID metadata uses the CKB TYPE_ID ABI and does not hide builder obligations",
                 "Spawn/IPC is bounded verifier reuse and does not make type scripts multi-tenant",
-                "hash_blake2b(input: Hash) uses CKB Blake2b-256; wider byte serialization hashing remains out of scope"
+                "hash_blake2b(input: Hash) uses CKB Blake2b-256 for one Hash",
+                "hash_pair(left: Hash, right: Hash) uses CKB Blake2b-256 over two Hash values; wider byte serialization hashing remains out of scope"
             ],
         });
         if args.json {
@@ -2645,18 +2691,31 @@ impl CommandExecutor {
             "constraints_failures": result.metadata.constraints.failures,
             "constraints_warnings": result.metadata.constraints.warnings,
         });
-        let json = serde_json::to_string_pretty(&plan)
-            .map_err(|error| crate::error::CompileError::without_span(format!("failed to serialize action build plan: {}", error)))?;
+        let output_value = if args.fabric_intent {
+            cellfabric_intent_envelope_json(&result.metadata, action, &plan, &input_path, &metadata_hash)?
+        } else {
+            plan
+        };
+        let json = serde_json::to_string_pretty(&output_value).map_err(|error| {
+            crate::error::CompileError::without_span(format!("failed to serialize action build output: {}", error))
+        })?;
 
         if let Some(output_path) = args.output {
             if let Some(parent) = output_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&output_path, json)?;
-            println!("{}", "Action build plan generated".green());
+            let label = if args.fabric_intent { "CellFabric intent envelope generated" } else { "Action build plan generated" };
+            println!("{}", label.green());
             println!("  Output: {}", output_path.display());
         } else if args.json {
             println!("{}", json);
+        } else if args.fabric_intent {
+            println!("CellFabric intent envelope: {}", action.name);
+            println!("  Target profile: {}", result.metadata.target_profile.name);
+            println!("  Status: requires-runtime-binding");
+            println!("  App conflict key templates: {}", cellfabric_app_conflict_key_templates(&result.metadata.module, action).len());
+            println!("  Embedded action plan: yes");
         } else {
             println!("Action build plan: {}", action.name);
             println!("  Target profile: {}", result.metadata.target_profile.name);
@@ -3288,6 +3347,9 @@ impl CommandExecutor {
                 default_features: true,
             };
 
+            let manifest_for_check = pm.read_manifest()?;
+            validate_not_self_dependency(&crate_name, &Dependency::Detailed(dep.clone()), &manifest_for_check)?;
+
             pm.resolve_from_path(&crate_name, &path.to_string_lossy())?;
 
             let mut manifest = pm.read_manifest()?;
@@ -3341,6 +3403,7 @@ impl CommandExecutor {
             };
 
             let mut manifest = pm.read_manifest()?;
+            validate_not_self_dependency(&resolved_name, &dep, &manifest)?;
             manifest.dependencies.insert(resolved_name.clone(), dep);
             pm.write_manifest(&manifest)?;
 
@@ -3751,6 +3814,73 @@ impl CommandExecutor {
 
         Ok(())
     }
+
+    fn certify(args: CertifyArgs) -> Result<()> {
+        if args.plugin != NOVASEAL_CERTIFICATION_PLUGIN {
+            return Err(crate::error::CompileError::without_span(format!(
+                "unknown certification plugin '{}'; available plugins: {}",
+                args.plugin, NOVASEAL_CERTIFICATION_PLUGIN
+            )));
+        }
+
+        let repo_root = args.repo_root.unwrap_or(std::env::current_dir()?);
+        let report_provided = args.report.is_some();
+        let plugin_report_path = args.report.clone().unwrap_or_else(|| repo_root.join("target/novaseal-production-gates.json"));
+        let report_generated = !report_provided;
+
+        let plugin_report = if report_provided {
+            read_json_value(&plugin_report_path)?
+        } else {
+            let report = super::novaseal_certification::build_report(&repo_root)?;
+            if let Some(parent) = plugin_report_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(
+                &plugin_report_path,
+                serde_json::to_string_pretty(&report).map_err(|error| {
+                    crate::error::CompileError::without_span(format!("failed to serialize NovaSeal production-gate report: {}", error))
+                })?,
+            )?;
+            report
+        };
+
+        let implementation_path = repo_root.join("src/cli/novaseal_certification.rs");
+        let summary = novaseal_certification_summary(
+            &plugin_report,
+            &repo_root,
+            &plugin_report_path,
+            &implementation_path,
+            report_generated,
+            args.require_production,
+        )?;
+        let output_path = args.output.unwrap_or_else(|| repo_root.join("target/cellscript-certification/novaseal-profile-v0.json"));
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(
+            &output_path,
+            serde_json::to_string_pretty(&summary).map_err(|error| {
+                crate::error::CompileError::without_span(format!("failed to serialize certification report: {}", error))
+            })?,
+        )?;
+
+        if args.json {
+            print_json(&summary)?;
+        } else {
+            println!("Certification report generated");
+            println!("  Plugin: {}", args.plugin);
+            println!("  Status: {}", summary["status"].as_str().unwrap_or("unknown"));
+            println!("  Level: {}", summary["certification_level"].as_str().unwrap_or("unknown"));
+            println!("  Output: {}", output_path.display());
+            println!("  Plugin report: {}", plugin_report_path.display());
+        }
+
+        if summary["status"].as_str() == Some("passed") {
+            Ok(())
+        } else {
+            Err(crate::error::CompileError::without_span(novaseal_certification_failure_message(&summary)))
+        }
+    }
 }
 
 #[cfg(feature = "vm-runner")]
@@ -3805,6 +3935,227 @@ fn print_json(value: &serde_json::Value) -> Result<()> {
         .map_err(|error| crate::error::CompileError::without_span(format!("failed to serialize JSON: {}", error)))?;
     println!("{}", json);
     Ok(())
+}
+
+fn ckb_blake2b_file_hash(path: &Path) -> Result<Option<String>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|error| crate::error::CompileError::without_span(format!("failed to read '{}': {}", path.display(), error)))?;
+    Ok(Some(crate::hex_encode(&crate::ckb_blake2b256(&bytes))))
+}
+
+fn json_pointer_str<'a>(value: &'a serde_json::Value, pointer: &str) -> Option<&'a str> {
+    value.pointer(pointer).and_then(serde_json::Value::as_str)
+}
+
+fn json_pointer_bool(value: &serde_json::Value, pointer: &str) -> bool {
+    value.pointer(pointer).and_then(serde_json::Value::as_bool).unwrap_or(false)
+}
+
+fn novaseal_gate_status<'a>(report: &'a serde_json::Value, gate_name: &str) -> Option<&'a str> {
+    report.get("gates")?.as_array()?.iter().find_map(|gate| {
+        let name = gate.get("name").and_then(serde_json::Value::as_str)?;
+        if name == gate_name {
+            gate.get("status").and_then(serde_json::Value::as_str)
+        } else {
+            None
+        }
+    })
+}
+
+fn novaseal_certification_failure_message(summary: &serde_json::Value) -> String {
+    let reason = summary.get("failure_reason").unwrap_or(&serde_json::Value::Null);
+    if let Some(message) = json_pointer_str(reason, "/message") {
+        return message.to_string();
+    }
+    if let Some(message) = reason.as_str() {
+        return message.to_string();
+    }
+    if !reason.is_null() {
+        return serde_json::to_string(reason).unwrap_or_else(|_| "certification failed".to_string());
+    }
+    "certification failed".to_string()
+}
+
+fn novaseal_failed_dimensions(plugin_report: &serde_json::Value, v1_readiness: &serde_json::Value) -> serde_json::Value {
+    let mut seen = BTreeSet::new();
+    let mut dimensions = Vec::new();
+    for source in [plugin_report.get("failed_dimensions"), v1_readiness.get("failed_dimensions")] {
+        let Some(items) = source.and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            let Some(name) = item.as_str() else {
+                continue;
+            };
+            if seen.insert(name.to_string()) {
+                dimensions.push(serde_json::Value::String(name.to_string()));
+            }
+        }
+    }
+    serde_json::Value::Array(dimensions)
+}
+
+fn novaseal_failed_dimension_matches(failed_dimensions: &serde_json::Value, expected: &[&str]) -> bool {
+    failed_dimensions.as_array().is_some_and(|dimensions| {
+        dimensions.iter().filter_map(serde_json::Value::as_str).any(|dimension| expected.contains(&dimension))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn novaseal_certification_summary(
+    plugin_report: &serde_json::Value,
+    repo_root: &Path,
+    plugin_report_path: &Path,
+    implementation_path: &Path,
+    report_generated: bool,
+    require_production: bool,
+) -> Result<serde_json::Value> {
+    let plugin_report_hash = ckb_blake2b_file_hash(plugin_report_path)?.ok_or_else(|| {
+        crate::error::CompileError::without_span(format!(
+            "NovaSeal plugin report '{}' is not a regular file",
+            plugin_report_path.display()
+        ))
+    })?;
+    let implementation_hash = ckb_blake2b_file_hash(implementation_path)?;
+    let profile_certification = plugin_report.get("profile_certification").unwrap_or(&serde_json::Value::Null);
+    let v1_readiness = plugin_report.get("v1_readiness").unwrap_or(&serde_json::Value::Null);
+
+    let mut checks = vec![
+        ("plugin_report_schema", json_pointer_str(plugin_report, "/schema") == Some(NOVASEAL_PLUGIN_REPORT_SCHEMA)),
+        (
+            "profile_certification_schema",
+            json_pointer_str(profile_certification, "/schema") == Some(NOVASEAL_PROFILE_CERTIFICATION_SCHEMA),
+        ),
+        ("profile_id", json_pointer_str(profile_certification, "/profile") == Some(NOVASEAL_AGREEMENT_PROFILE)),
+        ("canonical_target", json_pointer_str(profile_certification, "/conforms_to") == Some(NOVASEAL_CANONICAL_SCHEMA)),
+        ("profile_certification_passed", json_pointer_str(profile_certification, "/status") == Some("passed")),
+        ("public_ecosystem_gate_passed", novaseal_gate_status(plugin_report, NOVASEAL_PROFILE_CERTIFICATION_GATE) == Some("passed")),
+        ("local_production_prep_ready", json_pointer_bool(plugin_report, "/local_production_prep_ready")),
+    ];
+    if !v1_readiness.is_null() {
+        checks.push(("v1_readiness_local_ready", json_pointer_bool(v1_readiness, "/local_v1_ready")));
+    }
+
+    let production_statement_eligible = plugin_report
+        .pointer("/production_statement_eligible")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or_else(|| json_pointer_bool(profile_certification, "/production_statement_eligible"));
+
+    if require_production {
+        checks.push(("production_ready", json_pointer_bool(plugin_report, "/production_ready")));
+        checks.push(("production_statement_eligible", production_statement_eligible));
+    }
+
+    let checks_json =
+        checks.iter().map(|(name, passed)| ((*name).to_string(), serde_json::Value::Bool(*passed))).collect::<serde_json::Map<_, _>>();
+    let failed_checks: Vec<serde_json::Value> =
+        checks.iter().filter(|(_, passed)| !*passed).map(|(name, _)| serde_json::Value::String((*name).to_string())).collect();
+    let passed = failed_checks.is_empty();
+    let external_blockers = plugin_report
+        .get("external_blockers")
+        .cloned()
+        .or_else(|| v1_readiness.get("external_blockers").cloned())
+        .or_else(|| profile_certification.get("production_statement_blockers").cloned())
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let failed_dimensions = novaseal_failed_dimensions(plugin_report, v1_readiness);
+    let planned_missing =
+        v1_readiness.pointer("/planned_profile_matrix/missing").cloned().unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let planned_missing_non_empty = planned_missing.as_array().is_some_and(|items| !items.is_empty());
+    let external_blockers_non_empty = external_blockers.as_array().is_some_and(|items| !items.is_empty());
+    let failed_local_v1_dimension = novaseal_failed_dimension_matches(&failed_dimensions, NOVASEAL_LOCAL_V1_DIMENSIONS);
+    let failed_external_or_endpoint_dimension = novaseal_failed_dimension_matches(&failed_dimensions, NOVASEAL_EXTERNAL_V1_DIMENSIONS);
+    let certification_level = json_pointer_str(profile_certification, "/certification_level").unwrap_or("unknown");
+
+    let failure_reason = if passed {
+        serde_json::Value::Null
+    } else if !v1_readiness.is_null() && !json_pointer_bool(v1_readiness, "/local_v1_ready") && planned_missing_non_empty {
+        serde_json::json!({
+            "message": "NovaSeal V1 readiness requires remaining planned profiles and business scenarios",
+            "v1_status": json_pointer_str(v1_readiness, "/status"),
+            "missing": planned_missing,
+            "failed_dimensions": failed_dimensions.clone(),
+            "external_blockers": external_blockers.clone(),
+            "failed_checks": failed_checks,
+        })
+    } else if !v1_readiness.is_null() && !json_pointer_bool(v1_readiness, "/local_v1_ready") && failed_local_v1_dimension {
+        serde_json::json!({
+            "message": "NovaSeal V1 readiness requires fresh local evidence reports",
+            "remediation": [
+                "rerun live devnet reports for core, Agreement, and planned profiles after source or report changes",
+                "rerun NovaSeal wallet, operator fixture, service-builder, BTC SPV adapter, external attestation adapter, BIP340 TCB review, and handoff bundle generators"
+            ],
+            "v1_status": json_pointer_str(v1_readiness, "/status"),
+            "missing": planned_missing,
+            "failed_dimensions": failed_dimensions.clone(),
+            "external_blockers": external_blockers.clone(),
+            "failed_checks": failed_checks,
+        })
+    } else if !v1_readiness.is_null()
+        && !json_pointer_bool(v1_readiness, "/local_v1_ready")
+        && (external_blockers_non_empty || failed_external_or_endpoint_dimension)
+    {
+        serde_json::json!({
+            "message": "NovaSeal V1 readiness requires external production evidence and endpoint acceptance",
+            "v1_status": json_pointer_str(v1_readiness, "/status"),
+            "missing": planned_missing,
+            "failed_dimensions": failed_dimensions.clone(),
+            "external_blockers": external_blockers.clone(),
+            "failed_checks": failed_checks,
+        })
+    } else if require_production && json_pointer_bool(plugin_report, "/local_production_prep_ready") {
+        serde_json::json!({
+            "message": "NovaSeal production certification requires remaining external attestations",
+            "external_blockers": external_blockers.clone(),
+            "failed_dimensions": failed_dimensions.clone(),
+            "failed_checks": failed_checks,
+        })
+    } else {
+        serde_json::json!({
+            "message": "NovaSeal profile certification failed deterministic compiler checks",
+            "failed_dimensions": failed_dimensions.clone(),
+            "external_blockers": external_blockers.clone(),
+            "failed_checks": failed_checks,
+        })
+    };
+
+    Ok(serde_json::json!({
+        "schema": NOVASEAL_CERTIFICATION_REPORT_SCHEMA,
+        "status": if passed { "passed" } else { "failed" },
+        "plugin": {
+            "id": NOVASEAL_CERTIFICATION_PLUGIN,
+            "kind": "compiler-builtin-rust",
+            "implementation": super::novaseal_certification::IMPLEMENTATION_ID,
+            "implementation_path": implementation_path.display().to_string(),
+            "implementation_hash_algorithm": "ckb_blake2b_256",
+            "implementation_hash": implementation_hash,
+            "report_generated": report_generated,
+        },
+        "plugin_report": {
+            "path": plugin_report_path.display().to_string(),
+            "schema": json_pointer_str(plugin_report, "/schema"),
+            "hash_algorithm": "ckb_blake2b_256",
+            "hash": plugin_report_hash,
+            "status": json_pointer_str(plugin_report, "/status"),
+            "production_ready": json_pointer_bool(plugin_report, "/production_ready"),
+            "production_gates_passed": json_pointer_bool(plugin_report, "/production_gates_passed"),
+            "local_production_prep_ready": json_pointer_bool(plugin_report, "/local_production_prep_ready"),
+            "v1_status": json_pointer_str(v1_readiness, "/status"),
+            "local_v1_ready": json_pointer_bool(v1_readiness, "/local_v1_ready"),
+        },
+        "profile": NOVASEAL_AGREEMENT_PROFILE,
+        "conforms_to": NOVASEAL_CANONICAL_SCHEMA,
+        "certification_level": certification_level,
+        "production_statement_eligible": production_statement_eligible,
+        "failed_dimensions": failed_dimensions,
+        "external_blockers": external_blockers,
+        "require_production": require_production,
+        "repo_root": repo_root.display().to_string(),
+        "checks": checks_json,
+        "failure_reason": failure_reason,
+    }))
 }
 
 fn write_or_print_json(output: Option<&PathBuf>, value: &serde_json::Value, json_stdout: bool, label: &str) -> Result<()> {
@@ -3885,12 +4236,13 @@ fn verify_builder_lockfile_identity(
     let expected_build = locked_build_info_from_metadata(metadata)?;
     let mut violations = Vec::new();
 
-    match (&lockfile.package.source_hash, &metadata.source_hash) {
+    let locked_compiler_source_hash = lockfile.package.compiler_source_hash.as_ref().or(lockfile.package.source_hash.as_ref());
+    let locked_source_label = if lockfile.package.compiler_source_hash.is_some() { "compiler_source_hash" } else { "source_hash" };
+    match (locked_compiler_source_hash, &metadata.source_hash) {
         (Some(locked), Some(actual)) if locked == actual => {}
-        (Some(locked), Some(actual)) => {
-            violations.push(format!("source_hash mismatch: Cell.lock has '{}', metadata has '{}'", locked, actual))
-        }
-        (None, _) => violations.push("Cell.lock [package] has no source_hash".to_string()),
+        (Some(locked), Some(actual)) => violations
+            .push(format!("{} mismatch: Cell.lock has '{}', metadata source_hash is '{}'", locked_source_label, locked, actual)),
+        (None, _) => violations.push("Cell.lock [package] has no compiler_source_hash or source_hash".to_string()),
         (_, None) => violations.push("metadata has no source_hash".to_string()),
     }
 
@@ -3930,7 +4282,7 @@ fn verify_builder_lockfile_identity(
         "package": lockfile.package,
         "build": lockfile.package_build,
         "verified_fields": [
-            "source_hash",
+            locked_source_label,
             "compiler_version",
             "target_profile",
             "artifact_hash",
@@ -3954,15 +4306,23 @@ fn verify_builder_deployment_identity(
     let expected_build = locked_build_info_from_metadata(metadata)?;
     let mut violations = Vec::new();
 
-    if let Some(expected_source_hash) = &metadata.source_hash {
-        match &deployed.package.source_hash {
-            Some(source_hash) if source_hash == expected_source_hash => {}
-            Some(source_hash) => violations
-                .push(format!("source_hash mismatch: Deployed.toml has '{}', metadata has '{}'", source_hash, expected_source_hash)),
-            None => violations.push("Deployed.toml [package] has no source_hash".to_string()),
+    match (&lockfile.package.source_hash, &deployed.package.source_hash) {
+        (Some(locked), Some(deployed_hash)) if locked == deployed_hash => {}
+        (Some(locked), Some(deployed_hash)) => {
+            violations.push(format!("source_hash mismatch: Cell.lock has '{}', Deployed.toml has '{}'", locked, deployed_hash))
         }
-    } else {
-        violations.push("metadata has no source_hash".to_string());
+        (None, _) => violations.push("Cell.lock [package] has no source_hash".to_string()),
+        (_, None) => violations.push("Deployed.toml [package] has no source_hash".to_string()),
+    }
+
+    let locked_compiler_source_hash = lockfile.package.compiler_source_hash.as_ref().or(lockfile.package.source_hash.as_ref());
+    match (locked_compiler_source_hash, &metadata.source_hash) {
+        (Some(locked), Some(actual)) if locked == actual => {}
+        (Some(locked), Some(actual)) => {
+            violations.push(format!("compiler_source_hash mismatch: Cell.lock has '{}', metadata source_hash is '{}'", locked, actual))
+        }
+        (None, _) => violations.push("Cell.lock [package] has no compiler_source_hash or source_hash".to_string()),
+        (_, None) => violations.push("metadata has no source_hash".to_string()),
     }
 
     match &deployed.build {
@@ -4104,6 +4464,7 @@ fn verify_builder_deployment_identity(
         "deployments": verified_deployments,
         "verified_fields": [
             "source_hash",
+            "compiler_source_hash",
             "compiler_version",
             "artifact_hash",
             "metadata_hash",
@@ -4512,6 +4873,7 @@ fn typescript_builder_index(
            version?: string;\n\
            namespace?: string | null;\n\
            source_hash?: string | null;\n\
+           compiler_source_hash?: string | null;\n\
          }\n\n\
          export interface CellScriptLockfileBuild {\n\
            compiler_version?: string | null;\n\
@@ -4806,7 +5168,7 @@ fn typescript_builder_index(
            if (!pkg) {\n\
              violations.push(\"Cell.lock has no [package]\");\n\
            } else {\n\
-             compareRequiredIdentity(\"source_hash\", pkg.source_hash, GENERATED_SOURCE_HASH, violations);\n\
+             compareRequiredIdentity(\"compiler_source_hash\", pkg.compiler_source_hash ?? pkg.source_hash, GENERATED_SOURCE_HASH, violations);\n\
            }\n\
            const build = lockfile.package_build;\n\
            if (!build) {\n\
@@ -5311,8 +5673,9 @@ fn typescript_builder_test(actions: &[&crate::ActionMetadata]) -> Result<String>
              () => builder[first.plan](first.params, { deployment: missingStatusDeployment }),\n\
              /no status/,\n\
            );\n\
+           const { publisher_signature: _publisherSignature, audit_report_hash: _auditReportHash, ...unsignedDeployment } = deployment;\n\
            assert.throws(\n\
-             () => builder[first.plan](first.params, { deployment, trustPolicy: { requirePublisherSignature: true } }),\n\
+             () => builder[first.plan](first.params, { deployment: unsignedDeployment, trustPolicy: { requirePublisherSignature: true } }),\n\
              /publisher_signature/,\n\
            );\n\
            const signedDeployment = { ...deployment, publisher_signature: \"sig:fixture\", audit_report_hash: \"0xaaa\" };\n\
@@ -5614,13 +5977,19 @@ fn ckb_fixture_report_json(
     issues: Vec<String>,
 ) -> serde_json::Value {
     let is_ickb_claim = manifest["schema"].as_str() == Some(ICKB_CLAIM_MANIFEST_SCHEMA);
+    let evidence_execution_level = if is_ickb_claim { serde_json::json!(ICKB_DIFF_EVIDENCE_LEVEL) } else { serde_json::Value::Null };
+    let required_executable_gate =
+        if is_ickb_claim { serde_json::json!("cargo test --locked -p cellscript --test ickb_diff") } else { serde_json::Value::Null };
     serde_json::json!({
         "schema": "cellscript-ckb-fixture-verification-v0.17",
         "manifest_schema": manifest["schema"].as_str().unwrap_or("unknown"),
         "manifest_status": manifest["status"].as_str().unwrap_or("unknown"),
         "manifest_hash": manifest_hash,
-        "execution_level": if is_ickb_claim { "DIFFERENTIAL_CKB_VM" } else { "MODEL" },
-        "ckb_vm_execution": is_ickb_claim,
+        "execution_level": if is_ickb_claim { "DIFFERENTIAL_CKB_VM_MANIFEST" } else { "MODEL" },
+        "ckb_vm_execution": false,
+        "committed_ckb_vm_evidence": is_ickb_claim,
+        "evidence_execution_level": evidence_execution_level,
+        "required_executable_gate": required_executable_gate,
         "suite_count": suite_count,
         "fixture_count": rows.len(),
         "status": if issues.is_empty() { "ok" } else { "failed" },
@@ -5628,7 +5997,7 @@ fn ckb_fixture_report_json(
         "issues": issues,
         "fixtures": rows,
         "vm_execution_note": if is_ickb_claim {
-            "This iCKB mode validates a committed claim manifest against existing dual-side CKB VM differential rows and their production evidence envelopes."
+            "This command does not execute CKB VM. It validates the iCKB claim manifest against committed dual-side CKB VM differential rows, production evidence envelopes, and the required executable Rust gate."
         } else {
             "This command validates transaction-shape model fixtures only; it does not execute CKB VM or prove production compatibility."
         },
@@ -5830,6 +6199,113 @@ fn validate_ickb_claim_row(family_id: &str, branch_id: &str, scenario: &str, row
     if !row["execution"]["normalized_fixture"].is_object() {
         issues.push(format!("iCKB claim branch {family_id}/{branch_id} scenario {scenario} missing normalized_fixture"));
     }
+    validate_ickb_claim_execution_object(family_id, branch_id, scenario, row, issues);
+}
+
+fn validate_ickb_claim_execution_object(
+    family_id: &str,
+    branch_id: &str,
+    scenario: &str,
+    row: &serde_json::Value,
+    issues: &mut Vec<String>,
+) {
+    let Some(execution) = row["execution"].as_object() else {
+        issues.push(format!("iCKB claim branch {family_id}/{branch_id} scenario {scenario} missing execution object"));
+        return;
+    };
+    for field in [
+        "fixture_sha256",
+        "normalized_fixture_sha256",
+        "transaction_context_sha256",
+        "original_ickb_binary_sha256",
+        "cellscript_artifact_sha256",
+        "ckb_vm_or_testtool_version",
+        "original_ickb_exit_code",
+        "cellscript_exit_code",
+        "original_ickb_status",
+        "cellscript_status",
+        "statuses_match",
+        "original_cycles",
+        "cellscript_cycles",
+        "tx_size_bytes",
+        "occupied_capacity_shannons",
+        "fee_shannons",
+    ] {
+        if !execution.get(field).is_some_and(ckb_fixture_non_empty_json_value) {
+            issues.push(format!("iCKB claim branch {family_id}/{branch_id} scenario {scenario} execution missing non-empty {field}"));
+        }
+    }
+
+    for field in ["fixture_sha256", "normalized_fixture_sha256", "original_ickb_binary_sha256", "cellscript_artifact_sha256"] {
+        match execution.get(field).and_then(serde_json::Value::as_str) {
+            Some(hash) if ckb_fixture_is_canonical_prefixed_sha256(hash) => {}
+            _ => issues.push(format!(
+                "iCKB claim branch {family_id}/{branch_id} scenario {scenario} execution.{field} must be canonical 0x-prefixed SHA-256"
+            )),
+        }
+    }
+
+    match execution.get("transaction_context_sha256").and_then(serde_json::Value::as_object) {
+        Some(hashes) => {
+            for side in ["original", "cellscript"] {
+                match hashes.get(side).and_then(serde_json::Value::as_str) {
+                    Some(hash) if ckb_fixture_is_canonical_prefixed_sha256(hash) => {}
+                    _ => issues.push(format!(
+                        "iCKB claim branch {family_id}/{branch_id} scenario {scenario} transaction_context_sha256.{side} must be canonical 0x-prefixed SHA-256"
+                    )),
+                }
+            }
+        }
+        None => issues.push(format!(
+            "iCKB claim branch {family_id}/{branch_id} scenario {scenario} execution.transaction_context_sha256 must be an object"
+        )),
+    }
+
+    if execution.get("statuses_match").and_then(serde_json::Value::as_bool) != Some(true) {
+        issues.push(format!("iCKB claim branch {family_id}/{branch_id} scenario {scenario} execution.statuses_match must be true"));
+    }
+
+    for (side, expected_field, status_field, exit_field, cycle_field) in [
+        ("original", "original_ickb_expected", "original_ickb_status", "original_ickb_exit_code", "original_cycles"),
+        ("cellscript", "cellscript_expected", "cellscript_status", "cellscript_exit_code", "cellscript_cycles"),
+    ] {
+        let expected = row[expected_field].as_str();
+        let status = execution.get(status_field).and_then(serde_json::Value::as_str);
+        if expected.is_some() && status != expected {
+            issues.push(format!(
+                "iCKB claim branch {family_id}/{branch_id} scenario {scenario} {side} status {status:?} does not match {expected_field}={expected:?}"
+            ));
+        }
+        if status == Some("pass") {
+            if execution.get(exit_field).and_then(serde_json::Value::as_i64) != Some(0) {
+                issues
+                    .push(format!("iCKB claim branch {family_id}/{branch_id} scenario {scenario} {side} pass must have exit code 0"));
+            }
+            if execution.get(cycle_field).and_then(serde_json::Value::as_u64).unwrap_or(0) == 0 {
+                issues.push(format!("iCKB claim branch {family_id}/{branch_id} scenario {scenario} {side} pass must consume cycles"));
+            }
+        }
+        if status == Some("fail") && execution.get(exit_field).and_then(serde_json::Value::as_i64) == Some(0) {
+            issues.push(format!(
+                "iCKB claim branch {family_id}/{branch_id} scenario {scenario} {side} fail must have a non-zero exit code"
+            ));
+        }
+    }
+
+    for field in ["tx_size_bytes", "occupied_capacity_shannons"] {
+        if execution.get(field).and_then(serde_json::Value::as_u64).unwrap_or(0) == 0 {
+            issues.push(format!("iCKB claim branch {family_id}/{branch_id} scenario {scenario} execution.{field} must be positive"));
+        }
+    }
+
+    if row["original_ickb_expected"] == "fail" || row["cellscript_expected"] == "fail" {
+        match execution.get("failure_mode").and_then(serde_json::Value::as_str) {
+            Some(mode) if !mode.is_empty() => {}
+            _ => issues.push(format!(
+                "iCKB claim branch {family_id}/{branch_id} scenario {scenario} reject case missing execution.failure_mode"
+            )),
+        }
+    }
 }
 
 fn validate_ickb_evidence_object(
@@ -5894,6 +6370,12 @@ fn ckb_fixture_non_empty_json_value(value: &serde_json::Value) -> bool {
         serde_json::Value::Object(values) => !values.is_empty(),
         serde_json::Value::Bool(_) | serde_json::Value::Number(_) => true,
     }
+}
+
+fn ckb_fixture_is_canonical_prefixed_sha256(value: &str) -> bool {
+    value
+        .strip_prefix("0x")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
 }
 
 fn validate_ckb_fixture_suite(
@@ -6114,7 +6596,7 @@ fn ckb_fixture_little_endian_u128(hex_value: &str) -> std::result::Result<u128, 
     if bytes.is_empty() {
         return Ok(0);
     }
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(format!("odd-length hex amount {hex_value}"));
     }
     let raw = hex::decode(bytes).map_err(|err| format!("invalid hex amount {hex_value}: {err}"))?;
@@ -7071,6 +7553,36 @@ fn validate_dependency_target_flags(dev: bool, build: bool) -> Result<()> {
     Ok(())
 }
 
+/// Reject self-dependency writes to the manifest. A package cannot list itself
+/// (or a path pointing at its own root) as a dependency because that turns the
+/// package graph into an immediate cycle. The empty-name edge case observed in
+/// 0.20 ("cellc install --path ." wrote a `[dependencies.""]` row that broke
+/// every subsequent `cellc build`) is the canonical failure this helper
+/// prevents.
+fn validate_not_self_dependency(crate_name: &str, dep: &Dependency, manifest: &crate::package::PackageManifest) -> Result<()> {
+    if !crate_name.trim().is_empty() && crate_name == manifest.package.name {
+        return Err(crate::error::CompileError::without_span(format!(
+            "refusing to add self-dependency: package '{}' cannot depend on itself",
+            manifest.package.name
+        )));
+    }
+    if let Dependency::Detailed(detailed) = dep {
+        if let Some(dep_path) = &detailed.path {
+            let dep_canon = std::path::Path::new(dep_path);
+            let manifest_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let dep_abs = dep_canon.canonicalize().unwrap_or_else(|_| manifest_dir.join(dep_canon));
+            let manifest_abs = manifest_dir.canonicalize().unwrap_or_else(|_| manifest_dir.clone());
+            if dep_abs == manifest_abs {
+                return Err(crate::error::CompileError::without_span(format!(
+                    "refusing to add self-dependency: path '{}' resolves to the current package root",
+                    dep_path
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn dependency_target_label(dev: bool, build: bool) -> &'static str {
     if build {
         "build-dependencies"
@@ -7137,11 +7649,58 @@ fn refresh_lockfile_from_build(root: &Path, metadata: &CompileMetadata) -> Resul
     manager.resolve_dependencies()?;
 
     let mut lockfile = Lockfile::read_from_root(root)?.unwrap_or_default();
-    lockfile.package = lockfile_package_info(root, &manifest)?;
+    let mut package = lockfile_package_info(root, &manifest)?;
+    package.compiler_source_hash = metadata.source_hash.clone();
+    lockfile.package = package;
     lockfile.replace_with_resolved(manager.get_resolved());
     lockfile.package_build = Some(locked_build_info_from_metadata(metadata)?);
+    refresh_lockfile_deployment_refs(root, &mut lockfile);
     lockfile.write_to_root(root)?;
     Ok(())
+}
+
+/// Bridge Deployed.toml deployment records into Cell.lock. Without this,
+/// `cellc registry verify` would always fail with "deployment for network 'X'
+/// is missing from Cell.lock" because nothing in the production build pipeline
+/// ever wrote a `lockfile.deployment` entry. We only keep a record if its
+/// deployment name + tx_hash + output_index match a real Deployed.toml entry;
+/// stale or duplicate networks are dropped. Records that fail the build-identity
+/// match (artifact_hash / metadata_hash / etc. mismatch with Cell.lock's locked
+/// build) are kept but their hash fields are left None so the registry verifier
+/// can surface the mismatch as a violation instead of pretending the deployment
+/// is consistent with the locked build.
+fn refresh_lockfile_deployment_refs(root: &Path, lockfile: &mut crate::package::Lockfile) {
+    let deployed = match crate::package::DeployedManifest::read_from_root(root) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => return,
+        Err(_) => return,
+    };
+    let locked_build = lockfile.package_build.as_ref();
+    let mut next: BTreeMap<String, crate::package::LockfileDeploymentRef> = BTreeMap::new();
+    for record in deployed.deployments {
+        if record.network.trim().is_empty() {
+            continue;
+        }
+        if next.contains_key(&record.network) {
+            // First-write wins; later duplicates from Deployed.toml are dropped
+            // to keep Cell.lock deterministic for the same source tree.
+            continue;
+        }
+        let artifact_match = match (&record.artifact_hash, locked_build.and_then(|b| b.artifact_hash.as_ref())) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        };
+        let record_str = record.out_point.clone();
+        let record_hash = if artifact_match { hash_json_value("deployment record", &record).ok() } else { None };
+        let code_hash = if artifact_match { Some(record.code_hash.clone()) } else { None };
+        let out_point = if artifact_match { Some(record.out_point.clone()) } else { None };
+        let data_hash = if artifact_match { Some(record.data_hash.clone()) } else { None };
+        next.insert(
+            record.network.clone(),
+            crate::package::LockfileDeploymentRef { record: record_str, record_hash, code_hash, out_point, data_hash },
+        );
+    }
+    lockfile.deployment = next;
 }
 
 fn lockfile_package_info(root: &Path, manifest: &crate::package::PackageManifest) -> Result<crate::package::LockfilePackageInfo> {
@@ -7150,6 +7709,7 @@ fn lockfile_package_info(root: &Path, manifest: &crate::package::PackageManifest
         version: manifest.package.version.clone(),
         namespace: manifest.package.namespace.clone(),
         source_hash: Some(crate::package::registry::compute_source_hash(root)?),
+        compiler_source_hash: None,
     })
 }
 
@@ -7182,6 +7742,166 @@ fn hash_json_value<T: serde::Serialize>(label: &str, value: &T) -> Result<String
     let bytes = serde_json::to_vec(value)
         .map_err(|e| crate::error::CompileError::without_span(format!("failed to serialize {} for digest: {}", label, e)))?;
     Ok(crate::hex_encode(&crate::ckb_blake2b256(&bytes)))
+}
+
+fn cellfabric_intent_envelope_json(
+    metadata: &CompileMetadata,
+    action: &crate::ActionMetadata,
+    action_plan: &serde_json::Value,
+    input_path: &Path,
+    metadata_hash: &str,
+) -> Result<serde_json::Value> {
+    let action_plan_hash = hash_json_value("CellScript action plan", action_plan)?;
+    let app_namespace = metadata.module.clone();
+    let app_conflict_key_templates = cellfabric_app_conflict_key_templates(&app_namespace, action);
+    Ok(serde_json::json!({
+        "schema": "cellscript-cellfabric-intent-envelope-v0.20",
+        "status": "requires-runtime-binding",
+        "bridge_boundary": {
+            "kind": "json-bridge",
+            "cellscript_core_dependency": "no-cell-fabric-rust-crate",
+            "cellfabric_expected_role": "intent-ordering-soft-confirmation-and-settlement-tracking",
+            "not_a_cellfabric_signed_intent": true,
+            "not_a_soft_confirmation": true,
+            "not_l1_finality": true,
+            "compiler_must_not_infer_cellfabric_finality": true,
+        },
+        "source": {
+            "input": input_path.display().to_string(),
+            "module": metadata.module.clone(),
+            "action": action.name.clone(),
+            "target_profile": metadata.target_profile.name.clone(),
+            "compiler_version": metadata.compiler_version.clone(),
+            "metadata_hash": metadata_hash,
+            "artifact_hash": &metadata.artifact_hash,
+            "action_plan_hash": action_plan_hash.clone(),
+        },
+        "cellfabric_mapping": {
+            "target": "CellFabric IntentBody template",
+            "candidate_intent_action": "App",
+            "payload_format": "cellscript-action-plan-json-v1",
+            "payload_hash_field": "cellscript_action_plan_hash",
+            "resource_binding": "runtime-resolved-live-cells",
+            "auth_binding": "runtime-wallet-or-live-cell-context",
+            "settlement_compiler": "cellscript-ckb-adapter-or-generated-builder",
+        },
+        "cellfabric_intent_template": {
+            "version": 1,
+            "domain": {
+                "chain_id": metadata.target_profile.name.clone(),
+                "app_namespace": app_namespace.clone(),
+            },
+            "author": {
+                "lock_script_hash": serde_json::Value::Null,
+                "source": "runtime-wallet-or-live-cell-context",
+            },
+            "nonce": serde_json::Value::Null,
+            "validity": {
+                "valid_after_ms": serde_json::Value::Null,
+                "valid_until_ms": serde_json::Value::Null,
+            },
+            "resources": {
+                "consumes": [],
+                "reads": [],
+                "app_keys": app_conflict_key_templates,
+                "status": "template-only-runtime-outpoints-required",
+            },
+            "action": {
+                "kind": "App",
+                "action": action.name.clone(),
+                "payload_format": "cellscript-action-plan-json-v1",
+                "payload_hash": action_plan_hash.clone(),
+            },
+            "constraints": {
+                "source": "cellscript-action-plan",
+                "runtime_input_requirements": &action.transaction_runtime_input_requirements,
+                "verifier_obligations": &action.verifier_obligations,
+                "fail_closed_runtime_features": &action.fail_closed_runtime_features,
+            },
+            "dependencies": {
+                "requires": [],
+                "source": "service-supplied-cellfabric-intent-ids",
+            },
+            "replacement": {
+                "supersedes": [],
+                "rule": "service-policy",
+            },
+            "fee": {
+                "fee_bid_shannons": serde_json::Value::Null,
+                "max_fee_shannons": serde_json::Value::Null,
+                "source": "runtime-builder-policy",
+            },
+            "auth_mode": "CoSignConcreteTx",
+            "metadata": {
+                "cellscript_action": action.name.clone(),
+                "cellscript_metadata_hash": metadata_hash,
+                "cellscript_action_plan_hash": action_plan_hash.clone(),
+                "cellscript_artifact_hash": &metadata.artifact_hash,
+            },
+        },
+        "resource_access_template": {
+            "hard_conflicts": {
+                "status": "runtime-required",
+                "consumed_cell_patterns": &action.consume_set,
+                "runtime_input_requirements": &action.transaction_runtime_input_requirements,
+                "note": "CellFabric OutPointRef conflicts must be filled from resolved live cells before submitting a SignedIntent.",
+            },
+            "reads": &action.read_refs,
+            "writes": {
+                "creates": &action.create_set,
+                "mutates": &action.mutate_set,
+            },
+            "app_conflict_key_templates": cellfabric_app_conflict_key_templates(&app_namespace, action),
+        },
+        "required_runtime_evidence": [
+            "author_lock_script_hash",
+            "intent_nonce",
+            "resolved_consumed_outpoints",
+            "resolved_read_outpoints",
+            "cellfabric_auth_signature",
+            "deployment_identity",
+            "live_cell_resolution",
+            "capacity_fee_balance",
+            "estimate_cycles",
+            "tx_pool_acceptance",
+            "l1_status_observation"
+        ],
+        "non_claims": [
+            "does not create a CellFabric SignedIntent",
+            "does not prove CellFabric orderer acceptance",
+            "does not soft-confirm the action",
+            "does not prove live-cell availability",
+            "does not prove CKB tx-pool acceptance",
+            "does not prove L1 finality"
+        ],
+        "action_plan": action_plan,
+    }))
+}
+
+fn cellfabric_app_conflict_key_templates(app_namespace: &str, action: &crate::ActionMetadata) -> Vec<serde_json::Value> {
+    let mut keys = BTreeSet::<(String, String)>::new();
+    for shared in &action.touches_shared {
+        keys.insert(("cellscript-shared-resource".to_string(), shared.clone()));
+    }
+    for pattern in &action.mutate_set {
+        keys.insert(("cellscript-mutate-binding".to_string(), format!("{}:{}", pattern.ty, pattern.binding)));
+    }
+    for primitive in &action.pool_primitives {
+        if let Ok(value) = serde_json::to_value(primitive) {
+            keys.insert(("cellscript-pool-primitive".to_string(), value.to_string()));
+        }
+    }
+    keys.into_iter()
+        .map(|(key_type, key)| {
+            serde_json::json!({
+                "namespace": app_namespace,
+                "key_type": key_type,
+                "key": key,
+                "key_encoding": "utf8",
+                "key_bytes_hex": crate::hex_encode(key.as_bytes()),
+            })
+        })
+        .collect()
 }
 
 fn push_missing_locked_build_identity(label: &str, build: &crate::package::LockedBuildInfo, violations: &mut Vec<String>) {
@@ -8604,7 +9324,7 @@ fn decode_hex_arg(name: &str, value: &str, expected_len: Option<usize>) -> Resul
         .or_else(|| trimmed.strip_prefix("0x"))
         .or_else(|| trimmed.strip_prefix("0X"))
         .unwrap_or(trimmed);
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(crate::error::CompileError::without_span(format!("parameter '{}' hex value must contain full bytes", name)));
     }
     let bytes = hex
@@ -9077,6 +9797,12 @@ impl CliParser {
                         .arg(Arg::new("target").long("target").short('t').value_name("TARGET").help("Target architecture"))
                         .arg(Arg::new("target-profile").long("target-profile").value_name("PROFILE").help("Target profile: ckb"))
                         .arg(
+                            Arg::new("fabric-intent")
+                                .long("fabric-intent")
+                                .action(ArgAction::SetTrue)
+                                .help("Emit a CellFabric intent envelope instead of the raw CellScript action plan"),
+                        )
+                        .arg(
                             Arg::new("json").long("json").action(ArgAction::SetTrue).help("Emit a machine-readable JSON builder plan"),
                         ),
                 ),
@@ -9266,6 +9992,43 @@ impl CliParser {
                 ClapCommand::new("login")
                     .about("Experimental: authenticate against a registry")
                     .arg(Arg::new("registry").long("registry").value_name("URL")),
+            )
+            .subcommand(
+                ClapCommand::new("certify")
+                    .about("Run a deterministic compiler-hosted certification plugin (currently: novaseal-profile-v0)")
+                    .arg(
+                        Arg::new("plugin")
+                            .long("plugin")
+                            .value_name("PLUGIN")
+                            .required(true)
+                            .help("Certification plugin id, e.g. novaseal-profile-v0"),
+                    )
+                    .arg(
+                        Arg::new("repo-root")
+                            .long("repo-root")
+                            .value_name("DIR")
+                            .help("Repository root for Rust certification evidence"),
+                    )
+                    .arg(
+                        Arg::new("report")
+                            .long("report")
+                            .value_name("JSON")
+                            .help("Verify an existing plugin report instead of regenerating it"),
+                    )
+                    .arg(
+                        Arg::new("output")
+                            .long("output")
+                            .short('o')
+                            .value_name("FILE")
+                            .help("Write compiler certification report JSON"),
+                    )
+                    .arg(
+                        Arg::new("require-production")
+                            .long("require-production")
+                            .action(ArgAction::SetTrue)
+                            .help("Require external production attestations, not only local profile certification"),
+                    )
+                    .arg(Arg::new("json").long("json").action(ArgAction::SetTrue).help("Emit machine-readable JSON")),
             )
             .subcommand(
                 ClapCommand::new("package").about("Package integrity commands").subcommand_required(true).subcommand(
@@ -9568,6 +10331,7 @@ impl CliParser {
                     output: build.get_one::<String>("output").map(PathBuf::from),
                     target: build.get_one::<String>("target").cloned(),
                     target_profile: build.get_one::<String>("target-profile").cloned(),
+                    fabric_intent: build.get_flag("fabric-intent"),
                     json: build.get_flag("json"),
                 }),
                 _ => Command::ActionBuild(ActionBuildArgs::default()),
@@ -9631,6 +10395,14 @@ impl CliParser {
             Some(("update", _)) => Command::Update,
             Some(("info", m)) => Command::Info(InfoArgs { json: m.get_flag("json") }),
             Some(("login", m)) => Command::Login(LoginArgs { registry: m.get_one::<String>("registry").cloned() }),
+            Some(("certify", m)) => Command::Certify(CertifyArgs {
+                plugin: m.get_one::<String>("plugin").cloned().unwrap_or_else(|| NOVASEAL_CERTIFICATION_PLUGIN.to_string()),
+                repo_root: m.get_one::<String>("repo-root").map(PathBuf::from),
+                report: m.get_one::<String>("report").map(PathBuf::from),
+                output: m.get_one::<String>("output").map(PathBuf::from),
+                json: m.get_flag("json"),
+                require_production: m.get_flag("require-production"),
+            }),
             Some(("package", m)) => match m.subcommand() {
                 Some(("verify", verify)) => Command::PackageVerify(PackageVerifyArgs { json: verify.get_flag("json") }),
                 _ => unreachable!(),

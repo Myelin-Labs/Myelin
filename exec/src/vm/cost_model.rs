@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // VM cost model for cycles calculation
 // Adapted from CKB script/src/cost_model.rs

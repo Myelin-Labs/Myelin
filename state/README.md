@@ -50,10 +50,10 @@ state/
 
 - CKB Store: `/home/arthur/RustRoverProjects/ckb/store/src/`
 - CKB Freezer: `/home/arthur/RustRoverProjects/ckb/freezer/src/freezer.rs`
-- Spec: `spora.md` Section 7
+- Spec: `myelin.md` Section 7
 
 ## Status
 
-🚧 **Under Construction** - Part of the Spora fork
+🚧 **Under Construction** - Part of the Myelin fork
 
 

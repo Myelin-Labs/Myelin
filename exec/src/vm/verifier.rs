@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Cell transaction script verifier
 // Reference: ckb/script/src/verify.rs
@@ -15,7 +15,6 @@ use crate::serialization::molecule_compat::{
     serialize_transaction_molecule, CkbHeader,
 };
 use crate::serialization::{split_vm_abi_trailer, VmAbiError, VmAbiFormat, VmAbiNegotiator, VmSerializable};
-use borsh::{BorshDeserialize, BorshSerialize};
 use rayon::prelude::*;
 use std::{collections::HashSet, sync::Arc};
 
@@ -102,7 +101,7 @@ pub struct ScriptGroup {
 }
 
 /// Fully resolved cell contents available to the VM runtime.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCell {
     /// Full cell output structure.
     pub cell_output: CellOutput,
@@ -111,18 +110,26 @@ pub struct ResolvedCell {
 }
 
 /// Fully resolved header contents available to the VM runtime.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedHeader {
     /// Header hash.
     pub hash: [u8; 32],
     /// Header version.
     pub version: u32,
-    /// Parent hashes grouped by DAG level.
-    pub parents_by_level: Vec<Vec<[u8; 32]>>,
-    /// Transaction hash merkle root.
-    pub hash_merkle_root: [u8; 32],
-    /// Accepted transaction ID merkle root.
-    pub accepted_id_merkle_root: [u8; 32],
+    /// Linear parent block hash, following CKB header semantics.
+    pub parent_hash: [u8; 32],
+    /// Block number.
+    pub number: u64,
+    /// Packed epoch number-with-fraction value.
+    pub epoch: u64,
+    /// Transaction merkle root.
+    pub transactions_root: [u8; 32],
+    /// Proposal IDs hash.
+    pub proposals_hash: [u8; 32],
+    /// Uncles hash.
+    pub uncles_hash: [u8; 32],
+    /// DAO field.
+    pub dao: [u8; 32],
     /// Execution-related state commitment.
     pub cell_commitment: [u8; 32],
     /// Cell state root.
@@ -131,25 +138,10 @@ pub struct ResolvedHeader {
     pub segment_root: [u8; 32],
     /// Timestamp in milliseconds.
     pub timestamp: u64,
-    /// Compact difficulty bits.
-    pub bits: u32,
-    /// Mining nonce.
-    pub nonce: u64,
-    /// DAA score.
-    pub daa_score: u64,
-    /// Accumulated blue work encoded as little-endian Uint192 bytes.
-    pub blue_work: [u8; 24],
-    /// Blue score.
-    pub blue_score: u64,
-    /// Pruning-point hash.
-    pub pruning_point: [u8; 32],
-}
-
-impl ResolvedHeader {
-    /// Returns direct parent hashes (level 0 of the DAG parent set).
-    pub fn direct_parents(&self) -> &[[u8; 32]] {
-        self.parents_by_level.first().map(Vec::as_slice).unwrap_or(&[])
-    }
+    /// Compact target, matching CKB raw header semantics.
+    pub compact_target: u32,
+    /// CKB-compatible nonce width.
+    pub nonce: u128,
 }
 
 impl VmSerializable for ResolvedHeader {
@@ -188,7 +180,7 @@ impl VmSerializable for ResolvedCell {
 
 fn script_hash_for_semantics(script: &Script, semantics: VmSemantics) -> ScriptResult<[u8; 32]> {
     match semantics {
-        VmSemantics::SporaExtended => Ok(script.hash()),
+        VmSemantics::MyelinExtended => Ok(script.hash()),
         VmSemantics::CkbStrict => ckb_script_hash_molecule(script)
             .map_err(|err| ScriptError::VM(VMError::InvalidData(format!("failed to hash CKB Molecule Script: {err}")))),
     }
@@ -196,10 +188,10 @@ fn script_hash_for_semantics(script: &Script, semantics: VmSemantics) -> ScriptR
 
 fn transaction_hash_and_data_for_semantics(tx: &CellTx, semantics: VmSemantics) -> ScriptResult<([u8; 32], Vec<u8>)> {
     match semantics {
-        VmSemantics::SporaExtended => {
+        VmSemantics::MyelinExtended => {
             let tx_hash = crate::celltx::compute_txid(tx);
-            let tx_data = borsh::to_vec(tx).map_err(|err| {
-                ScriptError::VM(VMError::InvalidData(format!("failed to serialize tx for LOAD_TRANSACTION syscall: {err}")))
+            let tx_data = serialize_transaction_molecule(tx).map_err(|err| {
+                ScriptError::VM(VMError::InvalidData(format!("failed to serialize Molecule tx for LOAD_TRANSACTION syscall: {err}")))
             })?;
             Ok((tx_hash, tx_data))
         }
@@ -272,8 +264,8 @@ pub struct TransactionScriptVerifier<D: CellDataProvider> {
 impl<D: CellDataProvider> TransactionScriptVerifier<D> {
     /// Create a new verifier.
     ///
-    /// The default public VM object ABI is Molecule. Use `with_abi_format(VmAbiFormat::Legacy)`
-    /// or an artifact trailer declaring `0x0001` only for explicit legacy compatibility.
+    /// The public VM object ABI is Molecule. Artifact trailers declaring other
+    /// ABI versions are rejected.
     pub fn new(tx: Arc<CellTx>, data_provider: Arc<D>) -> Self {
         Self {
             tx,
@@ -284,7 +276,7 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
             max_script_size: MAX_SCRIPT_SIZE,
             skip_lock_groups: false,
             skip_lock_script_hashes: HashSet::new(),
-            semantics: VmSemantics::SporaExtended,
+            semantics: VmSemantics::MyelinExtended,
             abi_format: VmAbiFormat::Molecule,
         }
     }
@@ -767,7 +759,7 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
                         .with_semantics(semantics),
                 ));
                 syscalls.push(Box::new(LoadScript::new(Arc::clone(&script)).with_abi_format(abi_format).with_semantics(semantics)));
-                if semantics.allow_spora_extension_syscalls() {
+                if semantics.allow_myelin_extension_syscalls() {
                     syscalls.push(Box::new(LoadSignatureHash::new(
                         Arc::clone(&tx),
                         signing_inputs.clone(),
@@ -795,7 +787,7 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
                 syscalls.push(Box::new(Write::with_runtime(vm_id, runtime)));
                 syscalls.push(Box::new(InheritedFd::with_runtime(vm_id, runtime)));
                 syscalls.push(Box::new(Close::with_runtime(vm_id, runtime)));
-                if semantics.allow_spora_extension_syscalls() {
+                if semantics.allow_myelin_extension_syscalls() {
                     syscalls.push(Box::new(Blake3Hash::new()));
                     syscalls.push(Box::new(Secp256k1Verify::new()));
                 }
@@ -966,15 +958,15 @@ mod tests {
         )
         .unwrap();
 
-        let (spora_hash, spora_data) = transaction_hash_and_data_for_semantics(&tx, VmSemantics::SporaExtended).unwrap();
-        assert_eq!(spora_hash, crate::celltx::compute_txid(&tx));
-        assert_eq!(spora_data, borsh::to_vec(&tx).unwrap());
+        let (myelin_hash, myelin_data) = transaction_hash_and_data_for_semantics(&tx, VmSemantics::MyelinExtended).unwrap();
+        assert_eq!(myelin_hash, crate::celltx::compute_txid(&tx));
+        assert_eq!(myelin_data, serialize_transaction_molecule(&tx).unwrap());
 
         let (ckb_hash, ckb_data) = transaction_hash_and_data_for_semantics(&tx, VmSemantics::CkbStrict).unwrap();
         assert_eq!(ckb_hash, ckb_raw_transaction_hash_molecule(&tx).unwrap());
         assert_eq!(ckb_data, serialize_transaction_molecule(&tx).unwrap());
-        assert_ne!(ckb_hash, spora_hash);
-        assert_ne!(ckb_data, spora_data);
+        assert_ne!(ckb_hash, myelin_hash);
+        assert_eq!(ckb_data, myelin_data);
     }
 
     #[test]
@@ -982,19 +974,19 @@ mod tests {
         let header = ResolvedHeader {
             hash: [0x11; 32],
             version: 7,
-            parents_by_level: vec![vec![[0xAA; 32], [0xBB; 32]], vec![[0xCC; 32]]],
-            hash_merkle_root: [0x22; 32],
-            accepted_id_merkle_root: [0x33; 32],
+            parent_hash: [0xAA; 32],
+            transactions_root: [0x22; 32],
+            proposals_hash: [0x33; 32],
             cell_commitment: [0x44; 32],
             cell_root: [0x55; 32],
             segment_root: [0x66; 32],
             timestamp: 0x0102_0304_0506_0708,
-            bits: 0x1d00_ffff,
+            compact_target: 0x1d00_ffff,
             nonce: 0x8877_6655_4433_2211,
-            daa_score: 0x1122_3344_5566_7788,
-            blue_work: [0x77; 24],
-            blue_score: 0x99AA_BBCC_DDEE_FF00,
-            pruning_point: [0x88; 32],
+            number: 0x1122_3344_5566_7788,
+            dao: [0x77; 32],
+            epoch: 0x99AA_BBCC_DDEE_FF00,
+            uncles_hash: [0x88; 32],
         };
         assert_eq!(ResolvedHeader::abi_version(), VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
         let header_bytes = header.to_vm_bytes();
@@ -1195,13 +1187,13 @@ mod tests {
     }
 
     #[test]
-    fn test_verifier_defaults_to_spora_extended_semantics() {
+    fn test_verifier_defaults_to_myelin_extended_semantics() {
         let tx = Arc::new(CellTx::new(vec![], vec![], vec![], vec![], vec![]).unwrap());
         let provider = Arc::new(SimpleDataProvider::new());
 
         let verifier = TransactionScriptVerifier::new(tx, provider);
 
-        assert_eq!(verifier.semantics, VmSemantics::SporaExtended);
+        assert_eq!(verifier.semantics, VmSemantics::MyelinExtended);
     }
 
     #[test]

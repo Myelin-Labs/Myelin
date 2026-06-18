@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Load witness syscall
 
@@ -26,7 +26,7 @@ pub struct LoadWitness {
 
 impl LoadWitness {
     pub fn new(tx: Arc<CellTx>, group_input_indices: Vec<usize>, group_output_indices: Vec<usize>) -> Self {
-        Self { tx, group_input_indices, group_output_indices, semantics: VmSemantics::SporaExtended }
+        Self { tx, group_input_indices, group_output_indices, semantics: VmSemantics::MyelinExtended }
     }
 
     pub fn with_semantics(mut self, semantics: VmSemantics) -> Self {

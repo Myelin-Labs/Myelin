@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Load input syscall
 // Reference: ckb/script/src/syscalls/load_input.rs
@@ -8,7 +8,6 @@ use super::utils::{store_data, INDEX_OUT_OF_BOUND};
 use super::{InputField, Source, LOAD_INPUT_BY_FIELD_SYSCALL_NUMBER, LOAD_INPUT_SYSCALL_NUMBER};
 use crate::celltx::{CellInput, CellTx};
 use crate::serialization::molecule_compat::{serialize_cell_input_molecule, serialize_outpoint_molecule};
-use crate::serialization::vm_abi::serialize_outpoint;
 use crate::serialization::VmAbiFormat;
 use crate::vm::{transferred_byte_cycles, VmSemantics};
 use ckb_vm::{
@@ -29,7 +28,7 @@ pub struct LoadInput {
 
 impl LoadInput {
     pub fn new(tx: Arc<CellTx>, group_input_indices: Vec<usize>) -> Self {
-        Self { tx, group_input_indices, abi_format: VmAbiFormat::Molecule, semantics: VmSemantics::SporaExtended }
+        Self { tx, group_input_indices, abi_format: VmAbiFormat::Molecule, semantics: VmSemantics::MyelinExtended }
     }
 
     /// Select the VM ABI wire format used by full input loads.
@@ -53,25 +52,13 @@ impl LoadInput {
 
     fn serialize_input_field(&self, input: &CellInput, field: u64) -> Result<Vec<u8>, VMError> {
         match InputField::parse_from_u64(field)? {
-            InputField::OutPoint => match self.abi_format {
-                VmAbiFormat::Legacy => Ok(serialize_outpoint(&input.previous_output)),
-                VmAbiFormat::Molecule => {
-                    serialize_outpoint_molecule(&input.previous_output).map_err(|e| VMError::External(e.to_string()))
-                }
-            },
+            InputField::OutPoint => serialize_outpoint_molecule(&input.previous_output).map_err(|e| VMError::External(e.to_string())),
             InputField::Since => Ok(input.since.to_le_bytes().to_vec()),
         }
     }
 
     fn serialize_input(&self, input: &CellInput) -> Result<Vec<u8>, VMError> {
         match self.abi_format {
-            VmAbiFormat::Legacy => {
-                let mut data = Vec::with_capacity(44);
-                data.extend_from_slice(&input.previous_output.tx_hash);
-                data.extend_from_slice(&input.previous_output.index.to_le_bytes());
-                data.extend_from_slice(&input.since.to_le_bytes());
-                Ok(data)
-            }
             VmAbiFormat::Molecule => serialize_cell_input_molecule(input).map_err(|e| VMError::External(e.to_string())),
         }
     }
@@ -158,13 +145,14 @@ mod tests {
         machine.set_register(A4, 0x01);
         machine.set_register(A7, LOAD_INPUT_SYSCALL_NUMBER);
 
-        let mut syscall = LoadInput::new(tx, vec![0]).with_abi_format(VmAbiFormat::Legacy);
+        let mut syscall = LoadInput::new(tx, vec![0]).with_abi_format(VmAbiFormat::Molecule);
         let handled = syscall.ecall(&mut machine).expect("load input syscall should succeed");
 
         assert!(handled);
         assert_eq!(machine.registers()[A0].to_u64(), SUCCESS as u64);
-        assert_eq!(machine.memory_mut().load64(&SIZE_ADDR).unwrap().to_u64(), 8);
-        assert_eq!(machine.memory_mut().load_bytes(BUFFER_ADDR, 8).unwrap().as_ref(), &0x1122_3344_5566_7788u64.to_le_bytes());
+        let expected = serialize_cell_input_molecule(&input).unwrap();
+        assert_eq!(machine.memory_mut().load64(&SIZE_ADDR).unwrap().to_u64(), (expected.len() - 36) as u64);
+        assert_eq!(machine.memory_mut().load_bytes(BUFFER_ADDR, 8).unwrap().as_ref(), &expected[36..44]);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
-// Load header syscall (DAG-aware)
+// Load header syscall for CKB-style session headers.
 
 use super::utils::{store_data, INDEX_OUT_OF_BOUND, ITEM_MISSING, WRONG_FORMAT};
 use super::{HeaderField, Source, LOAD_HEADER_BY_FIELD_SYSCALL_NUMBER, LOAD_HEADER_SYSCALL_NUMBER};
@@ -23,8 +23,8 @@ use std::sync::Arc;
 ///
 /// Syscall number: 2072
 ///
-/// Note: In DAG, headers are multi-parent and the serialized runtime view preserves
-/// the richer header fields exposed by `ResolvedHeader`.
+/// Note: Myelin-extended mode exposes a richer session header view through
+/// `ResolvedHeader`; CKB-strict mode uses provider-supplied CKB header bytes.
 pub struct LoadHeader<D: CellDataProvider> {
     tx: Arc<CellTx>,
     provider: Arc<D>,
@@ -48,7 +48,7 @@ impl<D: CellDataProvider> LoadHeader<D> {
             group_input_indices,
             group_output_indices,
             abi_format: VmAbiFormat::Molecule,
-            semantics: VmSemantics::SporaExtended,
+            semantics: VmSemantics::MyelinExtended,
         }
     }
 
@@ -149,29 +149,26 @@ impl<D: CellDataProvider> LoadHeader<D> {
 
     fn serialize_header_field(&self, header: &ResolvedHeader, field: u64) -> Result<Vec<u8>, VMError> {
         match HeaderField::parse_from_u64(field)? {
-            HeaderField::DaaScore => Ok(header.daa_score.to_le_bytes().to_vec()),
+            HeaderField::Number => Ok(header.number.to_le_bytes().to_vec()),
             HeaderField::Timestamp => Ok(header.timestamp.to_le_bytes().to_vec()),
             HeaderField::Hash => Ok(header.hash.to_vec()),
-            HeaderField::Parents => Ok(header.direct_parents().iter().flatten().copied().collect()),
+            HeaderField::ParentHash => Ok(header.parent_hash.to_vec()),
             HeaderField::Version => Ok(header.version.to_le_bytes().to_vec()),
-            HeaderField::Bits => Ok(header.bits.to_le_bytes().to_vec()),
+            HeaderField::CompactTarget => Ok(header.compact_target.to_le_bytes().to_vec()),
             HeaderField::Nonce => Ok(header.nonce.to_le_bytes().to_vec()),
-            HeaderField::HashMerkleRoot => Ok(header.hash_merkle_root.to_vec()),
-            HeaderField::AcceptedIdMerkleRoot => Ok(header.accepted_id_merkle_root.to_vec()),
+            HeaderField::TransactionsRoot => Ok(header.transactions_root.to_vec()),
+            HeaderField::ProposalsHash => Ok(header.proposals_hash.to_vec()),
             HeaderField::CellCommitment => Ok(header.cell_commitment.to_vec()),
             HeaderField::CellRoot => Ok(header.cell_root.to_vec()),
             HeaderField::SegmentRoot => Ok(header.segment_root.to_vec()),
-            HeaderField::BlueScore => Ok(header.blue_score.to_le_bytes().to_vec()),
-            HeaderField::BlueWork => Ok(header.blue_work.to_vec()),
-            HeaderField::PruningPoint => Ok(header.pruning_point.to_vec()),
+            HeaderField::Epoch => Ok(header.epoch.to_le_bytes().to_vec()),
+            HeaderField::Dao => Ok(header.dao.to_vec()),
+            HeaderField::UnclesHash => Ok(header.uncles_hash.to_vec()),
         }
     }
 
     fn serialize_header(&self, header: &ResolvedHeader) -> Result<Vec<u8>, VMError> {
         match self.abi_format {
-            VmAbiFormat::Legacy => {
-                borsh::to_vec(header).map_err(|e| VMError::External(format!("legacy header serialization failed: {e}")))
-            }
             VmAbiFormat::Molecule => serialize_resolved_header_molecule(header).map_err(|e| VMError::External(e.to_string())),
         }
     }
@@ -244,7 +241,7 @@ impl<D: CellDataProvider, M: SupportMachine> Syscalls<M> for LoadHeader<D> {
             }
         };
 
-        if !self.semantics.allow_spora_header_abi() {
+        if !self.semantics.allow_myelin_header_abi() {
             machine.set_register(A0, M::REG::from_u8(WRONG_FORMAT));
             return Ok(true);
         }
@@ -285,19 +282,19 @@ mod tests {
         ResolvedHeader {
             hash: header_hash,
             version: 7,
-            parents_by_level: vec![vec![[0xAA; 32], [0xBB; 32]], vec![[0xCC; 32]]],
-            hash_merkle_root: [0x10; 32],
-            accepted_id_merkle_root: [0x20; 32],
+            parent_hash: [0xAA; 32],
+            transactions_root: [0x10; 32],
+            proposals_hash: [0x20; 32],
             cell_commitment: [0x30; 32],
             cell_root: [0x40; 32],
             segment_root: [0x50; 32],
             timestamp: 0x0102_0304_0506_0708,
-            bits: 0x1d00_ffff,
+            compact_target: 0x1d00_ffff,
             nonce: 0x8877_6655_4433_2211,
-            daa_score: 0x1122_3344_5566_7788,
-            blue_work: [0x60; 24],
-            blue_score: 0x99AA_BBCC_DDEE_FF00,
-            pruning_point: [0x70; 32],
+            number: 0x1122_3344_5566_7788,
+            dao: [0x60; 32],
+            epoch: 0x99AA_BBCC_DDEE_FF00,
+            uncles_hash: [0x70; 32],
         }
     }
 
@@ -495,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_header_by_field_supports_blue_work() {
+    fn test_load_header_by_field_supports_dao() {
         let (tx, provider) = build_tx_and_provider();
         let mut machine = ScriptVersion::V2.init_core_machine(10_000);
         machine.memory_mut().store64(&SIZE_ADDR, &24u64).unwrap();
@@ -504,7 +501,7 @@ mod tests {
         machine.set_register(A2, 0);
         machine.set_register(A3, 0);
         machine.set_register(A4, Source::HeaderDep as u64);
-        machine.set_register(A5, HeaderField::BlueWork as u64);
+        machine.set_register(A5, HeaderField::Dao as u64);
         machine.set_register(A7, LOAD_HEADER_BY_FIELD_SYSCALL_NUMBER);
 
         let mut syscall = LoadHeader::new(tx, provider, vec![0], vec![]);
@@ -512,7 +509,7 @@ mod tests {
 
         assert!(handled);
         assert_eq!(machine.registers()[A0].to_u64(), SUCCESS as u64);
-        assert_eq!(machine.memory_mut().load64(&SIZE_ADDR).unwrap().to_u64(), 24);
+        assert_eq!(machine.memory_mut().load64(&SIZE_ADDR).unwrap().to_u64(), 32);
         assert_eq!(machine.memory_mut().load_bytes(BUFFER_ADDR, 24).unwrap().as_ref(), &[0x60; 24]);
     }
 
@@ -563,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_header_ckb_strict_does_not_fallback_to_spora_header_abi() {
+    fn test_load_header_ckb_strict_does_not_fallback_to_myelin_header_abi() {
         let (tx, provider) = build_tx_and_provider();
 
         for syscall_number in [LOAD_HEADER_SYSCALL_NUMBER, LOAD_HEADER_BY_FIELD_SYSCALL_NUMBER] {
@@ -574,7 +571,7 @@ mod tests {
             machine.set_register(A2, 0);
             machine.set_register(A3, 0);
             machine.set_register(A4, Source::HeaderDep as u64);
-            machine.set_register(A5, HeaderField::DaaScore as u64);
+            machine.set_register(A5, HeaderField::Number as u64);
             machine.set_register(A7, syscall_number);
 
             let mut syscall =
@@ -818,21 +815,21 @@ mod tests {
         let header = resolved_header([0x77; 32]);
 
         let expected = vec![
-            (HeaderField::DaaScore as u64, header.daa_score.to_le_bytes().to_vec()),
+            (HeaderField::Number as u64, header.number.to_le_bytes().to_vec()),
             (HeaderField::Timestamp as u64, header.timestamp.to_le_bytes().to_vec()),
             (HeaderField::Hash as u64, header.hash.to_vec()),
-            (HeaderField::Parents as u64, vec![[0xAA; 32], [0xBB; 32]].into_iter().flatten().collect::<Vec<_>>()),
+            (HeaderField::ParentHash as u64, header.parent_hash.to_vec()),
             (HeaderField::Version as u64, header.version.to_le_bytes().to_vec()),
-            (HeaderField::Bits as u64, header.bits.to_le_bytes().to_vec()),
+            (HeaderField::CompactTarget as u64, header.compact_target.to_le_bytes().to_vec()),
             (HeaderField::Nonce as u64, header.nonce.to_le_bytes().to_vec()),
-            (HeaderField::HashMerkleRoot as u64, header.hash_merkle_root.to_vec()),
-            (HeaderField::AcceptedIdMerkleRoot as u64, header.accepted_id_merkle_root.to_vec()),
+            (HeaderField::TransactionsRoot as u64, header.transactions_root.to_vec()),
+            (HeaderField::ProposalsHash as u64, header.proposals_hash.to_vec()),
             (HeaderField::CellCommitment as u64, header.cell_commitment.to_vec()),
             (HeaderField::CellRoot as u64, header.cell_root.to_vec()),
             (HeaderField::SegmentRoot as u64, header.segment_root.to_vec()),
-            (HeaderField::BlueScore as u64, header.blue_score.to_le_bytes().to_vec()),
-            (HeaderField::BlueWork as u64, header.blue_work.to_vec()),
-            (HeaderField::PruningPoint as u64, header.pruning_point.to_vec()),
+            (HeaderField::Epoch as u64, header.epoch.to_le_bytes().to_vec()),
+            (HeaderField::Dao as u64, header.dao.to_vec()),
+            (HeaderField::UnclesHash as u64, header.uncles_hash.to_vec()),
         ];
 
         for (field, bytes) in expected {

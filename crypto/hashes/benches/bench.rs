@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use myelin_hashes::*;
 use rand::{thread_rng, Rng, RngCore};
-use spora_hashes::*;
 use std::any::type_name;
 
 fn test_bytes_hasher<H: Hasher>(c: &mut Criterion) {

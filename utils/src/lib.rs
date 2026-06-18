@@ -1,7 +1,7 @@
 //!
-//! # Spora Utilities
+//! # Myelin Utilities
 //!
-//! General purpose utilities and various type extensions used across the Rusty Spora codebase.
+//! General purpose utilities and various type extensions used across the Rusty Myelin codebase.
 //!
 
 pub mod any;
@@ -23,19 +23,11 @@ pub mod as_slice;
 /// ```
 /// #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// struct MyStructVec {
-///     #[serde(with = "spora_utils::serde_bytes")]
+///     #[serde(with = "myelin_utils::serde_bytes")]
 ///     v: Vec<u8>,
 /// }
 /// let v = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
-/// let len = v.len();
 /// let test_struct = MyStructVec { v: v.clone() };
-///
-/// // Serialize using bincode
-/// let encoded = bincode::serialize(&test_struct).unwrap();
-/// assert_eq!(encoded, len.to_le_bytes().into_iter().chain(v.into_iter()).collect::<Vec<_>>());
-/// // Deserialize using bincode
-/// let decoded: MyStructVec = bincode::deserialize(&encoded).unwrap();
-/// assert_eq!(test_struct, decoded);
 ///
 /// let expected_str = r#"{"v":"000102030405060708090a0b0c0d0e0f10111213"}"#;
 /// // Serialize using serde_json
@@ -50,19 +42,11 @@ pub mod as_slice;
 /// use smallvec::{smallvec, SmallVec};
 /// #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// struct MyStructSmallVec {  
-///     #[serde(with = "spora_utils::serde_bytes")]
+///     #[serde(with = "myelin_utils::serde_bytes")]
 ///     v: SmallVec<[u8; 19]>,
 /// }
 /// let v = smallvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
-/// let len = v.len();
 /// let test_struct = MyStructSmallVec { v: v.clone() };
-///
-/// // Serialize using bincode
-/// let encoded = bincode::serialize(&test_struct).unwrap();
-/// assert_eq!(encoded, len.to_le_bytes().into_iter().chain(v.into_iter()).collect::<Vec<_>>());
-/// // Deserialize using bincode
-/// let decoded: MyStructSmallVec = bincode::deserialize(&encoded).unwrap();
-/// assert_eq!(test_struct, decoded);
 ///
 /// let expected_str = r#"{"v":"000102030405060708090a0b0c0d0e0f10111213"}"#;
 /// // Serialize using serde_json
@@ -80,17 +64,10 @@ pub mod serde_bytes_optional;
 /// ```
 /// #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// struct TestStruct {
-///     #[serde(with = "spora_utils::serde_bytes_fixed")]
+///     #[serde(with = "myelin_utils::serde_bytes_fixed")]
 ///     v: [u8; 20],
 /// }
 /// let test_struct = TestStruct { v: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] };
-///
-/// // Serialize using bincode
-/// let encoded = bincode::serialize(&test_struct).unwrap();
-/// assert_eq!(encoded, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
-/// // Deserialize using bincode
-/// let decoded: TestStruct = bincode::deserialize(&encoded).unwrap();
-/// assert_eq!(test_struct, decoded);
 ///
 /// let expected_str = r#"{"v":"000102030405060708090a0b0c0d0e0f10111213"}"#;
 /// // Serialize using serde_json
@@ -112,7 +89,7 @@ pub mod serde_bytes_fixed;
 ///         &self.0
 ///     }
 /// }
-/// impl spora_utils::hex::FromHex for MyStruct {
+/// impl myelin_utils::hex::FromHex for MyStruct {
 ///     type Error = faster_hex::Error;
 ///     fn from_hex(hex_str: &str) -> Result<Self, Self::Error> {
 ///         let mut bytes = [0u8; 20];
@@ -125,8 +102,8 @@ pub mod serde_bytes_fixed;
 ///         MyStruct(value)
 ///     }
 /// }
-/// spora_utils::serde_impl_ser_fixed_bytes_ref!(MyStruct, 20);
-/// spora_utils::serde_impl_deser_fixed_bytes_ref!(MyStruct, 20);
+/// myelin_utils::serde_impl_ser_fixed_bytes_ref!(MyStruct, 20);
+/// myelin_utils::serde_impl_deser_fixed_bytes_ref!(MyStruct, 20);
 ///
 /// let test_struct = MyStruct([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
 /// let expected_str = r#""000102030405060708090a0b0c0d0e0f10111213""#;
@@ -136,12 +113,6 @@ pub mod serde_bytes_fixed;
 /// // Deserialize using serde_json
 /// let from_json: MyStruct = serde_json::from_str(&json).unwrap();
 /// assert_eq!(test_struct, from_json);
-/// // Serialize using bincode
-/// let encoded = bincode::serialize(&test_struct).unwrap();
-/// assert_eq!(encoded, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
-/// // Deserialize using bincode
-/// let decoded: MyStruct = bincode::deserialize(&encoded).unwrap();
-/// assert_eq!(test_struct, decoded);
 /// ```
 ///
 /// ## Implement serde::Serialize/serde::Deserialize for the field of the struct
@@ -154,7 +125,7 @@ pub mod serde_bytes_fixed;
 ///         &self.0
 ///     }
 /// }
-/// impl spora_utils::hex::FromHex for MyStruct {
+/// impl myelin_utils::hex::FromHex for MyStruct {
 ///     type Error = faster_hex::Error;
 ///     fn from_hex(hex_str: &str) -> Result<Self, Self::Error> {
 ///         let mut bytes = [0u8; 20];
@@ -170,18 +141,11 @@ pub mod serde_bytes_fixed;
 ///
 /// #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 /// struct TestStruct {
-///     #[serde(with = "spora_utils::serde_bytes_fixed_ref")]
+///     #[serde(with = "myelin_utils::serde_bytes_fixed_ref")]
 ///     v: MyStruct,
 /// }
 ///
 /// let test_struct = TestStruct { v: MyStruct([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]) };
-///
-/// // Serialize using bincode
-/// let encoded = bincode::serialize(&test_struct).unwrap();
-/// assert_eq!(encoded, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
-/// // Deserialize using bincode
-/// let decoded: TestStruct = bincode::deserialize(&encoded).unwrap();
-/// assert_eq!(test_struct, decoded);
 ///
 /// let expected_str = r#"{"v":"000102030405060708090a0b0c0d0e0f10111213"}"#;
 /// // Serialize using serde_json

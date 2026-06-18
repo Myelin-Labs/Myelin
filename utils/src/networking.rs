@@ -1,5 +1,4 @@
 // #![allow(dead_code)]
-use borsh::{BorshDeserialize, BorshSerialize};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -173,53 +172,8 @@ impl Deref for IpAddress {
     }
 }
 
-//
-// Borsh serializers need to be manually implemented for `NetAddress` since
-// IpAddr does not currently support Borsh
-//
-
-impl BorshSerialize for IpAddress {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> ::core::result::Result<(), std::io::Error> {
-        let variant_idx: u8 = match self.0 {
-            IpAddr::V4(..) => 0u8,
-            IpAddr::V6(..) => 1u8,
-        };
-        writer.write_all(&variant_idx.to_le_bytes())?;
-        match self.0 {
-            IpAddr::V4(id0) => {
-                borsh::BorshSerialize::serialize(&id0.octets(), writer)?;
-            }
-            IpAddr::V6(id0) => {
-                borsh::BorshSerialize::serialize(&id0.octets(), writer)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl BorshDeserialize for IpAddress {
-    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> ::core::result::Result<Self, borsh::io::Error> {
-        let variant_idx: u8 = BorshDeserialize::deserialize_reader(reader)?;
-        let ip = match variant_idx {
-            0u8 => {
-                let octets: [u8; 4] = BorshDeserialize::deserialize_reader(reader)?;
-                IpAddr::V4(Ipv4Addr::from(octets))
-            }
-            1u8 => {
-                let octets: [u8; 16] = BorshDeserialize::deserialize_reader(reader)?;
-                IpAddr::V6(Ipv6Addr::from(octets))
-            }
-            _ => {
-                let msg = format!("Unexpected variant index: {:?}", variant_idx);
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
-            }
-        };
-        Ok(Self(ip))
-    }
-}
-
 /// A network address, equivalent of a [SocketAddr].
-#[derive(PartialEq, Eq, Hash, Copy, Clone, Serialize, Deserialize, Debug, BorshSerialize, BorshDeserialize)]
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Serialize, Deserialize, Debug)]
 pub struct NetAddress {
     pub ip: IpAddress,
     pub port: u16,
@@ -264,7 +218,7 @@ impl Display for NetAddress {
 /// A network address possibly without explicit port.
 ///
 /// Use `normalize` to get a fully determined address.
-#[derive(PartialEq, Eq, Hash, Copy, Clone, Serialize, Deserialize, Debug, BorshSerialize, BorshDeserialize)]
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Serialize, Deserialize, Debug)]
 pub struct ContextualNetAddress {
     ip: IpAddress,
     port: Option<u16>,
@@ -387,57 +341,10 @@ impl Deref for PeerId {
     }
 }
 
-//
-// Borsh serializers need to be manually implemented for `PeerId` since
-// Uuid does not currently support Borsh
-//
-
-impl BorshSerialize for PeerId {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> ::core::result::Result<(), std::io::Error> {
-        borsh::BorshSerialize::serialize(&self.0.as_bytes(), writer)?;
-        Ok(())
-    }
-}
-
-impl BorshDeserialize for PeerId {
-    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> ::core::result::Result<Self, std::io::Error> {
-        let bytes: uuid::Bytes = BorshDeserialize::deserialize_reader(reader)?;
-        Ok(Self::new(Uuid::from_bytes(bytes)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::str::FromStr;
-
-    #[test]
-    fn test_ip_address_borsh() {
-        // Tests for IpAddress Borsh ser/deser since we manually implemented them
-        let ip: IpAddress = Ipv4Addr::from([44u8; 4]).into();
-        let bin = borsh::to_vec(&ip).unwrap();
-        let ip2: IpAddress = BorshDeserialize::try_from_slice(&bin).unwrap();
-        assert_eq!(ip, ip2);
-
-        let ip: IpAddress = Ipv6Addr::from([66u8; 16]).into();
-        let bin = borsh::to_vec(&ip).unwrap();
-        let ip2: IpAddress = BorshDeserialize::try_from_slice(&bin).unwrap();
-        assert_eq!(ip, ip2);
-    }
-
-    #[test]
-    fn test_peer_id_borsh() {
-        // Tests for PeerId Borsh ser/deser since we manually implemented them
-        let id: PeerId = Uuid::new_v4().into();
-        let bin = borsh::to_vec(&id).unwrap();
-        let id2: PeerId = BorshDeserialize::try_from_slice(&bin).unwrap();
-        assert_eq!(id, id2);
-
-        let id: PeerId = Uuid::from_bytes([123u8; 16]).into();
-        let bin = borsh::to_vec(&id).unwrap();
-        let id2: PeerId = BorshDeserialize::try_from_slice(&bin).unwrap();
-        assert_eq!(id, id2);
-    }
 
     #[test]
     fn test_net_address_from_str() {

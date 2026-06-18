@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Debug print syscall
 
@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_debugger_reads_message_without_mutating_memory() {
-        let original = b"spora-debug";
+        let original = b"myelin-debug";
         let mut machine = ScriptVersion::V2.init_core_machine(10_000);
         machine.memory_mut().store_bytes(MESSAGE_ADDR, original).unwrap();
         machine.set_register(A0, MESSAGE_ADDR);

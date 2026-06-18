@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
-// Standard scripts for Spora
+// Standard scripts for Myelin
 
 //! Standard lock and type scripts
 //!
@@ -92,14 +92,14 @@ pub fn timelock_absolute_code_hash() -> [u8; 32] {
     blake3::hash(TIMELOCK_ABSOLUTE_SCRIPT).into()
 }
 
-/// Relative DAA score lock script (for testing)
+/// Relative block number lock script (for testing)
 ///
-/// This ELF fixture verifies that the input's `since` field (as relative DAA)
+/// This ELF fixture verifies that the input's `since` field (as relative block number)
 /// is >= 100 blocks.
-/// Expected since format: bit63=1 (relative), bit62=0 (DAA), bits0-55=delta
+/// Expected since format: bit63=1 (relative), bit62=0 (block number), bits0-55=delta
 pub const TIMELOCK_RELATIVE_SCRIPT: &[u8] = include_bytes!("fixtures/timelock_relative.elf");
 
-/// Relative DAA score lock script code hash
+/// Relative block number lock script code hash
 pub fn timelock_relative_code_hash() -> [u8; 32] {
     blake3::hash(TIMELOCK_RELATIVE_SCRIPT).into()
 }
@@ -117,7 +117,7 @@ pub fn timelock_relative_code_hash() -> [u8; 32] {
 /// - [0..32]:   secret_hash (blake3)
 /// - [32..64]:  recipient_pubkey (32 bytes)
 /// - [64..96]:  sender_pubkey (32 bytes)
-/// - [96]:      lock_type (0=abs DAA, 1=abs timestamp, 2=rel DAA, 3=rel timestamp)
+/// - [96]:      lock_type (0=abs block number, 1=abs timestamp, 2=rel block number, 3=rel timestamp)
 /// - [97..105]: lock_value (u64)
 ///
 /// Witness format:
@@ -149,7 +149,7 @@ pub mod timelock;
 /// Secp256k1 + Blake3 lock script (Production-Ready ELF)
 ///
 /// This is the production-grade secp256k1 lock script compiled from Rust to RISC-V.
-/// It verifies ECDSA signatures using blake3 for hashing (Spora-specific).
+/// It verifies ECDSA signatures using blake3 for hashing (Myelin-specific).
 ///
 /// Features:
 /// - Args: pubkey hash (20 bytes, blake3 of pubkey)
@@ -198,7 +198,7 @@ hexdump -C secp256k1_blake3_lock.bin
 blake3sum secp256k1_blake3_lock.bin
 
 # If blake3sum/b3sum is unavailable:
-cargo run -p spora-exec --example fixture_hashes -- secp256k1_blake3_lock.bin
+cargo run -p myelin-exec --example fixture_hashes -- secp256k1_blake3_lock.bin
 
 # Note: exec/src/scripts/fixtures/build_fixtures.sh only builds the Rust-based
 # ELF fixtures under fixtures/*.rs. This C lock requires a separate RISC-V C

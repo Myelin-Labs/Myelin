@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Exec syscall
 // Reference: ckb/script/src/syscalls/exec.rs
@@ -70,7 +70,7 @@ impl<D: CellDataProvider> Exec<D> {
             group_output_indices,
             snapshot2_context: None,
             data_source: None,
-            semantics: VmSemantics::SporaExtended,
+            semantics: VmSemantics::MyelinExtended,
         }
     }
 

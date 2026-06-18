@@ -47,7 +47,7 @@ Each release answers a specific question:
   audit tooling.
 - **v0.17** — *Can iCKB-grade CKB protocol semantics execute?* Close the
   scoped protocol-semantics milestone with partial CKB VM differential evidence
-  and a fail-closed `NOT_PROVEN` equivalence gate.
+  and a fail-closed equivalence gate.
 - **v0.18** — *Can protocol equivalence be closed honestly?* Add the
   first-class read-only ScriptRef / ScriptArgs surface and remaining iCKB
   equivalence prerequisites.
@@ -66,10 +66,10 @@ Each release answers a specific question:
 |---|---|---|
 | v0.12 release scope | Released production foundation. | Historical release evidence and bundled examples |
 | v0.13 release scope | Implementation scope is closed for the `v0.13.2` stable release; the full gate includes stateful business-flow/action coverage. | [v0.13 release scope](../docs/releases/CELLSCRIPT_0_13_RELEASE_SCOPE.md), [v0.13 release tracker](CELLSCRIPT_0_13_TODOLIST.md), [v0.13.2 release notes](../docs/releases/CELLSCRIPT_0_13_2_RELEASE_NOTES.md) |
-| v0.14 release scope | CKB semantic-completeness scope is complete for the current stable line. | [v0.14 roadmap](CELLSCRIPT_0_14_ROADMAP.md), [v0.14 release notes draft](../docs/releases/CELLSCRIPT_0_14_RELEASE_NOTES_DRAFT.md) |
-| v0.15 release scope | Implemented P0; P1 is partial. The branch adds scoped invariants, aggregate invariant primitives, Covenant ProofPlan output, risk diagnostics, cell identity, destruction policies, capability reset, and macro provenance. | [v0.15 roadmap](CELLSCRIPT_0_15_ROADMAP.md), [v0.15 release notes draft](../docs/CELLSCRIPT_0_15_RELEASE_NOTES_DRAFT.md) |
-| v0.16 release scope | Implemented for the scoped `cellscript-0.16` metadata/tooling release. Adds operational semantics, ProofPlan soundness, builder assumptions, schema-bound transaction validation, solver templates, deployment governance, audit tooling, and descriptive standard CKB compatibility fixtures. | [v0.16 roadmap](CELLSCRIPT_0_16_ROADMAP.md), [v0.16 release notes draft](../docs/CELLSCRIPT_0_16_RELEASE_NOTES_DRAFT.md) |
-| v0.17 release scope | Scoped protocol-equivalence milestone complete: partial CKB VM differential evidence exists, while production equivalence remains deliberately `NOT_PROVEN`. | [v0.17 roadmap](../docs/0.17/CELLSCRIPT_0_17_ROADMAP.md), [iCKB final report](../docs/0.17/ickb_final_report.md) |
+| v0.14 release scope | CKB semantic-completeness scope is complete for the current stable line. | [v0.14 roadmap](CELLSCRIPT_0_14_ROADMAP.md), [v0.14 release notes](../docs/releases/CELLSCRIPT_0_14_RELEASE_NOTES.md) |
+| v0.15 release scope | `v0.15.0` is released from `nightly-0.15` with scoped invariants, aggregate invariant primitives, Covenant ProofPlan output, risk diagnostics, macro provenance, identity-aware lifecycle forms, and final release-gate evidence. | [v0.15 roadmap](CELLSCRIPT_0_15_ROADMAP.md), [v0.15 release notes](../docs/releases/CELLSCRIPT_0_15_RELEASE_NOTES.md) |
+| v0.16 release scope | Released as `v0.16.1` for the scoped metadata/tooling line. Adds operational semantics, ProofPlan soundness, builder assumptions, schema-bound transaction validation, solver templates, deployment governance, audit tooling, descriptive standard CKB compatibility fixtures, compiler hardening, proposal-local NovaSeal devnet/profile certification, and bundled example bootstrap cleanup. | [v0.16 roadmap](CELLSCRIPT_0_16_ROADMAP.md), [v0.16.1 release notes](../docs/releases/CELLSCRIPT_0_16_1_RELEASE_NOTES.md) |
+| v0.17/0.18 iCKB equivalence state | The standalone v0.17 branch is a partial protocol-equivalence milestone; the carried-forward v0.18 work closes the manifest-declared executable iCKB claim set as `EXECUTED_CKB_VM_DIFF` / `PROVEN`. | [v0.17 roadmap](../docs/0.17/CELLSCRIPT_0_17_ROADMAP.md), [iCKB final report](../docs/0.17/ickb_final_report.md) |
 | v0.18 planning scope | First-class read-only ScriptRef / ScriptArgs API and iCKB equivalence-closure prerequisites. | [v0.18 roadmap](../docs/CELLSCRIPT_0_18_ROADMAP.md) |
 | v0.19 scope | Scope complete for CKB ecosystem reuse, `ckb-std` compatibility, grammar governance, and Phase 1 package/deployment identity registry closure. | [v0.19 roadmap](../docs/CELLSCRIPT_0_19_ROADMAP.md), [v0.19 closure notes](../docs/releases/CELLSCRIPT_0_19_CLOSURE_NOTES.md) |
 | v0.20 planned scope | Generated Action Builder, live-chain deployment verification, stateful transaction flows, and registry trust hardening. | [v0.20 roadmap](../docs/CELLSCRIPT_0_20_ROADMAP.md) |
@@ -77,7 +77,7 @@ Each release answers a specific question:
 | Surface syntax | Low-risk syntax pass is implemented; authority-sensitive syntax remains staged. | [Surface elegance RFC](../docs/CELLSCRIPT_SURFACE_ELEGANCE_RFC.md) |
 | Collections | Stack-backed fixed-width `Vec<T>` helper surface is implemented; cell-backed and generic map ownership remain fail-closed. | [Collections support matrix](../docs/CELLSCRIPT_COLLECTIONS_SUPPORT_MATRIX.md), [v0.13 release scope](../docs/releases/CELLSCRIPT_0_13_RELEASE_SCOPE.md) |
 | CKB production evidence | Bundled actions and locks have builder-backed local CKB evidence; full release claims also require stateful coverage for every production acceptance action. | [Metadata and production gates wiki](../docs/wiki/Tutorial-06-Metadata-Verification-and-Production-Gates.md) |
-| Documentation and wiki | Wiki is version-neutral, cookbook-oriented, includes a standard-library chapter, and is published separately to GitHub Wiki. | [GitHub Wiki](https://github.com/tsukifune-kosei/CellScript/wiki) |
+| Documentation and wiki | Wiki is version-neutral, cookbook-oriented, includes a standard-library chapter, and is published separately to GitHub Wiki. | [GitHub Wiki](https://github.com/a19q3/CellScript/wiki) |
 
 ---
 
@@ -86,11 +86,11 @@ Each release answers a specific question:
 | Version | Theme | One-liner | Status |
 |---|---|---|---|
 | v0.12 | Production Foundation | "Write real CKB contracts safely." | Released |
-| v0.13 | Performance and Expressiveness | "Write less, run faster." | Beta released; scope closed |
-| v0.14 | CKB Semantic Completeness | "Expose CKB surface and bounded verifier reuse." | Feature-complete beta branch |
-| v0.15 | Scoped Invariants and Covenant ProofPlan | "Show when constraints run, what they read, and who they protect." | P0 complete; P1 partial |
-| v0.16 | Metadata Assurance and Production Tooling Skeleton | "Make assumptions explicit and auditable." | Implemented for scoped `cellscript-0.16` release |
-| v0.17 | iCKB-Grade Protocol Semantics | "Turn protocol-equivalence gaps into executable evidence gates." | Scoped milestone complete; equivalence not proven |
+| v0.13 | Performance and Expressiveness | "Write less, run faster." | Stable scope closed |
+| v0.14 | CKB Semantic Completeness | "Expose CKB surface and bounded verifier reuse." | Complete for the stable line |
+| v0.15 | Scoped Invariants and Covenant ProofPlan | "Show when constraints run, what they read, and who they protect." | Released from `nightly-0.15` |
+| v0.16 | Metadata Assurance and Production Tooling Skeleton | "Make assumptions explicit and auditable." | Released as `v0.16.1` |
+| v0.17 | iCKB-Grade Protocol Semantics | "Turn protocol-equivalence gaps into executable evidence gates." | Standalone milestone partial; selected claim set proven on the carried-forward 0.18+ line |
 | v0.18 | First-Class Script API and Equivalence Closure | "Make ScriptRef/ScriptArgs and remaining iCKB proof prerequisites first-class." | Planning |
 | v0.19 | Package Registry Phase 1 and Adapter Boundary | "Resolve and verify package/build/deployment identity before builders consume it." | Scope complete |
 | v0.20 | Generated Builder and Live Registry Proof | "Turn verified artifacts into valid transactions through registry-bound builders." | In progress: generated TypeScript builders, live registry verification, VS Code commands, and generated-builder tooling-gate checks are active. |
@@ -383,9 +383,9 @@ action verify_with_delegate(proof: Proof) {
 
 action multi_step_verify(data: VerifyData) {
     let (read_fd, write_fd) = pipe()
-    spawn("hash_checker", fds: [read_fd])
+    let pid = spawn("hash_checker", fds: [read_fd])
     pipe_write(write_fd, data.payload)
-    let result = wait()
+    let result = wait(pid)
     assert_invariant(result == 0, "hash check failed")
 }
 ```
@@ -841,6 +841,10 @@ change_policy
 signature_policy
 ```
 
+For manifest-bound spawn targets, `required_cell_deps` carries the concrete
+CellDep slot and manifest identity. `validate-tx` checks both the transaction
+`cell_deps[index]` object and matching `builder_assumption_evidence`.
+
 Tooling:
 
 ```bash
@@ -878,7 +882,7 @@ Local deployment artifacts:
 Audit tooling:
 
 - metadata/IR-level source-to-codegen mapping;
-- proof diff;
+- field-level proof diff;
 - cycle profiler per invariant/check;
 - transaction assumption trace viewer;
 - HTML audit bundle linking source, ProofPlan, metadata, IR effect classes, and
@@ -1034,7 +1038,7 @@ Future work:
 
 Source documents:
 
-- [GitHub Wiki](https://github.com/tsukifune-kosei/CellScript/wiki)
+- [GitHub Wiki](https://github.com/a19q3/CellScript/wiki)
 - [Surface elegance RFC](../docs/CELLSCRIPT_SURFACE_ELEGANCE_RFC.md)
 
 ---
@@ -1121,7 +1125,7 @@ metadata, IR effect classes, and codegen coverage.
 | Standard compatibility | descriptive CKB standard script fixture suites | v0.16 |
 | Transaction validation | schema-bound `cellc validate-tx` | v0.16 |
 | Transaction templates | `cellc solve-tx` template emitter | v0.16 |
-| Deployment governance | local deploy plan, dep locks, proof diff, audit bundle | v0.16 |
+| Deployment governance | local deploy plan, dep locks, field-level proof diff, audit bundle | v0.16 |
 
 ---
 

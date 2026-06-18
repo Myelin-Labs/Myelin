@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Cell state management and data availability storage
 
@@ -15,6 +15,7 @@
 
 pub mod cell_tree;
 pub mod index;
+mod molecule;
 pub mod store;
 
 pub use cell_tree::{CellEntry, CellStateTree};

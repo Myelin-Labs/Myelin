@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "amm_pool",
-    "invoice_financing",
     "launch",
     "multisig",
     "nft",

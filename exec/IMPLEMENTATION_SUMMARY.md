@@ -1,4 +1,4 @@
-# Spora 序列化分层治理实现总结
+# Myelin 序列化分层治理实现总结
 
 ## 实施日期
 2026-04-15
@@ -18,7 +18,7 @@
   - `upgrade_from()`: 支持从旧版本升级
   
 - **VersionedEnvelope<T>**: 版本化信封包装器
-  - `format_version`: 序列化格式 (0x00=Borsh, 0x80=Molecule)
+  - `format_version`: 序列化格式 (0x80=Molecule-compatible)
   - `schema_version`: 数据 schema 版本
   - `payload`: 实际序列化数据
   
@@ -30,7 +30,7 @@
 - **VmAbiNegotiator**: ABI 版本协商
   - `negotiate()`: 协商脚本和 VM 之间的 ABI 版本
   - `default_capabilities()`: 获取 VM 默认能力
-  - 支持版本回退 (Molecule → Borsh)
+  - 只接受 Molecule VM object ABI (`0x8001`)
 
 #### `vm_abi.rs` - VM ABI 标准化序列化
 提供统一的序列化格式，确保 ABI 稳定性：
@@ -134,8 +134,8 @@
 
 #### VM 类型 (`src/vm/verifier.rs`)
 VM-facing 类型实现 `VmSerializable`:
-- `ResolvedHeader` - ABI version 0x0001 (Borsh v1)
-- `ResolvedCell` - ABI version 0x0001 (Borsh v1)
+- `ResolvedHeader` - ABI version 0x8001 (Molecule v1)
+- `ResolvedCell` - ABI version 0x8001 (Molecule v1)
 
 ---
 
@@ -226,7 +226,7 @@ VM-facing 类型实现 `VmSerializable`:
 │  - 为未来 Molecule 迁移预留路径                                  │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 1: 共识关键路径 ✅ (保持现状)                             │
-│  - 自定义流式哈希，完全绕过 Borsh                               │
+│  - 自定义流式哈希                                                │
 │  - 不受序列化层变更影响                                          │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -260,21 +260,21 @@ VM-facing 类型实现 `VmSerializable`:
 
 ### 存储层版本化
 ```rust
-use spora_exec::{CellTx, VersionedEnvelope, VersionedSerializable};
+use myelin_exec::{CellTx, VersionedEnvelope, VersionedSerializable};
 
 // 存储
 let tx = CellTx::new(...)?;
 let envelope = VersionedEnvelope::new(&tx)?;
-db.put(key, borsh::to_vec(&envelope)?)?;
+db.put(key, envelope.to_bytes())?;
 
 // 读取
-let envelope: VersionedEnvelope<CellTx> = borsh::from_slice(&bytes)?;
+let envelope = VersionedEnvelope::<CellTx>::from_bytes(&bytes)?;
 let tx = envelope.parse()?;
 ```
 
 ### VM ABI 序列化
 ```rust
-use spora_exec::{ResolvedHeader, VmSerializable};
+use myelin_exec::{ResolvedHeader, VmSerializable};
 
 let header = ResolvedHeader { ... };
 let bytes = header.to_vm_bytes();
@@ -283,7 +283,7 @@ let restored = ResolvedHeader::from_vm_bytes(&bytes)?;
 
 ### ABI 版本协商
 ```rust
-use spora_exec::VmAbiNegotiator;
+use myelin_exec::VmAbiNegotiator;
 
 let caps = VmAbiNegotiator::default_capabilities();
 let version = VmAbiNegotiator::negotiate(script_version, &caps)?;

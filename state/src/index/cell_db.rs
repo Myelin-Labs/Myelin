@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // CellDB: Cell indexing database (OutPoint → CellMeta)
 
-use crate::{Result, StateError};
-use borsh::{BorshDeserialize, BorshSerialize};
+use crate::{molecule, Result, StateError};
+use myelin_exec::serialization::molecule_compat::{deserialize_cell_output_molecule, serialize_cell_output_molecule};
+use myelin_exec::{CellOutput, OutPoint};
 use parking_lot::RwLock;
 use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
-use spora_exec::{CellOutput, OutPoint};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -20,14 +20,14 @@ const CF_SPEND_JOURNAL: &str = "spend_journal"; // Full metadata for historical 
 /// Cell metadata (stored in CellDB)
 ///
 /// Maps OutPoint → CellMeta for quick Cell lookups
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellMeta {
     /// Cell output structure
     pub cell_output: CellOutput,
     /// Cell data (may be large, consider storing separately in DA layer)
     pub cell_data: Vec<u8>,
-    /// DAA score at creation
-    pub daa_score: u64,
+    /// block number at creation
+    pub created_block_number: u64,
     /// Block hash containing this Cell
     pub block_hash: [u8; 32],
     /// Is this a cellbase?
@@ -40,20 +40,20 @@ pub struct CellMeta {
 ///
 /// Stores both when a Cell was spent and its original metadata.
 ///
-/// `spent_in_block` is the primary branch-aware anchor. `spent_at_daa` is kept
+/// `spent_in_block` is the primary branch-aware anchor. `spent_at_block_number` is kept
 /// only as auxiliary/indexing data and must not be used as a consensus POV.
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpendRecord {
     /// Block hash where the Cell was spent.
     pub spent_in_block: [u8; 32],
-    /// DAA score observed when the Cell was spent.
-    pub spent_at_daa: u64,
+    /// block number observed when the Cell was spent.
+    pub spent_at_block_number: u64,
     /// Original Cell metadata (for historical reconstruction)
     pub cell_meta: CellMeta,
 }
 
 /// Segment storage information
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SegmentInfo {
     /// Segment ID
     pub segment_id: u32,
@@ -67,7 +67,7 @@ pub struct SegmentInfo {
 ///
 /// Responsibilities:
 /// - Store live Cells (OutPoint → CellMeta)
-/// - Track spent Cells (OutPoint → DAA score)
+/// - Track spent Cells (OutPoint → block number)
 /// - Support efficient queries
 pub struct CellDB {
     /// RocksDB instance
@@ -77,6 +77,64 @@ pub struct CellDB {
 }
 
 impl CellDB {
+    fn encode_segment_info(segment_info: &SegmentInfo) -> Vec<u8> {
+        molecule::encode_table(&[
+            molecule::encode_u32(segment_info.segment_id),
+            molecule::encode_u64(segment_info.offset),
+            molecule::encode_u32(segment_info.length),
+        ])
+    }
+
+    fn decode_segment_info(bytes: &[u8]) -> Result<SegmentInfo> {
+        let fields = molecule::decode_table(bytes, 3, "SegmentInfo")?;
+        Ok(SegmentInfo {
+            segment_id: molecule::decode_u32(fields[0], "SegmentInfo.segment_id")?,
+            offset: molecule::decode_u64(fields[1], "SegmentInfo.offset")?,
+            length: molecule::decode_u32(fields[2], "SegmentInfo.length")?,
+        })
+    }
+
+    fn encode_cell_meta(meta: &CellMeta) -> Result<Vec<u8>> {
+        let segment_info = meta.segment_info.as_ref().map(Self::encode_segment_info).unwrap_or_default();
+        Ok(molecule::encode_table(&[
+            serialize_cell_output_molecule(&meta.cell_output).map_err(|error| StateError::Serialization(error.to_string()))?,
+            meta.cell_data.clone(),
+            molecule::encode_u64(meta.created_block_number),
+            meta.block_hash.to_vec(),
+            molecule::encode_bool(meta.is_cellbase),
+            segment_info,
+        ]))
+    }
+
+    fn decode_cell_meta(bytes: &[u8]) -> Result<CellMeta> {
+        let fields = molecule::decode_table(bytes, 6, "CellMeta")?;
+        Ok(CellMeta {
+            cell_output: deserialize_cell_output_molecule(fields[0]).map_err(|error| StateError::Serialization(error.to_string()))?,
+            cell_data: fields[1].to_vec(),
+            created_block_number: molecule::decode_u64(fields[2], "CellMeta.created_block_number")?,
+            block_hash: molecule::decode_array32(fields[3], "CellMeta.block_hash")?,
+            is_cellbase: molecule::decode_bool(fields[4], "CellMeta.is_cellbase")?,
+            segment_info: if fields[5].is_empty() { None } else { Some(Self::decode_segment_info(fields[5])?) },
+        })
+    }
+
+    fn encode_spend_record(record: &SpendRecord) -> Result<Vec<u8>> {
+        Ok(molecule::encode_table(&[
+            record.spent_in_block.to_vec(),
+            molecule::encode_u64(record.spent_at_block_number),
+            Self::encode_cell_meta(&record.cell_meta)?,
+        ]))
+    }
+
+    fn decode_spend_record(bytes: &[u8]) -> Result<SpendRecord> {
+        let fields = molecule::decode_table(bytes, 3, "SpendRecord")?;
+        Ok(SpendRecord {
+            spent_in_block: molecule::decode_array32(fields[0], "SpendRecord.spent_in_block")?,
+            spent_at_block_number: molecule::decode_u64(fields[1], "SpendRecord.spent_at_block_number")?,
+            cell_meta: Self::decode_cell_meta(fields[2])?,
+        })
+    }
+
     fn normalize_meta_for_storage(meta: &CellMeta) -> CellMeta {
         let mut normalized = meta.clone();
         if normalized.segment_info.is_some() {
@@ -116,7 +174,7 @@ impl CellDB {
 
         match self.db.get_cf(&cf, &key).map_err(|e| StateError::Database(e.to_string()))? {
             Some(data) => {
-                let meta = CellMeta::try_from_slice(&data).map_err(|e| StateError::Serialization(e.to_string()))?;
+                let meta = Self::decode_cell_meta(&data)?;
                 Ok(Some(meta))
             }
             None => Ok(None),
@@ -136,7 +194,7 @@ impl CellDB {
 
         let key = out_point.to_key();
         let normalized = Self::normalize_meta_for_storage(meta);
-        let value = borsh::to_vec(&normalized).map_err(|e| StateError::Serialization(e.to_string()))?;
+        let value = Self::encode_cell_meta(&normalized)?;
 
         let mut batch = WriteBatch::default();
         // Re-adding a live cell after a reorg must clear the previous canonical spend marker.
@@ -166,7 +224,7 @@ impl CellDB {
             return Ok(None);
         };
 
-        let meta = CellMeta::try_from_slice(&existing).map_err(|e| StateError::Serialization(e.to_string()))?;
+        let meta = Self::decode_cell_meta(&existing)?;
         self.db.delete_cf(&cf, &key).map_err(|e| StateError::Database(e.to_string()))?;
         Ok(Some(meta))
     }
@@ -175,7 +233,7 @@ impl CellDB {
     ///
     /// Moves a Cell from live set to spent set, preserving metadata for debugging
     /// and index-only historical inspection.
-    pub fn spend_in_block(&self, out_point: &OutPoint, spent_at_daa: u64, spent_in_block: [u8; 32]) -> Result<()> {
+    pub fn spend_in_block(&self, out_point: &OutPoint, spent_at_block_number: u64, spent_in_block: [u8; 32]) -> Result<()> {
         let _lock = self.write_lock.write();
 
         let cf_cells = self.db.cf_handle(CF_CELLS).ok_or_else(|| StateError::Database("CF_CELLS not found".to_string()))?;
@@ -192,16 +250,16 @@ impl CellDB {
             .map_err(|e| StateError::Database(e.to_string()))?
             .ok_or_else(|| StateError::CellNotFound([0; 32]))?;
 
-        let cell_meta = CellMeta::try_from_slice(&cell_data).map_err(|e| StateError::Serialization(e.to_string()))?;
+        let cell_meta = Self::decode_cell_meta(&cell_data)?;
 
         // Create spend record
-        let spend_record = SpendRecord { spent_in_block, spent_at_daa, cell_meta };
+        let spend_record = SpendRecord { spent_in_block, spent_at_block_number, cell_meta };
 
         // Atomic update: delete from cells, add to spent + journal
         let mut batch = WriteBatch::default();
         batch.delete_cf(&cf_cells, &key);
-        batch.put_cf(&cf_spent, &key, &spent_at_daa.to_le_bytes());
-        batch.put_cf(&cf_journal, &key, &borsh::to_vec(&spend_record).map_err(|e| StateError::Serialization(e.to_string()))?);
+        batch.put_cf(&cf_spent, &key, &spent_at_block_number.to_le_bytes());
+        batch.put_cf(&cf_journal, &key, &Self::encode_spend_record(&spend_record)?);
 
         self.db.write(batch).map_err(|e| StateError::Database(e.to_string()))?;
 
@@ -217,10 +275,10 @@ impl CellDB {
         match self.db.get_cf(&cf, &key).map_err(|e| StateError::Database(e.to_string()))? {
             Some(data) => {
                 if data.len() != 8 {
-                    return Err(StateError::Serialization("Invalid DAA score".to_string()));
+                    return Err(StateError::Serialization("Invalid block number".to_string()));
                 }
-                let daa = u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
-                Ok(Some(daa))
+                let block_number = u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]);
+                Ok(Some(block_number))
             }
             None => Ok(None),
         }
@@ -240,7 +298,7 @@ impl CellDB {
         for (out_point, meta) in cells {
             let key = out_point.to_key();
             let normalized = Self::normalize_meta_for_storage(meta);
-            let value = borsh::to_vec(&normalized).map_err(|e| StateError::Serialization(e.to_string()))?;
+            let value = Self::encode_cell_meta(&normalized)?;
             batch.delete_cf(&cf_spent, &key);
             batch.delete_cf(&cf_journal, &key);
             batch.put_cf(&cf, &key, &value);
@@ -262,19 +320,20 @@ impl CellDB {
 
         let mut batch = WriteBatch::default();
 
-        for (out_point, spent_at_daa, spent_in_block) in spends {
+        for (out_point, spent_at_block_number, spent_in_block) in spends {
             let key = out_point.to_key();
 
             // Get Cell metadata before deleting
             if let Some(cell_data) = self.db.get_cf(&cf_cells, &key).map_err(|e| StateError::Database(e.to_string()))? {
-                let cell_meta = CellMeta::try_from_slice(&cell_data).map_err(|e| StateError::Serialization(e.to_string()))?;
+                let cell_meta = Self::decode_cell_meta(&cell_data)?;
 
                 // Create spend record
-                let spend_record = SpendRecord { spent_in_block: *spent_in_block, spent_at_daa: *spent_at_daa, cell_meta };
+                let spend_record =
+                    SpendRecord { spent_in_block: *spent_in_block, spent_at_block_number: *spent_at_block_number, cell_meta };
 
                 batch.delete_cf(&cf_cells, &key);
-                batch.put_cf(&cf_spent, &key, &spent_at_daa.to_le_bytes());
-                batch.put_cf(&cf_journal, &key, &borsh::to_vec(&spend_record).map_err(|e| StateError::Serialization(e.to_string()))?);
+                batch.put_cf(&cf_spent, &key, &spent_at_block_number.to_le_bytes());
+                batch.put_cf(&cf_journal, &key, &Self::encode_spend_record(&spend_record)?);
             }
         }
 
@@ -283,11 +342,11 @@ impl CellDB {
         Ok(())
     }
 
-    /// Get Cell state at a specific DAA score.
+    /// Get Cell state at a specific block number.
     ///
     /// # WARNING: Non-consensus index helper
     ///
-    /// DAA score does not uniquely identify a DAG history point-of-view.
+    /// block number alone does not identify a canonical history point of view.
     /// This method MUST NOT be used for consensus validation, reorg logic,
     /// or double-spend decisions.
     ///
@@ -295,18 +354,18 @@ impl CellDB {
     /// [`batch_get_cell_snapshots_at_pov`] which are anchored by block hash.
     ///
     /// Logic:
-    /// - Cell must have been created at or before `at_daa`
+    /// - Cell must have been created at or before `at_block_number`
     /// - Cell must be either:
     ///   a) Still live (in CF_CELLS), OR
-    ///   b) Spent after `at_daa` (in CF_SPEND_JOURNAL with spent_at_daa > at_daa)
+    ///   b) Spent after `at_block_number` (in CF_SPEND_JOURNAL with spent_at_block_number > at_block_number)
     ///
     /// Correct consensus queries must be anchored by block hash / POV, for
     /// example `get_cell_at_pov(outpoint, block_hash)`.
     #[deprecated(
         since = "0.2.0",
-        note = "Use get_cell_snapshot_at_pov() for consensus queries. This DAA-based method is retained only for index/debug purposes."
+        note = "Use get_cell_snapshot_at_pov() for consensus queries. This block number-based method is retained only for index/debug purposes."
     )]
-    pub fn get_cell_snapshot_at_daa(&self, out_point: &OutPoint, at_daa: u64) -> Result<Option<CellMeta>> {
+    pub fn get_cell_snapshot_at_block_number(&self, out_point: &OutPoint, at_block_number: u64) -> Result<Option<CellMeta>> {
         let cf_cells = self.db.cf_handle(CF_CELLS).ok_or_else(|| StateError::Database("CF_CELLS not found".to_string()))?;
         let cf_journal =
             self.db.cf_handle(CF_SPEND_JOURNAL).ok_or_else(|| StateError::Database("CF_SPEND_JOURNAL not found".to_string()))?;
@@ -315,27 +374,27 @@ impl CellDB {
 
         // CASE 1: Cell is currently live
         if let Some(data) = self.db.get_cf(&cf_cells, &key).map_err(|e| StateError::Database(e.to_string()))? {
-            let meta = CellMeta::try_from_slice(&data).map_err(|e| StateError::Serialization(e.to_string()))?;
+            let meta = Self::decode_cell_meta(&data)?;
 
-            // Cell exists and is live. Was it created by at_daa?
-            if meta.daa_score <= at_daa {
+            // Cell exists and is live. Was it created by at_block_number?
+            if meta.created_block_number <= at_block_number {
                 return Ok(Some(meta));
             } else {
-                // Cell was created after at_daa, so it didn't exist yet
+                // Cell was created after at_block_number, so it didn't exist yet
                 return Ok(None);
             }
         }
 
         // CASE 2: Cell has been spent - check spend journal
         if let Some(journal_data) = self.db.get_cf(&cf_journal, &key).map_err(|e| StateError::Database(e.to_string()))? {
-            let spend_record = SpendRecord::try_from_slice(&journal_data).map_err(|e| StateError::Serialization(e.to_string()))?;
+            let spend_record = Self::decode_spend_record(&journal_data)?;
 
-            // Check creation and spend DAA scores
-            let created_at = spend_record.cell_meta.daa_score;
-            let spent_at = spend_record.spent_at_daa;
+            // Check creation and spend block numbers
+            let created_at = spend_record.cell_meta.created_block_number;
+            let spent_at = spend_record.spent_at_block_number;
 
-            // Cell was live if: created_at <= at_daa < spent_at
-            if created_at <= at_daa && spent_at > at_daa {
+            // Cell was live if: created_at <= at_block_number < spent_at
+            if created_at <= at_block_number && spent_at > at_block_number {
                 return Ok(Some(spend_record.cell_meta));
             } else {
                 // Either not yet created or already spent
@@ -349,7 +408,7 @@ impl CellDB {
 
     /// Get Cell state from the canonical journal using an explicit POV block.
     ///
-    /// The caller supplies the DAG-specific ancestry predicate that decides
+    /// The caller supplies the consensus ancestry predicate that decides
     /// whether `block_hash` is included in the history visible from `pov`.
     /// This keeps `CellDB` free of consensus dependencies while still enabling
     /// branch-aware historical queries.
@@ -369,12 +428,12 @@ impl CellDB {
         let key = out_point.to_key();
 
         if let Some(data) = self.db.get_cf(&cf_cells, &key).map_err(|e| StateError::Database(e.to_string()))? {
-            let meta = CellMeta::try_from_slice(&data).map_err(|e| StateError::Serialization(e.to_string()))?;
+            let meta = Self::decode_cell_meta(&data)?;
             return if block_in_pov_history(meta.block_hash, pov)? { Ok(Some(meta)) } else { Ok(None) };
         }
 
         if let Some(journal_data) = self.db.get_cf(&cf_journal, &key).map_err(|e| StateError::Database(e.to_string()))? {
-            let spend_record = SpendRecord::try_from_slice(&journal_data).map_err(|e| StateError::Serialization(e.to_string()))?;
+            let spend_record = Self::decode_spend_record(&journal_data)?;
 
             let created_visible = block_in_pov_history(spend_record.cell_meta.block_hash, pov)?;
             if !created_visible {
@@ -388,11 +447,11 @@ impl CellDB {
         Ok(None)
     }
 
-    /// Batch query Cells at a specific DAA score for index/debug use.
+    /// Batch query Cells at a specific block number for index/debug use.
     ///
     /// # WARNING: Non-consensus index helper
     ///
-    /// DAA score does not uniquely identify a DAG history point-of-view.
+    /// block number alone does not identify a canonical history point of view.
     /// This method MUST NOT be used for consensus validation, reorg logic,
     /// or double-spend decisions.
     ///
@@ -400,14 +459,18 @@ impl CellDB {
     /// [`batch_get_cell_snapshots_at_pov`] which are anchored by block hash.
     #[deprecated(
         since = "0.2.0",
-        note = "Use batch_get_cell_snapshots_at_pov() for consensus queries. This DAA-based method is retained only for index/debug purposes."
+        note = "Use batch_get_cell_snapshots_at_pov() for consensus queries. This block number-based method is retained only for index/debug purposes."
     )]
     #[allow(deprecated)]
-    pub fn batch_get_cell_snapshots_at_daa(&self, out_points: &[OutPoint], at_daa: u64) -> Result<Vec<Option<CellMeta>>> {
+    pub fn batch_get_cell_snapshots_at_block_number(
+        &self,
+        out_points: &[OutPoint],
+        at_block_number: u64,
+    ) -> Result<Vec<Option<CellMeta>>> {
         let mut results = Vec::with_capacity(out_points.len());
 
         for out_point in out_points {
-            results.push(self.get_cell_snapshot_at_daa(out_point, at_daa)?);
+            results.push(self.get_cell_snapshot_at_block_number(out_point, at_block_number)?);
         }
 
         Ok(results)
@@ -461,7 +524,7 @@ impl CellDB {
 
         for item in self.db.iterator_cf(&cf_cells, IteratorMode::Start) {
             let (_key, value) = item.map_err(|e| StateError::Database(e.to_string()))?;
-            let meta = CellMeta::try_from_slice(&value).map_err(|e| StateError::Serialization(e.to_string()))?;
+            let meta = Self::decode_cell_meta(&value)?;
             total = total.saturating_add(meta.cell_output.capacity);
         }
 
@@ -494,23 +557,23 @@ pub struct CellDBStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spora_exec::{CellOutput, Script};
+    use myelin_exec::{CellOutput, Script};
     use tempfile::TempDir;
 
-    fn create_test_cell_meta(capacity: u64, daa: u64) -> CellMeta {
+    fn create_test_cell_meta(capacity: u64, block_number: u64) -> CellMeta {
         let lock = Script::new([0x00; 32], 0, vec![0; 20]);
         CellMeta {
             cell_output: CellOutput { lock, type_: None, capacity },
             cell_data: vec![0xAA; 100],
-            daa_score: daa,
+            created_block_number: block_number,
             block_hash: [0x11; 32],
             is_cellbase: false,
             segment_info: None,
         }
     }
 
-    fn create_segment_backed_cell_meta(capacity: u64, daa: u64) -> CellMeta {
-        let mut meta = create_test_cell_meta(capacity, daa);
+    fn create_segment_backed_cell_meta(capacity: u64, block_number: u64) -> CellMeta {
+        let mut meta = create_test_cell_meta(capacity, block_number);
         meta.segment_info = Some(SegmentInfo { segment_id: 3, offset: 128, length: meta.cell_data.len() as u32 });
         meta
     }
@@ -618,10 +681,10 @@ mod tests {
 
         let cf_journal = db.db.cf_handle(CF_SPEND_JOURNAL).unwrap();
         let journal_data = db.db.get_cf(&cf_journal, out_point.to_key()).unwrap().unwrap();
-        let spend_record = SpendRecord::try_from_slice(&journal_data).unwrap();
+        let spend_record = CellDB::decode_spend_record(&journal_data).unwrap();
 
         assert_eq!(spend_record.spent_in_block, spending_block);
-        assert_eq!(spend_record.spent_at_daa, 200);
+        assert_eq!(spend_record.spent_at_block_number, 200);
         assert_eq!(spend_record.cell_meta, meta);
     }
 
@@ -647,7 +710,8 @@ mod tests {
         // Spend first two Cells
         let spends = vec![(OutPoint::new([0x01; 32], 0), 200), (OutPoint::new([0x02; 32], 0), 201)];
 
-        let spends_with_block = spends.iter().map(|(out_point, daa)| (out_point.clone(), *daa, [0; 32])).collect::<Vec<_>>();
+        let spends_with_block =
+            spends.iter().map(|(out_point, block_number)| (out_point.clone(), *block_number, [0; 32])).collect::<Vec<_>>();
         db.batch_spend_in_block(&spends_with_block).unwrap();
 
         // Verify spends
@@ -679,61 +743,61 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
-    fn test_get_cell_at_daa_live_cell() {
+    fn test_get_cell_at_block_number_live_cell() {
         let temp_dir = TempDir::new().unwrap();
         let db = CellDB::open(temp_dir.path()).unwrap();
 
         let out_point = OutPoint::new([1; 32], 0);
-        let meta = create_test_cell_meta(1000, 50); // Created at DAA 50
+        let meta = create_test_cell_meta(1000, 50); // Created at block number 50
 
         db.put(&out_point, &meta).unwrap();
 
         // Query before creation: should be None
-        assert_eq!(db.get_cell_snapshot_at_daa(&out_point, 40).unwrap(), None);
+        assert_eq!(db.get_cell_snapshot_at_block_number(&out_point, 40).unwrap(), None);
 
         // Query at creation: should be Some
-        assert_eq!(db.get_cell_snapshot_at_daa(&out_point, 50).unwrap(), Some(meta.clone()));
+        assert_eq!(db.get_cell_snapshot_at_block_number(&out_point, 50).unwrap(), Some(meta.clone()));
 
         // Query after creation: should be Some (still live)
-        assert_eq!(db.get_cell_snapshot_at_daa(&out_point, 100).unwrap(), Some(meta));
+        assert_eq!(db.get_cell_snapshot_at_block_number(&out_point, 100).unwrap(), Some(meta));
     }
 
     #[test]
     #[allow(deprecated)]
-    fn test_get_cell_at_daa_spent_cell() {
+    fn test_get_cell_at_block_number_spent_cell() {
         let temp_dir = TempDir::new().unwrap();
         let db = CellDB::open(temp_dir.path()).unwrap();
 
         let out_point = OutPoint::new([2; 32], 0);
-        let meta = create_test_cell_meta(1000, 50); // Created at DAA 50
+        let meta = create_test_cell_meta(1000, 50); // Created at block number 50
 
         db.put(&out_point, &meta).unwrap();
-        db.spend_in_block(&out_point, 150, [0; 32]).unwrap(); // Spent at DAA 150
+        db.spend_in_block(&out_point, 150, [0; 32]).unwrap(); // Spent at block number 150
 
         // Query before creation: None
-        assert_eq!(db.get_cell_snapshot_at_daa(&out_point, 40).unwrap(), None);
+        assert_eq!(db.get_cell_snapshot_at_block_number(&out_point, 40).unwrap(), None);
 
         // Query when live (50 <= 100 < 150): Some
-        let result = db.get_cell_snapshot_at_daa(&out_point, 100).unwrap();
+        let result = db.get_cell_snapshot_at_block_number(&out_point, 100).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().cell_output.capacity, 1000);
 
-        // Query at spend point (DAA 150): None (just spent)
-        assert_eq!(db.get_cell_snapshot_at_daa(&out_point, 150).unwrap(), None);
+        // Query at spend point (block number 150): None (just spent)
+        assert_eq!(db.get_cell_snapshot_at_block_number(&out_point, 150).unwrap(), None);
 
         // Query after spend: None
-        assert_eq!(db.get_cell_snapshot_at_daa(&out_point, 200).unwrap(), None);
+        assert_eq!(db.get_cell_snapshot_at_block_number(&out_point, 200).unwrap(), None);
     }
 
     #[test]
     #[allow(deprecated)]
-    fn test_get_cell_at_daa_reorg_scenario() {
+    fn test_get_cell_at_block_number_reorg_scenario() {
         let temp_dir = TempDir::new().unwrap();
         let db = CellDB::open(temp_dir.path()).unwrap();
 
         // Simulate reorg scenario:
-        // Branch A: Cell created at DAA 50, spent at DAA 150
-        // Branch B: Need to validate tx at DAA 100 (Cell should be live)
+        // Branch A: Cell created at block number 50, spent at block number 150
+        // Branch B: Need to validate tx at block number 100 (Cell should be live)
 
         let out_point = OutPoint::new([3; 32], 0);
         let meta = create_test_cell_meta(1000, 50);
@@ -741,24 +805,24 @@ mod tests {
         db.put(&out_point, &meta).unwrap();
         db.spend_in_block(&out_point, 150, [0; 32]).unwrap();
 
-        // Reorg validation: Check if Cell was live at DAA 100
-        let cell_at_100 = db.get_cell_snapshot_at_daa(&out_point, 100).unwrap();
-        let cell_at_100 = cell_at_100.expect("cell should be live at daa 100");
+        // Reorg validation: Check if Cell was live at block number 100
+        let cell_at_100 = db.get_cell_snapshot_at_block_number(&out_point, 100).unwrap();
+        let cell_at_100 = cell_at_100.expect("cell should be live at block_number 100");
         assert_eq!(cell_at_100.cell_output.capacity, 1000);
-        assert_eq!(cell_at_100.daa_score, 50);
+        assert_eq!(cell_at_100.created_block_number, 50);
     }
 
     #[test]
     #[allow(deprecated)]
-    fn test_get_cell_at_daa_fork_scenario() {
+    fn test_get_cell_at_block_number_fork_scenario() {
         let temp_dir = TempDir::new().unwrap();
         let db = CellDB::open(temp_dir.path()).unwrap();
 
         // Fork scenario:
-        // Same Cell spent in different branches at different DAA scores
-        // Cell created at DAA 50
-        // Branch A: spent at DAA 120
-        // Branch B: need to check at DAA 100 (should be live)
+        // Same Cell spent in different branches at different block numbers
+        // Cell created at block number 50
+        // Branch A: spent at block number 120
+        // Branch B: need to check at block number 100 (should be live)
 
         let out_point = OutPoint::new([4; 32], 0);
         let meta = create_test_cell_meta(2000, 50);
@@ -766,18 +830,18 @@ mod tests {
         db.put(&out_point, &meta).unwrap();
         db.spend_in_block(&out_point, 120, [0; 32]).unwrap();
 
-        // Query at DAA 100: Cell should be live (50 <= 100 < 120)
-        let result = db.get_cell_snapshot_at_daa(&out_point, 100).unwrap();
+        // Query at block number 100: Cell should be live (50 <= 100 < 120)
+        let result = db.get_cell_snapshot_at_block_number(&out_point, 100).unwrap();
         assert!(result.is_some());
 
-        // Query at DAA 130: Cell should be spent (130 >= 120)
-        let result = db.get_cell_snapshot_at_daa(&out_point, 130).unwrap();
+        // Query at block number 130: Cell should be spent (130 >= 120)
+        let result = db.get_cell_snapshot_at_block_number(&out_point, 130).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     #[allow(deprecated)]
-    fn test_batch_get_at_daa() {
+    fn test_batch_get_at_block_number() {
         let temp_dir = TempDir::new().unwrap();
         let db = CellDB::open(temp_dir.path()).unwrap();
 
@@ -793,11 +857,11 @@ mod tests {
         db.put(&out2, &meta2).unwrap();
         db.put(&out3, &meta3).unwrap();
 
-        // Spend meta2 at DAA 100
+        // Spend meta2 at block number 100
         db.spend_in_block(&out2, 100, [0; 32]).unwrap();
 
-        // Batch query at DAA 80
-        let results = db.batch_get_cell_snapshots_at_daa(&[out1.clone(), out2.clone(), out3.clone()], 80).unwrap();
+        // Batch query at block number 80
+        let results = db.batch_get_cell_snapshots_at_block_number(&[out1.clone(), out2.clone(), out3.clone()], 80).unwrap();
 
         assert!(results[0].is_some()); // meta1: created at 50, still live
         assert!(results[1].is_some()); // meta2: created at 60, spent at 100 (live at 80)

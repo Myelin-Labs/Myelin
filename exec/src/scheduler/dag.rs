@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // CellDAG: RW-Set dependency graph construction
 
@@ -159,10 +159,7 @@ impl CellDAG {
                     for access in &witness.accesses {
                         let mode = AccessMode::from_operation(access.operation);
                         let entry = ConflictEntry { node_id, mode };
-                        conflict_hash_conflicts
-                            .entry(access.conflict_hash)
-                            .or_default()
-                            .push(entry);
+                        conflict_hash_conflicts.entry(access.conflict_hash).or_default().push(entry);
                     }
                 }
                 // If decode fails, skip — the transaction won't have valid
@@ -187,17 +184,10 @@ impl CellDAG {
 
                     // READ + WRITE or WRITE + WRITE → dependency edge
                     // Earlier transaction must come first
-                    let (from, to) = if a.node_id < b.node_id {
-                        (a.node_id, b.node_id)
-                    } else {
-                        (b.node_id, a.node_id)
-                    };
+                    let (from, to) = if a.node_id < b.node_id { (a.node_id, b.node_id) } else { (b.node_id, a.node_id) };
 
                     // Avoid duplicate edges
-                    let already_has_edge = dag
-                        .edges
-                        .get(&from)
-                        .map_or(false, |succs| succs.iter().any(|(s, _)| *s == to));
+                    let already_has_edge = dag.edges.get(&from).map_or(false, |succs| succs.iter().any(|(s, _)| *s == to));
 
                     if !already_has_edge {
                         dag.edges.entry(from).or_default().push((to, DagEdge::Dependency));
@@ -219,9 +209,7 @@ impl CellDAG {
     ///
     /// Returns a vector of (conflict_hash, AccessMode) pairs.
     /// Returns an empty vector if the transaction has no valid scheduler witness.
-    pub fn extract_conflict_accesses(
-        tx: &CellTx,
-    ) -> Vec<([u8; 32], AccessMode)> {
+    pub fn extract_conflict_accesses(tx: &CellTx) -> Vec<([u8; 32], AccessMode)> {
         let mut result = Vec::new();
         for witness_result in tx.decoded_cellscript_scheduler_witnesses() {
             if let Ok(witness) = witness_result {
@@ -238,10 +226,7 @@ impl CellDAG {
     /// based on their conflict_hash access patterns.
     ///
     /// Returns `true` if there is no Write-based conflict between them.
-    pub fn can_parallel(
-        accesses_a: &[( [u8; 32], AccessMode )],
-        accesses_b: &[( [u8; 32], AccessMode )],
-    ) -> bool {
+    pub fn can_parallel(accesses_a: &[([u8; 32], AccessMode)], accesses_b: &[([u8; 32], AccessMode)]) -> bool {
         // Build a map of conflict_hash → AccessMode for A
         let mut a_map: BTreeMap<[u8; 32], AccessMode> = BTreeMap::new();
         for &(hash, mode) in accesses_a {
@@ -492,12 +477,10 @@ mod tests {
     // ─── Typed Cell Conflict Hash Tests ─────────────────────────────────────────
 
     use crate::celltx::types::{
-        CellScriptSchedulerWitness, CellScriptSchedulerAccessWitness,
+        encode_cellscript_scheduler_witness_molecule, CellScriptSchedulerAccessWitness, CellScriptSchedulerWitness,
+        CELLSCRIPT_SCHEDULER_EFFECT_MUTATING, CELLSCRIPT_SCHEDULER_EFFECT_READ_ONLY, CELLSCRIPT_SCHEDULER_OP_CONSUME,
+        CELLSCRIPT_SCHEDULER_OP_READ_REF, CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP, CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
         TYPED_CELL_SCHEDULER_WITNESS_VERSION,
-        CELLSCRIPT_SCHEDULER_EFFECT_MUTATING, CELLSCRIPT_SCHEDULER_EFFECT_READ_ONLY,
-        CELLSCRIPT_SCHEDULER_OP_CONSUME, CELLSCRIPT_SCHEDULER_OP_READ_REF,
-        CELLSCRIPT_SCHEDULER_SOURCE_INPUT, CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP,
-        encode_cellscript_scheduler_witness_molecule,
     };
 
     fn create_typed_test_tx_with_witness(

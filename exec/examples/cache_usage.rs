@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Serialization Cache Usage Example
 //
 // This example demonstrates the serialization cache for optimizing
 // repeated serialization operations.
 
-use spora_exec::serialization::utils;
-use spora_exec::{CellOutput, Script, SerializationCache, ThreadSafeSerializationCache};
+use myelin_exec::serialization::utils;
+use myelin_exec::{CellOutput, Script, SerializationCache, ThreadSafeSerializationCache};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Serialization Cache Usage Example ===\n");

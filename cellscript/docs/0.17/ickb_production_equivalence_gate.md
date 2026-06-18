@@ -87,8 +87,8 @@ execution, or has mismatched status/exit-code evidence.
 
 ## Running The Gate
 
-The iCKB-specific gate is executable through Rust integration tests and the
-`verify-ckb-fixtures` CLI:
+The iCKB-specific executable gate is the Rust differential test suite. The
+`verify-ckb-fixtures` CLI is a committed-evidence manifest checker:
 
 ```bash
 cargo test --locked -p cellscript --test ickb_diff
@@ -98,15 +98,19 @@ cargo run --locked -p cellscript --bin cellc -- verify-ckb-fixtures tests/benchm
 
 `verify-ckb-fixtures` validates the standard CKB fixture manifest with the
 deterministic model runner and emits a manifest hash. It still reports
-`ckb_vm_execution = false`. In iCKB claim-manifest mode it reports
-`execution_level = DIFFERENTIAL_CKB_VM` and validates that every in-scope branch
-maps to matrix rows, production evidence, hardening thresholds, or explicit
-retired/out-of-scope notes. `tests/ickb_diff.rs` accepts the current `PROVEN`
-matrix only because every selected row is differential and the top-level
-evidence manifest is present. It still fails if any selected row lacks
-original-side execution, CellScript-side execution, matching pass/fail status,
-per-row execution evidence, or if active non-executable model assumptions
-reappear.
+`ckb_vm_execution = false`. In iCKB claim-manifest mode it still reports
+`ckb_vm_execution = false`, because the command does not run VM. It reports
+`execution_level = DIFFERENTIAL_CKB_VM_MANIFEST`,
+`committed_ckb_vm_evidence = true`, and validates that every in-scope branch maps
+to committed matrix rows, production evidence, hardening thresholds, or explicit
+retired/out-of-scope notes. It also checks the per-row execution evidence shape:
+status/exit-code consistency, canonical hashes, positive pass-row cycles,
+transaction size, occupied capacity, and named reject failure modes.
+`tests/ickb_diff.rs` accepts the current `PROVEN` matrix only because every
+selected row is differential and the top-level evidence manifest is present. It
+still fails if any selected row lacks original-side execution, CellScript-side
+execution, matching pass/fail status, per-row execution evidence, or if active
+non-executable model assumptions reappear.
 
 ## Current Enforcement
 
@@ -636,7 +640,8 @@ execution evidence fails the test suite.
   reject row covers the same cardinality failure on the output side. These still
   do not cover full
   synthetic wrong-owner resource fields or complete first-class MetaPoint map
-  behaviour. First-class Script API work is tracked separately as 0.18 scope.
+  behaviour. First-class Script API work has landed on the carried-forward 0.18
+  line; MetaPoint-map ergonomics remain separate future work.
 - Wrong owner and immature redeem are no longer active model rows. They are
   recorded as non-executable model assumptions with replacement differential
   evidence for the executable Owned-Owner and DAO maturity fixture shapes.
@@ -644,10 +649,10 @@ execution evidence fails the test suite.
   and explicit unresolved external steps; it is not a cell-selection, fee,
   change, witness, dep, or dry-run solver.
 
-Until these blockers are closed, the correct conclusion remains: CellScript is
-partially iCKB-grade for modelling and compiler-surface audit work, and now has
-partial CKB VM differential evidence for deposit, deposit/receipt output
-accounting, mint, selected Limit Order
-paths, and selected Owned-Owner input/output pairing, cardinality,
-script-role, non-withdrawal, related-cell, owner-data, and missing-pair paths,
-but it does not pass a complete production-equivalence iCKB benchmark.
+The current conclusion is therefore narrower than full protocol certification
+but stronger than model-level evidence: CellScript is production-equivalent for
+the selected executed subset declared in
+`tests/benchmarks/ickb_diff/claim_manifest.json`, with 187 dual-side CKB VM
+differential rows and no active `MODEL` rows. It still does not claim full
+mathematical state-space exhaustiveness, external audit, mainnet-value
+certification, or first-class generic MetaPoint-map ergonomics.

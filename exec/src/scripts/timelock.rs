@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Time lock scripts using CKB-VM with `since` syscall
 //
@@ -25,8 +25,8 @@
 //!
 //! The `since` field is a 64-bit value with the following structure:
 //! - Bit 63: Relative lock flag (1 = relative, 0 = absolute)
-//! - Bit 62: DAA score vs timestamp flag (1 = timestamp, 0 = DAA score)
-//! - Bits 0-55: Lock value (DAA score or timestamp)
+//! - Bit 62: block number vs timestamp flag (1 = timestamp, 0 = block number)
+//! - Bits 0-55: Lock value (block number or timestamp)
 //!
 //! See: <https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/0017-tx-valid-since.md>
 
@@ -41,20 +41,20 @@ pub const ABSOLUTE_TIME_LOCK_CODE_HASH: [u8; 32] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// Code hash for the relative time lock script (DAA score-based)
+/// Code hash for the relative time lock script (block number-based)
 ///
-/// This script verifies that the input's `since` field is >= a target DAA score delta.
+/// This script verifies that the input's `since` field is >= a target block number delta.
 /// Script args: [target_delta: u64 (8 bytes, little-endian)]
 pub const RELATIVE_TIME_LOCK_CODE_HASH: [u8; 32] = [
     0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// Code hash for the absolute DAA score lock script
+/// Code hash for the absolute block number lock script
 ///
-/// This script verifies that the input's `since` field is >= a target DAA score.
-/// Script args: [target_daa_score: u64 (8 bytes, little-endian)]
-pub const ABSOLUTE_DAA_LOCK_CODE_HASH: [u8; 32] = [
+/// This script verifies that the input's `since` field is >= a target block number.
+/// Script args: [target_block_number: u64 (8 bytes, little-endian)]
+pub const ABSOLUTE_BLOCK_NUMBER_LOCK_CODE_HASH: [u8; 32] = [
     0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
@@ -74,14 +74,14 @@ pub const COMBINED_ABSOLUTE_TIME_LOCK_CODE_HASH: [u8; 32] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// Reserved code hash for the relative DAA + secp256k1 combined lock script.
+/// Reserved code hash for the relative block number + secp256k1 combined lock script.
 pub const COMBINED_RELATIVE_TIME_LOCK_CODE_HASH: [u8; 32] = [
     0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// Reserved code hash for the absolute DAA + secp256k1 combined lock script.
-pub const COMBINED_ABSOLUTE_DAA_LOCK_CODE_HASH: [u8; 32] = [
+/// Reserved code hash for the absolute block number + secp256k1 combined lock script.
+pub const COMBINED_ABSOLUTE_BLOCK_NUMBER_LOCK_CODE_HASH: [u8; 32] = [
     0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
@@ -99,7 +99,7 @@ pub const TIME_LOCK_HASH_TYPE: u8 = 0;
 pub mod since_flags {
     /// Relative lock flag (bit 63)
     pub const RELATIVE: u64 = 1 << 63;
-    /// Timestamp flag (bit 62) - if set, interpret as Unix timestamp; otherwise DAA score
+    /// Timestamp flag (bit 62) - if set, interpret as Unix timestamp; otherwise block number
     pub const TIMESTAMP: u64 = 1 << 62;
     /// Mask for the value portion (bits 0-55)
     pub const VALUE_MASK: u64 = 0x00FF_FFFF_FFFF_FFFF;
@@ -115,7 +115,7 @@ pub mod since_flags {
 ///
 /// # Example
 /// ```rust
-/// use spora_exec::scripts::timelock;
+/// use myelin_exec::scripts::timelock;
 ///
 /// // Lock until January 1, 2025
 /// let target = 1735689600u64; // 2025-01-01 00:00:00 UTC
@@ -126,44 +126,44 @@ pub fn absolute_timestamp_lock(target_timestamp: u64) -> Script {
     Script::new(ABSOLUTE_TIME_LOCK_CODE_HASH, TIME_LOCK_HASH_TYPE, args)
 }
 
-/// Create a relative DAA score lock Script
+/// Create a relative block number lock Script
 ///
 /// This creates a script that requires the input's `since` field to indicate
-/// a relative lock of at least `delta_daa` blocks from the input's confirmation.
+/// a relative lock of at least `delta_blocks` blocks from the input's confirmation.
 ///
 /// # Arguments
-/// * `delta_daa` - The minimum number of blocks to wait
+/// * `delta_blocks` - The minimum number of blocks to wait
 ///
 /// # Example
 /// ```rust
-/// use spora_exec::scripts::timelock;
+/// use myelin_exec::scripts::timelock;
 ///
 /// // Lock for 100 blocks relative to confirmation
-/// let script = timelock::relative_daa_lock(100);
+/// let script = timelock::relative_block_number_lock(100);
 /// ```
-pub fn relative_daa_lock(delta_daa: u64) -> Script {
-    let args = delta_daa.to_le_bytes().to_vec();
+pub fn relative_block_number_lock(delta_blocks: u64) -> Script {
+    let args = delta_blocks.to_le_bytes().to_vec();
     Script::new(RELATIVE_TIME_LOCK_CODE_HASH, TIME_LOCK_HASH_TYPE, args)
 }
 
-/// Create an absolute DAA score lock Script
+/// Create an absolute block number lock Script
 ///
 /// This creates a script that requires the input's `since` field to be >= the
-/// specified absolute DAA score.
+/// specified absolute block number.
 ///
 /// # Arguments
-/// * `target_daa` - The minimum DAA score required
+/// * `target_block_number` - The minimum block number required
 ///
 /// # Example
 /// ```rust
-/// use spora_exec::scripts::timelock;
+/// use myelin_exec::scripts::timelock;
 ///
-/// // Lock until DAA score 1000000
-/// let script = timelock::absolute_daa_lock(1_000_000);
+/// // Lock until block number 1000000
+/// let script = timelock::absolute_block_number_lock(1_000_000);
 /// ```
-pub fn absolute_daa_lock(target_daa: u64) -> Script {
-    let args = target_daa.to_le_bytes().to_vec();
-    Script::new(ABSOLUTE_DAA_LOCK_CODE_HASH, TIME_LOCK_HASH_TYPE, args)
+pub fn absolute_block_number_lock(target_block_number: u64) -> Script {
+    let args = target_block_number.to_le_bytes().to_vec();
+    Script::new(ABSOLUTE_BLOCK_NUMBER_LOCK_CODE_HASH, TIME_LOCK_HASH_TYPE, args)
 }
 
 /// Create a relative timestamp lock Script
@@ -176,7 +176,7 @@ pub fn absolute_daa_lock(target_daa: u64) -> Script {
 ///
 /// # Example
 /// ```rust
-/// use spora_exec::scripts::timelock;
+/// use myelin_exec::scripts::timelock;
 ///
 /// // Lock for 24 hours relative to confirmation
 /// let script = timelock::relative_timestamp_lock(24 * 60 * 60);
@@ -197,26 +197,26 @@ pub fn encode_absolute_timestamp_since(timestamp: u64) -> u64 {
     since_flags::TIMESTAMP | (timestamp & since_flags::VALUE_MASK)
 }
 
-/// Encode a `since` value for relative DAA score lock
+/// Encode a `since` value for relative block number lock
 ///
 /// # Arguments
 /// * `delta` - Number of blocks to wait
 ///
 /// # Returns
 /// The encoded `since` value to use in `CellInput::since`
-pub fn encode_relative_daa_since(delta: u64) -> u64 {
+pub fn encode_relative_block_number_since(delta: u64) -> u64 {
     since_flags::RELATIVE | (delta & since_flags::VALUE_MASK)
 }
 
-/// Encode a `since` value for absolute DAA score lock
+/// Encode a `since` value for absolute block number lock
 ///
 /// # Arguments
-/// * `daa_score` - Target DAA score
+/// * `block_number` - Target block number
 ///
 /// # Returns
 /// The encoded `since` value to use in `CellInput::since`
-pub fn encode_absolute_daa_since(daa_score: u64) -> u64 {
-    daa_score & since_flags::VALUE_MASK
+pub fn encode_absolute_block_number_since(block_number: u64) -> u64 {
+    block_number & since_flags::VALUE_MASK
 }
 
 /// Encode a `since` value for relative timestamp lock
@@ -251,7 +251,7 @@ pub fn decode_since(since: u64) -> (bool, bool, u64) {
 /// * `pubkey_hash` - 20-byte hash of the public key
 /// * `target` - Target timestamp or delta (depending on lock type)
 /// * `is_relative` - Whether this is a relative lock
-/// * `is_timestamp` - Whether to use timestamp (vs DAA score)
+/// * `is_timestamp` - Whether to use timestamp (vs block number)
 ///
 /// The returned script uses a reserved combined-lock code hash. The actual
 /// RISC-V binary still needs to be deployed under that hash before this helper
@@ -264,9 +264,9 @@ pub fn secp256k1_with_timelock(pubkey_hash: [u8; 20], target: u64, is_relative: 
 
     // Choose the reserved combined-lock code hash based on lock type.
     let code_hash = match (is_relative, is_timestamp) {
-        (false, true) => COMBINED_ABSOLUTE_TIME_LOCK_CODE_HASH,     // Absolute timestamp
-        (true, false) => COMBINED_RELATIVE_TIME_LOCK_CODE_HASH,     // Relative DAA
-        (false, false) => COMBINED_ABSOLUTE_DAA_LOCK_CODE_HASH,     // Absolute DAA
+        (false, true) => COMBINED_ABSOLUTE_TIME_LOCK_CODE_HASH, // Absolute timestamp
+        (true, false) => COMBINED_RELATIVE_TIME_LOCK_CODE_HASH, // Relative block number
+        (false, false) => COMBINED_ABSOLUTE_BLOCK_NUMBER_LOCK_CODE_HASH, // Absolute block number
         (true, true) => COMBINED_RELATIVE_TIMESTAMP_LOCK_CODE_HASH, // Relative timestamp
     };
 
@@ -288,9 +288,9 @@ mod tests {
     }
 
     #[test]
-    fn test_relative_daa_lock() {
+    fn test_relative_block_number_lock() {
         let delta = 100u64;
-        let script = relative_daa_lock(delta);
+        let script = relative_block_number_lock(delta);
 
         assert_eq!(script.code_hash, RELATIVE_TIME_LOCK_CODE_HASH);
         assert_eq!(script.hash_type, TIME_LOCK_HASH_TYPE);
@@ -298,11 +298,11 @@ mod tests {
     }
 
     #[test]
-    fn test_absolute_daa_lock() {
+    fn test_absolute_block_number_lock() {
         let target = 1_000_000u64;
-        let script = absolute_daa_lock(target);
+        let script = absolute_block_number_lock(target);
 
-        assert_eq!(script.code_hash, ABSOLUTE_DAA_LOCK_CODE_HASH);
+        assert_eq!(script.code_hash, ABSOLUTE_BLOCK_NUMBER_LOCK_CODE_HASH);
         assert_eq!(script.hash_type, TIME_LOCK_HASH_TYPE);
         assert_eq!(script.args, target.to_le_bytes().to_vec());
     }
@@ -328,9 +328,9 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_relative_daa_since() {
+    fn test_encode_relative_block_number_since() {
         let delta = 100u64;
-        let since = encode_relative_daa_since(delta);
+        let since = encode_relative_block_number_since(delta);
 
         assert_eq!(since & since_flags::RELATIVE, since_flags::RELATIVE);
         assert_eq!(since & since_flags::VALUE_MASK, delta);

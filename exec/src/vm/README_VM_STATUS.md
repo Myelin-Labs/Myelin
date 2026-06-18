@@ -21,7 +21,7 @@
 
 3. **Syscalls Definition** ✅ 100%
    - 10 syscalls defined
-   - Blake3 syscall (3001) - Spora extension
+   - Blake3 syscall (3001) - Myelin extension
    - All CKB standard syscalls (2000-2999)
 
 4. **Script Examples** ✅ 100%
@@ -112,7 +112,7 @@ All concepts are implemented:
 
 1. **Complete runtime environment**
    - Complete remaining `LoadCell` / `LoadCellData` layout branches
-   - Expand `LoadHeader` further if future scripts need output-side or additional DAG-specific header source semantics
+   - Expand `LoadHeader` further if future scripts need output-side or additional session-header source semantics
 
 2. **Basic Tests** (1-2 hours)
    - Extend beyond always-success

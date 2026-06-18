@@ -1,6 +1,6 @@
 [package]
-name = "spora-math"
-description = "Spora misc math library"
+name = "myelin-math"
+description = "Myelin misc math library"
 rust-version.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -10,19 +10,17 @@ include.workspace = true
 repository.workspace = true
 
 [dependencies]
-borsh.workspace = true
 faster-hex.workspace = true
-js-sys.workspace = true
-spora-utils.workspace = true
+myelin-utils.workspace = true
 malachite-base.workspace = true
 malachite-nz.workspace = true
-serde-wasm-bindgen.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys.workspace = true
+serde-wasm-bindgen.workspace = true
 wasm-bindgen.workspace = true
-workflow-core.workspace = true
-workflow-log.workspace = true
-workflow-wasm.workspace = true
 
 [dev-dependencies]
 rand_chacha.workspace = true

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
-// Relative DAA score lock script test
+// Relative block number lock script test
 
 #[cfg(all(test, feature = "vm"))]
 mod tests {
     use crate::celltx::{CellInput, CellOutput, CellTx, OutPoint, Script};
-    use crate::scripts::timelock::encode_relative_daa_since;
+    use crate::scripts::timelock::encode_relative_block_number_since;
     use crate::scripts::{timelock_relative_code_hash, TIMELOCK_RELATIVE_SCRIPT};
     use crate::vm::{ResolvedCell, ScriptVersion, SimpleDataProvider, TransactionScriptVerifier};
     use std::sync::Arc;
@@ -35,7 +35,7 @@ mod tests {
         let provider = build_provider(code_hash, input_out_point.clone());
 
         // Use exact target delta
-        let since = encode_relative_daa_since(TARGET_DELTA);
+        let since = encode_relative_block_number_since(TARGET_DELTA);
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, since)],
@@ -59,7 +59,7 @@ mod tests {
         let provider = build_provider(code_hash, input_out_point.clone());
 
         // Use a larger delta
-        let since = encode_relative_daa_since(TARGET_DELTA + 50);
+        let since = encode_relative_block_number_since(TARGET_DELTA + 50);
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, since)],
@@ -83,7 +83,7 @@ mod tests {
         let provider = build_provider(code_hash, input_out_point.clone());
 
         // Use a smaller delta
-        let since = encode_relative_daa_since(TARGET_DELTA - 50);
+        let since = encode_relative_block_number_since(TARGET_DELTA - 50);
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, since)],
@@ -130,7 +130,7 @@ mod tests {
         let input_out_point = OutPoint::new([0x25; 32], 0);
         let provider = build_provider(code_hash, input_out_point.clone());
 
-        // Use timestamp lock instead of DAA (bit62 = 1)
+        // Use timestamp lock instead of block number (bit62 = 1)
         let since = (1u64 << 63) | (1u64 << 62) | TARGET_DELTA;
         let tx = CellTx {
             version: 0xC001,

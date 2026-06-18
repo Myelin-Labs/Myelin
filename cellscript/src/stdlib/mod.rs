@@ -1027,8 +1027,8 @@ fn typed_cell_access_record(access: &SchedulerAccess) -> Option<Vec<u8>> {
     out.push(operation);
     out.push(source);
     out.extend_from_slice(&access.index.to_le_bytes());
-    out.extend_from_slice(&typed_cell_access_hash(b"spora-typed-cell/conflict-hash/v1", access));
-    out.extend_from_slice(&typed_cell_access_hash(b"spora-typed-cell/typed-data-hash/v1", access));
+    out.extend_from_slice(&typed_cell_access_hash(b"myelin-typed-cell/conflict-hash/v1", access));
+    out.extend_from_slice(&typed_cell_access_hash(b"myelin-typed-cell/typed-data-hash/v1", access));
     Some(out)
 }
 
@@ -1070,9 +1070,8 @@ fn typed_cell_source_id(source: &str) -> Option<u8> {
 
 fn typed_cell_operation_accepts_source(operation: u8, source: u8) -> bool {
     match operation {
-        1 | 3 => source == 1,
-        2 => source == 1 || source == 3,
-        6 => source == 1 || source == 2,
+        1 | 2 | 3 => source == 1,
+        6 => matches!(source, 1 | 2),
         7 => source == 3,
         _ => false,
     }
@@ -1081,11 +1080,8 @@ fn typed_cell_operation_accepts_source(operation: u8, source: u8) -> bool {
 fn typed_cell_access_hash(domain: &[u8], access: &SchedulerAccess) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(domain);
-    hasher.update(&[0]);
-    hasher.update(access.operation.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(access.source.as_bytes());
-    hasher.update(&[0]);
+    hasher.update(&[typed_cell_operation_id(&access.operation).unwrap_or(0)]);
+    hasher.update(&[typed_cell_source_id(&access.source).unwrap_or(0)]);
     hasher.update(&access.index.to_le_bytes());
     hasher.update(access.binding.as_bytes());
     *hasher.finalize().as_bytes()

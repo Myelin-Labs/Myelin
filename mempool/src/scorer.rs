@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Transaction scorer: priority computation
 
-use spora_exec::CellTx;
+use myelin_exec::CellTx;
 
 /// Transaction score components
 #[derive(Clone, Debug, PartialEq)]
@@ -121,13 +121,13 @@ impl TransactionScorer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spora_exec::{CellInput, CellOutput, OutPoint, Script};
+    use myelin_exec::{CellInput, CellOutput, OutPoint, Script};
 
     fn create_test_tx(num_inputs: usize, num_deps: usize) -> CellTx {
         let lock = Script::new([0x00; 32], 0, vec![0; 20]);
         let inputs = (0..num_inputs).map(|i| CellInput::new(OutPoint::new([i as u8; 32], 0), 0)).collect();
         let deps = (0..num_deps)
-            .map(|i| spora_exec::CellDep { out_point: OutPoint::new([100 + i as u8; 32], 0), dep_type: spora_exec::DepType::Code })
+            .map(|i| myelin_exec::CellDep { out_point: OutPoint::new([100 + i as u8; 32], 0), dep_type: myelin_exec::DepType::Code })
             .collect();
 
         CellTx::new(inputs, deps, vec![CellOutput { lock, type_: None, capacity: 1000 }], vec![vec![]], vec![vec![0; 65]]).unwrap()
@@ -192,5 +192,4 @@ mod tests {
         // Higher cycles → lower fee density (larger effective size)
         assert!(score_low_cycles.fee_density > score_high_cycles.fee_density);
     }
-
 }

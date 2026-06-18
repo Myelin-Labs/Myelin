@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Secp256k1 + Blake3 Lock Script
 // Compile to RISC-V binary for use in CKB-VM
@@ -13,7 +13,7 @@
 #include <stddef.h>
 
 // ============================================================================
-// Spora Syscall Definitions
+// Myelin Syscall Definitions
 // ============================================================================
 
 #define LOAD_SCRIPT_HASH_SYSCALL 2062
@@ -21,9 +21,9 @@
 #define LOAD_INPUT_SYSCALL       2073
 #define LOAD_WITNESS_SYSCALL     2074
 #define LOAD_SCRIPT_SYSCALL      2075
-#define BLAKE3_HASH_SYSCALL      3001  // ← Spora extension!
-#define SECP256K1_VERIFY_SYSCALL 3002  // ← Spora extension!
-#define LOAD_ECDSA_SIGHASH_SYSCALL 3004 // ← Spora extension!
+#define BLAKE3_HASH_SYSCALL      3001  // ← Myelin extension!
+#define SECP256K1_VERIFY_SYSCALL 3002  // ← Myelin extension!
+#define LOAD_ECDSA_SIGHASH_SYSCALL 3004 // ← Myelin extension!
 
 #define SUCCESS              0
 #define INDEX_OUT_OF_BOUND   1
@@ -101,7 +101,7 @@ static inline int load_script(
     return syscall(LOAD_SCRIPT_SYSCALL, (uint64_t)buf, (uint64_t)len, offset, 0, 0, 0);
 }
 
-// Blake3 hash (Spora-specific!)
+// Blake3 hash (Myelin-specific!)
 static inline int blake3_hash(
     uint8_t* output,
     const uint8_t* input,

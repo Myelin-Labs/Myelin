@@ -1,6 +1,6 @@
-# Spora Standard Scripts
+# Myelin Standard Scripts
 
-This directory contains standard lock and type scripts for Spora.
+This directory contains standard lock and type scripts for Myelin.
 
 ## Lock Scripts
 
@@ -11,17 +11,17 @@ This directory contains standard lock and type scripts for Spora.
 **Files**:
 - `timelock.rs` - Rust helper module for constructing time lock Scripts
 - `timelock_absolute.c` - C source for absolute timestamp lock, reading target args via `LOAD_SCRIPT`
-- `timelock_relative.c` - C source for relative DAA score lock, reading target args via `LOAD_SCRIPT`
+- `timelock_relative.c` - C source for relative block number lock, reading target args via `LOAD_SCRIPT`
 
 **Features**:
 - Absolute timestamp lock (Unix timestamp)
-- Relative DAA score lock (block count)
-- Absolute DAA score lock
+- Relative block number lock (block count)
+- Absolute block number lock
 - Relative timestamp lock
 
 **Usage**:
 ```rust
-use spora_exec::scripts::timelock;
+use myelin_exec::scripts::timelock;
 
 // Absolute timestamp lock (e.g., lock until 2025-01-01)
 let target_timestamp = 1735689600u64;
@@ -38,8 +38,8 @@ let input = CellInput::new(outpoint, since);
 let since = timelock::encode_absolute_timestamp_since(timestamp);
 // Bits: 01xxxxxxxx (bit63=0, bit62=1, bits0-55=timestamp)
 
-// Relative DAA score
-let since = timelock::encode_relative_daa_since(delta_blocks);
+// Relative block number
+let since = timelock::encode_relative_block_number_since(delta_blocks);
 // Bits: 10xxxxxxxx (bit63=1, bit62=0, bits0-55=delta)
 ```
 
@@ -49,7 +49,7 @@ let since = timelock::encode_relative_daa_since(delta_blocks);
 |--------------|------------------------|
 | `pay_to_pub_key_with_lock_time` | `timelock::absolute_timestamp_lock` + proper `since` |
 | `htlc_script` | Custom CKB-VM script with `since` + signature verification |
-| `OP_CHECKSEQUENCEVERIFY` | `timelock::relative_daa_lock` + `encode_relative_daa_since` |
+| `OP_CHECKSEQUENCEVERIFY` | `timelock::relative_block_number_lock` + `encode_relative_block_number_since` |
 
 ### 2. Time Lock Fixtures (CKB-VM)
 
@@ -59,7 +59,7 @@ let since = timelock::encode_relative_daa_since(delta_blocks);
 - Target: 2025-01-01 00:00:00 UTC (1735689600)
 - Verifies: `since` >= target with bit63=0, bit62=1
 
-**Relative DAA Lock**
+**Relative block number Lock**
 - Source: `fixtures/timelock_relative.rs`
 - Binary: `fixtures/timelock_relative.elf`
 - Target: 100 blocks
@@ -67,8 +67,8 @@ let since = timelock::encode_relative_daa_since(delta_blocks);
 
 **Usage:**
 ```rust
-use spora_exec::scripts::{timelock_absolute_code_hash, TIMELOCK_ABSOLUTE_SCRIPT};
-use spora_exec::scripts::timelock::encode_absolute_timestamp_since;
+use myelin_exec::scripts::{timelock_absolute_code_hash, TIMELOCK_ABSOLUTE_SCRIPT};
+use myelin_exec::scripts::timelock::encode_absolute_timestamp_since;
 
 let code_hash = timelock_absolute_code_hash();
 let since = encode_absolute_timestamp_since(1735689600);
@@ -90,7 +90,7 @@ let since = encode_absolute_timestamp_since(1735689600);
 
 **Usage**:
 ```rust
-use spora_exec::scripts::{load_ecdsa_signature_hash_code_hash, LOAD_ECDSA_SIGNATURE_HASH_SCRIPT};
+use myelin_exec::scripts::{load_ecdsa_signature_hash_code_hash, LOAD_ECDSA_SIGNATURE_HASH_SCRIPT};
 
 let code_hash = load_ecdsa_signature_hash_code_hash();
 let expected_digest = [0u8; 32];
@@ -106,7 +106,7 @@ let witness = expected_digest.into_iter().chain([0x01]).collect::<Vec<_>>();
 - Two spending paths:
   1. Recipient path: secret preimage + signature
   2. Sender timeout path: signature after timelock expires
-- Supports all four lock types (absolute/relative DAA/timestamp)
+- Supports all four lock types (absolute/relative block number/timestamp)
 - Uses blake3 for secret hash verification
 - Uses a deterministic fixture-only signature rule in tests, not real secp256k1 verification
 
@@ -123,7 +123,7 @@ let witness = expected_digest.into_iter().chain([0x01]).collect::<Vec<_>>();
 
 **Usage:**
 ```rust
-use spora_exec::scripts::{htlc_code_hash, HTLC_SCRIPT};
+use myelin_exec::scripts::{htlc_code_hash, HTLC_SCRIPT};
 
 let code_hash = htlc_code_hash();
 let args = build_htlc_args(secret_hash, recipient_pubkey, sender_pubkey, lock_type, lock_value);
@@ -139,7 +139,7 @@ Source file:
 
 **Usage**:
 ```rust
-use spora_exec::scripts::{ALWAYS_SUCCESS_SCRIPT, always_success_code_hash};
+use myelin_exec::scripts::{ALWAYS_SUCCESS_SCRIPT, always_success_code_hash};
 
 let lock = Script {
     code_hash: always_success_code_hash(),
@@ -153,7 +153,7 @@ let lock = Script {
 **File**: `secp256k1_blake3_lock.c`
 
 **Functionality**:
-- Verifies secp256k1 signatures using **blake3** for hashing (Spora-specific!)
+- Verifies secp256k1 signatures using **blake3** for hashing (Myelin-specific!)
 - Args: pubkey hash (20 bytes, blake3 of pubkey)
 - Witness: recoverable signature (65 bytes, r + s + v), optionally followed by 1-byte sighash flag
 - Loads the canonical per-input ECDSA sighash from VM syscall `3004`
@@ -179,12 +179,12 @@ riscv64-unknown-elf-objcopy -O binary \
     secp256k1_blake3_lock.bin
 
 # Get code hash
-cargo run -p spora-exec --example fixture_hashes -- secp256k1_blake3_lock.bin
+cargo run -p myelin-exec --example fixture_hashes -- secp256k1_blake3_lock.bin
 ```
 
 **Verification**:
-- Script-level regression tests: `cargo test -p spora-exec --lib`
-- Consensus integration: `cargo test -p spora-consensus --features vm --lib`
+- Script-level regression tests: `cargo test -p myelin-exec --lib`
+- Consensus integration: `cargo test -p myelin-consensus --features vm --lib`
 - Syscall 3002 tests: `exec/src/vm/syscalls/secp256k1_verify.rs` (5 test cases covering valid signatures, tampered signatures, invalid recovery ids, high-S attacks)
 
 **Build**:
@@ -208,7 +208,7 @@ riscv64-unknown-elf-objcopy -O binary \
 blake3sum secp256k1_blake3_lock.bin
 
 # If blake3sum/b3sum is unavailable, use workspace helper
-cargo run -p spora-exec --example fixture_hashes -- secp256k1_blake3_lock.bin
+cargo run -p myelin-exec --example fixture_hashes -- secp256k1_blake3_lock.bin
 
 # For fixture ELFs, use the batch builder (also writes CODE_HASHES.blake3)
 bash exec/src/scripts/fixtures/build_fixtures.sh
@@ -235,13 +235,13 @@ let output = CellOutput {
 
 ## Key Differences from CKB
 
-| Feature | CKB | Spora |
+| Feature | CKB | Myelin |
 |---------|-----|-------|
 | Sighash | blake2b | **blake3** |
 | VM syscalls | 9 standard | 9 standard + **blake3_hash** |
 | Binary format | Same RISC-V | Same RISC-V ✅ |
 
-**Important**: CKB scripts need to be **recompiled** for Spora because:
+**Important**: CKB scripts need to be **recompiled** for Myelin because:
 1. Sighash uses blake3 (not blake2b)
 2. Tx hash uses blake3
 3. Script hash uses blake3
@@ -272,7 +272,7 @@ Use the always-success script for initial testing:
 ```rust
 #[test]
 fn test_always_success() {
-    use spora_exec::vm::{TransactionScriptVerifier, SimpleDataProvider};
+    use myelin_exec::vm::{TransactionScriptVerifier, SimpleDataProvider};
     
     // Create provider with always-success script
     let mut provider = SimpleDataProvider::new();
@@ -330,7 +330,7 @@ fn test_always_success() {
 
 ### Building Custom Scripts
 
-1. Write script in C (using Spora syscalls)
+1. Write script in C (using Myelin syscalls)
 2. Compile to RISC-V binary
 3. Compute blake3 code hash
 4. Deploy as cell data in genesis or via transaction

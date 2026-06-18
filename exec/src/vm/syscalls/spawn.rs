@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Spawn syscall
 
@@ -35,13 +35,13 @@ struct SpawnRuntime {
 
 impl Spawn {
     pub fn new() -> Self {
-        Self { runtime: None, semantics: VmSemantics::SporaExtended }
+        Self { runtime: None, semantics: VmSemantics::MyelinExtended }
     }
 
     pub fn with_runtime(id: VmId, runtime: &VmRuntime, program_resolver: ProgramResolver) -> Self {
         Self {
             runtime: Some(SpawnRuntime { id, message_box: Arc::clone(&runtime.message_box), program_resolver }),
-            semantics: VmSemantics::SporaExtended,
+            semantics: VmSemantics::MyelinExtended,
         }
     }
 

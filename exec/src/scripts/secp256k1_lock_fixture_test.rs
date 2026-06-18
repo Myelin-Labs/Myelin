@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Secp256k1 lock fixture test
 
@@ -11,8 +11,8 @@ mod tests {
     use crate::serialization::VmAbiFormat;
     use crate::vm::syscalls::load_signature_hash::standard_signing_input_from_resolved_cell;
     use crate::vm::{ResolvedCell, ScriptVersion, SimpleDataProvider, TransactionScriptVerifier};
+    use myelin_hashes::Hash;
     use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
-    use spora_hashes::Hash;
     use std::sync::Arc;
 
     #[derive(Clone, Copy)]
@@ -102,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn test_secp256k1_lock_fixture_accepts_valid_signature() {
+    fn test_secp256k1_lock_fixture_rejects_non_molecule_fixture() {
         let code_hash = secp256k1_lock_fixture_code_hash();
         let input_out_point = OutPoint::new([0x81; 32], 0);
         let secret_key = SecretKey::from_slice(&[0x11; 32]).expect("secret key");
@@ -116,11 +116,11 @@ mod tests {
         let tx = CellTx { witnesses: vec![witness], ..tx_without_witness };
         let provider = build_provider(code_hash, input_out_point, resolved_input);
         let verifier = TransactionScriptVerifier::new(Arc::new(tx), Arc::new(provider))
-            .with_abi_format(VmAbiFormat::Legacy)
+            .with_abi_format(VmAbiFormat::Molecule)
             .with_version(ScriptVersion::V2)
             .with_max_cycles(400_000);
 
-        assert!(verifier.verify().is_ok());
+        assert!(verifier.verify().is_err(), "legacy secp256k1 fixture should not validate under Molecule-only VM ABI");
     }
 
     #[test]
@@ -139,7 +139,7 @@ mod tests {
         let tx = CellTx { witnesses: vec![witness], ..tx_without_witness };
         let provider = build_provider(code_hash, input_out_point, resolved_input);
         let verifier = TransactionScriptVerifier::new(Arc::new(tx), Arc::new(provider))
-            .with_abi_format(VmAbiFormat::Legacy)
+            .with_abi_format(VmAbiFormat::Molecule)
             .with_version(ScriptVersion::V2)
             .with_max_cycles(400_000);
 

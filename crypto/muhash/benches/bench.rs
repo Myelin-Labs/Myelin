@@ -4,7 +4,7 @@ use rand_chacha::{
     ChaCha8Rng,
 };
 
-use spora_muhash::MuHash;
+use myelin_muhash::MuHash;
 
 fn bench_muhash(c: &mut Criterion) {
     let mut rng = ChaCha8Rng::from_seed([42u8; 32]);

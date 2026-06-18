@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Load-header-timestamp lock script test
 
@@ -28,19 +28,19 @@ mod tests {
             ResolvedHeader {
                 hash: header_hash,
                 version: 1,
-                parents_by_level: vec![vec![[0x99; 32], [0xAA; 32]]],
-                hash_merkle_root: [0x11; 32],
-                accepted_id_merkle_root: [0x12; 32],
+                parent_hash: [0x99; 32],
+                transactions_root: [0x11; 32],
+                proposals_hash: [0x12; 32],
                 cell_commitment: [0x13; 32],
                 cell_root: [0x14; 32],
                 segment_root: [0x15; 32],
                 timestamp,
-                bits: 0x1d00_ffff,
+                compact_target: 0x1d00_ffff,
                 nonce: 0,
-                daa_score: 42,
-                blue_work: [0x16; 24],
-                blue_score: 7,
-                pruning_point: [0x17; 32],
+                number: 42,
+                dao: [0x16; 32],
+                epoch: 7,
+                uncles_hash: [0x17; 32],
             },
         );
         provider

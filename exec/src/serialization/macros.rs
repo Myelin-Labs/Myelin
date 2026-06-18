@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Serialization Macros
 //
@@ -16,10 +16,9 @@
 /// # Example
 ///
 /// ```rust
-/// use spora_exec::{impl_versioned_serializable, VersionedSerializable};
-/// use borsh::{BorshSerialize, BorshDeserialize};
+/// use myelin_exec::{impl_versioned_serializable, VersionedSerializable};
 ///
-/// #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+/// #[derive(Clone, Debug, PartialEq, Eq)]
 /// struct MyData {
 ///     value: u64,
 /// }
@@ -37,43 +36,18 @@ macro_rules! impl_versioned_serializable {
     };
 }
 
-/// 为类型实现 VmSerializable trait
+/// Disabled legacy helper for implementing `VmSerializable`.
 ///
-/// # Example
-///
-/// ```rust
-/// use spora_exec::{impl_vm_serializable, VmSerializable};
-/// use borsh::{BorshSerialize, BorshDeserialize};
-///
-/// #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
-/// struct MyVmData {
-///     value: u64,
-/// }
-///
-/// impl_vm_serializable!(MyVmData, 0x0001);
-///
-/// assert_eq!(MyVmData::abi_version(), 0x0001);
-/// ```
+/// This macro used to emit legacy VM bytes. Public VM ABI is now Molecule-only
+/// by default, so new VM-visible types must implement `VmSerializable`
+/// explicitly and return a Molecule ABI version.
 #[macro_export]
 macro_rules! impl_vm_serializable {
-    ($type:ty, $abi_version:expr) => {
-        impl $crate::serialization::VmSerializable for $type {
-            fn to_vm_bytes(&self) -> Vec<u8> {
-                // Borsh 序列化理论上不应失败，但如果失败，返回空 Vec 而不是 panic
-                // 调用者应检查返回的 Vec 是否为空
-                borsh::to_vec(self).unwrap_or_default()
-            }
-
-            fn from_vm_bytes(bytes: &[u8]) -> Result<Self, $crate::serialization::VmAbiError> {
-                use borsh::BorshDeserialize;
-                BorshDeserialize::try_from_slice(bytes)
-                    .map_err(|e| $crate::serialization::VmAbiError::DeserializationFailed(e.to_string()))
-            }
-
-            fn abi_version() -> u16 {
-                $abi_version
-            }
-        }
+    ($($tokens:tt)*) => {
+        compile_error!(
+            "impl_vm_serializable! was removed because it emitted legacy VM bytes. \
+             Implement VmSerializable explicitly with Molecule bytes instead."
+        );
     };
 }
 
@@ -82,13 +56,12 @@ macro_rules! impl_vm_serializable {
 /// # Example
 ///
 /// ```rust
-/// use spora_exec::{impl_versioned_serializable_batch};
-/// use borsh::{BorshSerialize, BorshDeserialize};
+/// use myelin_exec::{impl_versioned_serializable_batch};
 ///
-/// #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+/// #[derive(Clone, Debug, PartialEq, Eq)]
 /// struct TypeA { value: u32 }
 ///
-/// #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+/// #[derive(Clone, Debug, PartialEq, Eq)]
 /// struct TypeB { value: u64 }
 ///
 /// impl_versioned_serializable_batch! {
@@ -105,31 +78,14 @@ macro_rules! impl_versioned_serializable_batch {
     };
 }
 
-/// 为多个类型批量实现 VmSerializable
-///
-/// # Example
-///
-/// ```rust
-/// use spora_exec::{impl_vm_serializable_batch};
-/// use borsh::{BorshSerialize, BorshDeserialize};
-///
-/// #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
-/// struct TypeA { value: u32 }
-///
-/// #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
-/// struct TypeB { value: u64 }
-///
-/// impl_vm_serializable_batch! {
-///     (TypeA, 0x0001),
-///     (TypeB, 0x0001)
-/// }
-/// ```
+/// Disabled batch helper for legacy VM ABI implementations.
 #[macro_export]
 macro_rules! impl_vm_serializable_batch {
-    ($(($type:ty, $abi_version:expr)),+ $(,)?) => {
-        $(
-            $crate::impl_vm_serializable!($type, $abi_version);
-        )+
+    ($($tokens:tt)*) => {
+        compile_error!(
+            "impl_vm_serializable_batch! was removed because it emitted legacy VM bytes. \
+             Implement VmSerializable explicitly with Molecule bytes instead."
+        );
     };
 }
 
@@ -138,7 +94,7 @@ macro_rules! impl_vm_serializable_batch {
 /// # Example
 ///
 /// ```rust
-/// use spora_exec::{envelope, CellOutput, Script};
+/// use myelin_exec::{envelope, CellOutput, Script};
 ///
 /// let output = CellOutput {
 ///     lock: Script::new([0xAA; 32], 0, vec![]),
@@ -160,7 +116,7 @@ macro_rules! envelope {
 /// # Example
 ///
 /// ```rust
-/// use spora_exec::{serialize, CellOutput, Script};
+/// use myelin_exec::{serialize, CellOutput, Script};
 ///
 /// let output = CellOutput {
 ///     lock: Script::new([0xAA; 32], 0, vec![]),
@@ -182,7 +138,7 @@ macro_rules! serialize {
 /// # Example
 ///
 /// ```rust
-/// use spora_exec::{serialize, deserialize, CellOutput, Script};
+/// use myelin_exec::{serialize, deserialize, CellOutput, Script};
 ///
 /// # let output = CellOutput {
 /// #     lock: Script::new([0xAA; 32], 0, vec![]),
@@ -207,13 +163,12 @@ macro_rules! deserialize {
 /// # Example
 ///
 /// ```rust
-/// use spora_exec::{define_schema_version, VersionedSerializable};
-/// use borsh::{BorshSerialize, BorshDeserialize};
+/// use myelin_exec::{define_schema_version, VersionedSerializable};
 ///
-/// #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+/// #[derive(Clone, Debug, PartialEq, Eq)]
 /// struct TypeA { value: u32 }
 ///
-/// #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+/// #[derive(Clone, Debug, PartialEq, Eq)]
 /// struct TypeB { value: u64 }
 ///
 /// define_schema_version!(MY_SCHEMA_VERSION = 1, TypeA, TypeB);
@@ -235,21 +190,14 @@ macro_rules! define_schema_version {
 
 #[cfg(test)]
 mod tests {
-    use crate::serialization::{VersionedSerializable, VmSerializable};
-    use borsh::{BorshDeserialize, BorshSerialize};
+    use crate::serialization::{SerializationError, VersionedSerializable};
 
-    #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq, Hash)]
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     struct TestData {
         value: u64,
     }
 
-    #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
-    struct TestVmData {
-        value: u64,
-    }
-
     impl_versioned_serializable!(TestData, 5);
-    impl_vm_serializable!(TestVmData, 0x1234);
 
     #[test]
     fn test_impl_versioned_serializable() {
@@ -260,23 +208,13 @@ mod tests {
     }
 
     #[test]
-    fn test_impl_vm_serializable() {
-        assert_eq!(TestVmData::abi_version(), 0x1234);
-
-        let data = TestVmData { value: 42 };
-        let bytes = data.to_vm_bytes();
-        let restored = TestVmData::from_vm_bytes(&bytes).unwrap();
-        assert_eq!(data, restored);
-    }
-
-    #[test]
     fn test_impl_versioned_serializable_batch() {
-        #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+        #[derive(Clone, Debug, PartialEq, Eq)]
         struct TypeA {
             value: u32,
         }
 
-        #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+        #[derive(Clone, Debug, PartialEq, Eq)]
         struct TypeB {
             value: u64,
         }
@@ -292,11 +230,21 @@ mod tests {
 
     #[test]
     fn test_envelope_macro() {
-        #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+        #[derive(Clone, Debug, PartialEq, Eq)]
         struct EnvelopeData {
             value: u64,
         }
-        impl_versioned_serializable!(EnvelopeData, 1);
+        impl VersionedSerializable for EnvelopeData {
+            const CURRENT_VERSION: u8 = 1;
+
+            fn to_versioned_payload(&self) -> Result<Vec<u8>, SerializationError> {
+                Ok(self.value.to_le_bytes().to_vec())
+            }
+
+            fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
+                decode_u64_payload(version, bytes).map(|value| Self { value })
+            }
+        }
 
         let data = EnvelopeData { value: 42 };
         let envelope = envelope!(data).unwrap();
@@ -305,11 +253,21 @@ mod tests {
 
     #[test]
     fn test_serialize_macro() {
-        #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+        #[derive(Clone, Debug, PartialEq, Eq)]
         struct SerializeData {
             value: u64,
         }
-        impl_versioned_serializable!(SerializeData, 1);
+        impl VersionedSerializable for SerializeData {
+            const CURRENT_VERSION: u8 = 1;
+
+            fn to_versioned_payload(&self) -> Result<Vec<u8>, SerializationError> {
+                Ok(self.value.to_le_bytes().to_vec())
+            }
+
+            fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
+                decode_u64_payload(version, bytes).map(|value| Self { value })
+            }
+        }
 
         let data = SerializeData { value: 42 };
         let bytes = serialize!(data).unwrap();
@@ -318,11 +276,21 @@ mod tests {
 
     #[test]
     fn test_deserialize_macro() {
-        #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+        #[derive(Clone, Debug, PartialEq, Eq)]
         struct DeserializeData {
             value: u64,
         }
-        impl_versioned_serializable!(DeserializeData, 1);
+        impl VersionedSerializable for DeserializeData {
+            const CURRENT_VERSION: u8 = 1;
+
+            fn to_versioned_payload(&self) -> Result<Vec<u8>, SerializationError> {
+                Ok(self.value.to_le_bytes().to_vec())
+            }
+
+            fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
+                decode_u64_payload(version, bytes).map(|value| Self { value })
+            }
+        }
 
         let data = DeserializeData { value: 42 };
         let bytes = serialize!(data).unwrap();
@@ -332,11 +300,21 @@ mod tests {
 
     #[test]
     fn test_deserialize_macro_with_type() {
-        #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+        #[derive(Clone, Debug, PartialEq, Eq)]
         struct DeserializeTypedData {
             value: u64,
         }
-        impl_versioned_serializable!(DeserializeTypedData, 1);
+        impl VersionedSerializable for DeserializeTypedData {
+            const CURRENT_VERSION: u8 = 1;
+
+            fn to_versioned_payload(&self) -> Result<Vec<u8>, SerializationError> {
+                Ok(self.value.to_le_bytes().to_vec())
+            }
+
+            fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
+                decode_u64_payload(version, bytes).map(|value| Self { value })
+            }
+        }
 
         let data = DeserializeTypedData { value: 42 };
         let bytes = serialize!(data).unwrap();
@@ -346,12 +324,12 @@ mod tests {
 
     #[test]
     fn test_define_schema_version() {
-        #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+        #[derive(Clone, Debug, PartialEq, Eq)]
         struct SchemaTypeA {
             value: u32,
         }
 
-        #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+        #[derive(Clone, Debug, PartialEq, Eq)]
         struct SchemaTypeB {
             value: u64,
         }
@@ -361,5 +339,15 @@ mod tests {
         assert_eq!(TEST_SCHEMA_VERSION, 3);
         assert_eq!(SchemaTypeA::CURRENT_VERSION, 3);
         assert_eq!(SchemaTypeB::CURRENT_VERSION, 3);
+    }
+
+    fn decode_u64_payload(version: u8, bytes: &[u8]) -> Result<u64, SerializationError> {
+        if version != 1 {
+            return Err(SerializationError::UpgradePathNotAvailable { from: version, to: 1 });
+        }
+        if bytes.len() != 8 {
+            return Err(SerializationError::DeserializationFailed("expected u64 payload".to_string()));
+        }
+        Ok(u64::from_le_bytes(bytes.try_into().expect("slice length checked")))
     }
 }

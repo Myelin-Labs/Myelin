@@ -43,6 +43,7 @@ check_trailing_whitespace() {
         "docs/archive/0.13/CELLSCRIPT_0_13_1_PLAN.md"
         "docs/archive/0.13/CELLSCRIPT_SIGNATURE_DIRECTION_EXECUTION_PLAN.md"
         "docs/CELLSCRIPT_CKB_DEPLOYMENT_MANIFEST.md"
+        "docs/CELLSCRIPT_CELLFABRIC_BRIDGE.md"
         "docs/CELLSCRIPT_CAPACITY_AND_BUILDER_CONTRACT.md"
         "docs/CELLSCRIPT_ENTRY_WITNESS_ABI.md"
         "docs/CELLSCRIPT_0_20_ROADMAP.md"
@@ -62,6 +63,7 @@ check_trailing_whitespace() {
         "scripts/cellscript_ckb_release_gate.sh"
         "scripts/cellscript_syntax_combo_audit.sh"
         "scripts/cellscript_syntax_combo_audit.py"
+        "scripts/cellscript_cellfabric_bridge_smoke.sh"
         "scripts/ckb_cellscript_acceptance.sh"
         "scripts/validate_cellscript_tooling_release.py"
         "scripts/validate_ckb_cellscript_production_evidence.py"
@@ -94,6 +96,8 @@ check_release_roadmap_docs() {
         'docs/CELLSCRIPT_0_20_ROADMAP.md::Generated Action Builder'
         'docs/CELLSCRIPT_0_20_ROADMAP.md::VS Code extension'
         'docs/CELLSCRIPT_0_20_ROADMAP.md::CellFabric is frozen'
+        'docs/CELLSCRIPT_0_20_ROADMAP.md::cellc action build --fabric-intent'
+        'docs/CELLSCRIPT_CELLFABRIC_BRIDGE.md::cellscript-cellfabric-intent-envelope-v0.20'
         'docs/wiki/Tutorial-07-LSP-and-Tooling.md::CellScript: Generate TypeScript Action Builder'
         'docs/wiki/Tutorial-07-LSP-and-Tooling.md::cellscript.builderOutputDir'
     )
@@ -206,6 +210,129 @@ check_grammar_governance_regression() {
     printf 'Grammar governance regression check passed.\n'
 }
 
+# Structural invariant: the NovaSeal certification surface must not be lost
+# again. After the 0.17 merge accidentally dropped src/cli/novaseal_certification.rs
+# and the cellc certify subcommand, every release gate must verify the four
+# pieces that wire it together still exist. This check is deliberately text-grep
+# based so it catches any future merge that drops the file or forgets to
+# re-register the module, dispatcher, or main.rs whitelist entry.
+check_novaseal_certify_invariant() {
+    local missing=0
+    if [ ! -f "src/cli/novaseal_certification.rs" ]; then
+        printf 'NovaSeal certifier invariant: src/cli/novaseal_certification.rs is missing\n' >&2
+        missing=1
+    fi
+    if ! rg --quiet -n '^mod novaseal_certification;' src/cli/mod.rs; then
+        printf 'NovaSeal certifier invariant: src/cli/mod.rs does not declare mod novaseal_certification;\n' >&2
+        missing=1
+    fi
+    if ! rg --quiet -n 'Command::Certify' src/cli/commands.rs; then
+        printf 'NovaSeal certifier invariant: src/cli/commands.rs does not dispatch Command::Certify\n' >&2
+        missing=1
+    fi
+    if ! rg --quiet -n '\|\s*"certify"' src/main.rs; then
+        printf 'NovaSeal certifier invariant: src/main.rs whitelist does not include "certify"\n' >&2
+        missing=1
+    fi
+    if [ "$missing" -ne 0 ]; then
+        exit 1
+    fi
+    printf 'NovaSeal certifier structural invariant passed.\n'
+}
+
+# Runtime invariant: the built cellc binary must actually expose certify and
+# refuse to silently no-op. We do not assert pass/fail of the certification
+# (that depends on fresh live reports). We only assert the binary knows the
+# subcommand, the plugin id is wired, and the produced JSON has the expected
+# schema. This is the gate that catches future drift after the merge.
+check_novaseal_certify_runs() {
+    local cellc_bin="target/debug/cellc"
+    if [ ! -x "$cellc_bin" ]; then
+        run cargo build --locked -p cellscript --bin cellc
+        cellc_bin="target/debug/cellc"
+    fi
+    if ! "$cellc_bin" certify --help >/dev/null 2>&1; then
+        printf 'NovaSeal certifier runtime: cellc certify --help failed\n' >&2
+        exit 1
+    fi
+    local cert_report
+    cert_report="$(mktemp)"
+    local exit_code=0
+    "$cellc_bin" certify --plugin novaseal-profile-v0 --repo-root . --output "$cert_report" >/dev/null 2>&1 || exit_code=$?
+    if [ ! -s "$cert_report" ]; then
+        printf 'NovaSeal certifier runtime: cellc certify did not write a report to %s\n' "$cert_report" >&2
+        rm -f "$cert_report"
+        exit 1
+    fi
+    local schema
+    schema="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('schema',''))" "$cert_report" 2>/dev/null || true)"
+    rm -f "$cert_report"
+    if [ "$schema" != "cellscript-certification-report-v0.1" ]; then
+        printf 'NovaSeal certifier runtime: unexpected certification schema "%s"\n' "$schema" >&2
+        exit 1
+    fi
+    # exit_code is informational; we do not fail on certification outcome
+    # because the only thing this gate protects is "certify still works".
+    printf 'NovaSeal certifier runtime check passed (certify exit=%d, schema=%s).\n' "$exit_code" "$schema"
+}
+
+# Phase 1 end-to-end invariant. The 0.19 closure shipped the package / lockfile
+# / Deployed.toml data model and the 0.20 close-out had to (1) reject
+# self-dependency writes from cellc install / cellc add, and (2) make
+# cellc build actually bridge Deployed.toml deployment records into
+# Cell.lock.[deployment.<network>] so that cellc registry verify can pass
+# end-to-end without manual patching. Both invariants used to be missing
+# and would silently re-regress on any future refactor. This check
+# text-greps the source tree to catch a regression before it ships.
+check_phase1_end_to_end_invariant() {
+    local missing=0
+
+    # Bug 1: cellc install --path <self_root> used to write a [dependencies.""]
+    # row that broke every subsequent cellc build with a circular-dep error.
+    # Reject any self-dependency write at the cellc install / cellc add
+    # boundary.
+    if ! rg --quiet -n 'fn validate_not_self_dependency' src/cli/commands.rs; then
+        printf 'Phase 1 end-to-end invariant: src/cli/commands.rs does not declare fn validate_not_self_dependency\n' >&2
+        missing=1
+    fi
+    if ! rg --quiet -n 'validate_not_self_dependency' src/cli/commands.rs; then
+        printf 'Phase 1 end-to-end invariant: validate_not_self_dependency is declared but never called from src/cli/commands.rs\n' >&2
+        missing=1
+    fi
+
+    # Bug 2: cellc build must bridge Deployed.toml deployment records into
+    # Cell.lock.[deployment.<network>] so that registry verify can pass.
+    if ! rg --quiet -n 'fn refresh_lockfile_deployment_refs' src/cli/commands.rs; then
+        printf 'Phase 1 end-to-end invariant: src/cli/commands.rs does not declare fn refresh_lockfile_deployment_refs\n' >&2
+        missing=1
+    fi
+    # The call must be inside refresh_lockfile_from_build (not just sitting in
+    # the file as a no-op), so look for the un-commented invocation form.
+    if ! rg --quiet -n '^\s*refresh_lockfile_deployment_refs\(' src/cli/commands.rs; then
+        printf 'Phase 1 end-to-end invariant: refresh_lockfile_deployment_refs is not invoked from refresh_lockfile_from_build\n' >&2
+        missing=1
+    fi
+
+    # Test coverage for both fixes. These tests are the only thing that
+    # will catch a future refactor that breaks either invariant.
+    for test_name in \
+        cellc_install_rejects_self_path_dependency \
+        cellc_install_rejects_self_name_dependency \
+        cellc_add_rejects_self_name_dependency \
+        cellc_build_writes_lockfile_deployment_ref_from_deployed_toml \
+        cellc_build_omits_lockfile_deployment_when_artifact_hash_mismatches; do
+        if ! rg --quiet -n "fn ${test_name}\b" tests/cli.rs; then
+            printf 'Phase 1 end-to-end invariant: tests/cli.rs is missing the %s integration test\n' "$test_name" >&2
+            missing=1
+        fi
+    done
+
+    if [ "$missing" -ne 0 ]; then
+        exit 1
+    fi
+    printf 'Phase 1 end-to-end invariant passed.\n'
+}
+
 check_action_builder_toolchain() {
     local output_dir
     output_dir="${TMPDIR:-/tmp}/cellscript-release-gate-builder-$MODE"
@@ -237,6 +364,7 @@ run_common_gate() {
     run bash -n scripts/ckb_cellscript_acceptance.sh
     run bash -n scripts/cellscript_ckb_release_gate.sh
     run bash -n scripts/cellscript_syntax_combo_audit.sh
+    run bash -n scripts/cellscript_cellfabric_bridge_smoke.sh
     run python3 -m py_compile scripts/cellscript_syntax_combo_audit.py
     run ./scripts/cellscript_syntax_combo_audit.sh quick
     run npm --prefix editors/vscode-cellscript run validate
@@ -248,6 +376,9 @@ run_common_gate() {
     check_ckb_release_docs
     check_ckb_acceptance_boundaries
     check_grammar_governance_regression
+    check_novaseal_certify_invariant
+    check_novaseal_certify_runs
+    check_phase1_end_to_end_invariant
 }
 
 run_quick_gate() {
@@ -268,15 +399,13 @@ run_production_gate() {
 
 case "$MODE" in
     quick)
-        run_quick_gate
+        exec "$ROOT_DIR/scripts/cellscript_gate.sh" release-quick "$@"
         ;;
     production|full)
-        run_production_gate
+        exec "$ROOT_DIR/scripts/cellscript_gate.sh" release "$@"
         ;;
     *)
         printf 'usage: %s [quick|production|full]\n' "$0" >&2
         exit 2
         ;;
 esac
-
-printf '\nCellScript CKB %s release gate passed.\n' "$MODE"

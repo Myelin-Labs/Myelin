@@ -11,8 +11,6 @@ pub struct Parser<'a> {
 struct PendingAttrs {
     type_id: Option<TypeIdentity>,
     capabilities: Option<Vec<Capability>>,
-    identity: Option<IdentityPolicy>,
-    conflict_key: Option<ConflictKeyPolicy>,
     effect: Option<EffectClass>,
     scheduler_hint: Option<SchedulerHint>,
 }
@@ -22,7 +20,6 @@ struct TypePolicyDecls {
     default_hash_type: Option<HashTypeDecl>,
     capacity_floor: Option<CapacityFloorDecl>,
     identity: Option<IdentityPolicy>,
-    conflict_key: Option<ConflictKeyPolicy>,
 }
 
 impl<'a> Parser<'a> {
@@ -273,18 +270,6 @@ impl<'a> Parser<'a> {
                     }
                     attrs.type_id = Some(TypeIdentity { value, span });
                 }
-                "identity" => {
-                    if attrs.identity.is_some() {
-                        return Err(CompileError::new("duplicate identity attribute", self.current().span));
-                    }
-                    attrs.identity = Some(self.parse_identity_policy_body()?);
-                }
-                "conflict_key" => {
-                    if attrs.conflict_key.is_some() {
-                        return Err(CompileError::new("duplicate conflict_key attribute", self.current().span));
-                    }
-                    attrs.conflict_key = Some(self.parse_conflict_key_policy_body()?);
-                }
                 "effect" => {
                     let mut has_mutating = false;
                     let mut has_creating = false;
@@ -396,43 +381,10 @@ impl<'a> Parser<'a> {
                 self.reject_type_id_attr(&attrs)?;
                 Ok(Item::Use(self.parse_use()?))
             }
-            TokenKind::Resource => {
-                if attrs.effect.is_some() || attrs.scheduler_hint.is_some() {
-                    return Err(CompileError::new(
-                        "#[effect] and #[scheduler_hint] can only be applied to action definitions",
-                        self.current().span,
-                    ));
-                }
-                Ok(Item::Resource(self.parse_resource(attrs.type_id, attrs.capabilities, attrs.identity, attrs.conflict_key)?))
-            }
-            TokenKind::Shared => {
-                if attrs.effect.is_some() || attrs.scheduler_hint.is_some() {
-                    return Err(CompileError::new(
-                        "#[effect] and #[scheduler_hint] can only be applied to action definitions",
-                        self.current().span,
-                    ));
-                }
-                Ok(Item::Shared(self.parse_shared(attrs.type_id, attrs.capabilities, attrs.identity, attrs.conflict_key)?))
-            }
-            TokenKind::Receipt => {
-                if attrs.effect.is_some() || attrs.scheduler_hint.is_some() {
-                    return Err(CompileError::new(
-                        "#[effect] and #[scheduler_hint] can only be applied to action definitions",
-                        self.current().span,
-                    ));
-                }
-                Ok(Item::Receipt(self.parse_receipt(attrs.type_id, attrs.capabilities, attrs.identity, attrs.conflict_key)?))
-            }
-            TokenKind::Struct => {
-                if attrs.capabilities.is_some() || attrs.identity.is_some() || attrs.effect.is_some() || attrs.scheduler_hint.is_some()
-                {
-                    return Err(CompileError::new(
-                        "only #[type_id] and #[conflict_key] attributes can be applied to struct definitions",
-                        self.current().span,
-                    ));
-                }
-                Ok(Item::Struct(self.parse_struct(attrs.type_id, attrs.conflict_key)?))
-            }
+            TokenKind::Resource => Ok(Item::Resource(self.parse_resource(attrs.type_id, attrs.capabilities)?)),
+            TokenKind::Shared => Ok(Item::Shared(self.parse_shared(attrs.type_id, attrs.capabilities)?)),
+            TokenKind::Receipt => Ok(Item::Receipt(self.parse_receipt(attrs.type_id, attrs.capabilities)?)),
+            TokenKind::Struct => Ok(Item::Struct(self.parse_struct(attrs.type_id)?)),
             TokenKind::Identifier(name) if name == "flow" => {
                 self.reject_type_id_attr(&attrs)?;
                 Ok(Item::Flow(self.parse_flow()?))
@@ -468,31 +420,13 @@ impl<'a> Parser<'a> {
     fn reject_type_id_attr(&self, attrs: &PendingAttrs) -> Result<()> {
         if let Some(type_id) = &attrs.type_id {
             Err(CompileError::new("#[type_id] can only be applied to resource, shared, receipt, or struct definitions", type_id.span))
-        } else if attrs.capabilities.is_some() {
-            Err(CompileError::new(
-                "#[capability] can only be applied to resource, shared, or receipt definitions",
-                self.current().span,
-            ))
-        } else if attrs.identity.is_some() {
-            Err(CompileError::new("#[identity] can only be applied to resource, shared, or receipt definitions", self.current().span))
-        } else if attrs.conflict_key.is_some() {
-            Err(CompileError::new(
-                "#[conflict_key] can only be applied to resource, shared, receipt, or struct definitions",
-                self.current().span,
-            ))
         } else {
             Ok(())
         }
     }
 
     fn reject_all_attrs(&self, item_kind: &str, attrs: &PendingAttrs) -> Result<()> {
-        if attrs.type_id.is_some()
-            || attrs.capabilities.is_some()
-            || attrs.identity.is_some()
-            || attrs.conflict_key.is_some()
-            || attrs.effect.is_some()
-            || attrs.scheduler_hint.is_some()
-        {
+        if attrs.type_id.is_some() || attrs.capabilities.is_some() || attrs.effect.is_some() || attrs.scheduler_hint.is_some() {
             Err(CompileError::new(format!("attributes cannot be applied to {} definitions", item_kind), self.current().span))
         } else {
             Ok(())
@@ -578,13 +512,7 @@ impl<'a> Parser<'a> {
         Ok(UseStmt { module_path, imports, span: Span::new(start_span.start, end_span.end, start_span.line, start_span.column) })
     }
 
-    fn parse_resource(
-        &mut self,
-        type_id: Option<TypeIdentity>,
-        attr_capabilities: Option<Vec<Capability>>,
-        attr_identity: Option<IdentityPolicy>,
-        attr_conflict_key: Option<ConflictKeyPolicy>,
-    ) -> Result<ResourceDef> {
+    fn parse_resource(&mut self, type_id: Option<TypeIdentity>, attr_capabilities: Option<Vec<Capability>>) -> Result<ResourceDef> {
         let start_span = self.current().span;
         self.expect(TokenKind::Resource)?;
 
@@ -602,8 +530,7 @@ impl<'a> Parser<'a> {
         Ok(ResourceDef {
             name,
             type_id,
-            identity: merge_type_identity_policy(attr_identity, type_policy.identity, start_span)?,
-            conflict_key: merge_type_conflict_key_policy(attr_conflict_key, type_policy.conflict_key, start_span)?,
+            identity: type_policy.identity.unwrap_or_default(),
             default_hash_type: type_policy.default_hash_type,
             capacity_floor: type_policy.capacity_floor,
             capabilities,
@@ -612,13 +539,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_shared(
-        &mut self,
-        type_id: Option<TypeIdentity>,
-        attr_capabilities: Option<Vec<Capability>>,
-        attr_identity: Option<IdentityPolicy>,
-        attr_conflict_key: Option<ConflictKeyPolicy>,
-    ) -> Result<SharedDef> {
+    fn parse_shared(&mut self, type_id: Option<TypeIdentity>, attr_capabilities: Option<Vec<Capability>>) -> Result<SharedDef> {
         let start_span = self.current().span;
         self.expect(TokenKind::Shared)?;
 
@@ -635,8 +556,7 @@ impl<'a> Parser<'a> {
         Ok(SharedDef {
             name,
             type_id,
-            identity: merge_type_identity_policy(attr_identity, type_policy.identity, start_span)?,
-            conflict_key: merge_type_conflict_key_policy(attr_conflict_key, type_policy.conflict_key, start_span)?,
+            identity: type_policy.identity.unwrap_or_default(),
             default_hash_type: type_policy.default_hash_type,
             capacity_floor: type_policy.capacity_floor,
             capabilities,
@@ -645,13 +565,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_receipt(
-        &mut self,
-        type_id: Option<TypeIdentity>,
-        attr_capabilities: Option<Vec<Capability>>,
-        attr_identity: Option<IdentityPolicy>,
-        attr_conflict_key: Option<ConflictKeyPolicy>,
-    ) -> Result<ReceiptDef> {
+    fn parse_receipt(&mut self, type_id: Option<TypeIdentity>, attr_capabilities: Option<Vec<Capability>>) -> Result<ReceiptDef> {
         let start_span = self.current().span;
         self.expect(TokenKind::Receipt)?;
 
@@ -674,8 +588,7 @@ impl<'a> Parser<'a> {
         Ok(ReceiptDef {
             name,
             type_id,
-            identity: merge_type_identity_policy(attr_identity, type_policy.identity, start_span)?,
-            conflict_key: merge_type_conflict_key_policy(attr_conflict_key, type_policy.conflict_key, start_span)?,
+            identity: type_policy.identity.unwrap_or_default(),
             default_hash_type: type_policy.default_hash_type,
             capacity_floor: type_policy.capacity_floor,
             claim_output,
@@ -685,7 +598,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_struct(&mut self, type_id: Option<TypeIdentity>, attr_conflict_key: Option<ConflictKeyPolicy>) -> Result<StructDef> {
+    fn parse_struct(&mut self, type_id: Option<TypeIdentity>) -> Result<StructDef> {
         let start_span = self.current().span;
         self.expect(TokenKind::Struct)?;
 
@@ -701,7 +614,6 @@ impl<'a> Parser<'a> {
         Ok(StructDef {
             name,
             type_id,
-            conflict_key: merge_type_conflict_key_policy(attr_conflict_key, type_policy.conflict_key, start_span)?,
             default_hash_type: type_policy.default_hash_type,
             capacity_floor: type_policy.capacity_floor,
             fields,
@@ -809,12 +721,6 @@ impl<'a> Parser<'a> {
                     }
                     policy.identity = Some(self.parse_identity_decl()?);
                 }
-                "conflict_key" => {
-                    if policy.conflict_key.is_some() {
-                        return Err(crate::error::CompileError::new("duplicate conflict_key declaration", self.current().span));
-                    }
-                    policy.conflict_key = Some(self.parse_conflict_key_decl()?);
-                }
                 _ => break,
             }
         }
@@ -864,7 +770,28 @@ impl<'a> Parser<'a> {
         self.advance(); // consume "identity"
         if self.check(&TokenKind::LParen) {
             self.advance();
-            let policy = self.parse_identity_policy_body()?;
+            let kind = self.parse_name()?;
+            let policy = match kind.as_str() {
+                "ckb_type_id" => IdentityPolicy::CkbTypeId,
+                "field" => {
+                    self.expect(TokenKind::LParen)?;
+                    let path = self.parse_name()?;
+                    self.expect(TokenKind::RParen)?;
+                    IdentityPolicy::Field(path)
+                }
+                "script_args" => IdentityPolicy::ScriptArgs,
+                "singleton_type" => IdentityPolicy::SingletonType,
+                "none" => IdentityPolicy::None,
+                other => {
+                    return Err(crate::error::CompileError::new(
+                        format!(
+                            "unsupported identity policy '{}'; expected none, ckb_type_id, field(...), script_args, or singleton_type",
+                            other
+                        ),
+                        self.current().span,
+                    ));
+                }
+            };
             self.expect(TokenKind::RParen)?;
             Ok(policy)
         } else {
@@ -880,72 +807,6 @@ impl<'a> Parser<'a> {
                     self.current().span,
                 )),
             }
-        }
-    }
-
-    fn parse_identity_policy_body(&mut self) -> Result<IdentityPolicy> {
-        let kind = self.parse_name()?;
-        match kind.as_str() {
-            "ckb_type_id" => Ok(IdentityPolicy::CkbTypeId),
-            "field" => {
-                self.expect(TokenKind::LParen)?;
-                let path = self.parse_name()?;
-                self.expect(TokenKind::RParen)?;
-                Ok(IdentityPolicy::Field(path))
-            }
-            "script_args" => Ok(IdentityPolicy::ScriptArgs),
-            "singleton_type" => Ok(IdentityPolicy::SingletonType),
-            "none" => Ok(IdentityPolicy::None),
-            other => Err(crate::error::CompileError::new(
-                format!(
-                    "unsupported identity policy '{}'; expected none, ckb_type_id, field(...), script_args, or singleton_type",
-                    other
-                ),
-                self.current().span,
-            )),
-        }
-    }
-
-    fn parse_conflict_key_decl(&mut self) -> Result<ConflictKeyPolicy> {
-        self.advance(); // consume "conflict_key"
-        self.expect(TokenKind::LParen)?;
-        let policy = self.parse_conflict_key_policy_body()?;
-        self.expect(TokenKind::RParen)?;
-        Ok(policy)
-    }
-
-    fn parse_conflict_key_policy_body(&mut self) -> Result<ConflictKeyPolicy> {
-        let first = self.parse_name()?;
-        match first.as_str() {
-            "none" => Ok(ConflictKeyPolicy::None),
-            "field" => {
-                self.expect(TokenKind::LParen)?;
-                let field = self.parse_name()?;
-                self.expect(TokenKind::RParen)?;
-                Ok(ConflictKeyPolicy::Field(field))
-            }
-            "composite" => {
-                self.expect(TokenKind::LParen)?;
-                let mut fields = Vec::new();
-                while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
-                    fields.push(self.parse_name()?);
-                    if self.check(&TokenKind::Comma) {
-                        self.advance();
-                        self.skip_newlines();
-                    } else {
-                        break;
-                    }
-                }
-                self.expect(TokenKind::RParen)?;
-                if fields.is_empty() {
-                    return Err(crate::error::CompileError::new(
-                        "conflict_key composite(...) requires at least one field",
-                        self.current().span,
-                    ));
-                }
-                Ok(ConflictKeyPolicy::Composite(fields))
-            }
-            field => Ok(ConflictKeyPolicy::Field(field.to_string())),
         }
     }
 
@@ -3091,30 +2952,6 @@ fn merge_capabilities(attr_capabilities: Option<Vec<Capability>>, inline_capabil
     merged
 }
 
-fn merge_type_identity_policy(
-    attr_identity: Option<IdentityPolicy>,
-    decl_identity: Option<IdentityPolicy>,
-    span: Span,
-) -> Result<IdentityPolicy> {
-    match (attr_identity, decl_identity) {
-        (Some(_), Some(_)) => Err(CompileError::new("duplicate identity declaration", span)),
-        (Some(identity), None) | (None, Some(identity)) => Ok(identity),
-        (None, None) => Ok(IdentityPolicy::None),
-    }
-}
-
-fn merge_type_conflict_key_policy(
-    attr_conflict_key: Option<ConflictKeyPolicy>,
-    decl_conflict_key: Option<ConflictKeyPolicy>,
-    span: Span,
-) -> Result<ConflictKeyPolicy> {
-    match (attr_conflict_key, decl_conflict_key) {
-        (Some(_), Some(_)) => Err(CompileError::new("duplicate conflict_key declaration", span)),
-        (Some(conflict_key), None) | (None, Some(conflict_key)) => Ok(conflict_key),
-        (None, None) => Ok(ConflictKeyPolicy::None),
-    }
-}
-
 fn normalize_hash_type_decl(value: &str) -> Option<String> {
     match value {
         "Data" | "data" => Some("data".to_string()),
@@ -3286,30 +3123,6 @@ resource Token has store {
         };
 
         assert_eq!(resource.type_id.as_ref().map(|type_id| type_id.value.as_str()), Some("cellscript::token::Token:v1"));
-    }
-
-    #[test]
-    fn test_parse_typed_cell_identity_and_conflict_key_attributes() {
-        let input = r#"
-module test
-
-#[identity(field(invoice_id))]
-#[conflict_key(composite(borrower, invoice_id))]
-shared Invoice has store {
-    borrower: Address
-    invoice_id: Hash
-    amount: u64
-}
-"#;
-        let tokens = lex(input).unwrap();
-        let module = parse(&tokens).unwrap();
-        let shared = match &module.items[0] {
-            Item::Shared(shared) => shared,
-            other => panic!("expected shared item, found {:?}", other),
-        };
-
-        assert_eq!(shared.identity, IdentityPolicy::Field("invoice_id".to_string()));
-        assert_eq!(shared.conflict_key, ConflictKeyPolicy::Composite(vec!["borrower".to_string(), "invoice_id".to_string()]));
     }
 
     #[test]

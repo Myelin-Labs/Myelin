@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
-// Blake3 hash syscall (Spora-specific extension to CKB-VM)
+// Blake3 hash syscall (Myelin-specific extension to CKB-VM)
 //
-// This syscall is NOT in CKB, it's our addition for Spora
+// This syscall is NOT in CKB, it's our addition for Myelin
 
 use super::BLAKE3_HASH_SYSCALL_NUMBER;
 use crate::vm::transferred_byte_cycles;
@@ -14,7 +14,7 @@ use ckb_vm::{
 
 /// Syscall: Blake3 Hash
 ///
-/// Syscall number: 3001 (Spora extension, not in CKB)
+/// Syscall number: 3001 (Myelin extension, not in CKB)
 ///
 /// Computes blake3 hash of input data
 ///
@@ -42,7 +42,7 @@ impl<M: SupportMachine> Syscalls<M> for Blake3Hash {
     fn ecall(&mut self, machine: &mut M) -> Result<bool, VMError> {
         let syscall_number = machine.registers()[A7].to_u64();
 
-        // BLAKE3_HASH = 3001 (Spora extension)
+        // BLAKE3_HASH = 3001 (Myelin extension)
         if syscall_number != BLAKE3_HASH_SYSCALL_NUMBER {
             return Ok(false);
         }

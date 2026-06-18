@@ -1,8 +1,7 @@
 mod blake3;
 mod hashers;
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use spora_utils::{
+use myelin_utils::{
     hex::{FromHex, ToHex},
     mem_size::MemSizeEstimator,
     serde_impl_deser_fixed_bytes_ref, serde_impl_ser_fixed_bytes_ref,
@@ -13,8 +12,8 @@ use std::{
     hash::{Hash as StdHash, Hasher as StdHasher},
     str::{self, FromStr},
 };
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
-use workflow_wasm::prelude::*;
 
 pub const HASH_SIZE: usize = 32;
 
@@ -22,8 +21,8 @@ pub use hashers::*;
 
 // TODO: Check if we use hash more as an array of u64 or of bytes and change the default accordingly
 /// @category General
-#[derive(Eq, Clone, Copy, Default, PartialOrd, Ord, BorshSerialize, BorshDeserialize, CastFromJs)]
-#[wasm_bindgen]
+#[derive(Eq, Clone, Copy, Default, PartialOrd, Ord)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct Hash([u8; HASH_SIZE]);
 
 serde_impl_ser_fixed_bytes_ref!(Hash, HASH_SIZE);
@@ -175,6 +174,7 @@ impl MemSizeEstimator for Hash {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 impl Hash {
     #[wasm_bindgen(constructor)]
@@ -185,23 +185,6 @@ impl Hash {
     #[wasm_bindgen(js_name = toString)]
     pub fn js_to_string(&self) -> String {
         self.to_string()
-    }
-}
-
-type TryFromError = workflow_wasm::error::Error;
-impl TryCastFromJs for Hash {
-    type Error = TryFromError;
-    fn try_cast_from<'a, R>(value: &'a R) -> Result<Cast<'a, Self>, Self::Error>
-    where
-        R: AsRef<JsValue> + 'a,
-    {
-        Self::resolve(value, || {
-            let bytes = value.as_ref().try_as_vec_u8()?;
-            Ok(Hash(
-                <[u8; HASH_SIZE]>::try_from(bytes)
-                    .map_err(|_| TryFromError::WrongSize("Slice must have the length of Hash".into()))?,
-            ))
-        })
     }
 }
 

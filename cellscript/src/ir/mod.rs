@@ -44,8 +44,6 @@ pub struct IrTypeDef {
     pub flow_rules: Vec<IrFlowRule>,
     /// Identity policy for v0.15 cell identity system
     pub identity: IrIdentityPolicy,
-    /// Typed-cell conflict key policy for scheduler conflict domains.
-    pub conflict_key: IrConflictKeyPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -120,13 +118,6 @@ pub enum IrIdentityPolicy {
     ScriptArgs,
     /// Singleton type identity
     SingletonType,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IrConflictKeyPolicy {
-    None,
-    Field(String),
-    Composite(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -663,7 +654,6 @@ impl IrGenerator {
             flow_state_field: self.flow_state_fields.get(&resource.name).cloned(),
             flow_rules: self.flow_rules.get(&resource.name).cloned().unwrap_or_default(),
             identity: Self::lower_identity_policy(&resource.identity),
-            conflict_key: Self::lower_conflict_key_policy(&resource.conflict_key),
         }
     }
 
@@ -681,7 +671,6 @@ impl IrGenerator {
             flow_state_field: self.flow_state_fields.get(&shared.name).cloned(),
             flow_rules: self.flow_rules.get(&shared.name).cloned().unwrap_or_default(),
             identity: Self::lower_identity_policy(&shared.identity),
-            conflict_key: Self::lower_conflict_key_policy(&shared.conflict_key),
         }
     }
 
@@ -699,7 +688,6 @@ impl IrGenerator {
             flow_state_field: self.flow_state_fields.get(&receipt.name).cloned(),
             flow_rules: self.flow_rules.get(&receipt.name).cloned().unwrap_or_default(),
             identity: Self::lower_identity_policy(&receipt.identity),
-            conflict_key: Self::lower_conflict_key_policy(&receipt.conflict_key),
         }
     }
 
@@ -717,7 +705,6 @@ impl IrGenerator {
             flow_state_field: self.flow_state_fields.get(&struct_def.name).cloned(),
             flow_rules: self.flow_rules.get(&struct_def.name).cloned().unwrap_or_default(),
             identity: IrIdentityPolicy::None,
-            conflict_key: Self::lower_conflict_key_policy(&struct_def.conflict_key),
         }
     }
 
@@ -899,7 +886,7 @@ impl IrGenerator {
             );
         }
         let touches_shared = self.infer_touches_shared(&params, &body);
-        let estimated_cycles = self.estimate_cycles(&body, action.outputs.len());
+        let estimated_cycles = self.estimate_cycles(&body);
 
         IrAction {
             name: action.name.clone(),
@@ -1647,17 +1634,13 @@ impl IrGenerator {
         }
     }
 
-    fn estimate_cycles(&self, body: &IrBody, declared_output_count: usize) -> u64 {
+    fn estimate_cycles(&self, body: &IrBody) -> u64 {
         let instruction_count = body.blocks.iter().map(|block| block.instructions.len() as u64).sum::<u64>();
         let branch_count =
             body.blocks.iter().filter(|block| matches!(block.terminator, IrTerminator::Jump(_) | IrTerminator::Branch { .. })).count()
                 as u64;
-        let create_ops = body.create_set.len().max(declared_output_count);
-        let cell_ops = (body.consume_set.len() + body.read_refs.len() + body.mutate_set.len() + create_ops) as u64;
-        1_000u64
-            .saturating_add(instruction_count.saturating_mul(16))
-            .saturating_add(branch_count.saturating_mul(64))
-            .saturating_add(cell_ops.saturating_mul(6_000))
+        let cell_ops = (body.consume_set.len() + body.read_refs.len() + body.create_set.len()) as u64;
+        (instruction_count * 8) + (branch_count * 4) + (cell_ops * 128) + 32
     }
 
     fn lower_stmts(
@@ -1977,10 +1960,10 @@ impl IrGenerator {
                 self.record_error("string literals are only supported in metadata positions such as assert messages", Span::default());
                 LoweredExpr { operand: IrOperand::Const(IrConst::U64(0)), current: Some(current) }
             }
-            Expr::ByteString(_) => {
-                self.record_error("byte string literals require an explicit lowered byte-array context", Span::default());
-                LoweredExpr { operand: IrOperand::Const(IrConst::U64(0)), current: Some(current) }
-            }
+            Expr::ByteString(bytes) => LoweredExpr {
+                operand: IrOperand::Const(IrConst::Array(bytes.iter().copied().map(IrConst::U8).collect())),
+                current: Some(current),
+            },
             Expr::Range(_) => {
                 self.record_error("range expressions are only supported as for-loop iterables", Span::default());
                 LoweredExpr { operand: IrOperand::Const(IrConst::U64(0)), current: Some(current) }
@@ -3068,14 +3051,6 @@ impl IrGenerator {
         }
     }
 
-    fn lower_conflict_key_policy(policy: &ConflictKeyPolicy) -> IrConflictKeyPolicy {
-        match policy {
-            ConflictKeyPolicy::None => IrConflictKeyPolicy::None,
-            ConflictKeyPolicy::Field(field) => IrConflictKeyPolicy::Field(field.clone()),
-            ConflictKeyPolicy::Composite(fields) => IrConflictKeyPolicy::Composite(fields.clone()),
-        }
-    }
-
     fn lower_create_unique_expr(
         &mut self,
         cu: &CreateUniqueExpr,
@@ -4092,6 +4067,18 @@ impl IrGenerator {
                     blocks,
                     vars,
                 ),
+                "ckb::hash_data_packed" if call.args.len() == 1 => self.lower_simple_runtime_call(
+                    "__ckb_hash_data_packed",
+                    "ckb_hash_data_packed",
+                    IrType::Hash,
+                    &call.args,
+                    current,
+                    blocks,
+                    vars,
+                ),
+                "verifier::btc::bip340::require_signature" if call.args.len() == 3 => {
+                    self.lower_void_runtime_call("__novaseal_bip340_require_signature", &call.args, current, blocks, vars)
+                }
                 "ckb::cell_lock_hash_low" if call.args.len() == 1 => self.lower_simple_runtime_call(
                     "__ckb_cell_lock_hash_low",
                     "ckb_cell_lock_hash_low",
@@ -4122,6 +4109,24 @@ impl IrGenerator {
                 "ckb::cell_type_hash" if call.args.len() == 1 => self.lower_simple_runtime_call(
                     "__ckb_cell_type_hash",
                     "ckb_cell_type_hash",
+                    IrType::Hash,
+                    &call.args,
+                    current,
+                    blocks,
+                    vars,
+                ),
+                "ckb::cell_data_hash" if call.args.len() == 1 => self.lower_simple_runtime_call(
+                    "__ckb_cell_data_hash",
+                    "ckb_cell_data_hash",
+                    IrType::Hash,
+                    &call.args,
+                    current,
+                    blocks,
+                    vars,
+                ),
+                "ckb::cell_data_hash_at" if call.args.len() == 2 => self.lower_simple_runtime_call(
+                    "__ckb_cell_data_hash_at",
+                    "ckb_cell_data_hash_at",
                     IrType::Hash,
                     &call.args,
                     current,
@@ -4640,6 +4645,9 @@ impl IrGenerator {
                 }
                 "hash_chain" if call.args.len() == 1 => {
                     self.lower_simple_runtime_call("__ckb_hash_chain", "hash_chain", IrType::Hash, &call.args, current, blocks, vars)
+                }
+                "hash_pair" if call.args.len() == 2 => {
+                    self.lower_simple_runtime_call("__ckb_hash_pair", "hash_pair", IrType::Hash, &call.args, current, blocks, vars)
                 }
                 "hash_blake2b" if call.args.len() == 1 => self.lower_simple_runtime_call(
                     "__ckb_hash_blake2b",
@@ -6147,7 +6155,6 @@ fn resolver_type_def_to_ir(local_name: &str, type_def: &TypeDef) -> Option<IrTyp
             flow_state_field: None,
             flow_rules: Vec::new(),
             identity: lower_identity_policy_ast(&resource.identity),
-            conflict_key: lower_conflict_key_policy_ast(&resource.conflict_key),
         }),
         TypeDef::Shared(shared) => Some(IrTypeDef {
             name: local_name.to_string(),
@@ -6162,7 +6169,6 @@ fn resolver_type_def_to_ir(local_name: &str, type_def: &TypeDef) -> Option<IrTyp
             flow_state_field: None,
             flow_rules: Vec::new(),
             identity: lower_identity_policy_ast(&shared.identity),
-            conflict_key: lower_conflict_key_policy_ast(&shared.conflict_key),
         }),
         TypeDef::Receipt(receipt) => Some(IrTypeDef {
             name: local_name.to_string(),
@@ -6177,7 +6183,6 @@ fn resolver_type_def_to_ir(local_name: &str, type_def: &TypeDef) -> Option<IrTyp
             flow_state_field: None,
             flow_rules: Vec::new(),
             identity: lower_identity_policy_ast(&receipt.identity),
-            conflict_key: lower_conflict_key_policy_ast(&receipt.conflict_key),
         }),
         TypeDef::Struct(struct_def) => Some(IrTypeDef {
             name: local_name.to_string(),
@@ -6192,7 +6197,6 @@ fn resolver_type_def_to_ir(local_name: &str, type_def: &TypeDef) -> Option<IrTyp
             flow_state_field: None,
             flow_rules: Vec::new(),
             identity: IrIdentityPolicy::None,
-            conflict_key: lower_conflict_key_policy_ast(&struct_def.conflict_key),
         }),
         TypeDef::Enum(_) => None,
     }
@@ -6205,14 +6209,6 @@ fn lower_identity_policy_ast(policy: &IdentityPolicy) -> IrIdentityPolicy {
         IdentityPolicy::Field(path) => IrIdentityPolicy::Field(path.clone()),
         IdentityPolicy::ScriptArgs => IrIdentityPolicy::ScriptArgs,
         IdentityPolicy::SingletonType => IrIdentityPolicy::SingletonType,
-    }
-}
-
-fn lower_conflict_key_policy_ast(policy: &ConflictKeyPolicy) -> IrConflictKeyPolicy {
-    match policy {
-        ConflictKeyPolicy::None => IrConflictKeyPolicy::None,
-        ConflictKeyPolicy::Field(field) => IrConflictKeyPolicy::Field(field.clone()),
-        ConflictKeyPolicy::Composite(fields) => IrConflictKeyPolicy::Composite(fields.clone()),
     }
 }
 
@@ -6680,6 +6676,42 @@ action check(x: u64, y: u64) -> u64 {
             branch_count,
             action.body.blocks.len()
         );
+    }
+
+    #[test]
+    fn byte_string_literal_lowers_to_fixed_array_const() {
+        let source = r#"
+module test
+
+action symbol() -> [u8; 4]
+{
+    verification
+        return b"TEST"
+}
+"#;
+        let ir = parse_and_lower(source);
+        let action = ir
+            .items
+            .iter()
+            .find_map(|item| match item {
+                IrItem::Action(a) if a.name == "symbol" => Some(a),
+                _ => None,
+            })
+            .expect("expected symbol action");
+        let bytes = action.body.blocks.iter().find_map(|block| match &block.terminator {
+            IrTerminator::Return(Some(IrOperand::Const(IrConst::Array(items)))) => Some(items),
+            _ => None,
+        });
+
+        let bytes = bytes.expect("expected byte string return to lower to a fixed array const");
+        let lowered = bytes
+            .iter()
+            .map(|byte| match byte {
+                IrConst::U8(byte) => *byte,
+                other => panic!("expected fixed byte const, got {:?}", other),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(lowered, b"TEST");
     }
 
     #[test]

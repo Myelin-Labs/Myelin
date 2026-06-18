@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
-// Cell transaction core types (CKB-inspired, DAG-adapted)
+// Cell transaction core types (CKB-inspired, scheduler-adapted)
 //
 // Reference: ckb/util/types/src/core/cell.rs
 
-use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 
 /// Serde helpers for serializing `[u8; 32]` as a hex string under the key `transactionId`
-/// for human-readable formats (JSON), or raw bytes for binary formats (bincode).
+/// for human-readable formats (JSON), or raw bytes for binary formats.
 mod outpoint_serde {
     use serde::{self, Deserialize, Deserializer, Serializer};
 
@@ -69,7 +68,7 @@ pub const CELL_TX_VERSION: u32 = 0xC001;
 // prevent obviously illegal combinations but the field does not affect scheduling.
 
 /// Ownership class — determines parallel execution and access rules
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CellOwnership {
     /// One owner, easy to parallelise
     Owned,
@@ -86,7 +85,7 @@ pub enum CellOwnership {
 }
 
 /// Mutability class — determines state transition pattern
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CellMutability {
     /// Consume + create
     Linear,
@@ -102,7 +101,7 @@ pub enum CellMutability {
 ///
 /// Multi-label: `Vec<CellAccounting>` in `TypedCellDecl`.
 /// E.g. a bridge-claim cell can be both `Receipt` + `StorageClaim`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CellAccounting {
     /// Fungible token-like accounting
     Fungible,
@@ -115,7 +114,7 @@ pub enum CellAccounting {
 }
 
 /// Identity class — how identity is preserved across updates
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CellIdentity {
     /// Natural OutPoint identity
     OutPoint,
@@ -133,7 +132,7 @@ pub enum CellIdentity {
 ///
 /// Naming is deployment-agnostic: does not presuppose L2, consortium, or standalone.
 /// Advisory in Phase 1: not consumed by runtime scheduling.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CellSettlement {
     /// Settled within this execution environment
     Local,
@@ -147,7 +146,7 @@ pub enum CellSettlement {
 ///
 /// Rule: mutable cells must not use `ConflictKeySpec::None`.
 /// `None` is only valid for Pure / ReadOnly / Ephemeral cells.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ConflictKeySpec {
     /// Concrete cell identity — default for owned mutable cells
     CellId,
@@ -168,7 +167,7 @@ pub enum ConflictKeySpec {
 /// scheduling-critical metadata (ownership + conflict_key + witness envelope).
 ///
 /// See `docs/TYPED_CELL_CLASSIFICATION_GOVERNANCE.md` §9.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCellSemantics {
     /// Ownership class — determines parallel execution and access rules
     pub ownership: CellOwnership,
@@ -186,7 +185,7 @@ pub struct RuntimeCellSemantics {
 /// TypedCellDecl is generated/normalised metadata, not an independent language.
 ///
 /// See `docs/TYPED_CELL_CLASSIFICATION_GOVERNANCE.md` §9.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedCellSemanticMetadata {
     /// Mutability class — future compiler/ProofPlan semantics, current cross-axis checks only
     pub mutability: CellMutability,
@@ -221,7 +220,7 @@ pub struct TypedCellSemanticMetadata {
 /// from CellScript source, ProofPlan obligations, or runtime scheduler requirements.
 ///
 /// See `docs/TYPED_CELL_CLASSIFICATION_GOVERNANCE.md` for full governance.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedCellDecl {
     /// Runtime-scheduling semantics (ownership + conflict_key)
     pub runtime: RuntimeCellSemantics,
@@ -233,7 +232,7 @@ pub struct TypedCellDecl {
 ///
 /// Keyed by full script identity (not just code_hash), because the same
 /// `code_hash` with different `args` represents different type instances.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct ScriptId {
     /// Script code hash
     pub code_hash: [u8; 32],
@@ -299,7 +298,7 @@ impl TypedCellStore for InMemoryTypedCellStore {
 /// Used by CellDAG conflict detection.
 pub fn compute_conflict_hash(type_script: &Script, conflict_key_value: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"spora-typed-cell/conflict-hash/v1");
+    hasher.update(b"myelin-typed-cell/conflict-hash/v1");
     hasher.update(&type_script.code_hash);
     hasher.update(&[type_script.hash_type]);
     hasher.update(&type_script.args);
@@ -316,7 +315,7 @@ pub fn compute_conflict_hash(type_script: &Script, conflict_key_value: &[u8]) ->
 /// include lock/capacity — only type script identity + data.
 pub fn compute_typed_data_hash(type_script: &Script, data: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"spora-typed-cell/typed-data-hash/v1");
+    hasher.update(b"myelin-typed-cell/typed-data-hash/v1");
     hasher.update(&type_script.code_hash);
     hasher.update(&[type_script.hash_type]);
     hasher.update(&type_script.args);
@@ -354,6 +353,225 @@ pub fn validate_typed_cell_decl(decl: &TypedCellDecl) -> Result<(), TypedCellDec
     Ok(())
 }
 
+/// Encode typed-cell metadata as a small Molecule-compatible table.
+pub fn encode_typed_cell_decl_molecule(decl: &TypedCellDecl) -> Vec<u8> {
+    scheduler_molecule_encode_table(&[
+        encode_runtime_cell_semantics_molecule(&decl.runtime),
+        encode_typed_cell_semantic_metadata_molecule(&decl.semantic),
+    ])
+}
+
+/// Decode typed-cell metadata from [`encode_typed_cell_decl_molecule`] bytes.
+pub fn decode_typed_cell_decl_molecule(bytes: &[u8]) -> Result<TypedCellDecl, String> {
+    let fields = scheduler_molecule_decode_table(bytes, 2, "TypedCellDecl")?;
+    Ok(TypedCellDecl {
+        runtime: decode_runtime_cell_semantics_molecule(fields[0])?,
+        semantic: decode_typed_cell_semantic_metadata_molecule(fields[1])?,
+    })
+}
+
+fn encode_runtime_cell_semantics_molecule(runtime: &RuntimeCellSemantics) -> Vec<u8> {
+    scheduler_molecule_encode_table(&[
+        vec![encode_cell_ownership_tag(runtime.ownership)],
+        encode_conflict_key_spec_molecule(&runtime.conflict_key),
+    ])
+}
+
+fn decode_runtime_cell_semantics_molecule(bytes: &[u8]) -> Result<RuntimeCellSemantics, String> {
+    let fields = scheduler_molecule_decode_table(bytes, 2, "RuntimeCellSemantics")?;
+    Ok(RuntimeCellSemantics {
+        ownership: decode_cell_ownership_tag(scheduler_molecule_decode_u8(fields[0], "RuntimeCellSemantics.ownership")?)?,
+        conflict_key: decode_conflict_key_spec_molecule(fields[1])?,
+    })
+}
+
+fn encode_typed_cell_semantic_metadata_molecule(semantic: &TypedCellSemanticMetadata) -> Vec<u8> {
+    scheduler_molecule_encode_table(&[
+        vec![encode_cell_mutability_tag(semantic.mutability)],
+        encode_cell_accounting_vec_molecule(&semantic.accounting),
+        encode_cell_identity_molecule(&semantic.identity),
+        vec![encode_cell_settlement_tag(semantic.settlement)],
+    ])
+}
+
+fn decode_typed_cell_semantic_metadata_molecule(bytes: &[u8]) -> Result<TypedCellSemanticMetadata, String> {
+    let fields = scheduler_molecule_decode_table(bytes, 4, "TypedCellSemanticMetadata")?;
+    Ok(TypedCellSemanticMetadata {
+        mutability: decode_cell_mutability_tag(scheduler_molecule_decode_u8(fields[0], "TypedCellSemanticMetadata.mutability")?)?,
+        accounting: decode_cell_accounting_vec_molecule(fields[1])?,
+        identity: decode_cell_identity_molecule(fields[2])?,
+        settlement: decode_cell_settlement_tag(scheduler_molecule_decode_u8(fields[3], "TypedCellSemanticMetadata.settlement")?)?,
+    })
+}
+
+fn encode_conflict_key_spec_molecule(spec: &ConflictKeySpec) -> Vec<u8> {
+    match spec {
+        ConflictKeySpec::CellId => scheduler_molecule_encode_table(&[vec![0], Vec::new()]),
+        ConflictKeySpec::Field(name) => scheduler_molecule_encode_table(&[vec![1], name.as_bytes().to_vec()]),
+        ConflictKeySpec::Composite(names) => scheduler_molecule_encode_table(&[vec![2], encode_string_vec_molecule(names)]),
+        ConflictKeySpec::None => scheduler_molecule_encode_table(&[vec![3], Vec::new()]),
+    }
+}
+
+fn decode_conflict_key_spec_molecule(bytes: &[u8]) -> Result<ConflictKeySpec, String> {
+    let fields = scheduler_molecule_decode_table(bytes, 2, "ConflictKeySpec")?;
+    match scheduler_molecule_decode_u8(fields[0], "ConflictKeySpec.tag")? {
+        0 => Ok(ConflictKeySpec::CellId),
+        1 => Ok(ConflictKeySpec::Field(decode_utf8_string(fields[1], "ConflictKeySpec.field")?)),
+        2 => Ok(ConflictKeySpec::Composite(decode_string_vec_molecule(fields[1], "ConflictKeySpec.composite")?)),
+        3 => Ok(ConflictKeySpec::None),
+        other => Err(format!("ConflictKeySpec: unknown tag {other}")),
+    }
+}
+
+fn encode_cell_identity_molecule(identity: &CellIdentity) -> Vec<u8> {
+    match identity {
+        CellIdentity::OutPoint => scheduler_molecule_encode_table(&[vec![0], Vec::new()]),
+        CellIdentity::TypeId => scheduler_molecule_encode_table(&[vec![1], Vec::new()]),
+        CellIdentity::Singleton => scheduler_molecule_encode_table(&[vec![2], Vec::new()]),
+        CellIdentity::Field(name) => scheduler_molecule_encode_table(&[vec![3], name.as_bytes().to_vec()]),
+        CellIdentity::Composite(names) => scheduler_molecule_encode_table(&[vec![4], encode_string_vec_molecule(names)]),
+    }
+}
+
+fn decode_cell_identity_molecule(bytes: &[u8]) -> Result<CellIdentity, String> {
+    let fields = scheduler_molecule_decode_table(bytes, 2, "CellIdentity")?;
+    match scheduler_molecule_decode_u8(fields[0], "CellIdentity.tag")? {
+        0 => Ok(CellIdentity::OutPoint),
+        1 => Ok(CellIdentity::TypeId),
+        2 => Ok(CellIdentity::Singleton),
+        3 => Ok(CellIdentity::Field(decode_utf8_string(fields[1], "CellIdentity.field")?)),
+        4 => Ok(CellIdentity::Composite(decode_string_vec_molecule(fields[1], "CellIdentity.composite")?)),
+        other => Err(format!("CellIdentity: unknown tag {other}")),
+    }
+}
+
+fn encode_cell_accounting_vec_molecule(accounting: &[CellAccounting]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + accounting.len());
+    out.extend_from_slice(&scheduler_molecule_pack_number(accounting.len()));
+    out.extend(accounting.iter().map(|item| encode_cell_accounting_tag(*item)));
+    out
+}
+
+fn decode_cell_accounting_vec_molecule(bytes: &[u8]) -> Result<Vec<CellAccounting>, String> {
+    let count = scheduler_molecule_unpack_number(bytes, "CellAccountingVec")?;
+    if bytes.len() != 4 + count {
+        return Err(format!("CellAccountingVec: expected {} bytes, got {}", 4 + count, bytes.len()));
+    }
+    bytes[4..].iter().map(|tag| decode_cell_accounting_tag(*tag)).collect()
+}
+
+fn encode_string_vec_molecule(values: &[String]) -> Vec<u8> {
+    let items = values.iter().map(|value| value.as_bytes().to_vec()).collect::<Vec<_>>();
+    typed_molecule_encode_dynvec(&items)
+}
+
+fn decode_string_vec_molecule(bytes: &[u8], ty: &'static str) -> Result<Vec<String>, String> {
+    typed_molecule_decode_dynvec(bytes, ty)?.into_iter().map(|item| decode_utf8_string(item, ty)).collect()
+}
+
+fn decode_utf8_string(bytes: &[u8], ty: &'static str) -> Result<String, String> {
+    std::str::from_utf8(bytes).map(|value| value.to_string()).map_err(|error| format!("{ty}: invalid utf-8: {error}"))
+}
+
+fn typed_molecule_encode_dynvec(items: &[Vec<u8>]) -> Vec<u8> {
+    if items.is_empty() {
+        return scheduler_molecule_pack_number(4).to_vec();
+    }
+    scheduler_molecule_encode_table(items)
+}
+
+fn typed_molecule_decode_dynvec<'a>(bytes: &'a [u8], ty: &'static str) -> Result<Vec<&'a [u8]>, String> {
+    if bytes.len() == 4 && scheduler_molecule_unpack_number(bytes, ty)? == 4 {
+        return Ok(Vec::new());
+    }
+    if bytes.len() < 8 {
+        return Err(format!("{ty}: dynvec header is too short: {}", bytes.len()));
+    }
+    let first_offset = scheduler_molecule_unpack_number(&bytes[4..], ty)?;
+    if first_offset < 8 || first_offset % 4 != 0 {
+        return Err(format!("{ty}: invalid dynvec first offset {first_offset}"));
+    }
+    let count = first_offset / 4 - 1;
+    scheduler_molecule_decode_table(bytes, count, ty)
+}
+
+fn encode_cell_ownership_tag(value: CellOwnership) -> u8 {
+    match value {
+        CellOwnership::Owned => 0,
+        CellOwnership::Shared => 1,
+        CellOwnership::Party => 2,
+        CellOwnership::Immutable => 3,
+        CellOwnership::Ephemeral => 4,
+    }
+}
+
+fn decode_cell_ownership_tag(tag: u8) -> Result<CellOwnership, String> {
+    match tag {
+        0 => Ok(CellOwnership::Owned),
+        1 => Ok(CellOwnership::Shared),
+        2 => Ok(CellOwnership::Party),
+        3 => Ok(CellOwnership::Immutable),
+        4 => Ok(CellOwnership::Ephemeral),
+        other => Err(format!("CellOwnership: unknown tag {other}")),
+    }
+}
+
+fn encode_cell_mutability_tag(value: CellMutability) -> u8 {
+    match value {
+        CellMutability::Linear => 0,
+        CellMutability::Versioned => 1,
+        CellMutability::AppendOnly => 2,
+        CellMutability::Migratable => 3,
+    }
+}
+
+fn decode_cell_mutability_tag(tag: u8) -> Result<CellMutability, String> {
+    match tag {
+        0 => Ok(CellMutability::Linear),
+        1 => Ok(CellMutability::Versioned),
+        2 => Ok(CellMutability::AppendOnly),
+        3 => Ok(CellMutability::Migratable),
+        other => Err(format!("CellMutability: unknown tag {other}")),
+    }
+}
+
+fn encode_cell_accounting_tag(value: CellAccounting) -> u8 {
+    match value {
+        CellAccounting::Fungible => 0,
+        CellAccounting::NonFungible => 1,
+        CellAccounting::Receipt => 2,
+        CellAccounting::StorageClaim => 3,
+    }
+}
+
+fn decode_cell_accounting_tag(tag: u8) -> Result<CellAccounting, String> {
+    match tag {
+        0 => Ok(CellAccounting::Fungible),
+        1 => Ok(CellAccounting::NonFungible),
+        2 => Ok(CellAccounting::Receipt),
+        3 => Ok(CellAccounting::StorageClaim),
+        other => Err(format!("CellAccounting: unknown tag {other}")),
+    }
+}
+
+fn encode_cell_settlement_tag(value: CellSettlement) -> u8 {
+    match value {
+        CellSettlement::Local => 0,
+        CellSettlement::Committed => 1,
+        CellSettlement::Pending => 2,
+    }
+}
+
+fn decode_cell_settlement_tag(tag: u8) -> Result<CellSettlement, String> {
+    match tag {
+        0 => Ok(CellSettlement::Local),
+        1 => Ok(CellSettlement::Committed),
+        2 => Ok(CellSettlement::Pending),
+        other => Err(format!("CellSettlement: unknown tag {other}")),
+    }
+}
+
 /// Runtime-scheduling critical checks.
 ///
 /// These directly affect CellDAG conflict detection correctness.
@@ -381,9 +599,7 @@ fn check_semantic_consistency_rules(decl: &TypedCellDecl) -> Result<(), TypedCel
     // Immutable ownership cannot pair with mutable mutability
     if matches!(decl.runtime.ownership, CellOwnership::Immutable) {
         if !matches!(decl.semantic.mutability, CellMutability::Linear) {
-            return Err(TypedCellDeclError::ImmutableWithMutableMutability {
-                mutability: decl.semantic.mutability,
-            });
+            return Err(TypedCellDeclError::ImmutableWithMutableMutability { mutability: decl.semantic.mutability });
         }
     }
 
@@ -395,9 +611,7 @@ fn check_semantic_consistency_rules(decl: &TypedCellDecl) -> Result<(), TypedCel
     }
 
     // Ephemeral cells must not have non-local settlement
-    if matches!(decl.runtime.ownership, CellOwnership::Ephemeral)
-        && !matches!(decl.semantic.settlement, CellSettlement::Local)
-    {
+    if matches!(decl.runtime.ownership, CellOwnership::Ephemeral) && !matches!(decl.semantic.settlement, CellSettlement::Local) {
         return Err(TypedCellDeclError::EphemeralWithNonLocalSettlement);
     }
 
@@ -467,7 +681,7 @@ pub const CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP: u8 = 2;
 /// Scheduler source id for transaction outputs.
 pub const CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT: u8 = 3;
 /// Domain used by the versioned script hash format.
-pub const SCRIPT_HASH_V1_DOMAIN: &[u8] = b"spora-cell/script-hash";
+pub const SCRIPT_HASH_V1_DOMAIN: &[u8] = b"myelin-cell/script-hash";
 /// Additional bytes a live-cell state entry needs beyond the raw output body.
 const CELL_ENTRY_OVERHEAD_EXCLUDING_OUTPUT_BODY: u64 = 32 + 4 + 8 + 1;
 /// Static transient-mass factor used before block-context VM cycles are known.
@@ -544,27 +758,17 @@ pub fn cell_tx_estimated_serialized_size(tx: &CellTx) -> u64 {
 /// Operation/source semantic constraints are enforced later by the scheduler
 /// consumer when decoding the full payload for conflict or admission decisions.
 pub fn is_cellscript_scheduler_witness_bytes(witness: &[u8]) -> bool {
-    decode_cellscript_scheduler_witness_molecule_unchecked(witness)
-        .ok()
-        .map_or(false, |w| {
-            w.magic == 0xCE11
-                && w.version == CELLSCRIPT_SCHEDULER_WITNESS_VERSION
-                && w.access_count <= MAX_CELLSCRIPT_ACCESS_COUNT
-                && w.access_count as usize == w.accesses.len()
-        })
+    decode_cellscript_scheduler_witness_molecule_unchecked(witness).ok().map_or(false, |w| {
+        w.magic == 0xCE11
+            && w.version == CELLSCRIPT_SCHEDULER_WITNESS_VERSION
+            && w.access_count <= MAX_CELLSCRIPT_ACCESS_COUNT
+            && w.access_count as usize == w.accesses.len()
+    })
 }
 
 fn is_cellscript_scheduler_witness_candidate_bytes(witness: &[u8]) -> bool {
-    has_legacy_borsh_scheduler_witness_marker(witness)
-        || decode_cellscript_scheduler_witness_molecule_unchecked(witness)
-            .is_ok_and(|decoded| decoded.magic == 0xCE11 && decoded.version == CELLSCRIPT_SCHEDULER_WITNESS_VERSION)
-}
-
-fn has_legacy_borsh_scheduler_witness_marker(witness: &[u8]) -> bool {
-    witness.len() >= 3
-        && witness[0] == CELLSCRIPT_SCHEDULER_WITNESS_MAGIC[0]
-        && witness[1] == CELLSCRIPT_SCHEDULER_WITNESS_MAGIC[1]
-        && witness[2] == CELLSCRIPT_SCHEDULER_WITNESS_VERSION
+    decode_cellscript_scheduler_witness_molecule_unchecked(witness)
+        .is_ok_and(|decoded| decoded.magic == 0xCE11 && decoded.version == CELLSCRIPT_SCHEDULER_WITNESS_VERSION)
 }
 
 /// Typed cell scheduler witness access record.
@@ -572,7 +776,7 @@ fn has_legacy_borsh_scheduler_witness_marker(witness: &[u8]) -> bool {
 /// Clean break from the old `binding_hash` model.
 /// `conflict_hash` is stable across data updates (used for conflict detection).
 /// `typed_data_hash` changes with data (used for audit/commitment).
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellScriptSchedulerAccessWitness {
     /// Operation id: CONSUME, CREATE, DESTROY, TRANSFER, READ_REF
     pub operation: u8,
@@ -594,7 +798,7 @@ pub struct CellScriptSchedulerAccessWitness {
 /// access-level conflict_hash, (2) its effect_class-based READ/WRITE classification
 /// was too coarse for typed-cell actions that mix reads and writes, and (3) no
 /// published version constrains this change.
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellScriptSchedulerWitness {
     /// Magic marker; must be `0xCE11`.
     pub magic: u16,
@@ -711,19 +915,6 @@ pub enum CellScriptSchedulerWitnessError {
 /// transaction-derived source bounds before using the witness for scheduling.
 pub fn decode_cellscript_scheduler_witness(bytes: &[u8]) -> Result<CellScriptSchedulerWitness, CellScriptSchedulerWitnessError> {
     decode_cellscript_scheduler_witness_molecule(bytes)
-}
-
-/// Decode the legacy Borsh CellScript scheduler witness format.
-///
-/// This is intentionally not part of witness admission. Public VM/CellScript
-/// scheduler witnesses are Molecule-only for v1; Borsh remains available only
-/// to explicit legacy migration or regression checks.
-pub fn decode_cellscript_scheduler_witness_legacy_borsh(
-    bytes: &[u8],
-) -> Result<CellScriptSchedulerWitness, CellScriptSchedulerWitnessError> {
-    let witness = CellScriptSchedulerWitness::try_from_slice(bytes)
-        .map_err(|error| CellScriptSchedulerWitnessError::Decode(error.to_string()))?;
-    validate_cellscript_scheduler_witness_header_and_body(witness)
 }
 
 /// Encode a CellScript scheduler witness as the launch Molecule witness schema.
@@ -1159,9 +1350,7 @@ fn validate_cellscript_scheduler_access_envelope(
 
 fn cellscript_scheduler_operation_accepts_source(operation: u8, source: u8) -> bool {
     match operation {
-        CELLSCRIPT_SCHEDULER_OP_CONSUME | CELLSCRIPT_SCHEDULER_OP_DESTROY => {
-            source == CELLSCRIPT_SCHEDULER_SOURCE_INPUT
-        }
+        CELLSCRIPT_SCHEDULER_OP_CONSUME | CELLSCRIPT_SCHEDULER_OP_DESTROY => source == CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
         CELLSCRIPT_SCHEDULER_OP_READ_REF => {
             source == CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP || source == CELLSCRIPT_SCHEDULER_SOURCE_INPUT
         }
@@ -1196,9 +1385,7 @@ pub enum ScriptHashVersion {
 /// OutPoint: uniquely identifies a Cell (tx_hash || output_index)
 ///
 /// Reference: CKB OutPoint
-#[derive(
-    Clone, Copy, Default, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, BorshSerialize, BorshDeserialize, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OutPoint {
     /// Transaction hash (32 bytes), serialized as hex string `transactionId` in JSON
     #[serde(rename = "transactionId", with = "outpoint_serde")]
@@ -1242,7 +1429,7 @@ impl fmt::Display for OutPoint {
 /// Script reference (Lock or Type script)
 ///
 /// Reference: CKB Script
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Script {
     /// Script code hash (points to a Cell's data)
     pub code_hash: [u8; 32],
@@ -1306,7 +1493,7 @@ impl Script {
 /// Note: data field is separated to CellTx.outputs_data (CKB optimization)
 ///
 /// Reference: CKB CellOutput
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellOutput {
     /// Lock script: defines who can spend this Cell
     pub lock: Script,
@@ -1342,13 +1529,13 @@ impl CellOutput {
 /// Cell input reference
 ///
 /// Reference: CKB CellInput
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellInput {
     /// Previous output: which Cell to spend (CKB calls this previous_output)
     pub previous_output: OutPoint,
-    /// Since: time lock (relative/absolute, timestamp/DAA)
+    /// Since: time lock (relative/absolute, timestamp/block number)
     /// Bit 63: 0=absolute, 1=relative
-    /// Bit 62: 0=timestamp, 1=DAA score
+    /// Bit 62: 0=timestamp, 1=block number
     /// Bit 61-0: lock value
     pub since: u64,
 }
@@ -1364,8 +1551,8 @@ impl CellInput {
         (self.since & 0x8000_0000_0000_0000) != 0
     }
 
-    /// Check if this uses DAA score (vs timestamp)
-    pub fn is_daa_lock(&self) -> bool {
+    /// Check if this uses block number (vs timestamp)
+    pub fn is_block_number_lock(&self) -> bool {
         (self.since & 0x4000_0000_0000_0000) != 0
     }
 
@@ -1378,7 +1565,7 @@ impl CellInput {
 /// Cell dependency
 ///
 /// Reference: CKB CellDep
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellDep {
     /// OutPoint: which Cell to depend on
     pub out_point: OutPoint,
@@ -1389,8 +1576,7 @@ pub struct CellDep {
 /// Dependency type
 ///
 /// Reference: CKB DepType
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
-#[borsh(use_discriminant = true)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum DepType {
     /// Code: single Cell as script code
@@ -1402,10 +1588,10 @@ pub enum DepType {
 /// DepGroup cell-data ABI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DepGroupDataAbi {
-    /// Spora's existing count-prefixed OutPoint list. Empty lists are accepted
-    /// for compatibility with existing Spora tests/builders.
-    Spora,
-    /// CKB Molecule `OutPointVec`. The byte layout matches the non-empty Spora
+    /// Myelin's existing count-prefixed OutPoint list. Empty lists are accepted
+    /// for compatibility with existing Myelin tests/builders.
+    Myelin,
+    /// CKB Molecule `OutPointVec`. The byte layout matches the non-empty Myelin
     /// list, but CKB rejects empty DepGroup data.
     CkbMolecule,
 }
@@ -1447,7 +1633,7 @@ pub fn encode_dep_group_data(outpoints: &[OutPoint]) -> Vec<u8> {
 /// Parse DepGroup cell data for an explicit target ABI.
 pub fn parse_dep_group_data_for_abi(data: &[u8], abi: DepGroupDataAbi) -> Result<Vec<OutPoint>, String> {
     match abi {
-        DepGroupDataAbi::Spora => parse_dep_group_data(data),
+        DepGroupDataAbi::Myelin => parse_dep_group_data(data),
         DepGroupDataAbi::CkbMolecule => {
             crate::serialization::molecule_compat::deserialize_ckb_outpoint_vec_molecule(data).map_err(|error| error.to_string())
         }
@@ -1457,7 +1643,7 @@ pub fn parse_dep_group_data_for_abi(data: &[u8], abi: DepGroupDataAbi) -> Result
 /// Encode DepGroup cell data for an explicit target ABI.
 pub fn encode_dep_group_data_for_abi(outpoints: &[OutPoint], abi: DepGroupDataAbi) -> Result<Vec<u8>, String> {
     match abi {
-        DepGroupDataAbi::Spora => Ok(encode_dep_group_data(outpoints)),
+        DepGroupDataAbi::Myelin => Ok(encode_dep_group_data(outpoints)),
         DepGroupDataAbi::CkbMolecule => {
             crate::serialization::molecule_compat::serialize_ckb_outpoint_vec_molecule(outpoints).map_err(|error| error.to_string())
         }
@@ -1477,7 +1663,7 @@ pub fn encode_ckb_dep_group_data(outpoints: &[OutPoint]) -> Result<Vec<u8>, Stri
 /// Cell transaction (complete structure)
 ///
 /// Reference: CKB Transaction
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellTx {
     /// Transaction version: 0xC001 (Cell v1)
     pub version: u32,
@@ -1606,9 +1792,10 @@ impl CellTx {
         self.version
     }
 
-    /// Check if this is a cellbase (coinbase) transaction
+    /// Check if this is a cellbase-style transaction.
     ///
-    /// Cellbase transactions have no inputs (mining reward)
+    /// Cellbase-style transactions have no inputs and are reserved for explicit
+    /// session genesis or issuance contexts.
     pub fn is_coinbase(&self) -> bool {
         self.inputs.is_empty()
     }
@@ -1669,7 +1856,7 @@ impl CellTx {
             .sum()
     }
 
-    /// Get cellbase payload (first output data for coinbase tx).
+    /// Get cellbase-style payload from the first output data or fallback witness.
     pub fn payload(&self) -> Option<&[u8]> {
         if !self.is_coinbase() {
             return None;
@@ -1703,16 +1890,16 @@ impl CellTx {
     }
 }
 
-/// Cell metadata (DAG-aware)
+/// Cell metadata for resolved execution inputs.
 ///
 /// Reference: CKB CellMeta, specialized for resolved execution inputs.
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedCellMeta {
     /// Cell output structure
     pub cell_output: CellOutput,
     /// OutPoint
     pub out_point: OutPoint,
-    /// DAG transaction info
+    /// CKB-style transaction inclusion info.
     pub transaction_info: Option<TransactionInfo>,
     /// Data size (bytes)
     pub data_bytes: u64,
@@ -1723,7 +1910,7 @@ pub struct ResolvedCellMeta {
 }
 
 impl ResolvedCellMeta {
-    /// Check if this is a cellbase (mining reward)
+    /// Check if this is a cellbase-style resolved cell.
     pub fn is_cellbase(&self) -> bool {
         self.transaction_info.as_ref().map(|info| info.is_cellbase).unwrap_or(false)
     }
@@ -1734,16 +1921,16 @@ impl ResolvedCellMeta {
     }
 }
 
-/// DAG transaction information
+/// CKB-style transaction inclusion information.
 ///
 /// Compatibility transaction information carried by resolved cells.
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionInfo {
     /// Transaction hash
     pub tx_hash: [u8; 32],
-    /// DAA score carried by the resolved header profile.
-    pub daa_score: u64,
-    /// Block hash (may be in multiple blocks in DAG)
+    /// Linear block number containing the transaction.
+    pub block_number: u64,
+    /// Block hash containing the transaction.
     pub block_hash: [u8; 32],
     /// Is this a cellbase transaction?
     pub is_cellbase: bool,
@@ -1756,7 +1943,7 @@ pub struct TransactionInfo {
 pub enum CellStatus {
     /// Cell exists and is unspent
     Live(Box<ResolvedCellMeta>),
-    /// Cell has been spent (at given DAA score)
+    /// Cell has been spent at the given block number.
     Dead(u64),
     /// Cell not found in index
     Unknown,
@@ -1765,7 +1952,7 @@ pub enum CellStatus {
 /// Resolved Cell transaction (all inputs/deps loaded)
 ///
 /// Reference: CKB ResolvedTransaction
-#[derive(Clone, Debug, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedCellTx {
     /// The transaction
     pub transaction: CellTx,
@@ -1842,13 +2029,13 @@ mod tests {
 
     #[test]
     fn test_time_lock_flags() {
-        let relative_daa_lock = CellInput::new(
+        let relative_block_number_lock = CellInput::new(
             OutPoint::new([0; 32], 0),
-            0xC000_0000_0000_0064, // relative + DAA + value=100
+            0xC000_0000_0000_0064, // relative + block number + value=100
         );
-        assert!(relative_daa_lock.is_relative_lock());
-        assert!(relative_daa_lock.is_daa_lock());
-        assert_eq!(relative_daa_lock.lock_value(), 100);
+        assert!(relative_block_number_lock.is_relative_lock());
+        assert!(relative_block_number_lock.is_block_number_lock());
+        assert_eq!(relative_block_number_lock.lock_value(), 100);
     }
 
     #[test]
@@ -1884,7 +2071,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 1,
             accesses: vec![expected_access.clone()],
@@ -1926,7 +2113,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 1,
             accesses: vec![expected_access.clone()],
@@ -1948,25 +2135,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cellscript_scheduler_witness_legacy_borsh_is_not_public_admission() {
-        let witness = CellScriptSchedulerWitness {
-            magic: 0xCE11,
-            version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
-            effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
-            parallelizable: false,
-            
-            estimated_cycles: 64,
-            access_count: 0,
-            accesses: vec![],
-        };
-        let legacy_borsh = borsh::to_vec(&witness).unwrap();
-
-        assert!(!is_cellscript_scheduler_witness_bytes(&legacy_borsh));
-        assert!(decode_cellscript_scheduler_witness(&legacy_borsh).is_err());
-        assert_eq!(decode_cellscript_scheduler_witness_legacy_borsh(&legacy_borsh).unwrap(), witness);
-    }
-
-    #[test]
     fn test_cellscript_scheduler_witness_molecule_decode_rejects_malformed_counts() {
         let bytes = encode_cellscript_scheduler_witness_molecule(&CellScriptSchedulerWitness {
             magic: 0xCE11,
@@ -1978,10 +2146,7 @@ mod tests {
             accesses: vec![],
         });
 
-        assert!(matches!(
-            decode_cellscript_scheduler_witness(&bytes),
-            Err(CellScriptSchedulerWitnessError::CountMismatch { .. })
-        ));
+        assert!(matches!(decode_cellscript_scheduler_witness(&bytes), Err(CellScriptSchedulerWitnessError::CountMismatch { .. })));
         assert!(!is_cellscript_scheduler_witness_bytes(&bytes));
     }
 
@@ -1996,7 +2161,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 1,
             accesses: vec![CellScriptSchedulerAccessWitness {
@@ -2031,7 +2196,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 1,
             accesses: vec![expected_access.clone()],
@@ -2054,7 +2219,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 1,
             accesses: vec![CellScriptSchedulerAccessWitness {
@@ -2090,7 +2255,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 1,
             accesses: vec![CellScriptSchedulerAccessWitness {
@@ -2121,10 +2286,7 @@ mod tests {
             accesses: vec![],
         });
 
-        assert!(matches!(
-            decode_cellscript_scheduler_witness(&bytes),
-            Err(CellScriptSchedulerWitnessError::CountMismatch { .. })
-        ));
+        assert!(matches!(decode_cellscript_scheduler_witness(&bytes), Err(CellScriptSchedulerWitnessError::CountMismatch { .. })));
         assert!(decode_cellscript_scheduler_witness(&[0x11, 0xCE]).is_err());
     }
 
@@ -2135,7 +2297,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_READ_ONLY,
             parallelizable: true,
-            
+
             estimated_cycles: 32,
             access_count: 1,
             accesses: vec![CellScriptSchedulerAccessWitness {
@@ -2164,7 +2326,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 1,
             accesses: vec![CellScriptSchedulerAccessWitness {
@@ -2202,7 +2364,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 1,
             accesses: vec![CellScriptSchedulerAccessWitness {
@@ -2247,15 +2409,15 @@ mod tests {
             operation: CELLSCRIPT_SCHEDULER_OP_READ_REF,
             source: CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP,
             index: 1,
-                            conflict_hash: [0x42; 32],
-                            typed_data_hash: [0x00; 32],
+            conflict_hash: [0x42; 32],
+            typed_data_hash: [0x00; 32],
         };
         let witness = CellScriptSchedulerWitness {
             magic: 0xCE11,
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 2,
             accesses: vec![create_access.clone(), read_access.clone()],
@@ -2278,7 +2440,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 2,
             accesses: vec![access.clone(), access.clone()],
@@ -2311,7 +2473,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 1,
             accesses: vec![access.clone()],
@@ -2349,14 +2511,8 @@ mod tests {
             accesses: vec![access.clone()],
         };
         // Tamper the conflict_hash in the actual witness
-        let tampered_access = CellScriptSchedulerAccessWitness {
-            conflict_hash: [0xFF; 32],
-            ..access
-        };
-        let actual = CellScriptSchedulerWitness {
-            accesses: vec![tampered_access],
-            ..expected.clone()
-        };
+        let tampered_access = CellScriptSchedulerAccessWitness { conflict_hash: [0xFF; 32], ..access };
+        let actual = CellScriptSchedulerWitness { accesses: vec![tampered_access], ..expected.clone() };
 
         assert_eq!(
             actual.validate_summary(&expected),
@@ -2378,7 +2534,7 @@ mod tests {
             version: CELLSCRIPT_SCHEDULER_WITNESS_VERSION,
             effect_class: CELLSCRIPT_SCHEDULER_EFFECT_CREATING,
             parallelizable: false,
-            
+
             estimated_cycles: 64,
             access_count: 0,
             accesses: vec![],
@@ -2428,47 +2584,59 @@ mod tests {
 
     fn scheduler_access_strategy() -> impl Strategy<Value = CellScriptSchedulerAccessWitness> {
         prop_oneof![
-            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_CONSUME,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                index,
-                conflict_hash,
-                typed_data_hash,
+            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| {
+                CellScriptSchedulerAccessWitness {
+                    operation: CELLSCRIPT_SCHEDULER_OP_CONSUME,
+                    source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
+                    index,
+                    conflict_hash,
+                    typed_data_hash,
+                }
             }),
-            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_DESTROY,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                index,
-                conflict_hash,
-                typed_data_hash,
+            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| {
+                CellScriptSchedulerAccessWitness {
+                    operation: CELLSCRIPT_SCHEDULER_OP_DESTROY,
+                    source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
+                    index,
+                    conflict_hash,
+                    typed_data_hash,
+                }
             }),
-            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_READ_REF,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP,
-                index,
-                conflict_hash,
-                typed_data_hash,
+            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| {
+                CellScriptSchedulerAccessWitness {
+                    operation: CELLSCRIPT_SCHEDULER_OP_READ_REF,
+                    source: CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP,
+                    index,
+                    conflict_hash,
+                    typed_data_hash,
+                }
             }),
-            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_CREATE,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT,
-                index,
-                conflict_hash,
-                typed_data_hash,
+            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| {
+                CellScriptSchedulerAccessWitness {
+                    operation: CELLSCRIPT_SCHEDULER_OP_CREATE,
+                    source: CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT,
+                    index,
+                    conflict_hash,
+                    typed_data_hash,
+                }
             }),
-            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_TRANSFER,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                index,
-                conflict_hash,
-                typed_data_hash,
+            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| {
+                CellScriptSchedulerAccessWitness {
+                    operation: CELLSCRIPT_SCHEDULER_OP_TRANSFER,
+                    source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
+                    index,
+                    conflict_hash,
+                    typed_data_hash,
+                }
             }),
-            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_TRANSFER,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT,
-                index,
-                conflict_hash,
-                typed_data_hash,
+            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| {
+                CellScriptSchedulerAccessWitness {
+                    operation: CELLSCRIPT_SCHEDULER_OP_TRANSFER,
+                    source: CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT,
+                    index,
+                    conflict_hash,
+                    typed_data_hash,
+                }
             }),
         ]
     }
@@ -2503,20 +2671,18 @@ mod tests {
     }
 
     fn source_tamper_strategy() -> impl Strategy<Value = (CellScriptSchedulerAccessWitness, u8)> {
-        prop_oneof![
-            (0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| {
-                (
-                    CellScriptSchedulerAccessWitness {
-                        operation: CELLSCRIPT_SCHEDULER_OP_TRANSFER,
-                        source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                        index,
-                        conflict_hash,
-                        typed_data_hash,
-                    },
-                    CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT,
-                )
-            }),
-        ]
+        prop_oneof![(0u32..16, hash32_strategy(), hash32_strategy()).prop_map(|(index, conflict_hash, typed_data_hash)| {
+            (
+                CellScriptSchedulerAccessWitness {
+                    operation: CELLSCRIPT_SCHEDULER_OP_TRANSFER,
+                    source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
+                    index,
+                    conflict_hash,
+                    typed_data_hash,
+                },
+                CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT,
+            )
+        }),]
     }
 
     fn assert_access_set_mismatch(error: CellScriptSchedulerWitnessError) {
@@ -2749,12 +2915,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ckb_dep_group_abi_matches_nonempty_spora_bytes() {
+    fn test_ckb_dep_group_abi_matches_nonempty_myelin_bytes() {
         let ops = vec![OutPoint::new([0x44; 32], 1), OutPoint::new([0x55; 32], 2)];
-        let spora_data = encode_dep_group_data_for_abi(&ops, DepGroupDataAbi::Spora).unwrap();
+        let myelin_data = encode_dep_group_data_for_abi(&ops, DepGroupDataAbi::Myelin).unwrap();
         let ckb_data = encode_dep_group_data_for_abi(&ops, DepGroupDataAbi::CkbMolecule).unwrap();
 
-        assert_eq!(ckb_data, spora_data);
+        assert_eq!(ckb_data, myelin_data);
         assert_eq!(parse_dep_group_data_for_abi(&ckb_data, DepGroupDataAbi::CkbMolecule).unwrap(), ops);
         assert_eq!(parse_ckb_dep_group_data(&ckb_data).unwrap(), ops);
     }
@@ -2871,10 +3037,7 @@ mod tests {
     #[test]
     fn test_validate_typed_cell_decl_rejects_mutable_with_none() {
         let decl = TypedCellDecl {
-            runtime: RuntimeCellSemantics {
-                ownership: CellOwnership::Owned,
-                conflict_key: ConflictKeySpec::None,
-            },
+            runtime: RuntimeCellSemantics { ownership: CellOwnership::Owned, conflict_key: ConflictKeySpec::None },
             semantic: TypedCellSemanticMetadata {
                 mutability: CellMutability::Linear,
                 accounting: vec![CellAccounting::Fungible],
@@ -2892,10 +3055,7 @@ mod tests {
     #[test]
     fn test_validate_typed_cell_decl_rejects_shared_mutable_with_none() {
         let decl = TypedCellDecl {
-            runtime: RuntimeCellSemantics {
-                ownership: CellOwnership::Shared,
-                conflict_key: ConflictKeySpec::None,
-            },
+            runtime: RuntimeCellSemantics { ownership: CellOwnership::Shared, conflict_key: ConflictKeySpec::None },
             semantic: TypedCellSemanticMetadata {
                 mutability: CellMutability::Versioned,
                 accounting: vec![CellAccounting::NonFungible],
@@ -2913,10 +3073,7 @@ mod tests {
     #[test]
     fn test_validate_typed_cell_decl_accepts_immutable_with_none() {
         let decl = TypedCellDecl {
-            runtime: RuntimeCellSemantics {
-                ownership: CellOwnership::Immutable,
-                conflict_key: ConflictKeySpec::None,
-            },
+            runtime: RuntimeCellSemantics { ownership: CellOwnership::Immutable, conflict_key: ConflictKeySpec::None },
             semantic: TypedCellSemanticMetadata {
                 mutability: CellMutability::Linear,
                 accounting: vec![CellAccounting::Receipt],
@@ -2924,19 +3081,13 @@ mod tests {
                 settlement: CellSettlement::Local,
             },
         };
-        assert!(
-            validate_typed_cell_decl(&decl).is_ok(),
-            "Immutable cell with ConflictKeySpec::None is valid"
-        );
+        assert!(validate_typed_cell_decl(&decl).is_ok(), "Immutable cell with ConflictKeySpec::None is valid");
     }
 
     #[test]
     fn test_validate_typed_cell_decl_accepts_ephemeral_with_none() {
         let decl = TypedCellDecl {
-            runtime: RuntimeCellSemantics {
-                ownership: CellOwnership::Ephemeral,
-                conflict_key: ConflictKeySpec::None,
-            },
+            runtime: RuntimeCellSemantics { ownership: CellOwnership::Ephemeral, conflict_key: ConflictKeySpec::None },
             semantic: TypedCellSemanticMetadata {
                 mutability: CellMutability::Linear,
                 accounting: vec![],
@@ -2944,19 +3095,13 @@ mod tests {
                 settlement: CellSettlement::Local,
             },
         };
-        assert!(
-            validate_typed_cell_decl(&decl).is_ok(),
-            "Ephemeral cell with ConflictKeySpec::None and Local settlement is valid"
-        );
+        assert!(validate_typed_cell_decl(&decl).is_ok(), "Ephemeral cell with ConflictKeySpec::None and Local settlement is valid");
     }
 
     #[test]
     fn test_validate_typed_cell_decl_accepts_owned_with_cell_id() {
         let decl = TypedCellDecl {
-            runtime: RuntimeCellSemantics {
-                ownership: CellOwnership::Owned,
-                conflict_key: ConflictKeySpec::CellId,
-            },
+            runtime: RuntimeCellSemantics { ownership: CellOwnership::Owned, conflict_key: ConflictKeySpec::CellId },
             semantic: TypedCellSemanticMetadata {
                 mutability: CellMutability::Linear,
                 accounting: vec![CellAccounting::Fungible],
@@ -2970,10 +3115,7 @@ mod tests {
     #[test]
     fn test_validate_rejects_immutable_with_versioned() {
         let decl = TypedCellDecl {
-            runtime: RuntimeCellSemantics {
-                ownership: CellOwnership::Immutable,
-                conflict_key: ConflictKeySpec::None,
-            },
+            runtime: RuntimeCellSemantics { ownership: CellOwnership::Immutable, conflict_key: ConflictKeySpec::None },
             semantic: TypedCellSemanticMetadata {
                 mutability: CellMutability::Versioned,
                 accounting: vec![],
@@ -2983,19 +3125,14 @@ mod tests {
         };
         assert_eq!(
             validate_typed_cell_decl(&decl),
-            Err(TypedCellDeclError::ImmutableWithMutableMutability {
-                mutability: CellMutability::Versioned,
-            })
+            Err(TypedCellDeclError::ImmutableWithMutableMutability { mutability: CellMutability::Versioned })
         );
     }
 
     #[test]
     fn test_validate_rejects_immutable_with_append_only() {
         let decl = TypedCellDecl {
-            runtime: RuntimeCellSemantics {
-                ownership: CellOwnership::Immutable,
-                conflict_key: ConflictKeySpec::None,
-            },
+            runtime: RuntimeCellSemantics { ownership: CellOwnership::Immutable, conflict_key: ConflictKeySpec::None },
             semantic: TypedCellSemanticMetadata {
                 mutability: CellMutability::AppendOnly,
                 accounting: vec![],
@@ -3005,19 +3142,14 @@ mod tests {
         };
         assert_eq!(
             validate_typed_cell_decl(&decl),
-            Err(TypedCellDeclError::ImmutableWithMutableMutability {
-                mutability: CellMutability::AppendOnly,
-            })
+            Err(TypedCellDeclError::ImmutableWithMutableMutability { mutability: CellMutability::AppendOnly })
         );
     }
 
     #[test]
     fn test_validate_rejects_fungible_plus_nonfungible() {
         let decl = TypedCellDecl {
-            runtime: RuntimeCellSemantics {
-                ownership: CellOwnership::Owned,
-                conflict_key: ConflictKeySpec::CellId,
-            },
+            runtime: RuntimeCellSemantics { ownership: CellOwnership::Owned, conflict_key: ConflictKeySpec::CellId },
             semantic: TypedCellSemanticMetadata {
                 mutability: CellMutability::Linear,
                 accounting: vec![CellAccounting::Fungible, CellAccounting::NonFungible],
@@ -3025,19 +3157,13 @@ mod tests {
                 settlement: CellSettlement::Local,
             },
         };
-        assert_eq!(
-            validate_typed_cell_decl(&decl),
-            Err(TypedCellDeclError::ConflictingAccountingLabels)
-        );
+        assert_eq!(validate_typed_cell_decl(&decl), Err(TypedCellDeclError::ConflictingAccountingLabels));
     }
 
     #[test]
     fn test_validate_rejects_ephemeral_with_committed_settlement() {
         let decl = TypedCellDecl {
-            runtime: RuntimeCellSemantics {
-                ownership: CellOwnership::Ephemeral,
-                conflict_key: ConflictKeySpec::None,
-            },
+            runtime: RuntimeCellSemantics { ownership: CellOwnership::Ephemeral, conflict_key: ConflictKeySpec::None },
             semantic: TypedCellSemanticMetadata {
                 mutability: CellMutability::Linear,
                 accounting: vec![],
@@ -3045,19 +3171,13 @@ mod tests {
                 settlement: CellSettlement::Committed,
             },
         };
-        assert_eq!(
-            validate_typed_cell_decl(&decl),
-            Err(TypedCellDeclError::EphemeralWithNonLocalSettlement)
-        );
+        assert_eq!(validate_typed_cell_decl(&decl), Err(TypedCellDeclError::EphemeralWithNonLocalSettlement));
     }
 
     #[test]
     fn test_validate_rejects_ephemeral_with_pending_settlement() {
         let decl = TypedCellDecl {
-            runtime: RuntimeCellSemantics {
-                ownership: CellOwnership::Ephemeral,
-                conflict_key: ConflictKeySpec::None,
-            },
+            runtime: RuntimeCellSemantics { ownership: CellOwnership::Ephemeral, conflict_key: ConflictKeySpec::None },
             semantic: TypedCellSemanticMetadata {
                 mutability: CellMutability::Linear,
                 accounting: vec![],
@@ -3065,14 +3185,11 @@ mod tests {
                 settlement: CellSettlement::Pending,
             },
         };
-        assert_eq!(
-            validate_typed_cell_decl(&decl),
-            Err(TypedCellDeclError::EphemeralWithNonLocalSettlement)
-        );
+        assert_eq!(validate_typed_cell_decl(&decl), Err(TypedCellDeclError::EphemeralWithNonLocalSettlement));
     }
 
     #[test]
-    fn test_typed_cell_decl_serialization_roundtrip() {
+    fn test_typed_cell_decl_molecule_roundtrip() {
         let decl = TypedCellDecl {
             runtime: RuntimeCellSemantics {
                 ownership: CellOwnership::Shared,
@@ -3086,9 +3203,9 @@ mod tests {
             },
         };
 
-        let bytes = borsh::to_vec(&decl).expect("borsh serialize");
-        let restored: TypedCellDecl = borsh::from_slice(&bytes).expect("borsh deserialize");
-        assert_eq!(decl, restored, "TypedCellDecl must round-trip through Borsh");
+        let bytes = encode_typed_cell_decl_molecule(&decl);
+        let restored = decode_typed_cell_decl_molecule(&bytes).expect("decode Molecule typed-cell metadata");
+        assert_eq!(decl, restored, "TypedCellDecl must round-trip through Molecule metadata bytes");
     }
 
     #[test]
@@ -3298,10 +3415,7 @@ mod tests {
         assert!(validate_typed_cell_decl(&shared_cellid).is_ok());
 
         let shared_none = TypedCellDecl {
-            runtime: RuntimeCellSemantics {
-                ownership: CellOwnership::Shared,
-                conflict_key: ConflictKeySpec::None,
-            },
+            runtime: RuntimeCellSemantics { ownership: CellOwnership::Shared, conflict_key: ConflictKeySpec::None },
             semantic: TypedCellSemanticMetadata {
                 mutability: CellMutability::Versioned,
                 accounting: vec![CellAccounting::NonFungible],
@@ -3406,30 +3520,102 @@ pub const CELLTX_SCHEMA_VERSION: u8 = 1;
 
 impl VersionedSerializable for OutPoint {
     const CURRENT_VERSION: u8 = CELLTX_SCHEMA_VERSION;
+
+    fn to_versioned_payload(&self) -> Result<Vec<u8>, crate::serialization::SerializationError> {
+        crate::serialization::molecule_compat::serialize_outpoint_molecule(self).map_err(Into::into)
+    }
+
+    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
+        ensure_celltx_schema_version(version)?;
+        crate::serialization::molecule_compat::deserialize_outpoint_molecule(bytes).map_err(Into::into)
+    }
 }
 
 impl VersionedSerializable for Script {
     const CURRENT_VERSION: u8 = CELLTX_SCHEMA_VERSION;
+
+    fn to_versioned_payload(&self) -> Result<Vec<u8>, crate::serialization::SerializationError> {
+        crate::serialization::molecule_compat::serialize_script_molecule(self).map_err(Into::into)
+    }
+
+    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
+        ensure_celltx_schema_version(version)?;
+        crate::serialization::molecule_compat::deserialize_script_molecule(bytes).map_err(Into::into)
+    }
 }
 
 impl VersionedSerializable for CellOutput {
     const CURRENT_VERSION: u8 = CELLTX_SCHEMA_VERSION;
+
+    fn to_versioned_payload(&self) -> Result<Vec<u8>, crate::serialization::SerializationError> {
+        crate::serialization::molecule_compat::serialize_cell_output_molecule(self).map_err(Into::into)
+    }
+
+    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
+        ensure_celltx_schema_version(version)?;
+        crate::serialization::molecule_compat::deserialize_cell_output_molecule(bytes).map_err(Into::into)
+    }
 }
 
 impl VersionedSerializable for CellInput {
     const CURRENT_VERSION: u8 = CELLTX_SCHEMA_VERSION;
+
+    fn to_versioned_payload(&self) -> Result<Vec<u8>, crate::serialization::SerializationError> {
+        crate::serialization::molecule_compat::serialize_cell_input_molecule(self).map_err(Into::into)
+    }
+
+    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
+        ensure_celltx_schema_version(version)?;
+        crate::serialization::molecule_compat::deserialize_cell_input_molecule(bytes).map_err(Into::into)
+    }
 }
 
 impl VersionedSerializable for CellDep {
     const CURRENT_VERSION: u8 = CELLTX_SCHEMA_VERSION;
+
+    fn to_versioned_payload(&self) -> Result<Vec<u8>, crate::serialization::SerializationError> {
+        crate::serialization::molecule_compat::serialize_cell_dep_molecule(self).map_err(Into::into)
+    }
+
+    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
+        ensure_celltx_schema_version(version)?;
+        crate::serialization::molecule_compat::deserialize_cell_dep_molecule(bytes).map_err(Into::into)
+    }
 }
 
 impl VersionedSerializable for DepType {
     const CURRENT_VERSION: u8 = CELLTX_SCHEMA_VERSION;
+
+    fn to_versioned_payload(&self) -> Result<Vec<u8>, crate::serialization::SerializationError> {
+        Ok(vec![match self {
+            DepType::Code => 0,
+            DepType::DepGroup => 1,
+        }])
+    }
+
+    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
+        ensure_celltx_schema_version(version)?;
+        match bytes {
+            [0] => Ok(DepType::Code),
+            [1] => Ok(DepType::DepGroup),
+            _ => Err(crate::serialization::SerializationError::DeserializationFailed(format!(
+                "invalid DepType Molecule payload length/value: {bytes:?}"
+            ))),
+        }
+    }
 }
 
 impl VersionedSerializable for CellTx {
     const CURRENT_VERSION: u8 = CELLTX_SCHEMA_VERSION;
+
+    fn to_versioned_payload(&self) -> Result<Vec<u8>, crate::serialization::SerializationError> {
+        crate::serialization::molecule_compat::serialize_transaction_molecule(self).map_err(Into::into)
+    }
+
+    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
+        ensure_celltx_schema_version(version)?;
+        crate::serialization::molecule_compat::deserialize_transaction_molecule(bytes).map_err(Into::into)
+    }
 }
 
 impl VersionedSerializable for TransactionInfo {
@@ -3442,4 +3628,12 @@ impl VersionedSerializable for ResolvedCellMeta {
 
 impl VersionedSerializable for ResolvedCellTx {
     const CURRENT_VERSION: u8 = CELLTX_SCHEMA_VERSION;
+}
+
+fn ensure_celltx_schema_version(version: u8) -> Result<(), crate::serialization::SerializationError> {
+    if version == CELLTX_SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(crate::serialization::SerializationError::UpgradePathNotAvailable { from: version, to: CELLTX_SCHEMA_VERSION })
+    }
 }

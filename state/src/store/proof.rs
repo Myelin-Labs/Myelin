@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Data availability proofs: Merkle-based sampling with an upgrade path to NMT/KZG
 
-use crate::Result;
-use borsh::{BorshDeserialize, BorshSerialize};
+use crate::{molecule, Result};
 
 /// Segment proof (Merkle proof for DA sampling)
 ///
 /// Current implementation uses a conventional Merkle tree over ordered chunk
 /// payloads. This keeps proofs sound today while preserving an upgrade path to
 /// NMT/KZG for namespaced sampling later.
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentProof {
     /// Segment ID
     pub segment_id: u32,
@@ -50,6 +49,39 @@ impl SegmentProof {
 
         let leaf = hash_leaf(&self.chunk_data);
         Ok(verify_merkle_proof(&leaf, &self.merkle_path, &self.segment_root, self.leaf_index as usize))
+    }
+
+    /// Encode the proof as a Molecule-compatible table for public DA evidence.
+    pub fn to_molecule_bytes(&self) -> Vec<u8> {
+        let path_items = self.merkle_path.iter().map(|hash| hash.to_vec()).collect::<Vec<_>>();
+        molecule::encode_table(&[
+            molecule::encode_u32(self.segment_id),
+            molecule::encode_u32(self.leaf_index),
+            self.chunk_data.clone(),
+            molecule::encode_u64(self.chunk_offset),
+            molecule::encode_u32(self.chunk_length),
+            molecule::encode_dynvec(&path_items),
+            self.segment_root.to_vec(),
+        ])
+    }
+
+    /// Decode a proof from the Molecule-compatible DA evidence table.
+    pub fn from_molecule_bytes(bytes: &[u8]) -> Result<Self> {
+        let fields = molecule::decode_table(bytes, 7, "SegmentProof")?;
+        let merkle_path = molecule::decode_dynvec(fields[5], "SegmentProof.merkle_path")?
+            .into_iter()
+            .map(|hash| molecule::decode_array32(hash, "SegmentProof.merkle_path.item"))
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Self {
+            segment_id: molecule::decode_u32(fields[0], "SegmentProof.segment_id")?,
+            leaf_index: molecule::decode_u32(fields[1], "SegmentProof.leaf_index")?,
+            chunk_data: fields[2].to_vec(),
+            chunk_offset: molecule::decode_u64(fields[3], "SegmentProof.chunk_offset")?,
+            chunk_length: molecule::decode_u32(fields[4], "SegmentProof.chunk_length")?,
+            merkle_path,
+            segment_root: molecule::decode_array32(fields[6], "SegmentProof.segment_root")?,
+        })
     }
 }
 
@@ -143,14 +175,14 @@ impl Default for MerkleTreeBuilder {
 
 fn hash_leaf(data: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"spora-segment/leaf");
+    hasher.update(b"myelin-segment/leaf");
     hasher.update(data);
     *hasher.finalize().as_bytes()
 }
 
 fn hash_internal(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"spora-segment/node");
+    hasher.update(b"myelin-segment/node");
     hasher.update(left);
     hasher.update(right);
     *hasher.finalize().as_bytes()
@@ -304,5 +336,22 @@ mod tests {
         proof.merkle_path = builder.get_proof(1);
 
         assert!(proof.verify().unwrap());
+    }
+
+    #[test]
+    fn test_segment_proof_molecule_roundtrip() {
+        let mut builder = MerkleTreeBuilder::new();
+        builder.add_leaf(b"left");
+        builder.add_leaf(b"right");
+        let root = builder.build();
+        let mut proof = SegmentProof::new(7, 1, b"right".to_vec(), 64, 5, root);
+        proof.merkle_path = builder.get_proof(1);
+
+        let bytes = proof.to_molecule_bytes();
+        assert!(bytes.len() > 4);
+        let decoded = SegmentProof::from_molecule_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded, proof);
+        assert!(decoded.verify().unwrap());
     }
 }

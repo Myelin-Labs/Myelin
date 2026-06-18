@@ -28,7 +28,6 @@ pub struct ResourceDef {
     pub name: String,
     pub type_id: Option<TypeIdentity>,
     pub identity: IdentityPolicy,
-    pub conflict_key: ConflictKeyPolicy,
     pub default_hash_type: Option<HashTypeDecl>,
     pub capacity_floor: Option<CapacityFloorDecl>,
     pub capabilities: Vec<Capability>,
@@ -41,7 +40,6 @@ pub struct SharedDef {
     pub name: String,
     pub type_id: Option<TypeIdentity>,
     pub identity: IdentityPolicy,
-    pub conflict_key: ConflictKeyPolicy,
     pub default_hash_type: Option<HashTypeDecl>,
     pub capacity_floor: Option<CapacityFloorDecl>,
     pub capabilities: Vec<Capability>,
@@ -54,7 +52,6 @@ pub struct ReceiptDef {
     pub name: String,
     pub type_id: Option<TypeIdentity>,
     pub identity: IdentityPolicy,
-    pub conflict_key: ConflictKeyPolicy,
     pub default_hash_type: Option<HashTypeDecl>,
     pub capacity_floor: Option<CapacityFloorDecl>,
     pub claim_output: Option<Type>,
@@ -67,7 +64,6 @@ pub struct ReceiptDef {
 pub struct StructDef {
     pub name: String,
     pub type_id: Option<TypeIdentity>,
-    pub conflict_key: ConflictKeyPolicy,
     pub default_hash_type: Option<HashTypeDecl>,
     pub capacity_floor: Option<CapacityFloorDecl>,
     pub fields: Vec<Field>,
@@ -549,18 +545,6 @@ pub enum IdentityPolicy {
     ScriptArgs,
     /// Singleton type identity (one cell per type script)
     SingletonType,
-}
-
-/// Typed-cell conflict key policy for resource/shared/receipt declarations.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum ConflictKeyPolicy {
-    /// No typed-cell conflict key declaration.
-    #[default]
-    None,
-    /// Single field conflict key, e.g. #[conflict_key(invoice_id)].
-    Field(String),
-    /// Composite conflict key with length-prefixed field bytes.
-    Composite(Vec<String>),
 }
 
 /// Destruction policy for the `destroy` expression.

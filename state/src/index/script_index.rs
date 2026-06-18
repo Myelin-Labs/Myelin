@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
-// ScriptIndex: lock_hash/type_hash → Cells (for wallet queries)
+// ScriptIndex: lock_hash/type_hash -> Cells for owner or script queries.
 
 use crate::{Result, StateError};
+use myelin_exec::OutPoint;
 use parking_lot::RwLock;
 use rocksdb::{ColumnFamilyDescriptor, Options, DB};
-use spora_exec::OutPoint;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ const CF_TYPE_INDEX: &str = "type_index";
 
 /// Script index database
 ///
-/// Maps script hashes to OutPoints for wallet queries:
+/// Maps script hashes to OutPoints for owner and script queries:
 /// - lock_hash → [OutPoint, ...]
 /// - type_hash → [OutPoint, ...]
 pub struct ScriptIndex {

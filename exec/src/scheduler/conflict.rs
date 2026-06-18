@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Deterministic conflict resolution
 
@@ -100,15 +100,7 @@ impl ConflictResolver {
     /// Resolve conflict between two transactions
     ///
     /// Returns the winner (transaction with higher priority)
-    pub fn resolve(
-        &self,
-        tx1: &CellTx,
-        fee1: u64,
-        cycles1: u64,
-        tx2: &CellTx,
-        fee2: u64,
-        cycles2: u64,
-    ) -> ConflictResolution {
+    pub fn resolve(&self, tx1: &CellTx, fee1: u64, cycles1: u64, tx2: &CellTx, fee2: u64, cycles2: u64) -> ConflictResolution {
         let key1 = self.compute_key(tx1, fee1, cycles1);
         let key2 = self.compute_key(tx2, fee2, cycles2);
 
@@ -179,7 +171,7 @@ mod tests {
         let tx1 = create_test_tx(1000);
         let tx2 = create_test_tx(1001); // Different capacity → different wtxid
 
-        // Same fee and cycles, no blue score
+        // Same fee and cycles, no inherited ordering score
         let key1 = resolver.compute_key(&tx1, 1000, 1000);
         let key2 = resolver.compute_key(&tx2, 1000, 1000);
 

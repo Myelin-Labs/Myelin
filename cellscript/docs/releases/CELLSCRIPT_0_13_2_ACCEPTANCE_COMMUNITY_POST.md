@@ -23,16 +23,19 @@ transactions, lock rejection matrices, and stateful business-flow scenarios.
 The full release gate is:
 
 ```bash
-./scripts/cellscript_ckb_release_gate.sh full
+./scripts/cellscript_gate.sh release
 ```
+
+The old `./scripts/cellscript_ckb_release_gate.sh full` command remains
+supported as a compatibility wrapper.
 
 The current release evidence includes:
 
 - 7 production bundled examples.
-- 43/43 production acceptance actions covered.
-- 16 builder-backed lock valid/invalid spend cases.
+- 44/44 production acceptance actions covered.
+- 17 builder-backed lock valid/invalid spend cases.
 - 27 stateful local CKB scenarios.
-- 46 committed stateful steps.
+- 47 committed stateful steps.
 - 7 end-to-end business-flow scenarios.
 - 20 stateful action-branch scenarios.
 
@@ -167,7 +170,7 @@ Acceptance evidence:
 - Launch consumed paired-token input and created mint authority, pool, LP, and
   recipient token outputs.
 - The launched mint authority became the live input for a later mint.
-- `simple_launch` is covered by a stateful branch transaction.
+- `bootstrap_token` is covered by a stateful branch transaction.
 - Malformed distribution/accounting outputs were rejected by the action matrix.
 
 ## What This Proves

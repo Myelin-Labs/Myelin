@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // VM system calls
 // Adapted from CKB script/src/syscalls/
@@ -23,7 +23,7 @@ pub mod process_id;
 pub mod read;
 pub mod secp256k1_verify;
 pub mod spawn;
-pub mod utils; // Spora-specific: blake3 hash syscall
+pub mod utils; // Myelin-specific: blake3 hash syscall
 pub mod vm_version;
 pub mod wait;
 pub mod write;
@@ -61,10 +61,10 @@ pub const LOAD_CELL_SYSCALL_NUMBER: u64 = 2071;
 pub const LOAD_HEADER_SYSCALL_NUMBER: u64 = 2072;
 pub const LOAD_INPUT_SYSCALL_NUMBER: u64 = 2073;
 pub const LOAD_WITNESS_SYSCALL_NUMBER: u64 = 2074;
-/// Spora `LOAD_SCRIPT` syscall number.
+/// Myelin `LOAD_SCRIPT` syscall number.
 ///
-/// Upstream CKB uses `2052` for `LOAD_SCRIPT`; Spora historically used `2075`.
-/// Keep this constant as the Spora value for existing scripts and fixtures.
+/// Upstream CKB uses `2052` for `LOAD_SCRIPT`; Myelin historically used `2075`.
+/// Keep this constant as the Myelin value for existing scripts and fixtures.
 pub const LOAD_SCRIPT_SYSCALL_NUMBER: u64 = 2075;
 /// Upstream CKB `LOAD_SCRIPT` syscall number.
 pub const CKB_LOAD_SCRIPT_SYSCALL_NUMBER: u64 = 2052;
@@ -84,7 +84,7 @@ pub const READ_SYSCALL_NUMBER: u64 = 2606;
 pub const INHERITED_FD_SYSCALL_NUMBER: u64 = 2607;
 pub const CLOSE_SYSCALL_NUMBER: u64 = 2608;
 
-/// Spora-specific syscall numbers (3000+ range to avoid conflicts)
+/// Myelin-specific syscall numbers (3000+ range to avoid conflicts)
 pub const BLAKE3_HASH_SYSCALL_NUMBER: u64 = 3001;
 pub const SECP256K1_VERIFY_SYSCALL_NUMBER: u64 = 3002;
 pub const LOAD_SCHNORR_SIGNATURE_HASH_SYSCALL_NUMBER: u64 = 3003;
@@ -271,57 +271,57 @@ impl InputField {
 /// Header field selector
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderField {
-    /// DAA score
-    DaaScore = 0,
+    /// Block number
+    Number = 0,
     /// Timestamp
     Timestamp = 1,
     /// Block hash
     Hash = 2,
-    /// Direct parent hashes
-    Parents = 3,
+    /// Parent block hash
+    ParentHash = 3,
     /// Header version
     Version = 4,
-    /// Compact difficulty bits
-    Bits = 5,
-    /// Mining nonce
+    /// Compact target
+    CompactTarget = 5,
+    /// Header nonce
     Nonce = 6,
-    /// Transaction hash merkle root
-    HashMerkleRoot = 7,
-    /// Accepted transaction ID merkle root
-    AcceptedIdMerkleRoot = 8,
+    /// Transaction merkle root
+    TransactionsRoot = 7,
+    /// Proposal IDs hash
+    ProposalsHash = 8,
     /// Execution state commitment
     CellCommitment = 9,
     /// Cell state root
     CellRoot = 10,
     /// Data-availability segment root
     SegmentRoot = 11,
-    /// Blue score
-    BlueScore = 12,
-    /// Accumulated blue work
-    BlueWork = 13,
-    /// Pruning-point hash
-    PruningPoint = 14,
+    /// Packed epoch number-with-fraction
+    Epoch = 12,
+    /// DAO field
+    Dao = 13,
+    /// Uncles hash
+    UnclesHash = 14,
 }
 
 impl HeaderField {
     /// Parse field from u64
     pub fn parse(field: u64) -> Option<Self> {
         match field {
-            0 => Some(Self::DaaScore),
+            0 => Some(Self::Number),
             1 => Some(Self::Timestamp),
             2 => Some(Self::Hash),
-            3 => Some(Self::Parents),
+            3 => Some(Self::ParentHash),
             4 => Some(Self::Version),
-            5 => Some(Self::Bits),
+            5 => Some(Self::CompactTarget),
             6 => Some(Self::Nonce),
-            7 => Some(Self::HashMerkleRoot),
-            8 => Some(Self::AcceptedIdMerkleRoot),
+            7 => Some(Self::TransactionsRoot),
+            8 => Some(Self::ProposalsHash),
             9 => Some(Self::CellCommitment),
             10 => Some(Self::CellRoot),
             11 => Some(Self::SegmentRoot),
-            12 => Some(Self::BlueScore),
-            13 => Some(Self::BlueWork),
-            14 => Some(Self::PruningPoint),
+            12 => Some(Self::Epoch),
+            13 => Some(Self::Dao),
+            14 => Some(Self::UnclesHash),
             _ => None,
         }
     }
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_source_parse_for_semantics_rejects_legacy_group_values_under_ckb_strict() {
-        assert_eq!(Source::parse_for_semantics(0x0100, crate::vm::VmSemantics::SporaExtended), Some(Source::GroupInput));
+        assert_eq!(Source::parse_for_semantics(0x0100, crate::vm::VmSemantics::MyelinExtended), Some(Source::GroupInput));
         assert_eq!(Source::parse_for_semantics(0x0100, crate::vm::VmSemantics::CkbStrict), None);
         assert_eq!(Source::parse_for_semantics(0x0100_0000_0000_0001, crate::vm::VmSemantics::CkbStrict), Some(Source::GroupInput));
         assert_eq!(Source::parse_for_semantics(0x0200_0000_0000_0001, crate::vm::VmSemantics::CkbStrict), None);

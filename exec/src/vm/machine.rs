@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // VM Machine implementation (adapted from CKB-VM)
 // Reference: ckb/script/src/types.rs

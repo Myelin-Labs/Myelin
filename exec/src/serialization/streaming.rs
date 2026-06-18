@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Streaming Serialization
 //
@@ -33,7 +33,7 @@ impl<W: Write> StreamingSerializer<W> {
     /// 序列化单个值
     pub fn serialize<T: VersionedSerializable>(&mut self, value: &T) -> Result<(), SerializationError> {
         let envelope = crate::serialization::VersionedEnvelope::new(value)?;
-        let bytes = borsh::to_vec(&envelope).map_err(|e| SerializationError::IoError(e.to_string()))?;
+        let bytes = envelope.to_bytes();
 
         self.writer.write_all(&bytes).map_err(|e| SerializationError::IoError(e.to_string()))?;
 
@@ -97,35 +97,21 @@ impl<R: Read> StreamingDeserializer<R> {
 
     /// 反序列化单个值
     pub fn deserialize<T: VersionedSerializable>(&mut self) -> Result<T, SerializationError> {
-        // Read format version
-        let mut format_version = [0u8; 1];
-        self.reader.read_exact(&mut format_version).map_err(|e| SerializationError::IoError(e.to_string()))?;
-        self.bytes_read += 1;
-
-        // Read schema version
-        let mut schema_version = [0u8; 1];
-        self.reader.read_exact(&mut schema_version).map_err(|e| SerializationError::IoError(e.to_string()))?;
-        self.bytes_read += 1;
-
-        // Read payload length (u32)
         let mut len_bytes = [0u8; 4];
         self.reader.read_exact(&mut len_bytes).map_err(|e| SerializationError::IoError(e.to_string()))?;
-        let payload_len = u32::from_le_bytes(len_bytes) as usize;
-        self.bytes_read += 4;
+        let total_len = u32::from_le_bytes(len_bytes) as usize;
+        if total_len < 4 {
+            return Err(SerializationError::DeserializationFailed("invalid Molecule envelope length".to_string()));
+        }
 
-        // Read payload
-        let mut payload = vec![0u8; payload_len];
-        self.reader.read_exact(&mut payload).map_err(|e| SerializationError::IoError(e.to_string()))?;
-        self.bytes_read += payload_len;
+        let mut bytes = Vec::with_capacity(total_len);
+        bytes.extend_from_slice(&len_bytes);
+        let mut rest = vec![0u8; total_len - 4];
+        self.reader.read_exact(&mut rest).map_err(|e| SerializationError::IoError(e.to_string()))?;
+        bytes.extend_from_slice(&rest);
+        self.bytes_read += total_len;
 
-        // Create envelope and parse
-        let envelope = crate::serialization::VersionedEnvelope::<T> {
-            format_version: format_version[0],
-            schema_version: schema_version[0],
-            payload,
-            _phantom: std::marker::PhantomData,
-        };
-
+        let envelope = crate::serialization::VersionedEnvelope::<T>::from_bytes(&bytes)?;
         envelope.parse()
     }
 
@@ -223,7 +209,7 @@ mod tests {
     fn test_streaming_deserializer_basic() {
         let output = create_test_output();
         let envelope = crate::serialization::VersionedEnvelope::new(&output).unwrap();
-        let bytes = borsh::to_vec(&envelope).unwrap();
+        let bytes = envelope.to_bytes();
 
         let mut deserializer = StreamingDeserializer::new(&bytes[..]);
         let restored: CellOutput = deserializer.deserialize().unwrap();

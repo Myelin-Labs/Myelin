@@ -38,10 +38,10 @@ exec/
 
 - CKB Cell Model: `/home/arthur/RustRoverProjects/ckb/util/types/src/core/cell.rs`
 - CKB Script Verifier: `/home/arthur/RustRoverProjects/ckb/script/src/verify.rs`
-- Spec: `/home/arthur/RustRoverProjects/Spora/spora.md` Section 4-6
+- Spec: `/home/arthur/RustRoverProjects/Myelin/myelin.md` Section 4-6
 
 ## Status
 
 🚧 **Under Construction** - Part of the Myelin L2 kernel
 
-See `spora.md` for full implementation plan.
+See `myelin.md` for full implementation plan.

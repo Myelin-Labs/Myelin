@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // VM ABI Integration Tests
 //
 // These tests verify VM-facing types implement VmSerializable correctly.
 
-use spora_exec::{
+use myelin_exec::{
     serialization::vm_abi::{
         serialize_cell_input, serialize_cell_output, serialize_outpoint, serialize_script, serialized_cell_output_size,
         serialized_script_size,
@@ -19,19 +19,19 @@ fn test_resolved_header_vm_serializable() {
     let header = ResolvedHeader {
         hash: [0xAA; 32],
         version: 1,
-        parents_by_level: vec![vec![[0xBB; 32], [0xCC; 32]], vec![[0xDD; 32]]],
-        hash_merkle_root: [0x11; 32],
-        accepted_id_merkle_root: [0x22; 32],
+        parent_hash: [0xBB; 32],
+        transactions_root: [0x11; 32],
+        proposals_hash: [0x22; 32],
         cell_commitment: [0x33; 32],
         cell_root: [0x44; 32],
         segment_root: [0x55; 32],
         timestamp: 1234567890,
-        bits: 0x1d00ffff,
+        compact_target: 0x1d00ffff,
         nonce: 42,
-        daa_score: 1000,
-        blue_work: [0x66; 24],
-        blue_score: 500,
-        pruning_point: [0x77; 32],
+        number: 1000,
+        dao: [0x66; 32],
+        epoch: 500,
+        uncles_hash: [0x77; 32],
     };
 
     // Test ABI version — ResolvedHeader uses Molecule v1 for VM-facing serialization
@@ -173,9 +173,9 @@ fn test_abi_version_compatibility() {
     assert!(ResolvedHeader::is_abi_compatible(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1));
     assert!(ResolvedCell::is_abi_compatible(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1));
 
-    // Legacy Borsh v1 is not the active ABI for these types
-    assert!(!ResolvedHeader::is_abi_compatible(VmAbiNegotiator::ABI_VERSION_BORSH_V1));
-    assert!(!ResolvedCell::is_abi_compatible(VmAbiNegotiator::ABI_VERSION_BORSH_V1));
+    // Old pre-Molecule ABI numbers are not compatible.
+    assert!(!ResolvedHeader::is_abi_compatible(0x0001));
+    assert!(!ResolvedCell::is_abi_compatible(0x0001));
 
     // Unknown versions should not be compatible
     assert!(!ResolvedHeader::is_abi_compatible(0x9999));
@@ -189,19 +189,19 @@ fn test_vm_serializable_consistency() {
     let header = ResolvedHeader {
         hash: [0xAA; 32],
         version: 1,
-        parents_by_level: vec![vec![[0xBB; 32]]],
-        hash_merkle_root: [0xCC; 32],
-        accepted_id_merkle_root: [0xDD; 32],
+        parent_hash: [0xBB; 32],
+        transactions_root: [0xCC; 32],
+        proposals_hash: [0xDD; 32],
         cell_commitment: [0xEE; 32],
         cell_root: [0xFF; 32],
         segment_root: [0x11; 32],
         timestamp: 1000,
-        bits: 0x1d00ffff,
+        compact_target: 0x1d00ffff,
         nonce: 42,
-        daa_score: 100,
-        blue_work: [0x22; 24],
-        blue_score: 50,
-        pruning_point: [0x33; 32],
+        number: 100,
+        dao: [0x22; 32],
+        epoch: 50,
+        uncles_hash: [0x33; 32],
     };
 
     // Multiple serializations should produce same bytes

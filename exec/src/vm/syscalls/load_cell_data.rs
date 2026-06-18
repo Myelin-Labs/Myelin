@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Load cell data syscall
 
@@ -35,7 +35,7 @@ enum CellDataLookupResult {
 
 impl<D: CellDataProvider> LoadCellData<D> {
     pub fn new(tx: Arc<CellTx>, provider: Arc<D>, group_input_indices: Vec<usize>, group_output_indices: Vec<usize>) -> Self {
-        Self { tx, provider, group_input_indices, group_output_indices, semantics: VmSemantics::SporaExtended }
+        Self { tx, provider, group_input_indices, group_output_indices, semantics: VmSemantics::MyelinExtended }
     }
 
     pub fn with_semantics(mut self, semantics: VmSemantics) -> Self {

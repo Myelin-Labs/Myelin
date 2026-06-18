@@ -10,7 +10,7 @@ you already know what you want to do.
 Use this when you have a single `.cell` file and want a CKB-profile artifact.
 
 ```bash
-cellc examples/token.cell --target riscv64-elf --target-profile ckb --primitive-strict 0.15 -o /tmp/token.elf
+cellc examples/token.cell --target riscv64-elf --target-profile ckb --primitive-strict 0.16 -o /tmp/token.elf
 cellc verify-artifact /tmp/token.elf --expect-target-profile ckb
 ```
 
@@ -34,12 +34,12 @@ through an explicit stdlib lifecycle pattern such as
 `std::lifecycle::transfer`, `std::receipt::claim`, or
 `std::lifecycle::settle`.
 
-## Recipe: Mint A New Output Cell
+## Recipe: Mint With Authority
 
 Use `create` when an action materializes new Cell state.
 
 ```cellscript
-action mint(auth_before: MintAuthority, to: Address, amount: u64) -> (auth_after: MintAuthority, token: Token) {
+action mint_with_authority(auth_before: MintAuthority, to: Address, amount: u64) -> (auth_after: MintAuthority, token: Token) {
     transition auth_before -> auth_after
 
     verification
@@ -90,8 +90,9 @@ action transfer_badge(badge: Badge, new_owner: Address) -> Badge {
 
 `replace_unique` consumes the named input before the field initializer block.
 For `field(...)`, the generated verifier compares the fixed-width identity field
-between input and output. Global uniqueness of field identities still needs
-builder or indexer evidence.
+between input and output. `create_unique` emits a local output anchor and
+records full create-time uniqueness as runtime-required; field identity
+uniqueness still needs builder or indexer evidence.
 
 ## Recipe: Update State Without Updating In Place
 
@@ -123,10 +124,10 @@ destroy_instance(badge, identity_field = badge_id)
 burn_amount(token, field = amount)
 ```
 
-In `--primitive-strict=0.15` mode, bare `destroy value` requires the `consume +
-burn` kernel effects instead of the legacy `destroy` attribute. Keep the policy explicit
-when reviewers must distinguish output absence, identity consumption, instance
-consumption, and quantity burn.
+In `--primitive-compat=0.15` legacy compatibility mode, bare `destroy value` requires
+the `consume + burn` kernel effects instead of the legacy `destroy` attribute.
+Keep the policy explicit when reviewers must distinguish output absence,
+identity consumption, instance consumption, and quantity burn.
 
 ## Recipe: Write An Honest Lock Predicate
 
@@ -232,7 +233,7 @@ This is a compiler/package gate. Use it before asking for deeper CKB evidence.
 Use this only from the CellScript repository root:
 
 ```bash
-./scripts/cellscript_ckb_release_gate.sh full
+./scripts/cellscript_gate.sh release
 ```
 
 This is the boundary where compiler evidence becomes builder-backed local CKB

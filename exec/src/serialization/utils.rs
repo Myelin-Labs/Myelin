@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Serialization Utilities
 //
@@ -13,30 +13,29 @@ use crate::serialization::{SerializationError, VersionedEnvelope, VersionedSeria
 ///
 /// # Example
 /// ```
-/// use spora_exec::serialization::utils::serialize_to_bytes;
-/// use spora_exec::serialization::VersionedSerializable;
+/// use myelin_exec::serialization::utils::serialize_to_bytes;
+/// use myelin_exec::serialization::VersionedSerializable;
 ///
 /// // Use any type that implements VersionedSerializable
 /// let value = 42u8;
 /// ```
 pub fn serialize_to_bytes<T: VersionedSerializable>(value: &T) -> Result<Vec<u8>, SerializationError> {
     let envelope = VersionedEnvelope::new(value)?;
-    borsh::to_vec(&envelope).map_err(|e| SerializationError::IoError(e.to_string()))
+    Ok(envelope.to_bytes())
 }
 
 /// 从字节向量解析类型，自动处理 VersionedEnvelope
 ///
 /// # Example
 /// ```
-/// use spora_exec::serialization::utils::{serialize_to_bytes, deserialize_from_bytes};
-/// use spora_exec::serialization::VersionedSerializable;
+/// use myelin_exec::serialization::utils::{serialize_to_bytes, deserialize_from_bytes};
+/// use myelin_exec::serialization::VersionedSerializable;
 ///
 /// // Roundtrip serialize/deserialize works for any VersionedSerializable type
 /// let value = 42u8;
 /// ```
 pub fn deserialize_from_bytes<T: VersionedSerializable>(bytes: &[u8]) -> Result<T, SerializationError> {
-    let envelope: VersionedEnvelope<T> =
-        borsh::from_slice(bytes).map_err(|e| SerializationError::DeserializationFailed(e.to_string()))?;
+    let envelope = VersionedEnvelope::<T>::from_bytes(bytes)?;
     envelope.parse()
 }
 
@@ -44,19 +43,7 @@ pub fn deserialize_from_bytes<T: VersionedSerializable>(bytes: &[u8]) -> Result<
 ///
 /// 这个函数可以快速检查数据格式，而不需要完全解析。
 pub fn is_valid_versioned_envelope(bytes: &[u8]) -> bool {
-    if bytes.len() < 3 {
-        return false;
-    }
-
-    // Check format version (first byte)
-    let format_version = bytes[0];
-    if format_version > 0x80 {
-        // Future Molecule format, not yet supported
-        return false;
-    }
-
-    // Basic length check - should have at least format_version, schema_version, and some payload
-    bytes.len() >= 3
+    VersionedEnvelope::<()>::from_bytes(bytes).is_ok()
 }
 
 /// 从 VersionedEnvelope 字节中提取 schema 版本
@@ -65,10 +52,7 @@ pub fn is_valid_versioned_envelope(bytes: &[u8]) -> bool {
 /// 这个函数不会验证数据的完整性，仅用于快速检查版本。
 /// 如果数据无效，可能返回错误的结果。
 pub fn peek_schema_version(bytes: &[u8]) -> Option<u8> {
-    if bytes.len() < 2 {
-        return None;
-    }
-    Some(bytes[1])
+    VersionedEnvelope::<()>::from_bytes(bytes).ok().map(|envelope| envelope.schema_version)
 }
 
 /// 从 VersionedEnvelope 字节中提取格式版本
@@ -76,7 +60,7 @@ pub fn peek_schema_version(bytes: &[u8]) -> Option<u8> {
 /// # Safety
 /// 这个函数不会验证数据的完整性，仅用于快速检查版本。
 pub fn peek_format_version(bytes: &[u8]) -> Option<u8> {
-    bytes.first().copied()
+    VersionedEnvelope::<()>::from_bytes(bytes).ok().map(|envelope| envelope.format_version)
 }
 
 /// 序列化多个值到一个字节向量
@@ -152,8 +136,7 @@ pub fn deserialize_many<T: VersionedSerializable>(bytes: &[u8]) -> Result<Vec<T>
 /// 这个函数返回一个估计值，实际大小可能略有不同。
 pub fn estimate_serialized_size<T: VersionedSerializable>(value: &T) -> Result<usize, SerializationError> {
     let envelope = VersionedEnvelope::new(value)?;
-    // VersionedEnvelope has: format_version (1) + schema_version (1) + payload_len + payload
-    Ok(2 + 4 + envelope.payload_size()) // 2 bytes for versions, 4 bytes for vec length
+    Ok(envelope.to_bytes().len())
 }
 
 /// 序列化结果类型别名
@@ -187,7 +170,7 @@ mod tests {
         assert!(!is_valid_versioned_envelope(&[0x00]));
         assert!(!is_valid_versioned_envelope(&[0x00, 0x01]));
 
-        // Invalid: future format
+        // Invalid: malformed Molecule table
         assert!(!is_valid_versioned_envelope(&[0x81, 0x01, 0x00]));
     }
 
@@ -206,7 +189,7 @@ mod tests {
         let bytes = serialize_to_bytes(&output).unwrap();
 
         let version = peek_format_version(&bytes).unwrap();
-        assert_eq!(version, 0x00); // Borsh format
+        assert_eq!(version, VersionedEnvelope::<CellOutput>::FORMAT_VERSION_MOLECULE);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Serialization Security
 //
@@ -14,7 +14,7 @@
 //! - 防重放保护（可选）
 //! - 大小限制和深度限制
 
-use crate::serialization::SerializationError;
+use crate::serialization::{utils, SerializationError, VersionedSerializable};
 use blake3::Hasher;
 
 /// 安全序列化配置
@@ -116,29 +116,27 @@ impl SecureEnvelope {
 
     /// 序列化为字节
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut result = Vec::with_capacity(4 + 32 + self.data.len());
-        result.extend_from_slice(&self.length.to_le_bytes());
-        result.extend_from_slice(&self.hash);
-        result.extend_from_slice(&self.data);
-        result
+        encode_table(&[self.length.to_le_bytes().to_vec(), self.hash.to_vec(), self.data.clone()])
     }
 
     /// 从字节解析
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SerializationError> {
-        if bytes.len() < 36 {
-            return Err(SerializationError::DeserializationFailed("Insufficient bytes for SecureEnvelope".to_string()));
+        let (length, hash, data) = match decode_table(bytes, 3) {
+            Ok(fields) => {
+                let length = decode_u32(fields[0], "SecureEnvelope.length")? as usize;
+                let hash = decode_array_32(fields[1], "SecureEnvelope.hash")?;
+                let data = fields[2].to_vec();
+                (length, hash, data)
+            }
+            Err(_) => decode_legacy_bytes(bytes)?,
+        };
+
+        if data.len() != length {
+            return Err(SerializationError::DeserializationFailed(format!(
+                "SecureEnvelope length mismatch: expected {length}, got {}",
+                data.len()
+            )));
         }
-
-        let length = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-
-        if bytes.len() < 36 + length {
-            return Err(SerializationError::DeserializationFailed(format!("Expected {} bytes, got {}", 36 + length, bytes.len())));
-        }
-
-        let hash: [u8; 32] =
-            bytes[4..36].try_into().map_err(|_| SerializationError::DeserializationFailed("Invalid hash length".to_string()))?;
-
-        let data = bytes[36..36 + length].to_vec();
 
         let envelope = Self { data, hash, length: length as u32 };
 
@@ -240,28 +238,129 @@ pub fn verify_integrity(data: &[u8], expected_hash: &[u8; 32]) -> bool {
 }
 
 /// 带完整性校验的序列化
-pub fn serialize_with_integrity<T: borsh::BorshSerialize>(value: &T) -> Result<SecureEnvelope, SerializationError> {
-    let data = borsh::to_vec(value).map_err(|e| SerializationError::IoError(e.to_string()))?;
+pub fn serialize_with_integrity<T: VersionedSerializable>(value: &T) -> Result<SecureEnvelope, SerializationError> {
+    let data = utils::serialize_to_bytes(value)?;
     Ok(SecureEnvelope::new(data))
 }
 
 /// 带完整性校验的反序列化
-pub fn deserialize_with_integrity<T: borsh::BorshDeserialize>(envelope: &SecureEnvelope) -> Result<T, SerializationError> {
+pub fn deserialize_with_integrity<T: VersionedSerializable>(envelope: &SecureEnvelope) -> Result<T, SerializationError> {
     if !envelope.verify() {
         return Err(SerializationError::DeserializationFailed("Integrity check failed".to_string()));
     }
-    borsh::from_slice(&envelope.data).map_err(|e| SerializationError::DeserializationFailed(e.to_string()))
+    utils::deserialize_from_bytes(&envelope.data)
+}
+
+fn encode_table(fields: &[Vec<u8>]) -> Vec<u8> {
+    let header_size = 4 + fields.len() * 4;
+    let total_size = header_size + fields.iter().map(Vec::len).sum::<usize>();
+    let mut out = Vec::with_capacity(total_size);
+    out.extend_from_slice(&(total_size as u32).to_le_bytes());
+    let mut offset = header_size;
+    for field in fields {
+        out.extend_from_slice(&(offset as u32).to_le_bytes());
+        offset += field.len();
+    }
+    for field in fields {
+        out.extend_from_slice(field);
+    }
+    out
+}
+
+fn decode_table<'a>(bytes: &'a [u8], expected_fields: usize) -> Result<Vec<&'a [u8]>, SerializationError> {
+    if bytes.len() < 8 {
+        return Err(SerializationError::DeserializationFailed("Molecule table too short".to_string()));
+    }
+    let total_size = u32::from_le_bytes(bytes[..4].try_into().expect("slice length checked")) as usize;
+    if total_size != bytes.len() {
+        return Err(SerializationError::DeserializationFailed("Molecule table total size mismatch".to_string()));
+    }
+    let first_offset = u32::from_le_bytes(bytes[4..8].try_into().expect("slice length checked")) as usize;
+    if first_offset < 4 || first_offset % 4 != 0 {
+        return Err(SerializationError::DeserializationFailed("invalid Molecule table first offset".to_string()));
+    }
+    let field_count = (first_offset - 4) / 4;
+    if field_count != expected_fields {
+        return Err(SerializationError::DeserializationFailed(format!(
+            "Molecule table field count mismatch: expected {expected_fields}, got {field_count}"
+        )));
+    }
+    let mut offsets = Vec::with_capacity(field_count + 1);
+    for index in 0..field_count {
+        let start = 4 + index * 4;
+        let offset = u32::from_le_bytes(bytes[start..start + 4].try_into().expect("slice length checked")) as usize;
+        if offset < first_offset || offset > bytes.len() {
+            return Err(SerializationError::DeserializationFailed("Molecule table offset out of range".to_string()));
+        }
+        if let Some(previous) = offsets.last() {
+            if offset < *previous {
+                return Err(SerializationError::DeserializationFailed("Molecule table offsets are not ordered".to_string()));
+            }
+        }
+        offsets.push(offset);
+    }
+    offsets.push(bytes.len());
+    Ok(offsets.windows(2).map(|range| &bytes[range[0]..range[1]]).collect())
+}
+
+fn decode_u32(bytes: &[u8], field: &'static str) -> Result<u32, SerializationError> {
+    if bytes.len() != 4 {
+        return Err(SerializationError::DeserializationFailed(format!("{field} must be u32le")));
+    }
+    Ok(u32::from_le_bytes(bytes.try_into().expect("slice length checked")))
+}
+
+fn decode_array_32(bytes: &[u8], field: &'static str) -> Result<[u8; 32], SerializationError> {
+    bytes.try_into().map_err(|_| SerializationError::DeserializationFailed(format!("{field} must be 32 bytes")))
+}
+
+fn decode_legacy_bytes(bytes: &[u8]) -> Result<(usize, [u8; 32], Vec<u8>), SerializationError> {
+    if bytes.len() < 36 {
+        return Err(SerializationError::DeserializationFailed("Insufficient bytes for legacy SecureEnvelope".to_string()));
+    }
+    let length = u32::from_le_bytes(bytes[..4].try_into().expect("slice length checked")) as usize;
+    if bytes.len() != 36 + length {
+        return Err(SerializationError::DeserializationFailed(format!("Expected {} bytes, got {}", 36 + length, bytes.len())));
+    }
+    let hash = decode_array_32(&bytes[4..36], "legacy SecureEnvelope.hash")?;
+    Ok((length, hash, bytes[36..].to_vec()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use borsh::{BorshDeserialize, BorshSerialize};
 
-    #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq)]
     struct TestData {
         value: u64,
         data: Vec<u8>,
+    }
+
+    impl VersionedSerializable for TestData {
+        const CURRENT_VERSION: u8 = 1;
+
+        fn to_versioned_payload(&self) -> Result<Vec<u8>, SerializationError> {
+            let mut out = Vec::with_capacity(12 + self.data.len());
+            out.extend_from_slice(&self.value.to_le_bytes());
+            out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&self.data);
+            Ok(out)
+        }
+
+        fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
+            if version != Self::CURRENT_VERSION {
+                return Err(SerializationError::UpgradePathNotAvailable { from: version, to: Self::CURRENT_VERSION });
+            }
+            if bytes.len() < 12 {
+                return Err(SerializationError::DeserializationFailed("TestData payload too short".to_string()));
+            }
+            let value = u64::from_le_bytes(bytes[..8].try_into().expect("slice length checked"));
+            let data_len = u32::from_le_bytes(bytes[8..12].try_into().expect("slice length checked")) as usize;
+            if bytes.len() != 12 + data_len {
+                return Err(SerializationError::DeserializationFailed("TestData payload length mismatch".to_string()));
+            }
+            Ok(Self { value, data: bytes[12..].to_vec() })
+        }
     }
 
     #[test]
@@ -444,7 +543,7 @@ mod tests {
 
         assert!(envelope.verify());
         let bytes = envelope.to_bytes();
-        assert_eq!(bytes.len(), 36 + 10000);
+        assert_eq!(bytes.len(), 16 + 4 + 32 + 10000);
 
         let restored = SecureEnvelope::from_bytes(&bytes).unwrap();
         assert_eq!(envelope, restored);

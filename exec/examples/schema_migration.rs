@@ -1,33 +1,21 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Schema Migration Example
-//
-// This example demonstrates how to implement schema migration
-// when data structures evolve.
 
-use borsh::{BorshDeserialize, BorshSerialize};
-use spora_exec::{SerializationError, VersionedEnvelope, VersionedSerializable};
+use myelin_exec::{SerializationError, VersionedEnvelope, VersionedSerializable};
 
-// ============================================================================
-// Old Schema (v1)
-// ============================================================================
-
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct UserDataV1 {
     name: String,
     age: u32,
 }
 
-// ============================================================================
-// New Schema (v2) - Added email field, changed age to birth_year
-// ============================================================================
-
-#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct UserDataV2 {
     name: String,
-    birth_year: u32,       // Changed from age
-    email: Option<String>, // New field
+    birth_year: u32,
+    email: Option<String>,
 }
 
 impl UserDataV2 {
@@ -36,122 +24,139 @@ impl UserDataV2 {
     }
 }
 
-// ============================================================================
-// VersionedSerializable Implementation with Migration
-// ============================================================================
-
 impl VersionedSerializable for UserDataV2 {
     const CURRENT_VERSION: u8 = 2;
+
+    fn to_versioned_payload(&self) -> Result<Vec<u8>, SerializationError> {
+        let mut out = Vec::new();
+        push_string(&mut out, &self.name);
+        out.extend_from_slice(&self.birth_year.to_le_bytes());
+        match &self.email {
+            Some(email) => {
+                out.push(1);
+                push_string(&mut out, email);
+            }
+            None => out.push(0),
+        }
+        Ok(out)
+    }
 
     fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
         match version {
             1 => {
-                // Parse old version
-                let v1: UserDataV1 =
-                    BorshDeserialize::try_from_slice(bytes).map_err(|e| SerializationError::DeserializationFailed(e.to_string()))?;
-
-                // Migrate to new version
-                // Assume current year is 2026 for age calculation
+                let v1 = UserDataV1::from_payload(bytes)?;
                 let current_year: u32 = 2026;
-                let birth_year = current_year.saturating_sub(v1.age);
-
-                Ok(Self {
-                    name: v1.name,
-                    birth_year,
-                    email: None, // New field, default to None
-                })
+                Ok(Self { name: v1.name, birth_year: current_year.saturating_sub(v1.age), email: None })
             }
-            2 => {
-                // Current version
-                BorshDeserialize::try_from_slice(bytes).map_err(|e| SerializationError::DeserializationFailed(e.to_string()))
-            }
+            2 => Self::from_payload(bytes),
             _ => Err(SerializationError::UpgradePathNotAvailable { from: version, to: Self::CURRENT_VERSION }),
         }
+    }
+}
+
+impl UserDataV1 {
+    fn to_payload(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_string(&mut out, &self.name);
+        out.extend_from_slice(&self.age.to_le_bytes());
+        out
+    }
+
+    fn from_payload(bytes: &[u8]) -> Result<Self, SerializationError> {
+        let mut offset = 0;
+        let name = read_string(bytes, &mut offset)?;
+        let age = read_u32(bytes, &mut offset)?;
+        ensure_consumed(bytes, offset)?;
+        Ok(Self { name, age })
+    }
+}
+
+impl UserDataV2 {
+    fn from_payload(bytes: &[u8]) -> Result<Self, SerializationError> {
+        let mut offset = 0;
+        let name = read_string(bytes, &mut offset)?;
+        let birth_year = read_u32(bytes, &mut offset)?;
+        let has_email = read_u8(bytes, &mut offset)?;
+        let email = match has_email {
+            0 => None,
+            1 => Some(read_string(bytes, &mut offset)?),
+            other => return Err(SerializationError::DeserializationFailed(format!("invalid optional email flag {other}"))),
+        };
+        ensure_consumed(bytes, offset)?;
+        Ok(Self { name, birth_year, email })
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Schema Migration Example ===\n");
 
-    // ============================================================================
-    // Scenario 1: Create and store v2 data
-    // ============================================================================
-    println!("--- Scenario 1: Storing new data (v2) ---");
-
     let user_v2 = UserDataV2::new("Alice", 1990, Some("alice@example.com"));
     let envelope = VersionedEnvelope::new(&user_v2)?;
+    let stored_bytes = envelope.to_bytes();
 
-    println!("Created user: {:?}", user_v2);
-    println!("Schema version: {}", envelope.schema_version());
+    println!("Stored v2 user with schema version {}", envelope.schema_version());
 
-    // Simulate storing to database
-    let stored_bytes = borsh::to_vec(&envelope)?;
-    println!("Stored {} bytes to database", stored_bytes.len());
-
-    // ============================================================================
-    // Scenario 2: Read v2 data
-    // ============================================================================
-    println!("\n--- Scenario 2: Reading new data (v2) ---");
-
-    let restored_envelope: VersionedEnvelope<UserDataV2> = borsh::from_slice(&stored_bytes)?;
+    let restored_envelope = VersionedEnvelope::<UserDataV2>::from_bytes(&stored_bytes)?;
     let restored_user = restored_envelope.parse()?;
-
-    println!("Restored user: {:?}", restored_user);
     assert_eq!(user_v2, restored_user);
-    println!("✓ Data integrity verified");
+    println!("Read v2 data successfully");
 
-    // ============================================================================
-    // Scenario 3: Simulate old v1 data in database
-    // ============================================================================
-    println!("\n--- Scenario 3: Migrating old data (v1 → v2) ---");
+    let user_v1 = UserDataV1 { name: "Bob".to_string(), age: 30 };
+    let old_envelope =
+        VersionedEnvelope::<UserDataV2>::from_parts(VersionedEnvelope::<UserDataV2>::FORMAT_VERSION_MOLECULE, 1, user_v1.to_payload());
+    let old_stored_bytes = old_envelope.to_bytes();
 
-    // Create old v1 data
-    let user_v1 = UserDataV1 {
-        name: "Bob".to_string(),
-        age: 30, // Will be converted to birth_year
-    };
-
-    // Store as v1 (simulating old database entry)
-    let mut old_envelope = VersionedEnvelope::<UserDataV2>::default();
-    old_envelope.format_version = 0x00; // Borsh
-    old_envelope.schema_version = 1; // Old version
-    old_envelope.payload = borsh::to_vec(&user_v1)?;
-    let old_stored_bytes = borsh::to_vec(&old_envelope)?;
-
-    println!("Old v1 data: {:?}", user_v1);
-    println!("Stored with schema version: 1");
-
-    // ============================================================================
-    // Scenario 4: Read and auto-migrate v1 data
-    // ============================================================================
-    println!("\n--- Scenario 4: Auto-migration on read ---");
-
-    let migrated_envelope: VersionedEnvelope<UserDataV2> = borsh::from_slice(&old_stored_bytes)?;
-    println!("Detected schema version: {}", migrated_envelope.schema_version());
-
+    let migrated_envelope = VersionedEnvelope::<UserDataV2>::from_bytes(&old_stored_bytes)?;
     let migrated_user = migrated_envelope.parse()?;
-    println!("Migrated user: {:?}", migrated_user);
 
-    // Verify migration
     assert_eq!(migrated_user.name, "Bob");
-    assert_eq!(migrated_user.birth_year, 1996); // 2026 - 30
-    assert_eq!(migrated_user.email, None); // Default value
-    println!("✓ Migration successful: age 30 → birth_year 1996");
-
-    // ============================================================================
-    // Summary
-    // ============================================================================
-    println!("\n=== Summary ===");
-    println!("✓ New data stored with current schema version (v2)");
-    println!("✓ Old data (v1) automatically migrated to v2 on read");
-    println!("✓ No data loss during migration");
-    println!("✓ Application code only works with v2 structure");
-
-    println!("\nKey benefits:");
-    println!("  - Backward compatibility: Old data continues to work");
-    println!("  - Forward compatibility: New data can't be read by old code");
-    println!("  - Zero-downtime migration: No need to migrate entire database at once");
-    println!("  - Type safety: Application always works with current schema");
+    assert_eq!(migrated_user.birth_year, 1996);
+    assert_eq!(migrated_user.email, None);
+    println!("Migrated v1 data to v2 successfully");
 
     Ok(())
+}
+
+fn push_string(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn read_string(bytes: &[u8], offset: &mut usize) -> Result<String, SerializationError> {
+    let len = read_u32(bytes, offset)? as usize;
+    let end = offset.checked_add(len).ok_or_else(|| SerializationError::DeserializationFailed("offset overflow".to_string()))?;
+    if end > bytes.len() {
+        return Err(SerializationError::DeserializationFailed("string extends past end of payload".to_string()));
+    }
+    let value =
+        std::str::from_utf8(&bytes[*offset..end]).map_err(|e| SerializationError::DeserializationFailed(e.to_string()))?.to_string();
+    *offset = end;
+    Ok(value)
+}
+
+fn read_u32(bytes: &[u8], offset: &mut usize) -> Result<u32, SerializationError> {
+    let end = offset.checked_add(4).ok_or_else(|| SerializationError::DeserializationFailed("offset overflow".to_string()))?;
+    if end > bytes.len() {
+        return Err(SerializationError::DeserializationFailed("u32 extends past end of payload".to_string()));
+    }
+    let value = u32::from_le_bytes(bytes[*offset..end].try_into().expect("slice length checked"));
+    *offset = end;
+    Ok(value)
+}
+
+fn read_u8(bytes: &[u8], offset: &mut usize) -> Result<u8, SerializationError> {
+    if *offset >= bytes.len() {
+        return Err(SerializationError::DeserializationFailed("u8 extends past end of payload".to_string()));
+    }
+    let value = bytes[*offset];
+    *offset += 1;
+    Ok(value)
+}
+
+fn ensure_consumed(bytes: &[u8], offset: usize) -> Result<(), SerializationError> {
+    if offset == bytes.len() {
+        Ok(())
+    } else {
+        Err(SerializationError::DeserializationFailed("trailing bytes in payload".to_string()))
+    }
 }

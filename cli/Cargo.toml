@@ -1,0 +1,22 @@
+[package]
+name = "myelin-cli"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "myelin"
+path = "src/main.rs"
+
+[dependencies]
+blake3.workspace = true
+clap.workspace = true
+hex.workspace = true
+myelin-consensus.workspace = true
+myelin-exec.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

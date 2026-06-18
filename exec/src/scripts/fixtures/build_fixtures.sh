@@ -99,7 +99,7 @@ if [ "$HASH_TOOL" = "cargo-fixture-hash" ]; then
     done
     (
         cd "$REPO_ROOT"
-        cargo run --quiet -p spora-exec --example fixture_hashes -- "${helper_args[@]}"
+        cargo run --quiet -p myelin-exec --example fixture_hashes -- "${helper_args[@]}"
     ) > "$HASH_CACHE_FILE"
 fi
 

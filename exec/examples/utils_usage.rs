@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Serialization Utils Usage Example
 //
 // This example demonstrates the utility functions for serialization.
 
-use spora_exec::{
+use myelin_exec::{
     serialization::utils::{
         deserialize_from_bytes, deserialize_many, estimate_serialized_size, is_valid_versioned_envelope, peek_format_version,
         peek_schema_version, serialize_many, serialize_to_bytes,

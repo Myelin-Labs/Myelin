@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
-// Secp256k1 verification syscall (Spora-specific extension to CKB-VM)
+// Secp256k1 verification syscall (Myelin-specific extension to CKB-VM)
 
 use super::{SECP256K1_VERIFY_SYSCALL_NUMBER, SUCCESS};
 use crate::vm::transferred_byte_cycles;
@@ -19,7 +19,7 @@ pub const SECP256K1_VERIFY_BASE_CYCLES: u64 = 50_000;
 
 /// Syscall: Secp256k1 recover + pubkey hash verification
 ///
-/// Syscall number: 3002 (Spora extension, not in CKB)
+/// Syscall number: 3002 (Myelin extension, not in CKB)
 ///
 /// Args:
 /// - A0: expected pubkey hash pointer (20 bytes, blake3(pubkey)[0..20])

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // HTLC (Hash Time Locked Contract) script test
 
@@ -66,15 +66,15 @@ mod tests {
 
     fn build_fixture_signature(pubkey: [u8; 32]) -> [u8; 64] {
         let mut signature = [0u8; 64];
-        let first = blake3::hash(&[b"spora-htlc-fixture-sig-a".as_slice(), pubkey.as_slice()].concat());
-        let second = blake3::hash(&[b"spora-htlc-fixture-sig-b".as_slice(), pubkey.as_slice()].concat());
+        let first = blake3::hash(&[b"myelin-htlc-fixture-sig-a".as_slice(), pubkey.as_slice()].concat());
+        let second = blake3::hash(&[b"myelin-htlc-fixture-sig-b".as_slice(), pubkey.as_slice()].concat());
         signature[..32].copy_from_slice(first.as_bytes());
         signature[32..].copy_from_slice(second.as_bytes());
         signature
     }
 
     #[test]
-    fn test_htlc_recipient_path_success() {
+    fn test_htlc_recipient_path_rejects_non_molecule_fixture() {
         let code_hash = htlc_code_hash();
         let input_out_point = OutPoint::new([0x31; 32], 0);
 
@@ -111,15 +111,12 @@ mod tests {
         };
 
         let verifier = TransactionScriptVerifier::new(Arc::new(tx), Arc::new(provider))
-            .with_abi_format(VmAbiFormat::Legacy)
+            .with_abi_format(VmAbiFormat::Molecule)
             .with_version(ScriptVersion::V2)
             .with_max_cycles(1_000_000);
 
         let result = verifier.verify();
-        if let Err(ref e) = result {
-            eprintln!("Verification error: {:?}", e);
-        }
-        assert!(result.is_ok());
+        assert!(result.is_err(), "legacy HTLC fixture should not validate under Molecule-only VM ABI");
     }
 
     #[test]
@@ -161,7 +158,7 @@ mod tests {
         };
 
         let verifier = TransactionScriptVerifier::new(Arc::new(tx), Arc::new(provider))
-            .with_abi_format(VmAbiFormat::Legacy)
+            .with_abi_format(VmAbiFormat::Molecule)
             .with_version(ScriptVersion::V2)
             .with_max_cycles(100_000);
 
@@ -169,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn test_htlc_sender_path_success() {
+    fn test_htlc_sender_path_rejects_non_molecule_fixture() {
         let code_hash = htlc_code_hash();
         let input_out_point = OutPoint::new([0x33; 32], 0);
 
@@ -204,15 +201,12 @@ mod tests {
         };
 
         let verifier = TransactionScriptVerifier::new(Arc::new(tx), Arc::new(provider))
-            .with_abi_format(VmAbiFormat::Legacy)
+            .with_abi_format(VmAbiFormat::Molecule)
             .with_version(ScriptVersion::V2)
             .with_max_cycles(1_000_000);
 
         let result = verifier.verify();
-        if let Err(ref e) = result {
-            eprintln!("Verification error: {:?}", e);
-        }
-        assert!(result.is_ok());
+        assert!(result.is_err(), "legacy HTLC fixture should not validate under Molecule-only VM ABI");
     }
 
     #[test]
@@ -251,7 +245,7 @@ mod tests {
         };
 
         let verifier = TransactionScriptVerifier::new(Arc::new(tx), Arc::new(provider))
-            .with_abi_format(VmAbiFormat::Legacy)
+            .with_abi_format(VmAbiFormat::Molecule)
             .with_version(ScriptVersion::V2)
             .with_max_cycles(100_000);
 
@@ -290,7 +284,7 @@ mod tests {
         };
 
         let verifier = TransactionScriptVerifier::new(Arc::new(tx), Arc::new(provider))
-            .with_abi_format(VmAbiFormat::Legacy)
+            .with_abi_format(VmAbiFormat::Molecule)
             .with_version(ScriptVersion::V2)
             .with_max_cycles(100_000);
 

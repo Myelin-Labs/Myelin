@@ -15,7 +15,7 @@ path = "src/bin/cellscript-deploy.rs"
 anyhow = "1.0"
 ckb-jsonrpc-types = "1.0.0"
 ckb-hash = "1.0.0"
-ckb-sdk = { git = "https://github.com/nervosnetwork/ckb-sdk-rust.git", tag = "v5.1.0" }
+ckb-sdk = { path = "../../../../ckb-sdk-rust" }
 ckb-types = "1.0.0"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"

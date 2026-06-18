@@ -9,10 +9,10 @@ stable category that matches how readers should use them.
 reader-facing tutorials and cookbook material. They should teach the current
 stable surface rather than act as release logs.
 
-## Release Notes
+## Release Records
 
 `docs/releases/` contains finalized release notes and active release-note
-drafts.
+drafts. Released versions should use non-draft filenames.
 
 - `docs/releases/CELLSCRIPT_0_13_2_RELEASE_NOTES.md` is the final 0.13.2
   release note and the canonical 0.13 release summary.
@@ -21,8 +21,14 @@ drafts.
 - `docs/releases/CELLSCRIPT_0_13_2_ACCEPTANCE_COMMUNITY_POST.md` is a
   community-facing summary of the 0.13.2 CKB acceptance and stateful flow
   evidence.
-- `docs/releases/CELLSCRIPT_0_14_RELEASE_NOTES_DRAFT.md` tracks the active
-  0.14 nightly release-note draft.
+- `docs/releases/CELLSCRIPT_0_14_RELEASE_NOTES.md` is the final 0.14.0 release
+  note and release-evidence summary.
+- `docs/releases/CELLSCRIPT_0_15_RELEASE_NOTES.md` is the final 0.15.0 release
+  note and release-evidence summary.
+- `docs/releases/CELLSCRIPT_0_16_RELEASE_NOTES.md` is the initial 0.16.0 release
+  note and release-evidence summary.
+- `docs/releases/CELLSCRIPT_0_16_1_RELEASE_NOTES.md` is the final 0.16.1 release
+  note and release-evidence summary.
 
 Release candidates and planning notes should not live here unless they are the
 final release record.
@@ -38,6 +44,7 @@ High-value active references include:
 
 - `releases/CELLSCRIPT_0_13_2_RELEASE_NOTES.md` for the final 0.13 syntax
   governance summary
+- `CELLSCRIPT_GATE_POLICY.md`
 - `CELLSCRIPT_SYNTAX_COMBO_AUDIT_METHODOLOGY.md`
 - `CELLSCRIPT_GRAMMAR_GOVERNANCE_RFC.md` for the active grammar-governance
   direction around transition shape, `verification`, `require`, and accounting
@@ -46,14 +53,32 @@ High-value active references include:
   require full parser/typechecker/lowering/metadata/formatter/LSP coverage
 - `CELLSCRIPT_CAPACITY_AND_BUILDER_CONTRACT.md`
 - `CELLSCRIPT_CKB_ADAPTER.md`
+- `CELLSCRIPT_CELLFABRIC_BRIDGE.md`
 - `CELLSCRIPT_PACKAGE_PROVENANCE_AND_DEPLOYMENT_IDENTITY.md`
 - `CELLSCRIPT_COLLECTIONS_SUPPORT_MATRIX.md`
+- `CELLSCRIPT_ENTRY_WITNESS_ABI.md`
+- `CELLSCRIPT_EXAMPLE_BUSINESS_FLOWS.md`
+- `CELLSCRIPT_LINEAR_OWNERSHIP.md`
+- `CELLSCRIPT_METADATA_SYSTEM_AUDIT.md`
+- `CELLSCRIPT_OUTPUT_BINDINGS.md`
 - `CELLSCRIPT_RUNTIME_ERROR_CODES.md`
+- `CELLSCRIPT_SCHEDULER_HINTS.md`
+
+## Specs And Future Tracks
+
+- `docs/spec/` contains normative or semi-normative specifications. The 0.16
+  operational semantics live there.
+- `docs/0.17/` contains next-release planning and iCKB investigation material.
+  It is not part of the 0.16 release contract.
 
 ## Examples
 
 `docs/examples/` contains focused example notes and matrices that support the
 bundled `.cell` examples. These are not release notes.
+
+- `docs/examples/token_amm_bootstrap.md` records the concrete token authority
+  bootstrap and AMM builder path for the bundled `launch`, `token`, and
+  `amm_pool` examples.
 
 ## Roadmap
 
@@ -77,8 +102,8 @@ to branch-specific evidence or forward design:
 - `CELLSCRIPT_REGISTRY_PHASE1.md` for the 0.19 package/deployment identity
   registry closure and 0.20 handoff boundary
 - `CELLSCRIPT_0_20_ROADMAP.md` for generated TypeScript action builders,
-  live-chain registry verification, stateful flow evidence, and the frozen
-  CellFabric boundary
+  live-chain registry verification, stateful flow evidence, and the bounded
+  CellFabric JSON bridge
 
 ## Archive
 
@@ -90,6 +115,7 @@ Current archive:
 
 - `docs/archive/0.13/CELLSCRIPT_0_13_1_PLAN.md`
 - `docs/archive/0.13/CELLSCRIPT_SIGNATURE_DIRECTION_EXECUTION_PLAN.md`
+- `docs/archive/0.15/CELLSCRIPT_0_15_ROADMAP_SUMMARY.md`
 
 When moving a document into the archive, update all public links and add a short
 status note if the file could otherwise be mistaken for active guidance.

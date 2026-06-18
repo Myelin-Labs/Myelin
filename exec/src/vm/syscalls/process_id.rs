@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Process ID syscall
 
@@ -13,7 +13,7 @@ use ckb_vm::{
 ///
 /// Syscall number: 2603
 ///
-/// Spora currently executes one VM context per script verification path, so we
+/// Myelin currently executes one VM context per script verification path, so we
 /// expose a fixed root process id (`0`) for scripts that
 /// probe process identity.
 #[derive(Debug, Clone, Copy)]

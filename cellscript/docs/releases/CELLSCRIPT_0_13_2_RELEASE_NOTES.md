@@ -51,8 +51,10 @@ Tooling compatibility expectations:
 - package manifests use version `0.13.2`;
 - the VS Code extension version is `0.13.2`;
 - metadata schema version is `30`;
-- CKB production claims require `./scripts/cellscript_ckb_release_gate.sh full`,
-  which now runs stateful local CKB scenarios as part of the full gate.
+- CKB production claims require `./scripts/cellscript_gate.sh release`, which
+  runs stateful local CKB scenarios as part of the full gate. The legacy
+  `./scripts/cellscript_ckb_release_gate.sh full` command remains a
+  compatibility wrapper.
 
 ## Collections Scope
 
@@ -205,16 +207,16 @@ Important boundaries:
 Release-facing gate commands:
 
 ```bash
-./scripts/cellscript_ckb_release_gate.sh quick
-./scripts/cellscript_ckb_release_gate.sh full
+./scripts/cellscript_gate.sh dev
+./scripts/cellscript_gate.sh release
 ```
 
-The full gate is the release-facing command. It expands to:
+The release gate is the release-facing command. It expands to:
 
 - Rust formatting, check, test, and clippy gates;
+- strict backend and syntax-combination CI audits;
 - package/LSP/tooling boundary validation;
 - VS Code extension validation and local VSIX packaging dry-run;
-- syntax-combination quick and CI audits;
 - documentation-boundary checks for release scope and production evidence;
 - builder-backed local CKB production acceptance;
 - stateful local CKB business-flow and action-branch acceptance.
@@ -222,6 +224,8 @@ The full gate is the release-facing command. It expands to:
 Useful component commands are:
 
 ```bash
+./scripts/cellscript_gate.sh ci
+./scripts/cellscript_gate.sh backend
 ./scripts/cellscript_syntax_combo_audit.sh ci
 cargo fmt --all --check
 cargo clippy --locked -p cellscript --all-targets -- -D warnings
@@ -232,17 +236,16 @@ git diff --check
 CKB-facing repository gates:
 
 ```bash
-./scripts/cellscript_ckb_release_gate.sh
-./scripts/cellscript_ckb_release_gate.sh production
+./scripts/cellscript_gate.sh release
+./scripts/cellscript_ckb_release_gate.sh full
 ./scripts/ckb_cellscript_acceptance.sh --production --stateful-scenarios
 ./scripts/cellscript_ckb_stateful_scenarios.sh
 ```
 
-The default `cellscript_ckb_release_gate.sh` mode is the quick gate. It includes
-the quick syntax-combination audit plus compile-only production acceptance and
-is useful before push. The `production`/`full` mode also runs the broader
-syntax-combination CI matrix before the full local CKB acceptance script, then
-runs stateful business-flow/action coverage. It is the release-facing gate.
+The default local fast path is `./scripts/cellscript_gate.sh dev`. The
+release-facing path is `./scripts/cellscript_gate.sh release`; the legacy
+`cellscript_ckb_release_gate.sh quick` and `production`/`full` commands remain
+supported for compatibility and delegate into the unified gate.
 
 The release evidence standard is strict about ordering: syntax-combination CI
 is a preflight before builder-backed CKB acceptance. A passing CKB acceptance
@@ -261,14 +264,14 @@ New at the 0.13.2 release cutoff:
   minting, AMM pool lifecycle, vesting revoke, and multisig execution flows;
 - stateful action-branch scenarios cover every production acceptance action not
   already covered by those end-to-end flows;
-- the stateful report must cover 43/43 production acceptance actions with no
+- the stateful report must cover 44/44 production acceptance actions with no
   missing action IDs or missing action artifacts;
 - every stateful step must have dry-run evidence, committed transaction
   evidence, consumed-input liveness checks, output liveness checks, measured
   cycles, consensus-serialized transaction size, occupied-capacity evidence, and
   no under-capacity outputs.
 
-The current release gate expectation is 27 stateful scenarios, 46 committed
+The current release gate expectation is 27 stateful scenarios, 47 committed
 stateful steps, 7 end-to-end business scenarios, and 20 stateful action-branch
 scenarios. If any new production action is added later, the stateful coverage
 gate must fail until that action is covered.

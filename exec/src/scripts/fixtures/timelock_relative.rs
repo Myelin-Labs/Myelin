@@ -1,14 +1,14 @@
 #![no_std]
 #![no_main]
 
-//! Relative DAA score lock script fixture
+//! Relative block number lock script fixture
 //!
-//! This script verifies that the input's `since` field (as relative DAA)
+//! This script verifies that the input's `since` field (as relative block number)
 //! is >= the target delta baked into the script.
 //!
 //! Expected since format:
 //! - bit63 = 1 (relative)
-//! - bit62 = 0 (DAA score, not timestamp)
+//! - bit62 = 0 (block number, not timestamp)
 //! - bits 0-55 = delta blocks (>= TARGET_DELTA)
 
 use core::arch::asm;
@@ -72,7 +72,7 @@ pub extern "C" fn _start() -> ! {
 
     // Check flags:
     // - bit63 must be 1 (relative lock)
-    // - bit62 must be 0 (DAA score, not timestamp)
+    // - bit62 must be 0 (block number, not timestamp)
     let is_relative = (since & (1u64 << 63)) != 0;
     let is_timestamp = (since & (1u64 << 62)) != 0;
 

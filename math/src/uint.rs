@@ -431,11 +431,13 @@ macro_rules! construct_uint {
                 Ok(Self::from_be_bytes(out))
             }
 
+            #[cfg(target_arch = "wasm32")]
             #[inline]
             pub fn as_bigint(&self) -> Result<js_sys::BigInt, $crate::Error> {
                 self.try_into()
             }
 
+            #[cfg(target_arch = "wasm32")]
             #[inline]
             pub fn to_bigint(self) -> Result<js_sys::BigInt, $crate::Error> {
                 self.try_into()
@@ -443,26 +445,26 @@ macro_rules! construct_uint {
 
         }
 
-        impl spora_utils::mem_size::MemSizeEstimator for $name {
+        impl myelin_utils::mem_size::MemSizeEstimator for $name {
             fn estimate_mem_units(&self) -> usize {
                 1
 
             }
         }
 
-        impl spora_utils::hex::ToHex for $name {
+        impl myelin_utils::hex::ToHex for $name {
             fn to_hex(&self) -> String {
                 self.to_be_bytes().as_slice().to_hex()
             }
         }
 
-        impl spora_utils::hex::ToHex for &$name {
+        impl myelin_utils::hex::ToHex for &$name {
             fn to_hex(&self) -> String {
                 self.to_be_bytes().as_slice().to_hex()
             }
         }
 
-        impl spora_utils::hex::FromHex for $name {
+        impl myelin_utils::hex::FromHex for $name {
             type Error = $crate::Error;
             fn from_hex(hex: &str) -> Result<$name, Self::Error> {
                 Ok($name::from_hex(hex)?)
@@ -960,15 +962,17 @@ macro_rules! construct_uint {
 
         }
 
+        #[cfg(target_arch = "wasm32")]
         impl TryFrom<&$name> for js_sys::BigInt {
             type Error = $crate::Error;
             #[inline]
             fn try_from(value: &$name) -> Result<js_sys::BigInt, Self::Error> {
                 use $crate::wasm::*;
-                BigInt::new(&JsValue::from_str(&format!("0x{value:x}"))).map_err(|err|$crate::Error::JsSys(Sendable(err)))
+                BigInt::new(&JsValue::from_str(&format!("0x{value:x}"))).map_err($crate::Error::from)
             }
         }
 
+        #[cfg(target_arch = "wasm32")]
         impl TryFrom<$name> for js_sys::BigInt {
             type Error = $crate::Error;
             #[inline]
@@ -978,13 +982,14 @@ macro_rules! construct_uint {
             }
         }
 
+        #[cfg(target_arch = "wasm32")]
         impl TryFrom<wasm_bindgen::JsValue> for $name {
             type Error = $crate::Error;
             fn try_from(js_value: wasm_bindgen::JsValue) -> Result<Self, Self::Error> {
                 use $crate::wasm::*;
 
                 if js_value.is_string() || js_value.is_array() {
-                    let bytes = js_value.try_as_vec_u8()?;
+                    let bytes = js_value_to_vec_u8(&js_value)?;
                     Ok(Self::from_be_bytes_var(&bytes)?)
                 } else if js_value.is_bigint() {
                     let v: &BigInt = js_value.dyn_ref().unwrap();

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Load-ecdsa-signature-hash lock script test
 
@@ -10,7 +10,7 @@ mod tests {
     use crate::scripts::{load_ecdsa_signature_hash_code_hash, LOAD_ECDSA_SIGNATURE_HASH_SCRIPT};
     use crate::vm::syscalls::load_signature_hash::standard_signing_input_from_resolved_cell;
     use crate::vm::{ResolvedCell, ScriptVersion, SimpleDataProvider, TransactionScriptVerifier, VmSemantics};
-    use spora_hashes::Hash;
+    use myelin_hashes::Hash;
     use std::sync::Arc;
 
     #[derive(Clone, Copy)]
@@ -146,6 +146,6 @@ mod tests {
             .with_max_cycles(200_000)
             .with_semantics(VmSemantics::CkbStrict);
 
-        assert!(verifier.verify().is_err(), "CkbStrict must not expose Spora-only signature hash syscall 3004");
+        assert!(verifier.verify().is_err(), "CkbStrict must not expose Myelin-only signature hash syscall 3004");
     }
 }

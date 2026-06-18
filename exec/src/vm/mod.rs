@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // VM integration for Cell script execution
 
@@ -34,11 +34,11 @@ pub use verifier::*;
 /// VM integration status
 pub const VM_ENABLED: bool = cfg!(feature = "vm");
 
-/// VM version for SPORA
-pub const SPORA_VM_VERSION: u32 = 0x0001_0000; // 1.0.0
+/// VM version for MYELIN
+pub const MYELIN_VM_VERSION: u32 = 0x0001_0000; // 1.0.0
 
 /// VM ISA support
-pub const SPORA_VM_ISA: u8 = 0x07; // IMC + B + MOP
+pub const MYELIN_VM_ISA: u8 = 0x07; // IMC + B + MOP
 
 //
 // Default VM Limits (CKB-compatible)
@@ -88,15 +88,15 @@ impl Default for VmLimits {
 
 /// VM syscall semantics profile.
 ///
-/// `SporaExtended` preserves current Spora-only syscall extensions such as
+/// `MyelinExtended` preserves current Myelin-only syscall extensions such as
 /// resolving `HeaderDep` through `LOAD_CELL` / `LOAD_CELL_DATA`.
 /// `CkbStrict` disables those extensions so syscall behavior more closely
 /// matches upstream CKB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VmSemantics {
-    /// Preserve Spora-specific syscall extensions.
+    /// Preserve Myelin-specific syscall extensions.
     #[default]
-    SporaExtended,
+    MyelinExtended,
     /// Prefer upstream CKB syscall semantics.
     CkbStrict,
 }
@@ -104,24 +104,24 @@ pub enum VmSemantics {
 impl VmSemantics {
     /// Whether `LOAD_CELL` / `LOAD_CELL_DATA` may map `HeaderDep` to a cell.
     pub const fn allow_header_dep_cell_lookup(self) -> bool {
-        matches!(self, Self::SporaExtended)
+        matches!(self, Self::MyelinExtended)
     }
 
-    /// Whether Spora-only helper syscalls in the `3001..3004` range are exposed.
-    pub const fn allow_spora_extension_syscalls(self) -> bool {
-        matches!(self, Self::SporaExtended)
+    /// Whether Myelin-only helper syscalls in the `3001..3004` range are exposed.
+    pub const fn allow_myelin_extension_syscalls(self) -> bool {
+        matches!(self, Self::MyelinExtended)
     }
 
-    /// Whether Spora's DAG header object and field ABI are exposed through
+    /// Whether Myelin's session header object and field ABI are exposed through
     /// `LOAD_HEADER` and `LOAD_HEADER_BY_FIELD`.
-    pub const fn allow_spora_header_abi(self) -> bool {
-        matches!(self, Self::SporaExtended)
+    pub const fn allow_myelin_header_abi(self) -> bool {
+        matches!(self, Self::MyelinExtended)
     }
 
-    /// Whether legacy Spora group source encodings such as `0x0100` are
+    /// Whether legacy Myelin group source encodings such as `0x0100` are
     /// accepted in addition to canonical CKB high-bit group source values.
     pub const fn allow_legacy_group_source_encoding(self) -> bool {
-        matches!(self, Self::SporaExtended)
+        matches!(self, Self::MyelinExtended)
     }
 }
 

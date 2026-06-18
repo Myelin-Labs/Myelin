@@ -1,7 +1,20 @@
 # Myelin Architecture Seed
 
-Myelin starts from Spora's `spora-typed` work and narrows it to an L2 execution
-kernel.
+Myelin is a CKB-style isomorphic session runtime for typed Cell execution and
+single-chunk L1 adjudication. It narrows the repository to an off-chain finite
+Cell ledger built around typed Cell execution.
+
+It is not a CKB full-node fork, not a new L1, and not a permissionless L2 in its
+current phase. Phase one uses static closed-committee finality for session
+benchmarking and pressure testing; CKB-style projection reports and the future
+court path are the CKB-aligned parts of the design.
+
+The public claim boundary is:
+
+```text
+Myelin currently uses static committee finality for session benchmarking and
+pressure testing; the L1 court/projection path is what makes it CKB-aligned.
+```
 
 ## Kept
 
@@ -21,7 +34,7 @@ kernel.
 
 - PoW.
 - Mining.
-- GHOSTDAG and L1 consensus pipeline.
+- inherited L1 consensus pipeline.
 - Full-node daemon entry points.
 - P2P block propagation.
 - RPC services tied to the old node.
@@ -38,3 +51,38 @@ accepted Myelin transition == replayable typed Cell transition
 
 The repository does not yet implement the full L2 protocol. It is a prepared
 base for that work.
+
+Early evidence should prefer:
+
+```text
+semantic_profile = "ckb-compatible"
+ckb_projection_possible = true
+```
+
+`myelin-native` remains useful for experiments, but it should not be the default
+evidence path while the project is trying to prove CKB isomorphism. Before a
+transition has a projection report, Myelin can only claim that it is designed to
+stay close to CKB semantics; after the report, it can claim that the transition
+is projectable into a CKB-style transaction/context, or list exact deviation
+flags.
+
+The project should keep this claim ladder visible:
+
+```text
+static committee finality -> useful session fast path and benchmark harness
+projection report         -> concrete CKB-style semantic evidence
+court bundle              -> executable input shape for disputed chunks
+future court script       -> actual L1 adjudication path
+```
+
+Until the final step is implemented and exercised, Myelin should be described
+as an experimental CKB-style isomorphic session runtime, not as a finished
+trustless L2.
+
+The immediate implementation path is deliberately narrow:
+
+```text
+simple CellTx -> execution report
+simple CellTx -> CKB projection report
+Teeworlds fixture -> measured benchmark JSON with per-chunk CKB projection status
+```

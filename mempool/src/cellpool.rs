@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // CellPool: Cell transaction memory pool
 
 use crate::{MempoolError, Result, TransactionScore, TransactionScorer};
 use indexmap::IndexMap;
+use myelin_exec::{CellTx, OutPoint};
 use parking_lot::RwLock;
-use spora_exec::{CellTx, OutPoint};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -119,7 +119,7 @@ impl CellPool {
 
     /// Add a transaction to the pool
     pub fn add(&self, tx: CellTx, fee: u64, cycles: u64) -> Result<[u8; 32]> {
-        let wtxid = spora_exec::celltx::sighash::compute_wtxid(&tx);
+        let wtxid = myelin_exec::celltx::sighash::compute_wtxid(&tx);
 
         // Check if already exists
         if self.txs.read().contains_key(&wtxid) {
@@ -261,14 +261,7 @@ impl CellPool {
     ///
     /// Uses deterministic conflict resolution:
     /// Priority: fee_density (desc) → wtxid (asc)
-    fn try_replace_by_fee(
-        &self,
-        tx: &CellTx,
-        wtxid: [u8; 32],
-        fee: u64,
-        cycles: u64,
-        conflicts: &[[u8; 32]],
-    ) -> Result<[u8; 32]> {
+    fn try_replace_by_fee(&self, tx: &CellTx, wtxid: [u8; 32], fee: u64, cycles: u64, conflicts: &[[u8; 32]]) -> Result<[u8; 32]> {
         let txs = self.txs.read();
 
         // Compute score for new transaction
@@ -342,7 +335,7 @@ impl CellPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spora_exec::{CellInput, CellOutput, Script};
+    use myelin_exec::{CellInput, CellOutput, Script};
 
     fn create_test_tx(inputs: Vec<OutPoint>, capacity: u64) -> CellTx {
         let lock = Script::new([0x00; 32], 0, vec![0; 20]);

@@ -1,3 +1,6 @@
+mod common;
+
+use common::cellc_command;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::Command;
@@ -159,6 +162,7 @@ fn write_live_registry_fixture_with(root: &std::path::Path, data_hash: &str, cod
         version: "1.0.0".to_string(),
         namespace: Some("cellscript".to_string()),
         source_hash: Some("source_hash".to_string()),
+        compiler_source_hash: None,
     };
     lockfile.package_build = Some(cellscript::package::LockedBuildInfo {
         compiler_version: Some("0.20.0".to_string()),
@@ -327,8 +331,16 @@ fn cellc_verify_ckb_fixtures_accepts_ickb_claim_manifest() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["status"], "ok");
     assert_eq!(report["manifest_schema"], "cellscript-ickb-claim-manifest-v1");
-    assert_eq!(report["execution_level"], "DIFFERENTIAL_CKB_VM");
-    assert_eq!(report["ckb_vm_execution"], true);
+    assert_eq!(report["execution_level"], "DIFFERENTIAL_CKB_VM_MANIFEST");
+    assert_eq!(report["ckb_vm_execution"], false);
+    assert_eq!(report["committed_ckb_vm_evidence"], true);
+    assert_eq!(report["evidence_execution_level"], "DIFFERENTIAL_CKB_VM_EXECUTED");
+    assert_eq!(report["required_executable_gate"], "cargo test --locked -p cellscript --test ickb_diff");
+    assert!(
+        report["vm_execution_note"].as_str().is_some_and(|note| note.contains("does not execute CKB VM")),
+        "{}",
+        report["vm_execution_note"]
+    );
     assert_eq!(report["issue_count"], 0);
     assert!(report["fixture_count"].as_u64().unwrap() >= 8);
 }
@@ -356,6 +368,36 @@ fn cellc_verify_ckb_fixtures_rejects_ickb_claim_without_matrix_row() {
     assert_eq!(report["status"], "failed");
     let issues = report["issues"].as_array().unwrap().iter().filter_map(|issue| issue.as_str()).collect::<Vec<_>>().join("\n");
     assert!(issues.contains("required scenario is missing"), "{issues}");
+}
+
+#[test]
+fn cellc_verify_ckb_fixtures_rejects_tampered_ickb_execution_evidence() {
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("benchmarks")
+        .join("ickb_diff")
+        .join("claim_manifest.json");
+    let matrix_path = manifest_path.parent().unwrap().join("matrix.json");
+    let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let mut matrix: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&matrix_path).unwrap()).unwrap();
+
+    let rows = matrix["rows"].as_array_mut().unwrap();
+    let pass_row =
+        rows.iter_mut().find(|row| row["result"].as_str() == Some("differential-agree-pass")).expect("at least one pass row");
+    pass_row["execution"]["cellscript_cycles"] = serde_json::json!(0);
+
+    let dir = tempfile::tempdir().unwrap();
+    let invalid = dir.path().join("claim_manifest.json");
+    std::fs::write(&invalid, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    std::fs::write(dir.path().join("matrix.json"), serde_json::to_vec_pretty(&matrix).unwrap()).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("verify-ckb-fixtures").arg(&invalid).arg("--json").output().unwrap();
+
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    let issues = report["issues"].as_array().unwrap().iter().filter_map(|issue| issue.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(issues.contains("cellscript pass must consume cycles"), "{issues}");
 }
 
 #[test]
@@ -1097,6 +1139,7 @@ fn cellc_registry_verify_json_fails_closed_for_missing_deployment_ref() {
         version: "1.0.0".to_string(),
         namespace: Some("cellscript".to_string()),
         source_hash: Some("source_hash".to_string()),
+        compiler_source_hash: None,
     };
     lockfile.package_build = Some(cellscript::package::LockedBuildInfo {
         compiler_version: Some("0.19.0".to_string()),
@@ -2824,7 +2867,7 @@ action seed_pool(token_a: Token, token_b: Token, fee_rate_bps: u16, provider: Ad
 }
 
 #[test]
-fn cellc_check_reports_checked_pool_invariant_families_without_runtime_blockers() {
+fn cellc_check_reports_amm_pool_without_runtime_blockers() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -2848,37 +2891,38 @@ version = "0.1.0"
     assert!(json_output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&json_output.stderr));
     let stdout: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
     let target = &stdout["checked_targets"][0];
-    assert!(target["checked_pool_invariant_families"].as_u64().unwrap() > 0, "unexpected stdout: {}", stdout);
-    assert!(target["runtime_required_pool_invariant_families"].as_u64().unwrap() > 0, "unexpected stdout: {}", stdout);
-    assert!(target["runtime_required_pool_invariant_blocker_classes"].as_u64().unwrap() > 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["checked_pool_invariant_families"].as_u64().unwrap(), 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_pool_invariant_families"].as_u64().unwrap(), 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_pool_invariant_blocker_classes"].as_u64().unwrap(), 0, "unexpected stdout: {}", stdout);
     let blocker_classes = target["runtime_required_pool_invariant_blocker_class_summaries"]
         .as_array()
         .expect("runtime-required Pool invariant blocker class summaries array");
-    assert!(
-        blocker_classes.iter().any(|value| value.as_str().is_some_and(|summary| summary.contains("pool-create:Pool"))),
-        "AMM pool admission blockers should remain explicit: {}",
-        stdout
-    );
-    assert!(
-        !blocker_classes.iter().any(|value| value
-            .as_str()
-            .is_some_and(|summary| { summary.contains("pool-mutation-invariants:Pool:reserve-conservation") })),
-        "reserve-conservation should be checked-runtime, not in blocker classes: {}",
-        stdout
-    );
+    assert!(blocker_classes.is_empty(), "AMM pool admission should not leave runtime-required blockers: {}", stdout);
     let runtime_inputs = target["pool_runtime_input_requirement_summaries"].as_array().expect("runtime input summaries array");
     assert!(
         !runtime_inputs.iter().any(|value| value.as_str().is_some_and(|summary| { summary.contains("reserve-conservation=") })),
-        "checked reserve-conservation should not appear in runtime input summaries: {}",
+        "AMM reserve-conservation should not appear in Pool runtime input summaries: {}",
+        stdout
+    );
+    assert_eq!(
+        target["runtime_required_transaction_runtime_input_requirements"].as_u64().unwrap(),
+        0,
+        "unexpected stdout: {}",
+        stdout
+    );
+    assert_eq!(
+        target["runtime_required_transaction_runtime_input_blocker_classes"].as_u64().unwrap(),
+        0,
+        "unexpected stdout: {}",
         stdout
     );
 
     let output =
         Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--deny-runtime-obligations").output().unwrap();
     assert!(
-        !output.status.success(),
-        "full AMM policy debt should still fail deny-runtime-obligations: {}",
-        String::from_utf8_lossy(&output.stdout)
+        output.status.success(),
+        "full AMM policy should satisfy deny-runtime-obligations: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -4498,6 +4542,87 @@ action mint(amount: u64) -> Token {
 }
 
 #[test]
+fn cellc_action_build_emits_cellfabric_intent_envelope() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[build]
+target_profile = "ckb"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store, replace, relock, consume {
+    amount: u64,
+}
+
+action mint(amount: u64) -> Token {
+    verification
+        create Token { amount: amount }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("action")
+        .arg("build")
+        .arg("--action")
+        .arg("mint")
+        .arg("--fabric-intent")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["schema"], "cellscript-cellfabric-intent-envelope-v0.20");
+    assert_eq!(envelope["status"], "requires-runtime-binding");
+    assert_eq!(envelope["bridge_boundary"]["kind"], "json-bridge");
+    assert_eq!(envelope["bridge_boundary"]["cellscript_core_dependency"], "no-cell-fabric-rust-crate");
+    assert_eq!(envelope["bridge_boundary"]["not_a_cellfabric_signed_intent"], true);
+    assert_eq!(envelope["bridge_boundary"]["not_a_soft_confirmation"], true);
+    assert_eq!(envelope["bridge_boundary"]["not_l1_finality"], true);
+
+    let action_plan_hash = envelope["source"]["action_plan_hash"].as_str().expect("action plan hash");
+    assert_eq!(action_plan_hash.len(), 64);
+    assert_eq!(envelope["source"]["action"], "mint");
+    assert_eq!(envelope["source"]["target_profile"], "ckb");
+    assert_eq!(envelope["cellfabric_mapping"]["candidate_intent_action"], "App");
+    assert_eq!(envelope["cellfabric_intent_template"]["domain"]["chain_id"], "ckb");
+    assert_eq!(envelope["cellfabric_intent_template"]["action"]["kind"], "App");
+    assert_eq!(envelope["cellfabric_intent_template"]["action"]["action"], "mint");
+    assert_eq!(envelope["cellfabric_intent_template"]["action"]["payload_format"], "cellscript-action-plan-json-v1");
+    assert_eq!(envelope["cellfabric_intent_template"]["action"]["payload_hash"], action_plan_hash);
+    assert_eq!(envelope["cellfabric_intent_template"]["resources"]["status"], "template-only-runtime-outpoints-required");
+    assert_eq!(envelope["cellfabric_intent_template"]["author"]["lock_script_hash"], serde_json::Value::Null);
+    assert_eq!(envelope["cellfabric_intent_template"]["auth_mode"], "CoSignConcreteTx");
+    assert!(envelope["resource_access_template"]["hard_conflicts"]["runtime_input_requirements"].as_array().is_some());
+    assert!(envelope["resource_access_template"]["app_conflict_key_templates"].as_array().is_some());
+    assert!(envelope["required_runtime_evidence"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item == "resolved_consumed_outpoints")
+            && items.iter().any(|item| item == "l1_status_observation")));
+    assert!(envelope["non_claims"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item.as_str().is_some_and(|text| text.contains("does not soft-confirm")))));
+    assert_eq!(envelope["action_plan"]["policy"], "cellscript-action-builder-plan-v1");
+    assert_eq!(envelope["action_plan"]["transaction_draft"]["state"], "ActionPlan");
+}
+
+#[test]
 fn cellc_gen_builder_typescript_emits_package_scaffold() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -4676,13 +4801,15 @@ action mint(amount: u64, owner: Address) -> Token {
     let deployment_network = "aggron4";
     let deployment_code_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
     let deployment_out_point = "0xaaaa:0";
+    let package_source_hash = "package-registry-source-hash".to_string();
     let mut lockfile = cellscript::package::Lockfile {
         version: 1,
         package: cellscript::package::LockfilePackageInfo {
             name: "demo".to_string(),
             version: "0.1.0".to_string(),
             namespace: None,
-            source_hash: metadata.source_hash.clone(),
+            source_hash: Some(package_source_hash.clone()),
+            compiler_source_hash: metadata.source_hash.clone(),
         },
         dependencies: Default::default(),
         package_build: Some(build_info.clone()),
@@ -4707,7 +4834,7 @@ action mint(amount: u64, owner: Address) -> Token {
         package: cellscript::package::DeployedPackageInfo {
             name: "demo".to_string(),
             version: "0.1.0".to_string(),
-            source_hash: metadata.source_hash.clone(),
+            source_hash: Some(package_source_hash.clone()),
         },
         build: Some(cellscript::package::DeployedBuildInfo {
             compiler_version: build_info.compiler_version.clone(),
@@ -4777,6 +4904,8 @@ action mint(amount: u64, owner: Address) -> Token {
     assert_eq!(manifest["locked_identity"]["schema"], "cellscript-builder-locked-identity-v0.20");
     assert_eq!(manifest["deployment_identity"]["schema"], "cellscript-builder-deployment-identity-v0.20");
     assert_eq!(manifest["deployment_identity"]["deployments"][0]["network"], deployment_network);
+    assert_eq!(manifest["locked_identity"]["package"]["source_hash"], package_source_hash);
+    assert_eq!(manifest["locked_identity"]["package"]["compiler_source_hash"], metadata.source_hash.as_deref().unwrap());
     assert_eq!(manifest["locked_identity"]["build"]["metadata_hash"], build_info.metadata_hash.as_deref().unwrap());
 
     let index_ts = std::fs::read_to_string(output_dir.join("src").join("index.ts")).unwrap();
@@ -4959,6 +5088,116 @@ action main(amount: u64) -> u64 {
     let mut expected = b"CSARGv1\0".to_vec();
     expected.extend_from_slice(&77u64.to_le_bytes());
     assert_eq!(std::fs::read(output_path).unwrap(), expected);
+}
+
+#[test]
+fn cellc_entry_witness_subcommand_encodes_bundled_token_amm_bootstrap_payloads() {
+    let examples = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let launch = examples.join("launch.cell");
+    let token = examples.join("token.cell");
+    let amm_pool = examples.join("amm_pool.cell");
+    let address = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let distribution = format!("0x{}", "22".repeat(160));
+
+    let launch_output = cellc_command()
+        .arg("entry-witness")
+        .arg(&launch)
+        .arg("--target-profile")
+        .arg("ckb")
+        .arg("--action")
+        .arg("launch_token")
+        .arg("--arg")
+        .arg("0x4c41554e43483031")
+        .arg("--arg")
+        .arg("10000")
+        .arg("--arg")
+        .arg("1000")
+        .arg("--arg")
+        .arg("500")
+        .arg("--arg")
+        .arg("30")
+        .arg("--arg")
+        .arg(address)
+        .arg("--arg")
+        .arg(&distribution)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(launch_output.status.success(), "stderr: {}", String::from_utf8_lossy(&launch_output.stderr));
+    let launch_stdout: serde_json::Value = serde_json::from_slice(&launch_output.stdout).unwrap();
+    assert_eq!(launch_stdout["status"], "ok");
+    assert_eq!(launch_stdout["entry"], "launch_token");
+    assert_eq!(launch_stdout["payload_args"], 7);
+    assert_eq!(launch_stdout["witness_size_bytes"], 234);
+    assert_eq!(launch_stdout["payload_params"][0], "symbol");
+    assert_eq!(launch_stdout["payload_params"][4], "fee_rate_bps");
+    assert_eq!(launch_stdout["payload_params"][6], "distribution");
+
+    let token_output = cellc_command()
+        .arg("entry-witness")
+        .arg(&token)
+        .arg("--target-profile")
+        .arg("ckb")
+        .arg("--action")
+        .arg("mint_with_authority")
+        .arg("--arg")
+        .arg(address)
+        .arg("--arg")
+        .arg("25")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(token_output.status.success(), "stderr: {}", String::from_utf8_lossy(&token_output.stderr));
+    let token_stdout: serde_json::Value = serde_json::from_slice(&token_output.stdout).unwrap();
+    assert_eq!(token_stdout["status"], "ok");
+    assert_eq!(token_stdout["entry"], "mint_with_authority");
+    assert_eq!(token_stdout["payload_params"][0], "to");
+    assert_eq!(token_stdout["payload_params"][1], "amount");
+    assert_eq!(token_stdout["witness_size_bytes"], 48);
+
+    let seed_output = cellc_command()
+        .arg("entry-witness")
+        .arg(&amm_pool)
+        .arg("--target-profile")
+        .arg("ckb")
+        .arg("--action")
+        .arg("seed_pool")
+        .arg("--arg")
+        .arg("30")
+        .arg("--arg")
+        .arg(address)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(seed_output.status.success(), "stderr: {}", String::from_utf8_lossy(&seed_output.stderr));
+    let seed_stdout: serde_json::Value = serde_json::from_slice(&seed_output.stdout).unwrap();
+    assert_eq!(seed_stdout["status"], "ok");
+    assert_eq!(seed_stdout["entry"], "seed_pool");
+    assert_eq!(seed_stdout["payload_params"][0], "fee_rate_bps");
+    assert_eq!(seed_stdout["payload_params"][1], "provider");
+    assert_eq!(seed_stdout["witness_size_bytes"], 42);
+
+    let swap_output = cellc_command()
+        .arg("entry-witness")
+        .arg(&amm_pool)
+        .arg("--target-profile")
+        .arg("ckb")
+        .arg("--action")
+        .arg("swap_a_for_b")
+        .arg("--arg")
+        .arg("2")
+        .arg("--arg")
+        .arg(address)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(swap_output.status.success(), "stderr: {}", String::from_utf8_lossy(&swap_output.stderr));
+    let swap_stdout: serde_json::Value = serde_json::from_slice(&swap_output.stdout).unwrap();
+    assert_eq!(swap_stdout["status"], "ok");
+    assert_eq!(swap_stdout["entry"], "swap_a_for_b");
+    assert_eq!(swap_stdout["payload_params"][0], "min_output");
+    assert_eq!(swap_stdout["payload_params"][1], "to");
+    assert_eq!(swap_stdout["witness_size_bytes"], 48);
 }
 
 #[test]
@@ -5785,4 +6024,381 @@ action compute() -> u64 {
     assert!(output2.status.success(), "stderr: {}", String::from_utf8_lossy(&output2.stderr));
     let summary2: serde_json::Value = serde_json::from_slice(&output2.stdout).unwrap();
     assert_eq!(summary2["cache_hit"], false, "--entry-action should bypass incremental cache");
+}
+
+#[test]
+fn cellc_install_rejects_self_path_dependency() {
+    // `cellc install --path <self_root>` used to write a `[dependencies.""]` row
+    // that turned every subsequent `cellc build` into a circular-dep failure.
+    // The cellc install surface must now refuse the self-reference fail-closed.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[dependencies]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store, replace, relock, consume {
+    amount: u64,
+}
+
+action mint(amount: u64) -> Token {
+    verification
+        create Token { amount: amount }
+}
+"#,
+    )
+    .unwrap();
+
+    let install = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("install").arg("--path").arg(".").output().unwrap();
+
+    assert!(!install.status.success(), "self path install must be rejected");
+    let stderr = String::from_utf8_lossy(&install.stderr);
+    assert!(
+        stderr.contains("refusing to add self-dependency") || stderr.contains("current package root"),
+        "expected self-dep refusal, got: {stderr}"
+    );
+
+    // Cell.toml must not have gained a dependencies row.
+    let manifest_text = std::fs::read_to_string(root.join("Cell.toml")).unwrap();
+    let manifest: toml::Value = manifest_text.parse().unwrap();
+    let deps = manifest.get("dependencies").and_then(|d| d.as_table()).map(|t| t.len()).unwrap_or(0);
+    assert_eq!(deps, 0, "no dependency row should be written for a self path install");
+}
+
+#[test]
+fn cellc_install_rejects_self_name_dependency() {
+    // `cellc install demo --path <somewhere>` where the package's own name is
+    // 'demo' must be rejected: a package cannot list itself as a dependency.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[dependencies]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store, replace, relock, consume {
+    amount: u64,
+}
+
+action mint(amount: u64) -> Token {
+    verification
+        create Token { amount: amount }
+}
+"#,
+    )
+    .unwrap();
+
+    // Even when the path points somewhere else, an explicit self-name dependency
+    // is a logical circular dep and must be rejected.
+    let install = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("install")
+        .arg("demo")
+        .arg("--path")
+        .arg("./src")
+        .output()
+        .unwrap();
+
+    assert!(!install.status.success(), "self name install must be rejected");
+    let stderr = String::from_utf8_lossy(&install.stderr);
+    assert!(
+        stderr.contains("refusing to add self-dependency") && stderr.contains("cannot depend on itself"),
+        "expected self-name refusal, got: {stderr}"
+    );
+}
+
+#[test]
+fn cellc_add_rejects_self_name_dependency() {
+    // `cellc add` (manifest-mutating, distinct from `cellc install`) shares the
+    // same self-dep hazard and must also be fail-closed.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[dependencies]
+"#,
+    )
+    .unwrap();
+
+    let add = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("add")
+        .arg("demo")
+        .arg("--path")
+        .arg("./src")
+        .output()
+        .unwrap();
+
+    assert!(!add.status.success(), "self name add must be rejected");
+    let stderr = String::from_utf8_lossy(&add.stderr);
+    assert!(stderr.contains("refusing to add self-dependency"), "expected self-dep refusal, got: {stderr}");
+}
+
+#[test]
+fn cellc_build_writes_lockfile_deployment_ref_from_deployed_toml() {
+    // `cellc build` is the canonical place where Cell.lock gets refreshed.
+    // When a Deployed.toml is present, build must bridge its deployment
+    // records into the lockfile so that `cellc registry verify` does not
+    // always fail with "deployment for network 'X' is missing from Cell.lock".
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[dependencies]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store, replace, relock, consume {
+    amount: u64,
+}
+
+action mint(amount: u64) -> Token {
+    verification
+        create Token { amount: amount }
+}
+"#,
+    )
+    .unwrap();
+
+    // First build without Deployed.toml to capture the locked build identity.
+    let build = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").output().unwrap();
+    assert!(build.status.success(), "stderr: {}", String::from_utf8_lossy(&build.stderr));
+
+    let lockfile: cellscript::package::Lockfile = toml::from_str(&std::fs::read_to_string(root.join("Cell.lock")).unwrap()).unwrap();
+    assert!(lockfile.package_build.is_some(), "Cell.lock must carry build identity");
+    assert!(lockfile.deployment.is_empty(), "no deployment section when Deployed.toml is absent");
+
+    // Now write a Deployed.toml that matches the locked build identity and
+    // build again. The lockfile should now carry a [deployment.devnet] entry.
+    let artifact_hash = lockfile.package_build.as_ref().unwrap().artifact_hash.as_deref().unwrap();
+    let metadata_hash = lockfile.package_build.as_ref().unwrap().metadata_hash.as_deref().unwrap();
+    let schema_hash = lockfile.package_build.as_ref().unwrap().schema_hash.as_deref().unwrap();
+    let abi_hash = lockfile.package_build.as_ref().unwrap().abi_hash.as_deref().unwrap();
+    let constraints_hash = lockfile.package_build.as_ref().unwrap().constraints_hash.as_deref().unwrap();
+    let source_hash = lockfile.package.source_hash.as_deref().unwrap();
+    let compiler_version = lockfile.package_build.as_ref().unwrap().compiler_version.as_deref().unwrap();
+    let deployed = format!(
+        r#"version = 1
+schema = "cellscript-ckb-deployment-manifest-v0.19"
+
+[package]
+name = "demo"
+version = "0.1.0"
+source_hash = "{source_hash}"
+
+[build]
+compiler_version = "{compiler_version}"
+artifact_hash = "{artifact_hash}"
+metadata_hash = "{metadata_hash}"
+schema_hash = "{schema_hash}"
+abi_hash = "{abi_hash}"
+constraints_hash = "{constraints_hash}"
+
+[[deployments]]
+name = "demo-mock"
+status = "active"
+network = "devnet"
+chain_id = "ckb-devnet"
+tx_hash = "0x0000000000000000000000000000000000000000000000000000000000000001"
+output_index = 0
+code_hash = "{artifact_hash}"
+data_hash = "{artifact_hash}"
+hash_type = "data1"
+dep_type = "code"
+out_point = "0x0000000000000000000000000000000000000000000000000000000000000001:0"
+artifact_hash = "{artifact_hash}"
+metadata_hash = "{metadata_hash}"
+schema_hash = "{schema_hash}"
+abi_hash = "{abi_hash}"
+constraints_hash = "{constraints_hash}"
+compiler_version = "{compiler_version}"
+"#
+    );
+    std::fs::write(root.join("Deployed.toml"), deployed).unwrap();
+
+    let build2 = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").output().unwrap();
+    assert!(build2.status.success(), "stderr: {}", String::from_utf8_lossy(&build2.stderr));
+
+    let lockfile2: cellscript::package::Lockfile = toml::from_str(&std::fs::read_to_string(root.join("Cell.lock")).unwrap()).unwrap();
+    let devnet = lockfile2
+        .deployment
+        .get("devnet")
+        .expect("Cell.lock must carry a [deployment.devnet] entry after build bridges Deployed.toml");
+    assert_eq!(devnet.record, "0x0000000000000000000000000000000000000000000000000000000000000001:0");
+    assert_eq!(devnet.code_hash.as_deref(), Some(artifact_hash));
+    assert_eq!(devnet.data_hash.as_deref(), Some(artifact_hash));
+    assert_eq!(devnet.out_point.as_deref(), Some("0x0000000000000000000000000000000000000000000000000000000000000001:0"));
+    assert!(devnet.record_hash.is_some(), "record_hash must be computed for build-identity-matching deployment");
+
+    // Finally, registry verify on this clean fixture must succeed.
+    let verify =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("registry").arg("verify").arg("--json").output().unwrap();
+    assert!(
+        verify.status.success(),
+        "registry verify must pass after build bridges Deployed.toml: stderr: {}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&verify.stdout).unwrap();
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["violations"].as_array().map(|a| a.len()).unwrap_or(0), 0);
+}
+
+#[test]
+fn cellc_build_omits_lockfile_deployment_when_artifact_hash_mismatches() {
+    // When the Deployed.toml artifact_hash disagrees with the locked build
+    // identity, the deployment ref must be written with hash fields left None
+    // so that `registry verify` reports a deterministic build-identity mismatch
+    // violation rather than silently agreeing.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[dependencies]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store, replace, relock, consume {
+    amount: u64,
+}
+
+action mint(amount: u64) -> Token {
+    verification
+        create Token { amount: amount }
+}
+"#,
+    )
+    .unwrap();
+
+    let build = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").output().unwrap();
+    assert!(build.status.success(), "stderr: {}", String::from_utf8_lossy(&build.stderr));
+
+    // Deployed.toml with a wrong artifact_hash. The record field still points
+    // at the out_point, but the code/out_point/data/record_hash fields must
+    // be left None so the verifier can surface the build-identity mismatch.
+    let deployed = r#"version = 1
+schema = "cellscript-ckb-deployment-manifest-v0.19"
+
+[package]
+name = "demo"
+version = "0.1.0"
+source_hash = "fake"
+
+[build]
+compiler_version = "0.17.0"
+artifact_hash = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+metadata_hash = "0x00"
+schema_hash = "0x00"
+abi_hash = "0x00"
+constraints_hash = "0x00"
+
+[[deployments]]
+name = "demo-mock"
+status = "active"
+network = "devnet"
+chain_id = "ckb-devnet"
+tx_hash = "0x0000000000000000000000000000000000000000000000000000000000000001"
+output_index = 0
+code_hash = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+data_hash = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+hash_type = "data1"
+dep_type = "code"
+out_point = "0x0000000000000000000000000000000000000000000000000000000000000001:0"
+artifact_hash = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+"#;
+    std::fs::write(root.join("Deployed.toml"), deployed).unwrap();
+
+    let build2 = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").output().unwrap();
+    assert!(build2.status.success(), "stderr: {}", String::from_utf8_lossy(&build2.stderr));
+
+    let lockfile: cellscript::package::Lockfile = toml::from_str(&std::fs::read_to_string(root.join("Cell.lock")).unwrap()).unwrap();
+    let devnet =
+        lockfile.deployment.get("devnet").expect("Cell.lock must still record a deployment ref even when build identity mismatches");
+    assert_eq!(devnet.record, "0x0000000000000000000000000000000000000000000000000000000000000001:0");
+    assert!(devnet.code_hash.is_none());
+    assert!(devnet.out_point.is_none());
+    assert!(devnet.data_hash.is_none());
+    assert!(devnet.record_hash.is_none());
+
+    let verify =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("registry").arg("verify").arg("--json").output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&verify.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    let violations = report["violations"].as_array().unwrap();
+    // The ref carries no code_hash/out_point/data_hash/record_hash because
+    // the build identity did not match, so the verifier must surface at least
+    // one of the deterministic "no <field>" violations from the lockfile ref.
+    assert!(
+        violations.iter().any(|v| {
+            let s = v.as_str().unwrap_or("");
+            s.contains("has no code_hash")
+                || s.contains("has no out_point")
+                || s.contains("has no data_hash")
+                || s.contains("has no record_hash")
+        }),
+        "expected a 'has no <hash>' violation from the mismatched ref, got: {violations:?}"
+    );
+    // Additionally, the top-level build-identity comparison must surface the
+    // artifact_hash disagreement.
+    assert!(
+        violations.iter().any(|v| v.as_str().unwrap_or("").contains("artifact_hash mismatch")),
+        "expected artifact_hash mismatch violation, got: {violations:?}"
+    );
 }

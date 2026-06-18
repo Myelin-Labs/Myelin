@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (C) 2026 Spora developers
+// Copyright (C) 2026 Myelin developers
 //
 // Serialization Cache
 //
@@ -16,7 +16,7 @@
 //! ## 示例
 //!
 //! ```rust
-//! use spora_exec::serialization::cache::SerializationCache;
+//! use myelin_exec::serialization::cache::SerializationCache;
 //!
 //! let mut cache = SerializationCache::new(1000); // 最多缓存 1000 项
 //!
@@ -90,7 +90,7 @@ impl SerializationCache {
 
         // Serialize
         let envelope = crate::serialization::VersionedEnvelope::new(value)?;
-        let bytes = borsh::to_vec(&envelope).map_err(|e| SerializationError::IoError(e.to_string()))?;
+        let bytes = envelope.to_bytes();
         let bytes = Arc::new(bytes);
 
         // Store in cache
