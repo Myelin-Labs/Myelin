@@ -1,0 +1,42 @@
+[package]
+name = "spora-state"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Cell state management and data availability storage"
+
+[dependencies]
+# Core dependencies
+spora-exec = { path = "../exec", version = "0.1.0" }
+spora-hashes = { path = "../crypto/hashes", version = "0.1.0" }
+
+# Database
+rocksdb = { version = "0.24", default-features = false, features = ["snappy"] }
+
+# Serialization
+borsh = { version = "1.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+
+# Hashing
+blake3 = "1.5"
+spora-muhash = { path = "../crypto/muhash" }
+
+# Concurrency
+parking_lot = "0.12"
+
+# Errors
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Collections (deterministic)
+indexmap = "=2.2.6"
+
+# I/O
+memmap2 = "0.9"
+
+# Cache
+lru = "0.12"
+
+[dev-dependencies]
+tempfile = "3.10"
+proptest = "1.4"

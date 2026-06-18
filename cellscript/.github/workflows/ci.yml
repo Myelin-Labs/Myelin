@@ -1,0 +1,88 @@
+name: CellScript CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+      - "nightly-*"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: cellscript-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: /tmp/cellscript-ci-target
+      CELLSCRIPT_BACKEND_SHAPE_REPORT: /tmp/cellscript-backend-shape/backend-shape-report.json
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.85.0
+          rustc --version
+          cargo --version
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run tests
+        run: |
+          mkdir -p "$(dirname "$CELLSCRIPT_BACKEND_SHAPE_REPORT")"
+          printf '{"status":"not-generated","reason":"test suite did not reach backend shape report generation"}\n' > "$CELLSCRIPT_BACKEND_SHAPE_REPORT"
+          cargo test --locked --manifest-path Cargo.toml -- --test-threads=1
+
+      - name: Run syntax combination audit
+        run: ./scripts/cellscript_syntax_combo_audit.sh ci
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Check crates.io package contents
+        run: |
+          cargo package --list --locked --allow-dirty --offline > /tmp/cellscript-package-files.txt
+          if grep -E '^(\.github/|docs/|editors/|tools/|src/bin/)' /tmp/cellscript-package-files.txt; then
+            echo "crates.io package includes repository-only files or unpublished helper binaries" >&2
+            exit 1
+          fi
+
+      - name: Verify crates.io package
+        run: cargo package --locked --offline
+
+      - name: Upload backend shape report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cellscript-backend-shape-report
+          if-no-files-found: error
+          path: /tmp/cellscript-backend-shape/
+
+      - name: Upload syntax combination audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cellscript-syntax-combo-audit
+          if-no-files-found: ignore
+          path: target/syntax-combo-audit/

@@ -1,0 +1,267 @@
+Every CellScript artifact should be treated as a pair:
+
+```text
+artifact
+artifact.meta.json
+```
+
+The artifact is executable RISC-V assembly or ELF. The metadata sidecar is the
+explanation: source identity, target profile, artifact hash, schema layout,
+runtime requirements, scheduler information, and verifier obligations.
+
+This chapter is about trust boundaries. It teaches you what compiler evidence
+can prove, and where you still need CKB transaction evidence.
+
+## The Main Rule
+
+Compiler verification is necessary, but it is not the same thing as a deployed
+transaction or chain acceptance report.
+
+If `verify-artifact` passes, you know the artifact and metadata agree. You do
+not yet know that a transaction builder can provide the right inputs, serialize
+the right witness, satisfy capacity, pass dry-run, and commit.
+
+That distinction prevents overclaiming.
+
+## Emit Metadata
+
+Compile normally:
+
+```bash
+cellc build --json
+```
+
+Or request metadata directly:
+
+```bash
+cellc metadata src/main.cell --target riscv64-elf --target-profile ckb -o /tmp/main.meta.json
+```
+
+Open the metadata when something is unclear. It is often easier to understand a
+compiler decision by reading the emitted facts than by guessing from the source
+alone.
+
+## Verify an Artifact
+
+Start with the basic check:
+
+```bash
+cellc verify-artifact build/main.elf
+```
+
+Pin the target profile:
+
+```bash
+cellc verify-artifact build/main.elf --expect-target-profile ckb
+```
+
+Verify source units on disk:
+
+```bash
+cellc verify-artifact build/main.elf --verify-sources
+```
+
+Use production checks when preparing release evidence:
+
+```bash
+cellc verify-artifact build/main.elf --production
+cellc verify-artifact build/main.elf --deny-fail-closed
+cellc verify-artifact build/main.elf --deny-runtime-obligations
+```
+
+Read this gate narrowly: it verifies the artifact, metadata, source hash
+expectations, and selected policy flags. It does not prove that a concrete CKB
+transaction has been built, deployed, dry-run, indexed, or measured.
+
+## Check Before Build
+
+Use check mode for CI and local feedback:
+
+```bash
+cellc check --all-targets --production
+cellc check --target-profile ckb --json
+```
+
+Important policy flags:
+
+| Flag | Purpose |
+|---|---|
+| `--production` | Reject unsafe or incomplete lowering paths. |
+| `--deny-fail-closed` | Reject metadata that contains fail-closed runtime features or obligations. |
+| `--deny-ckb-runtime` | Reject CKB runtime features when they are not allowed for the workflow. |
+| `--deny-runtime-obligations` | Reject runtime-required verifier obligations. |
+
+These flags are useful because they turn "remember to inspect this later" into a
+compiler-visible failure.
+
+## What To Inspect First
+
+You do not need to memorize the whole sidecar. Start with these fields:
+
+- `target_profile`
+- `artifact_format`
+- `artifact_hash`
+- `artifact_size_bytes`
+- `source_hash`
+- `source_content_hash`
+- `source_units`
+- `metadata_schema_version`
+- `actions`
+- `locks`
+- `schema`
+- `runtime`
+- `verifier_obligations`
+- `runtime.proof_plan`
+- `runtime.proof_plan_soundness`
+- `runtime.builder_assumptions`
+- `constraints`
+- `runtime_error_registry`
+- `constraints.artifact`
+- `constraints.entry_abi`
+- `constraints.ckb.capacity_evidence_contract`
+- `constraints.ckb.declared_capacity_floors`
+- `constraints.ckb.hash_type_policy`
+- `constraints.ckb.dep_group_manifest`
+- `scheduler`
+
+When reviewing a contract, ask simple questions first:
+
+- which action or lock is the entry;
+- what witness does it expect;
+- which Cells are consumed or created;
+- which runtime obligations remain;
+- which CKB profile assumptions are recorded.
+
+## v0.16 Assurance Checks
+
+CellScript 0.16 adds a checked assurance layer over ProofPlan metadata:
+
+```bash
+cellc explain-proof src/main.cell --json
+cellc explain-assumptions src/main.cell --json
+cellc validate-tx --against build/main.elf.meta.json tx.json --json
+```
+
+`runtime.proof_plan_soundness` tells you whether verifier obligations and
+ProofPlan records agree. `--primitive-strict=0.16` rejects metadata-only or
+runtime-required ProofPlan gaps. The soundness key includes origin/scope,
+category, feature, status, and detail; local and runtime ProofPlan records are
+compared by full semantic content, including trigger, reads, coverage, and
+source spans.
+
+`runtime.builder_assumptions` is the machine-readable contract for transaction
+builders. `validate-tx` checks a transaction JSON shape against that contract,
+rejects bare evidence tokens, and requires indexed evidence objects for
+non-structural assumptions before signing. Evidence indexes are range-checked
+against the transaction, and concrete fields such as outpoints, hashes,
+capacity, dep metadata, witness bytes, and TYPE_ID args must match when present.
+This is still pre-chain evidence: dry-run, capacity, cycles, and commit checks
+remain required for production claims.
+
+Additional 0.16 reports are available for audit and deployment workflows:
+
+```bash
+cellc solve-tx src/main.cell --json   # emits can_submit=false template output
+cellc deploy-plan src/main.cell --json
+cellc proof-diff old.meta.json new.meta.json --json
+cellc audit-bundle src/main.cell --output target/audit
+```
+
+For the review-finding closure matrix, see
+`docs/0.17/review_findings_closure.md`.
+
+## Suggested Compiler CI Gate
+
+For CKB packages, a useful compiler CI gate is:
+
+```bash
+cellc fmt --check
+cellc check --target-profile ckb --all-targets --production
+cellc build --target riscv64-elf --target-profile ckb --production
+cellc verify-artifact build/main.elf --expect-target-profile ckb --verify-sources --production
+```
+
+For CKB, make the profile explicit in every step:
+
+```bash
+cellc check --target-profile ckb --production
+cellc build --target riscv64-elf --target-profile ckb --production
+cellc verify-artifact build/main.elf --expect-target-profile ckb --verify-sources --production
+```
+
+These gates are suitable for a compiler/package CI loop. They are not enough for
+a release claim that says a contract is production-ready on a chain.
+
+## Syntax-Combination Preflight
+
+Syntax and lowering bugs can pass ordinary example compilation when the risky
+shape is hidden in an uncommon combination. The reusable syntax-combination
+audit exists to catch those bugs before chain evidence is generated:
+
+```bash
+./scripts/cellscript_syntax_combo_audit.sh quick
+./scripts/cellscript_syntax_combo_audit.sh ci
+```
+
+The syntax-combination audit is a release acceptance preflight. It exercises
+parser, formatter, type checking, lowering, metadata, codegen, and negative
+obsolete-syntax oracles with compact reports under
+`target/syntax-combo-audit/`.
+
+For CellScript releases, `quick` is part of the pre-push gate and `ci` runs
+before builder-backed CKB acceptance. A direct CKB acceptance run does not
+replace this preflight because it only proves selected concrete transactions.
+
+## CKB Release Evidence Gate
+
+When you are ready to make a CKB production claim, move from compiler evidence
+to chain evidence. Run the CKB acceptance gate from the CellScript repository
+root:
+
+```bash
+./scripts/cellscript_ckb_release_gate.sh full
+```
+
+For pre-push checks, the quick gate runs the compiler/tooling suite and
+compile-only production acceptance:
+
+```bash
+./scripts/cellscript_ckb_release_gate.sh
+```
+
+The quick gate is useful development evidence. The production mode is the
+release-facing gate because it first runs the syntax-combination CI preflight
+and then runs builder-backed local CKB transactions.
+
+The CKB validator requires primitive-strict original bundled-example coverage,
+scoped action and lock compile coverage, builder-backed action runs,
+builder-backed lock valid-spend and invalid-spend matrices, valid transaction
+dry-runs, committed valid transactions, malformed rejection, measured cycles,
+consensus-serialized transaction size, occupied-capacity evidence, no
+under-capacity outputs, bundled example deployment, and a passed final
+production hardening gate.
+
+The report must explicitly record a passed final production hardening gate.
+
+The production gate compiles the seven checked-in top-level
+`examples/*.cell` bundled examples directly. Those files are the single
+canonical business source and the cleaner reading surface; there are no
+checked-in `examples/business` or `examples/acceptance` mirrors. Acceptance-only
+profile/effect/scheduler metadata belongs in runner configuration or generated
+files under `target/`.
+
+Lock behavior coverage is machine-readable through
+`lock_acceptance_scope.onchain_lock_spend_matrix_scope`; each listed lock must
+have both valid-spend and invalid-spend evidence.
+
+`examples/registry.cell` and every checked-in `examples/language/*.cell` file
+are non-production language examples covered by compiler/tooling tests, not by
+the bundled CKB production matrix.
+
+`--compile-only` and bounded diagnostic runs can help development, but they are
+not external production release evidence.
+
+## Next
+
+Once the verification boundary is clear, continue with
+[LSP and Tooling](https://github.com/tsukifune-kosei/CellScript/wiki/Tutorial-07-LSP-and-Tooling).

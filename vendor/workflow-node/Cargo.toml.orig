@@ -1,0 +1,33 @@
+[package]
+name = "workflow-node"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+keywords = ["node","nodejs"]
+categories = ["wasm","api-bindings"]
+description = """
+Utilities and curated re-exports for Node.js APIs.
+"""
+
+[lib]
+doctest = false
+
+[dependencies]
+borsh.workspace = true
+serde.workspace = true
+futures.workspace = true
+js-sys.workspace = true
+node-sys.workspace = true
+thiserror.workspace = true
+wasm-bindgen-futures.workspace = true
+wasm-bindgen.workspace = true
+workflow-core.workspace = true
+workflow-log.workspace = true
+workflow-wasm.workspace = true
+workflow-task.workspace = true
+lazy_static.workspace = true
+
+[lints.clippy]
+empty_docs = "allow"

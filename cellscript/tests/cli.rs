@@ -1,0 +1,5788 @@
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::process::Command;
+
+fn git_init(repo_dir: &std::path::Path) {
+    let status = Command::new("git").args(["init"]).current_dir(repo_dir).status().expect("git init");
+    assert!(status.success());
+}
+
+fn git_add_all(repo_dir: &std::path::Path) {
+    let status = Command::new("git").args(["add", "."]).current_dir(repo_dir).status().expect("git add");
+    assert!(status.success());
+}
+
+fn git_commit(repo_dir: &std::path::Path, msg: &str) {
+    git_add_all(repo_dir);
+    let status = Command::new("git")
+        .args(["commit", "-m", msg, "--author=test <test@test.com>"])
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00+00:00")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00+00:00")
+        .current_dir(repo_dir)
+        .status()
+        .expect("git commit");
+    assert!(status.success());
+}
+
+fn git_tag(repo_dir: &std::path::Path, tag: &str) {
+    let status = Command::new("git").args(["tag", tag]).current_dir(repo_dir).status().expect("git tag");
+    assert!(status.success());
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hash_json_for_test<T: serde::Serialize>(value: &T) -> String {
+    let bytes = serde_json::to_vec(value).unwrap();
+    hex_lower(&cellscript::ckb_blake2b256(&bytes))
+}
+
+fn ckb_script_hash_for_test(code_hash: &str, hash_type: &str, args: &str) -> String {
+    let code_hash_bytes = hex::decode(code_hash.trim_start_matches("0x")).unwrap();
+    let hash_type_byte = match hash_type {
+        "data" => 0u8,
+        "type" => 1u8,
+        "data1" => 2u8,
+        "data2" => 4u8,
+        other => panic!("unknown hash_type: {other}"),
+    };
+    let args_bytes = hex::decode(args.trim_start_matches("0x")).unwrap();
+    let mut args_molecule = Vec::with_capacity(4 + args_bytes.len());
+    args_molecule.extend_from_slice(&(args_bytes.len() as u32).to_le_bytes());
+    args_molecule.extend_from_slice(&args_bytes);
+
+    let header_size = 4 + 4 * 3;
+    let field_sizes = [32usize, 1usize, args_molecule.len()];
+    let mut cursor = header_size;
+    let mut offsets = Vec::with_capacity(3);
+    for size in field_sizes {
+        offsets.push(cursor);
+        cursor += size;
+    }
+
+    let mut serialized = Vec::with_capacity(cursor);
+    serialized.extend_from_slice(&(cursor as u32).to_le_bytes());
+    for offset in offsets {
+        serialized.extend_from_slice(&(offset as u32).to_le_bytes());
+    }
+    serialized.extend_from_slice(&code_hash_bytes);
+    serialized.push(hash_type_byte);
+    serialized.extend_from_slice(&args_molecule);
+
+    format!("0x{}", hex_lower(&cellscript::ckb_blake2b256(&serialized)))
+}
+
+fn locked_build_from_metadata_for_test(metadata: &cellscript::CompileMetadata) -> cellscript::package::LockedBuildInfo {
+    let abi = serde_json::json!({
+        "metadata_schema_version": metadata.metadata_schema_version,
+        "target_profile": metadata.target_profile.name.as_str(),
+        "types": &metadata.types,
+        "actions": &metadata.actions,
+        "functions": &metadata.functions,
+        "locks": &metadata.locks,
+        "molecule_schema_manifest": &metadata.molecule_schema_manifest,
+    });
+    cellscript::package::LockedBuildInfo {
+        compiler_version: Some(metadata.compiler_version.clone()),
+        target_profile: Some(metadata.target_profile.name.clone()),
+        artifact_hash: metadata.artifact_hash.clone(),
+        metadata_hash: Some(hash_json_for_test(metadata)),
+        schema_hash: Some(metadata.molecule_schema_manifest.manifest_hash.clone()),
+        abi_hash: Some(hash_json_for_test(&abi)),
+        constraints_hash: Some(hash_json_for_test(&metadata.constraints)),
+    }
+}
+
+fn start_mock_ckb_rpc(responses: Vec<(&'static str, serde_json::Value)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for (expected_method, result) in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request_body(&mut stream);
+            let request_json: serde_json::Value = serde_json::from_slice(&request).unwrap();
+            assert_eq!(request_json["method"], expected_method);
+            let response_body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_json["id"].clone(),
+                "result": result,
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    format!("http://{}", addr)
+}
+
+fn read_http_request_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        let read = stream.read(&mut buffer).unwrap();
+        assert_ne!(read, 0, "mock RPC request ended before headers");
+        request.extend_from_slice(&buffer[..read]);
+        if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            let body_start = header_end + 4;
+            while request.len() < body_start + content_length {
+                let read = stream.read(&mut buffer).unwrap();
+                assert_ne!(read, 0, "mock RPC request ended before body");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            return request[body_start..body_start + content_length].to_vec();
+        }
+    }
+}
+
+fn write_live_registry_fixture(root: &std::path::Path, data_hash: &str) {
+    write_live_registry_fixture_with(root, data_hash, data_hash, "data1", None);
+}
+
+fn write_live_registry_fixture_with(root: &std::path::Path, data_hash: &str, code_hash: &str, hash_type: &str, type_id: Option<&str>) {
+    let out_point = "0xaaaa:0".to_string();
+    let mut lockfile = cellscript::package::Lockfile::new();
+    lockfile.package = cellscript::package::LockfilePackageInfo {
+        name: "token".to_string(),
+        version: "1.0.0".to_string(),
+        namespace: Some("cellscript".to_string()),
+        source_hash: Some("source_hash".to_string()),
+    };
+    lockfile.package_build = Some(cellscript::package::LockedBuildInfo {
+        compiler_version: Some("0.20.0".to_string()),
+        target_profile: Some("ckb".to_string()),
+        artifact_hash: Some("artifact_hash".to_string()),
+        metadata_hash: Some("metadata_hash".to_string()),
+        schema_hash: Some("schema_hash".to_string()),
+        abi_hash: Some("abi_hash".to_string()),
+        constraints_hash: Some("constraints_hash".to_string()),
+    });
+    lockfile.deployment.insert(
+        "aggron4".to_string(),
+        cellscript::package::LockfileDeploymentRef {
+            record: out_point.clone(),
+            record_hash: None,
+            code_hash: Some(code_hash.to_string()),
+            out_point: Some(out_point.clone()),
+            data_hash: Some(data_hash.to_string()),
+        },
+    );
+    lockfile.write_to_root(root).unwrap();
+
+    let deployed = cellscript::package::DeployedManifest {
+        version: 1,
+        schema: None,
+        package: cellscript::package::DeployedPackageInfo {
+            name: "token".to_string(),
+            version: "1.0.0".to_string(),
+            source_hash: Some("source_hash".to_string()),
+        },
+        build: Some(cellscript::package::DeployedBuildInfo {
+            compiler_version: Some("0.20.0".to_string()),
+            artifact_hash: Some("artifact_hash".to_string()),
+            metadata_hash: Some("metadata_hash".to_string()),
+            schema_hash: Some("schema_hash".to_string()),
+            abi_hash: Some("abi_hash".to_string()),
+            constraints_hash: Some("constraints_hash".to_string()),
+        }),
+        deployments: vec![cellscript::package::DeploymentRecord {
+            network: "aggron4".to_string(),
+            chain_id: "ckb-testnet".to_string(),
+            tx_hash: "0xaaaa".to_string(),
+            output_index: 0,
+            code_hash: code_hash.to_string(),
+            hash_type: hash_type.to_string(),
+            dep_type: "code".to_string(),
+            data_hash: data_hash.to_string(),
+            out_point,
+            artifact_hash: Some("artifact_hash".to_string()),
+            metadata_hash: Some("metadata_hash".to_string()),
+            schema_hash: Some("schema_hash".to_string()),
+            abi_hash: Some("abi_hash".to_string()),
+            constraints_hash: Some("constraints_hash".to_string()),
+            compiler_version: Some("0.20.0".to_string()),
+            type_id: type_id.map(str::to_string),
+            script_role: Some(cellscript::package::ScriptRole::Type),
+            status: Some(cellscript::package::DeploymentStatus::Active),
+            upgrade_lineage: None,
+            audit_report_hash: None,
+            publisher_signature: None,
+            cell_deps: vec![],
+        }],
+    };
+    deployed.write_to_root(root).unwrap();
+}
+
+fn live_cell_rpc_result(status: &str, data_hash: &str) -> serde_json::Value {
+    live_cell_rpc_result_with_type(status, data_hash, serde_json::Value::Null)
+}
+
+fn live_cell_rpc_result_with_type(status: &str, data_hash: &str, type_script: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "status": status,
+        "cell": {
+            "output": {
+                "capacity": "0x0",
+                "lock": {
+                    "code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "hash_type": "data1",
+                    "args": "0x"
+                },
+                "type": type_script
+            },
+            "data": {
+                "content": "0x00",
+                "hash": data_hash
+            }
+        }
+    })
+}
+
+#[test]
+fn cellc_writes_requested_output_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("sample.cell");
+    let output = dir.path().join("sample.s");
+    let source = r#"
+module test
+
+action add(x: u64, y: u64) -> u64 {
+    verification
+        let z = x + y
+        return z
+}
+"#;
+    std::fs::write(&input, source).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&input).arg("-o").arg(&output).status().unwrap();
+
+    assert!(status.success());
+
+    let written = std::fs::read_to_string(&output).unwrap();
+    assert!(written.contains(".section .text"));
+    assert!(written.contains(".global add"));
+
+    let metadata = std::fs::read_to_string(dir.path().join("sample.s.meta.json")).unwrap();
+    assert!(metadata.contains("\"actions\""));
+    assert!(metadata.contains("\"add\""));
+    assert!(metadata.contains("\"scheduler_witness_abi\""));
+    assert!(metadata.contains("\"scheduler_witness_hex\""));
+    assert!(!metadata.contains("\"scheduler_witness_molecule_hex\""));
+    assert!(metadata.contains("\"metadata_schema_version\""));
+    assert!(metadata.contains("\"compiler_version\""));
+    assert!(metadata.contains("\"artifact_hash\""));
+    assert!(metadata.contains("\"artifact_size_bytes\""));
+    assert!(metadata.contains("\"source_hash\""));
+    assert!(metadata.contains("\"source_content_hash\""));
+    assert!(metadata.contains("\"source_units\""));
+    assert!(metadata.contains("\"target_profile\""));
+    assert!(metadata.contains("\"target_chain\""));
+    assert!(metadata.contains("\"constraints\""));
+    assert!(metadata.contains("\"entry_abi\""));
+    assert!(metadata.contains("\"artifact\""));
+    assert!(metadata.contains("\"runtime_errors\""));
+}
+
+#[test]
+fn cellc_verify_ckb_fixtures_accepts_standard_manifest() {
+    let manifest =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("compat").join("ckb_standard").join("manifest.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("verify-ckb-fixtures").arg(&manifest).arg("--json").output().unwrap();
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["manifest_schema"], "cellscript-ckb-standard-compat-v0.16");
+    assert_eq!(report["execution_level"], "MODEL");
+    assert_eq!(report["ckb_vm_execution"], false);
+    assert_eq!(report["issue_count"], 0);
+    assert!(report["fixture_count"].as_u64().unwrap() >= 14);
+    assert!(report["manifest_hash"].as_str().is_some_and(|hash| hash.len() == 64));
+}
+
+#[test]
+fn cellc_verify_ckb_fixtures_accepts_ickb_claim_manifest() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("benchmarks")
+        .join("ickb_diff")
+        .join("claim_manifest.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("verify-ckb-fixtures").arg(&manifest).arg("--json").output().unwrap();
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["manifest_schema"], "cellscript-ickb-claim-manifest-v1");
+    assert_eq!(report["execution_level"], "DIFFERENTIAL_CKB_VM");
+    assert_eq!(report["ckb_vm_execution"], true);
+    assert_eq!(report["issue_count"], 0);
+    assert!(report["fixture_count"].as_u64().unwrap() >= 8);
+}
+
+#[test]
+fn cellc_verify_ckb_fixtures_rejects_ickb_claim_without_matrix_row() {
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("benchmarks")
+        .join("ickb_diff")
+        .join("claim_manifest.json");
+    let mut manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["families"][0]["branches"][0]["required_scenarios"] =
+        serde_json::json!(["differential: missing iCKB protocol branch original vs CellScript agree"]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let invalid = dir.path().join("claim_manifest.json");
+    std::fs::write(&invalid, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    std::fs::copy(manifest_path.parent().unwrap().join("matrix.json"), dir.path().join("matrix.json")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("verify-ckb-fixtures").arg(&invalid).arg("--json").output().unwrap();
+
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    let issues = report["issues"].as_array().unwrap().iter().filter_map(|issue| issue.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(issues.contains("required scenario is missing"), "{issues}");
+}
+
+#[test]
+fn cellc_verify_ckb_fixtures_rejects_invalid_manifest_claim() {
+    let manifest_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("compat").join("ckb_standard").join("manifest.json");
+    let mut manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["schema"] = serde_json::Value::String("wrong-schema".to_string());
+
+    let dir = tempfile::tempdir().unwrap();
+    let invalid = dir.path().join("invalid-fixture-manifest.json");
+    std::fs::write(&invalid, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("verify-ckb-fixtures").arg(&invalid).arg("--json").output().unwrap();
+
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    let issues = report["issues"].as_array().unwrap().iter().filter_map(|issue| issue.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(issues.contains("manifest schema must be cellscript-ckb-standard-compat-v0.16"), "{issues}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("CKB fixture manifest failed verification"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cellc_top_level_accepts_primitive_strict_for_kernel_effect_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("strict.cell");
+    let output = dir.path().join("strict.s");
+    std::fs::write(
+        &input,
+        r#"
+module test
+
+resource Token has store, consume, burn {
+    amount: u64,
+}
+
+action burn(token: Token) {
+    verification
+        destroy token
+}
+"#,
+    )
+    .unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg(&input)
+        .arg("--primitive-strict")
+        .arg("0.15")
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .unwrap();
+
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(output.exists());
+}
+
+#[test]
+fn cellc_top_level_primitive_strict_rejects_legacy_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("legacy.cell");
+    std::fs::write(
+        &input,
+        r#"
+module test
+
+resource Token has store, destroy {
+    amount: u64,
+}
+
+action burn(token: Token) {
+    verification
+        destroy token
+}
+"#,
+    )
+    .unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&input).arg("--primitive-strict").arg("0.15").output().unwrap();
+
+    assert!(!run.status.success(), "legacy capability should fail strict mode");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains("CS0151"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("legacy capability 'destroy'"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("consume + burn"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_constraints_subcommand_surfaces_ckb_deployment_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[deploy.ckb]
+hash_type = "data2"
+
+[[deploy.ckb.cell_deps]]
+name = "secp256k1"
+out_point = "0x1111111111111111111111111111111111111111111111111111111111111111:0"
+dep_type = "dep_group"
+hash_type = "type"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action main(value: u64) -> u64 {
+    verification
+        return value
+}
+"#,
+    )
+    .unwrap();
+
+    let run = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("constraints")
+        .arg("--target-profile")
+        .arg("ckb")
+        .arg("--entry-action")
+        .arg("main")
+        .output()
+        .unwrap();
+
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let constraints: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    let ckb = &constraints["ckb"];
+    assert_eq!(constraints["target_profile"], "ckb");
+    assert_eq!(ckb["hash_type_policy"]["declared_hash_type"], "data2");
+    assert_eq!(ckb["hash_type_policy"]["status"], "manifest-declared-builder-must-match");
+    assert_eq!(ckb["dep_group_manifest"]["status"], "manifest-declares-dep-group-builder-must-expand-or-reference");
+    let dep = &ckb["dep_group_manifest"]["declared_cell_deps"][0];
+    assert_eq!(dep["name"], "secp256k1");
+    assert_eq!(dep["dep_type"], "dep_group");
+    assert_eq!(dep["tx_hash"], "0x1111111111111111111111111111111111111111111111111111111111111111");
+    assert_eq!(dep["index"], 0);
+    assert_eq!(dep["hash_type"], "type");
+    assert_eq!(ckb["profile_abi_contract"]["witness_abi"], "ckb-molecule-witness-args+cellscript-entry-witness-v1");
+    assert_eq!(ckb["profile_abi_contract"]["lock_args_abi"], "ckb-script-args-typed-fixed-bytes");
+    assert_eq!(ckb["profile_abi_contract"]["source_encoding"], "ckb-source-group-high-bit");
+    assert_eq!(ckb["profile_abi_contract"]["cell_dep_abi"], "ckb-cell-dep-outpoint-and-dep-group");
+    assert_eq!(ckb["profile_abi_contract"]["script_ref_abi"], "ckb-script-code-hash-hash-type-args");
+    assert_eq!(ckb["profile_abi_contract"]["output_data_abi"], "ckb-outputs-and-outputs-data-index-aligned");
+    assert_eq!(ckb["profile_abi_contract"]["capacity_floor_abi"], "ckb-output-capacity-floor-shannons");
+    assert_eq!(ckb["profile_abi_contract"]["type_id_abi"], "ckb-type-id-v1");
+    assert_eq!(ckb["capacity_evidence_contract"]["tx_size_measurement_required"], true);
+}
+
+#[test]
+fn cellc_verify_artifact_accepts_matching_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("sample.cell");
+    let output = dir.path().join("sample.s");
+    let source = r#"
+module test
+
+action add(x: u64, y: u64) -> u64 {
+    verification
+        x + y
+}
+"#;
+    std::fs::write(&input, source).unwrap();
+
+    let build = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&input).arg("-o").arg(&output).status().unwrap();
+    assert!(build.success());
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("verify-artifact").arg(&output).output().unwrap();
+
+    assert!(verify.status.success(), "{}", String::from_utf8_lossy(&verify.stderr));
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(stdout.contains("Artifact verification succeeded"));
+    assert!(stdout.contains("Metadata schema"));
+    assert!(stdout.contains("Compiler"));
+    assert!(stdout.contains("RISC-V assembly"));
+
+    let verify_sources =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).arg("verify-artifact").arg(&output).arg("--verify-sources").output().unwrap();
+    assert!(verify_sources.status.success(), "{}", String::from_utf8_lossy(&verify_sources.stderr));
+    let stdout = String::from_utf8_lossy(&verify_sources.stdout);
+    assert!(stdout.contains("Sources: verified 1 unit(s)"), "{}", stdout);
+}
+
+#[test]
+fn cellc_verify_artifact_rejects_tampered_artifact() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("sample.cell");
+    let output = dir.path().join("sample.s");
+    let source = r#"
+module test
+
+action add(x: u64, y: u64) -> u64 {
+    verification
+        x + y
+}
+"#;
+    std::fs::write(&input, source).unwrap();
+
+    let build = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&input).arg("-o").arg(&output).status().unwrap();
+    assert!(build.success());
+    std::fs::write(&output, b"tampered").unwrap();
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("verify-artifact").arg(&output).output().unwrap();
+
+    assert!(!verify.status.success());
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(stderr.contains("metadata artifact_hash") || stderr.contains("artifact_hash"), "{}", stderr);
+}
+
+#[test]
+fn cellc_verify_artifact_rejects_tampered_source_when_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("sample.cell");
+    let output = dir.path().join("sample.s");
+    let source = r#"
+module test
+
+action add(x: u64, y: u64) -> u64 {
+    verification
+        x + y
+}
+"#;
+    std::fs::write(&input, source).unwrap();
+
+    let build = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&input).arg("-o").arg(&output).status().unwrap();
+    assert!(build.success());
+    std::fs::write(
+        &input,
+        r#"
+module test
+
+action add(x: u64, y: u64) -> u64 {
+    verification
+        x + y + 1
+}
+"#,
+    )
+    .unwrap();
+
+    let verify =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).arg("verify-artifact").arg(&output).arg("--verify-sources").output().unwrap();
+
+    assert!(!verify.status.success());
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(stderr.contains("source unit") && stderr.contains("does not match metadata"), "{}", stderr);
+}
+
+#[test]
+fn cellc_verify_artifact_rejects_metadata_schema_downgrade() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("sample.cell");
+    let output = dir.path().join("sample.s");
+    let tampered_metadata = dir.path().join("schema-old.meta.json");
+    let source = r#"
+module test
+
+action add(x: u64, y: u64) -> u64 {
+    verification
+        x + y
+}
+"#;
+    std::fs::write(&input, source).unwrap();
+
+    let build = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&input).arg("-o").arg(&output).status().unwrap();
+    assert!(build.success());
+
+    let metadata_path = dir.path().join("sample.s.meta.json");
+    let mut metadata_json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&metadata_path).unwrap()).unwrap();
+    let current_schema = metadata_json["metadata_schema_version"].as_u64().unwrap();
+    metadata_json["metadata_schema_version"] = serde_json::json!(current_schema - 1);
+    std::fs::write(&tampered_metadata, serde_json::to_vec_pretty(&metadata_json).unwrap()).unwrap();
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("verify-artifact")
+        .arg(&output)
+        .arg("--metadata")
+        .arg(&tampered_metadata)
+        .output()
+        .unwrap();
+
+    assert!(!verify.status.success(), "unexpected success: {}", String::from_utf8_lossy(&verify.stdout));
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(stderr.contains("unsupported metadata_schema_version"), "{}", stderr);
+}
+
+#[test]
+fn cellc_verify_artifact_rejects_noncanonical_source_unit_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("sample.cell");
+    let output = dir.path().join("sample.s");
+    let tampered_metadata = dir.path().join("uppercase-source-hash.meta.json");
+    let source = r#"
+module test
+
+action add(x: u64, y: u64) -> u64 {
+    verification
+        x + y
+}
+"#;
+    std::fs::write(&input, source).unwrap();
+
+    let build = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&input).arg("-o").arg(&output).status().unwrap();
+    assert!(build.success());
+
+    let metadata_path = dir.path().join("sample.s.meta.json");
+    let mut metadata_json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&metadata_path).unwrap()).unwrap();
+    let source_hash = metadata_json["source_units"][0]["hash"].as_str().unwrap().to_uppercase();
+    metadata_json["source_units"][0]["hash"] = serde_json::json!(source_hash);
+    std::fs::write(&tampered_metadata, serde_json::to_vec_pretty(&metadata_json).unwrap()).unwrap();
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("verify-artifact")
+        .arg(&output)
+        .arg("--metadata")
+        .arg(&tampered_metadata)
+        .output()
+        .unwrap();
+
+    assert!(!verify.status.success(), "unexpected success: {}", String::from_utf8_lossy(&verify.stdout));
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(stderr.contains("expected 64 lowercase hex characters"), "{}", stderr);
+}
+
+#[test]
+fn cellc_verify_artifact_enforces_policy_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("sample.cell");
+    let output = dir.path().join("sample.s");
+    let source = r#"
+module test
+
+resource Fingerprint {
+    digest: Hash,
+}
+
+fn pass_digest(digest: Hash) -> Hash {
+    return digest
+}
+
+action issue(digest: Hash) -> Fingerprint {
+    verification
+        let dynamic_digest = pass_digest(digest)
+        let token = create Fingerprint {
+            digest: dynamic_digest
+        }
+        return token
+}
+"#;
+    std::fs::write(&input, source).unwrap();
+
+    let build = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&input).arg("-o").arg(&output).status().unwrap();
+    assert!(build.success());
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("verify-artifact").arg(&output).arg("--production").output().unwrap();
+
+    assert!(!verify.status.success(), "unexpected success: {}", String::from_utf8_lossy(&verify.stdout));
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(stderr.contains("check policy failed"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("output-verification-incomplete"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("fail-closed"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_verify_artifact_enforces_expected_hashes() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("sample.cell");
+    let output = dir.path().join("sample.s");
+    let source = r#"
+module test
+
+action add(x: u64, y: u64) -> u64 {
+    verification
+        x + y
+}
+"#;
+    std::fs::write(&input, source).unwrap();
+
+    let build = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&input).arg("-o").arg(&output).status().unwrap();
+    assert!(build.success());
+
+    let metadata_path = dir.path().join("sample.s.meta.json");
+    let metadata_json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&metadata_path).unwrap()).unwrap();
+    let artifact_hash = metadata_json["artifact_hash"].as_str().unwrap();
+    let source_content_hash = metadata_json["source_content_hash"].as_str().unwrap();
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("verify-artifact")
+        .arg(&output)
+        .arg("--expect-artifact-hash")
+        .arg(artifact_hash)
+        .arg("--expect-source-content-hash")
+        .arg(source_content_hash)
+        .output()
+        .unwrap();
+    assert!(verify.status.success(), "{}", String::from_utf8_lossy(&verify.stderr));
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(stdout.contains("Expected hashes: verified"), "{}", stdout);
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("verify-artifact")
+        .arg(&output)
+        .arg("--json")
+        .arg("--expect-artifact-hash")
+        .arg(artifact_hash)
+        .arg("--expect-source-content-hash")
+        .arg(source_content_hash)
+        .output()
+        .unwrap();
+    assert!(verify.status.success(), "{}", String::from_utf8_lossy(&verify.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&verify.stdout).unwrap();
+    assert_eq!(stdout["status"], "ok");
+    assert_eq!(stdout["artifact_hash"], artifact_hash);
+    assert_eq!(stdout["source_content_hash"], source_content_hash);
+    assert_eq!(stdout["expected_hashes_verified"], true);
+    assert_eq!(stdout["policy_verified"], false);
+    assert_eq!(stdout["sources_verified"], false);
+    assert_eq!(stdout["runtime_required_verifier_obligations"], 0);
+    assert_eq!(stdout["fail_closed_verifier_obligations"], 0);
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("verify-artifact")
+        .arg(&output)
+        .arg("--expect-source-content-hash")
+        .arg("00".repeat(32))
+        .output()
+        .unwrap();
+    assert!(!verify.status.success(), "unexpected success: {}", String::from_utf8_lossy(&verify.stdout));
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(stderr.contains("source_content_hash") && stderr.contains("does not match expected"), "{}", stderr);
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("verify-artifact")
+        .arg(&output)
+        .arg("--expect-artifact-hash")
+        .arg(artifact_hash.to_uppercase())
+        .output()
+        .unwrap();
+    assert!(!verify.status.success(), "unexpected success: {}", String::from_utf8_lossy(&verify.stdout));
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(stderr.contains("lowercase CKB Blake2b hex digest"), "{}", stderr);
+}
+
+#[test]
+fn cellc_compiles_bundled_examples_to_requested_outputs() {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let examples_dir = manifest_dir.join("examples");
+    let output_dir = tempfile::tempdir().unwrap();
+
+    for example in ["amm_pool.cell", "launch.cell", "multisig.cell", "nft.cell", "timelock.cell", "token.cell", "vesting.cell"] {
+        let input = examples_dir.join(example);
+        let output = output_dir.path().join(example.replace(".cell", ".s"));
+
+        let status = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&input).arg("-o").arg(&output).status().unwrap();
+        assert!(status.success(), "cellc failed for {}", example);
+
+        let written = std::fs::read_to_string(&output).unwrap();
+        assert!(written.contains(".section .text"), "missing text section for {}", example);
+        assert!(!written.trim().is_empty(), "empty output for {}", example);
+    }
+}
+
+#[test]
+fn cellc_compiles_package_with_local_path_dependency() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let dep_root = root.join("dep_pkg");
+    let app_root = root.join("app_pkg");
+
+    std::fs::create_dir_all(dep_root.join("src")).unwrap();
+    std::fs::create_dir_all(app_root.join("src")).unwrap();
+
+    std::fs::write(
+        dep_root.join("Cell.toml"),
+        r#"
+[package]
+name = "dep_pkg"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dep_root.join("src").join("token.cell"),
+        r#"
+module dep::token
+
+resource Token has store, replace, relock, consume, burn {
+    amount: u64
+}
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        app_root.join("Cell.toml"),
+        r#"
+[package]
+name = "app_pkg"
+version = "0.1.0"
+
+[dependencies]
+dep_pkg = { path = "../dep_pkg" }
+"#,
+    )
+    .unwrap();
+
+    let app_entry = app_root.join("src").join("main.cell");
+    std::fs::write(
+        &app_entry,
+        r#"
+module app::main
+
+use dep::token::Token
+
+action pass_through(token: Token) -> Token {
+    verification
+        token
+}
+"#,
+    )
+    .unwrap();
+
+    let output = app_root.join("build").join("main.s");
+    let status = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&app_root).status().unwrap();
+
+    assert!(status.success());
+
+    let written = std::fs::read_to_string(&output).unwrap();
+    assert!(written.contains(".section .text"));
+    assert!(written.contains(".global pass_through"));
+    assert!(!app_entry.with_extension("s").exists());
+}
+
+#[test]
+fn cellc_rejects_registry_package_dependencies_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[dependencies]
+remote = "1.2.3"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(root).output().unwrap();
+
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("registry dependency 'remote' requires a namespace"), "unexpected stderr: {}", stderr);
+    assert!(!root.join("build").join("main.s").exists());
+    assert!(!root.join("build").join("main.s.meta.json").exists());
+}
+
+#[test]
+fn cellc_build_resolves_registry_dependency_and_writes_phase1_lockfile() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let dep_root = root.join("token");
+    let app_root = root.join("app");
+    let registry_root = root.join("registry");
+
+    std::fs::create_dir_all(dep_root.join("src")).unwrap();
+    std::fs::write(
+        dep_root.join("Cell.toml"),
+        r#"
+[package]
+name = "token"
+version = "0.3.0"
+namespace = "cellscript"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dep_root.join("src/token.cell"),
+        r#"
+module dep::token
+
+resource Token has store, replace, relock, consume, burn {
+    amount: u64
+}
+"#,
+    )
+    .unwrap();
+    let source_hash = cellscript::package::registry::compute_source_hash(&dep_root).unwrap();
+    cellscript::package::registry::RegistryIndex::append_version(
+        &dep_root,
+        "token",
+        "cellscript",
+        cellscript::package::registry::RegistryVersion {
+            version: "0.3.0".to_string(),
+            tag: "v0.3.0".to_string(),
+            source_hash: source_hash.clone(),
+            cellscript_version: "0.19.0".to_string(),
+            dependencies: Default::default(),
+            abi_index: None,
+            schema_hash: None,
+            license: None,
+            released_at: None,
+            yanked: false,
+            audit: None,
+        },
+    )
+    .unwrap();
+    git_init(&dep_root);
+    git_add_all(&dep_root);
+    git_commit(&dep_root, "publish token");
+    git_tag(&dep_root, "v0.3.0");
+
+    std::fs::create_dir_all(registry_root.join("cellscript")).unwrap();
+    git_init(&registry_root);
+    let entry = cellscript::package::registry::DiscoveryEntry {
+        name: "token".to_string(),
+        namespace: "cellscript".to_string(),
+        source: dep_root.to_string_lossy().to_string(),
+    };
+    std::fs::write(registry_root.join("cellscript/token.json"), serde_json::to_string_pretty(&entry).unwrap()).unwrap();
+    git_add_all(&registry_root);
+    git_commit(&registry_root, "add token");
+
+    std::fs::create_dir_all(app_root.join("src")).unwrap();
+    std::fs::write(
+        app_root.join("Cell.toml"),
+        r#"
+[package]
+name = "app"
+version = "0.1.0"
+namespace = "cellscript"
+
+[dependencies.token]
+version = "0.3.0"
+namespace = "cellscript"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        app_root.join("src/main.cell"),
+        r#"
+module app::main
+
+use dep::token::Token
+
+action pass_through(token: Token) -> Token {
+    verification
+        token
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("build")
+        .env(cellscript::package::registry::REGISTRY_URL_ENV, &registry_root)
+        .current_dir(&app_root)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let lockfile: cellscript::package::Lockfile =
+        toml::from_str(&std::fs::read_to_string(app_root.join("Cell.lock")).unwrap()).unwrap();
+    assert!(lockfile.package.source_hash.is_some());
+    let build = lockfile.package_build.as_ref().expect("build identity");
+    assert!(build.compiler_version.is_some());
+    assert!(build.target_profile.is_some());
+    assert!(build.artifact_hash.is_some());
+    assert!(build.metadata_hash.is_some());
+    assert!(build.schema_hash.is_some());
+    assert!(build.abi_hash.is_some());
+    assert!(build.constraints_hash.is_some());
+    let token = lockfile.dependencies.get("token").expect("locked registry dependency");
+    assert_eq!(token.source_hash.as_deref(), Some(source_hash.as_str()));
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("package")
+        .arg("verify")
+        .env(cellscript::package::registry::REGISTRY_URL_ENV, &registry_root)
+        .current_dir(&app_root)
+        .output()
+        .unwrap();
+    assert!(verify.status.success(), "stderr: {}", String::from_utf8_lossy(&verify.stderr));
+}
+
+#[test]
+fn cellc_init_accepts_phase1_namespace_flag() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("init")
+        .arg("amm_pool")
+        .arg("--namespace")
+        .arg("cellscript")
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let manifest = std::fs::read_to_string(temp.path().join("Cell.toml")).unwrap();
+    assert!(manifest.contains("namespace = \"cellscript\""), "manifest: {}", manifest);
+}
+
+#[test]
+fn cellc_registry_verify_json_fails_closed_for_missing_deployment_ref() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let mut lockfile = cellscript::package::Lockfile::new();
+    lockfile.package = cellscript::package::LockfilePackageInfo {
+        name: "token".to_string(),
+        version: "1.0.0".to_string(),
+        namespace: Some("cellscript".to_string()),
+        source_hash: Some("source_hash".to_string()),
+    };
+    lockfile.package_build = Some(cellscript::package::LockedBuildInfo {
+        compiler_version: Some("0.19.0".to_string()),
+        target_profile: Some("ckb".to_string()),
+        artifact_hash: Some("artifact_hash".to_string()),
+        metadata_hash: Some("metadata_hash".to_string()),
+        schema_hash: Some("schema_hash".to_string()),
+        abi_hash: Some("abi_hash".to_string()),
+        constraints_hash: Some("constraints_hash".to_string()),
+    });
+    lockfile.write_to_root(root).unwrap();
+
+    let deployed = cellscript::package::DeployedManifest {
+        version: 1,
+        schema: None,
+        package: cellscript::package::DeployedPackageInfo {
+            name: "token".to_string(),
+            version: "1.0.0".to_string(),
+            source_hash: Some("source_hash".to_string()),
+        },
+        build: Some(cellscript::package::DeployedBuildInfo {
+            compiler_version: Some("0.19.0".to_string()),
+            artifact_hash: Some("artifact_hash".to_string()),
+            metadata_hash: Some("metadata_hash".to_string()),
+            schema_hash: Some("schema_hash".to_string()),
+            abi_hash: Some("abi_hash".to_string()),
+            constraints_hash: Some("constraints_hash".to_string()),
+        }),
+        deployments: vec![cellscript::package::DeploymentRecord {
+            network: "aggron4".to_string(),
+            chain_id: "ckb-testnet".to_string(),
+            tx_hash: "0xaaaa".to_string(),
+            output_index: 0,
+            code_hash: "0xbbbb".to_string(),
+            hash_type: "data1".to_string(),
+            dep_type: "code".to_string(),
+            data_hash: "0xcccc".to_string(),
+            out_point: "0xaaaa:0".to_string(),
+            artifact_hash: None,
+            metadata_hash: None,
+            schema_hash: None,
+            abi_hash: None,
+            constraints_hash: None,
+            compiler_version: None,
+            type_id: None,
+            script_role: None,
+            status: None,
+            upgrade_lineage: None,
+            audit_report_hash: None,
+            publisher_signature: None,
+            cell_deps: vec![],
+        }],
+    };
+    deployed.write_to_root(root).unwrap();
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).arg("registry").arg("verify").arg("--json").current_dir(root).output().unwrap();
+
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert!(report["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|violation| violation.as_str().unwrap_or_default().contains("missing from Cell.lock")));
+}
+
+#[test]
+fn cellc_registry_verify_live_accepts_matching_rpc_cell() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let data_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    write_live_registry_fixture(root, data_hash);
+    let rpc_url = start_mock_ckb_rpc(vec![
+        ("get_blockchain_info", serde_json::json!({ "chain": "ckb_testnet" })),
+        ("get_live_cell", live_cell_rpc_result("live", data_hash)),
+    ]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("registry")
+        .arg("verify")
+        .arg("--live")
+        .arg("--rpc-url")
+        .arg(&rpc_url)
+        .arg("--network")
+        .arg("aggron4")
+        .arg("--json")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["live"]["enabled"], true);
+    assert_eq!(report["live"]["checked"], 1);
+    assert_eq!(report["live"]["evidence"][0]["status"], "live-verified");
+    assert_eq!(report["live"]["evidence"][0]["rpc_data_hash"], data_hash);
+    assert!(report["violations"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn cellc_registry_verify_live_accepts_type_hash_and_type_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let data_hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
+    let type_code_hash = "0x4444444444444444444444444444444444444444444444444444444444444444";
+    let type_id = "0x5555555555555555555555555555555555555555555555555555555555555555";
+    let script_hash = ckb_script_hash_for_test(type_code_hash, "data1", type_id);
+    write_live_registry_fixture_with(root, data_hash, &script_hash, "type", Some(type_id));
+    let rpc_url = start_mock_ckb_rpc(vec![
+        ("get_blockchain_info", serde_json::json!({ "chain": "ckb-testnet" })),
+        (
+            "get_live_cell",
+            live_cell_rpc_result_with_type(
+                "live",
+                data_hash,
+                serde_json::json!({
+                    "code_hash": type_code_hash,
+                    "hash_type": "data1",
+                    "args": type_id
+                }),
+            ),
+        ),
+    ]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("registry")
+        .arg("verify")
+        .arg("--live")
+        .arg("--rpc-url")
+        .arg(&rpc_url)
+        .arg("--json")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["live"]["evidence"][0]["rpc_code_hash"], script_hash);
+    assert!(report["violations"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn cellc_registry_verify_live_rejects_dead_rpc_cell() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let data_hash = "0x2222222222222222222222222222222222222222222222222222222222222222";
+    write_live_registry_fixture(root, data_hash);
+    let rpc_url = start_mock_ckb_rpc(vec![
+        ("get_blockchain_info", serde_json::json!({ "chain": "ckb-testnet" })),
+        ("get_live_cell", live_cell_rpc_result("dead", data_hash)),
+    ]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("registry")
+        .arg("verify")
+        .arg("--live")
+        .arg("--rpc-url")
+        .arg(&rpc_url)
+        .arg("--json")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["live"]["evidence"][0]["rpc_status"], "dead");
+    assert!(report["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|violation| violation.as_str().unwrap_or_default().contains("is not live")));
+}
+
+#[test]
+fn cellc_registry_verify_live_rejects_deprecated_deployment_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let data_hash = "0x6666666666666666666666666666666666666666666666666666666666666666";
+    write_live_registry_fixture(root, data_hash);
+    let mut deployed = cellscript::package::DeployedManifest::read_from_root(root).unwrap().unwrap();
+    deployed.deployments[0].status = Some(cellscript::package::DeploymentStatus::Deprecated);
+    deployed.write_to_root(root).unwrap();
+    let rpc_url = start_mock_ckb_rpc(vec![
+        ("get_blockchain_info", serde_json::json!({ "chain": "ckb-testnet" })),
+        ("get_live_cell", live_cell_rpc_result("live", data_hash)),
+    ]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("registry")
+        .arg("verify")
+        .arg("--live")
+        .arg("--rpc-url")
+        .arg(&rpc_url)
+        .arg("--json")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["live"]["evidence"][0]["status"], "failed");
+    assert_eq!(report["live"]["evidence"][0]["deployment_status"], "deprecated");
+    assert!(report["live"]["evidence"][0]["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|violation| violation.as_str().unwrap_or_default().contains("not active")));
+}
+
+#[test]
+fn cellc_registry_verify_live_rejects_missing_deployment_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let data_hash = "0x7777777777777777777777777777777777777777777777777777777777777777";
+    write_live_registry_fixture(root, data_hash);
+    let mut deployed = cellscript::package::DeployedManifest::read_from_root(root).unwrap().unwrap();
+    deployed.deployments[0].status = None;
+    deployed.write_to_root(root).unwrap();
+    let rpc_url = start_mock_ckb_rpc(vec![
+        ("get_blockchain_info", serde_json::json!({ "chain": "ckb-testnet" })),
+        ("get_live_cell", live_cell_rpc_result("live", data_hash)),
+    ]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("registry")
+        .arg("verify")
+        .arg("--live")
+        .arg("--rpc-url")
+        .arg(&rpc_url)
+        .arg("--json")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["live"]["evidence"][0]["status"], "failed");
+    assert!(report["live"]["evidence"][0]["deployment_status"].is_null());
+    assert!(report["live"]["evidence"][0]["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|violation| violation.as_str().unwrap_or_default().contains("has no status")));
+}
+
+#[test]
+fn cellc_registry_verify_requires_trust_metadata_when_requested() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let data_hash = "0x8888888888888888888888888888888888888888888888888888888888888888";
+    write_live_registry_fixture(root, data_hash);
+
+    let rejected = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("registry")
+        .arg("verify")
+        .arg("--require-publisher-signature")
+        .arg("--require-audit-report")
+        .arg("--json")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert!(!rejected.status.success(), "unexpected success: {}", String::from_utf8_lossy(&rejected.stdout));
+    let report: serde_json::Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["trust"]["enabled"], true);
+    assert_eq!(report["trust"]["verification_boundary"], "metadata-presence-only");
+    assert_eq!(report["trust"]["evidence"][0]["publisher_signature_status"], "missing");
+    assert_eq!(report["trust"]["evidence"][0]["audit_report_hash_status"], "missing");
+    assert!(report["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|violation| violation.as_str().unwrap_or_default().contains("publisher_signature")));
+
+    let mut deployed = cellscript::package::DeployedManifest::read_from_root(root).unwrap().unwrap();
+    deployed.deployments[0].publisher_signature = Some("sig:fixture".to_string());
+    deployed.deployments[0].audit_report_hash = Some("0xabc".to_string());
+    deployed.write_to_root(root).unwrap();
+
+    let accepted = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("registry")
+        .arg("verify")
+        .arg("--require-publisher-signature")
+        .arg("--require-audit-report")
+        .arg("--json")
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert!(accepted.status.success(), "stderr: {}", String::from_utf8_lossy(&accepted.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["trust"]["evidence"][0]["status"], "policy-satisfied");
+    assert_eq!(report["trust"]["evidence"][0]["publisher_signature_status"], "present-unverified");
+    assert_eq!(report["trust"]["evidence"][0]["audit_report_hash_status"], "present");
+    assert!(report["violations"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn cellc_rejects_underdeclared_effects_from_path_dependency_calls() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let dep_root = root.join("dep_pkg");
+    let app_root = root.join("app_pkg");
+
+    std::fs::create_dir_all(dep_root.join("src")).unwrap();
+    std::fs::create_dir_all(app_root.join("src")).unwrap();
+
+    std::fs::write(
+        dep_root.join("Cell.toml"),
+        r#"
+[package]
+name = "dep_pkg"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dep_root.join("src").join("token.cell"),
+        r#"
+module dep::token
+
+resource Token {
+    amount: u64
+}
+
+action issue(amount: u64) -> Token {
+    verification
+        let out = create Token {
+            amount: amount
+        }
+        return out
+}
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        app_root.join("Cell.toml"),
+        r#"
+[package]
+name = "app_pkg"
+version = "0.1.0"
+
+[dependencies]
+dep_pkg = { path = "../dep_pkg" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        app_root.join("src").join("main.cell"),
+        r#"
+module app::main
+
+use dep::token::Token
+use dep::token::issue
+
+#[effect(ReadOnly)]
+action wrapper(amount: u64) -> Token {
+    verification
+        return issue(amount)
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&app_root).output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("declared effect ReadOnly is too weak"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("inferred effect is Creating"), "unexpected stderr: {}", stderr);
+
+    std::fs::write(
+        app_root.join("src").join("main.cell"),
+        r#"
+module app::main
+
+use dep::token::Token
+
+#[effect(ReadOnly)]
+action wrapper(amount: u64) -> Token {
+    verification
+        return dep::token::issue(amount)
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&app_root).output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("declared effect ReadOnly is too weak"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("inferred effect is Creating"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_rejects_external_dependency_function_calls_until_linking_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let dep_root = root.join("dep_pkg");
+    let app_root = root.join("app_pkg");
+
+    std::fs::create_dir_all(dep_root.join("src")).unwrap();
+    std::fs::create_dir_all(app_root.join("src")).unwrap();
+
+    std::fs::write(
+        dep_root.join("Cell.toml"),
+        r#"
+[package]
+name = "dep_pkg"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dep_root.join("src").join("math.cell"),
+        r#"
+module dep::math
+
+fn add_one(x: u64) -> u64 {
+    return x + 1
+}
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        app_root.join("Cell.toml"),
+        r#"
+[package]
+name = "app_pkg"
+version = "0.1.0"
+
+[dependencies]
+dep_pkg = { path = "../dep_pkg" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        app_root.join("src").join("main.cell"),
+        r#"
+module app::main
+
+action run(x: u64) -> u64 {
+    verification
+        return dep::math::add_one(x)
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(&app_root).output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("external function call 'dep::math::add_one' is not linkable yet"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_uses_manifest_build_out_dir_for_package_input() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[build]
+out_dir = "artifacts"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+
+    let output = root.join("artifacts").join("main.s");
+    let status = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(root).status().unwrap();
+
+    assert!(status.success());
+
+    let written = std::fs::read_to_string(&output).unwrap();
+    assert!(written.contains(".section .text"));
+    assert!(!root.join("build").join("main.s").exists());
+}
+
+#[test]
+fn cellc_cli_target_overrides_manifest_build_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[build]
+target = "riscv64-elf"
+out_dir = "artifacts"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+
+    let output = root.join("artifacts").join("main.s");
+    let status = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(root).arg("--target").arg("riscv64-asm").status().unwrap();
+
+    assert!(status.success());
+
+    let written = std::fs::read_to_string(&output).unwrap();
+    assert!(written.contains(".section .text"));
+    assert!(!written.trim().is_empty());
+}
+
+#[test]
+fn cellc_uses_manifest_build_target_by_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[build]
+target = "riscv64-elf"
+out_dir = "artifacts"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+
+    let output = root.join("artifacts").join("main.elf");
+    let status = Command::new(env!("CARGO_BIN_EXE_cellc")).arg(root).status().unwrap();
+
+    assert!(status.success());
+
+    let written = std::fs::read(&output).unwrap();
+    assert!(written.starts_with(b"\x7fELF"));
+    assert!(!root.join("artifacts").join("main.s").exists());
+}
+
+#[test]
+fn cellc_build_and_check_subcommands_use_package_flow() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+
+    let check = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").status().unwrap();
+    assert!(check.success());
+
+    let build = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").status().unwrap();
+    assert!(build.success());
+
+    let output = root.join("build").join("main.s");
+    let written = std::fs::read_to_string(output).unwrap();
+    assert!(written.contains(".section .text"));
+    let metadata = std::fs::read_to_string(root.join("build").join("main.s.meta.json")).unwrap();
+    assert!(metadata.contains("\"module\": \"demo::main\""));
+    assert!(metadata.contains("\"scheduler_witness_abi\""));
+    assert!(metadata.contains("\"scheduler_witness_hex\""));
+    assert!(!metadata.contains("\"scheduler_witness_molecule_hex\""));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").arg("--json").output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["status"], "ok");
+    assert_eq!(stdout["artifact_format"], "RISC-V assembly");
+    assert_eq!(stdout["opt_level"], 1);
+    assert_eq!(stdout["target_profile"], "ckb");
+    assert_eq!(stdout["policy_verified"], false);
+    assert_eq!(stdout["runtime_required_verifier_obligations"], 0);
+    assert_eq!(stdout["fail_closed_verifier_obligations"], 0);
+    assert!(stdout["artifact"].as_str().unwrap().ends_with("build/main.s"));
+    assert!(stdout["metadata"].as_str().unwrap().ends_with("build/main.s.meta.json"));
+    assert!(stdout["artifact_hash"].as_str().unwrap().len() == 64);
+    assert!(stdout["source_content_hash"].as_str().unwrap().len() == 64);
+    assert_eq!(stdout["constraints"]["target_profile"], "ckb");
+    assert_eq!(stdout["constraints"]["status"], "warn");
+    assert!(stdout["constraints"]["artifact"]["artifact_size_bytes"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn cellc_check_all_targets_checks_asm_and_elf_without_writing_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[build]
+target = "riscv64-elf"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--all-targets").output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Check succeeded"), "unexpected stdout: {}", stdout);
+    assert!(stdout.contains("riscv64-asm (RISC-V assembly)"), "unexpected stdout: {}", stdout);
+    assert!(stdout.contains("riscv64-elf (RISC-V ELF)"), "unexpected stdout: {}", stdout);
+    assert!(!root.join("build").join("main.s").exists());
+    assert!(!root.join("build").join("main.elf").exists());
+    assert!(!root.join("build").join("main.s.meta.json").exists());
+    assert!(!root.join("build").join("main.elf.meta.json").exists());
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--all-targets").arg("--json").output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["status"], "ok");
+    assert_eq!(stdout["all_targets"], true);
+    assert_eq!(stdout["policy_verified"], false);
+    let checked_targets = stdout["checked_targets"].as_array().unwrap();
+    assert_eq!(checked_targets.len(), 2);
+    assert!(checked_targets.iter().all(|target| target["runtime_required_verifier_obligations"] == 0));
+    assert!(checked_targets.iter().all(|target| target["fail_closed_verifier_obligations"] == 0));
+    assert!(checked_targets.iter().all(|target| target["target_profile"] == "ckb"));
+    assert!(checked_targets.iter().all(|target| target["compiled_target_profile"] == "ckb"));
+    assert!(checked_targets.iter().all(|target| target["target_profile_policy_violations"].as_array().unwrap().is_empty()));
+    assert!(checked_targets.iter().any(|target| target["requested_target"] == "riscv64-asm"));
+    assert!(checked_targets.iter().any(|target| target["requested_target"] == "riscv64-elf"));
+}
+
+#[test]
+fn cellc_build_accepts_pure_ckb_target_profile_without_vm_abi_trailer() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("build")
+        .arg("--target-profile")
+        .arg("ckb")
+        .arg("--target")
+        .arg("riscv64-elf")
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["target_profile"], "ckb");
+    assert_eq!(stdout["artifact_format"], "RISC-V ELF");
+    let artifact_path = stdout["artifact"].as_str().unwrap();
+    let artifact = std::fs::read(artifact_path).unwrap();
+    assert!(artifact.starts_with(b"\x7fELF"));
+    assert!(!artifact.ends_with(b"CSABITR0\x01\x80\0\0\0\0\0\0"));
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("verify-artifact")
+        .arg(artifact_path)
+        .arg("--expect-target-profile")
+        .arg("ckb")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(verify.status.success(), "{}", String::from_utf8_lossy(&verify.stderr));
+    let verify_stdout: serde_json::Value = serde_json::from_slice(&verify.stdout).unwrap();
+    assert_eq!(verify_stdout["target_profile"], "ckb");
+    assert_eq!(verify_stdout["expected_target_profile_verified"], true);
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("verify-artifact")
+        .arg(artifact_path)
+        .arg("--expect-target-profile")
+        .arg("unknown")
+        .output()
+        .unwrap();
+    assert!(!verify.status.success(), "unexpected success: {}", String::from_utf8_lossy(&verify.stdout));
+}
+
+#[test]
+fn cellc_check_accepts_pure_ckb_target_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action add(x: u64, y: u64) -> u64 {
+    verification
+        return x + y
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("check")
+        .arg("--target-profile")
+        .arg("ckb")
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["status"], "ok");
+    let checked_targets = stdout["checked_targets"].as_array().unwrap();
+    assert_eq!(checked_targets.len(), 1);
+    assert_eq!(checked_targets[0]["target_profile"], "ckb");
+    assert_eq!(checked_targets[0]["compiled_target_profile"], "ckb");
+    assert!(checked_targets[0]["target_profile_policy_violations"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn cellc_check_accepts_ckb_profile_timepoint() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action now() -> u64 {
+    verification
+        return env::current_timepoint()
+}
+"#,
+    )
+    .unwrap();
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--target-profile").arg("ckb").output().unwrap();
+
+    assert!(output.status.success(), "check should succeed with timepoint: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn cellc_check_production_rejects_fail_closed_runtime_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Fingerprint {
+    digest: Hash,
+}
+
+fn pass_digest(digest: Hash) -> Hash {
+    return digest
+}
+
+action issue(digest: Hash) -> Fingerprint {
+    verification
+        let dynamic_digest = pass_digest(digest)
+        let token = create Fingerprint {
+            digest: dynamic_digest
+        }
+        return token
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--production").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("check policy failed"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("output-verification-incomplete"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("fail-closed"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_errors_include_runtime_ecode_when_policy_failure_maps_to_runtime_registry() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action append_schema_vec(items: Vec<Address>, owner: Address) -> u64 {
+    verification
+        let mut values = items
+        values.push(owner)
+        return values.len()
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--production").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[E0024]"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("cellc explain E0024"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("collection-runtime-unsupported"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_check_production_rejects_incomplete_output_verification() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Fingerprint {
+    digest: Hash,
+}
+
+fn pass_digest(digest: Hash) -> Hash {
+    return digest
+}
+
+action issue(digest: Hash) -> Fingerprint {
+    verification
+        let dynamic_digest = pass_digest(digest)
+        let token = create Fingerprint {
+            digest: dynamic_digest
+        }
+        return token
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--production").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("check policy failed"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("output-verification-incomplete"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("fail-closed"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_check_can_reject_runtime_required_obligations() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Fingerprint {
+    digest: Hash,
+}
+
+fn pass_digest(digest: Hash) -> Hash {
+    return digest
+}
+
+action issue(digest: Hash) -> Fingerprint {
+    verification
+        let dynamic_digest = pass_digest(digest)
+        let token = create Fingerprint {
+            digest: dynamic_digest
+        }
+        return token
+}
+"#,
+    )
+    .unwrap();
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--json").output().unwrap();
+    assert!(json_output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&json_output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    let target = &stdout["checked_targets"][0];
+    assert_eq!(target["runtime_required_transaction_runtime_input_requirements"], 1, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blockers"], 1, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blocker_classes"], 1, "unexpected stdout: {}", stdout);
+    let runtime_inputs = target["runtime_required_transaction_runtime_input_requirement_summaries"]
+        .as_array()
+        .expect("runtime-required transaction runtime input summaries array");
+    assert!(
+        runtime_inputs.iter().any(|value| value
+            .as_str()
+            .is_some_and(|summary| { summary.contains("create-output:Fingerprint") && summary.contains("(runtime-required)") })),
+        "unexpected runtime-required transaction runtime input summaries: {}",
+        stdout
+    );
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--deny-runtime-obligations").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("check policy failed"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("runtime-required verifier obligations"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("runtime-required transaction runtime input requirements"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("runtime-required transaction runtime input blockers"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("runtime-required transaction runtime input blocker classes"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("create-output:Fingerprint"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_check_reports_transaction_invariant_checked_subconditions() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store {
+    amount: u64
+    owner: Address
+}
+
+receipt VestingGrant has store {
+    state: u8
+    beneficiary: Address
+    total_amount: u64
+    claimed_amount: u64
+    cliff_timepoint: u64
+    end_timepoint: u64
+}
+
+flow VestingGrant.state {
+    Granted -> Claimable;
+    Granted -> FullyClaimed;
+    Claimable -> FullyClaimed;
+}
+
+action claim_vested(grant: VestingGrant) -> (tokens: Token, updated_grant: VestingGrant) {
+    transition grant.state: Claimable -> updated_grant.state: FullyClaimed
+    verification
+        let now = env::current_timepoint()
+
+        require now >= grant.cliff_timepoint, "cliff not reached"
+        require grant.state < VestingGrant::FullyClaimed, "already fully claimed"
+
+        let vested_total = grant.total_amount
+        let claimable = vested_total - grant.claimed_amount
+        require claimable > 0, "nothing to claim"
+
+        consume grant
+
+        let new_state: u8 = if vested_total == grant.total_amount { VestingGrant::FullyClaimed } else { VestingGrant::Claimable }
+
+        create tokens = Token {
+            amount: claimable,
+            owner: grant.beneficiary
+        } with_lock(grant.beneficiary)
+
+        create updated_grant = VestingGrant {
+            state: new_state,
+            beneficiary: grant.beneficiary,
+            total_amount: grant.total_amount,
+            claimed_amount: grant.claimed_amount + claimable,
+            cliff_timepoint: grant.cliff_timepoint,
+            end_timepoint: grant.end_timepoint
+        } with_lock(grant.beneficiary)
+}
+"#,
+    )
+    .unwrap();
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--json").output().unwrap();
+    assert!(json_output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&json_output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    let target = &stdout["checked_targets"][0];
+    assert_eq!(target["runtime_required_transaction_invariants"], 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_invariant_checked_subconditions"], 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["transaction_runtime_input_requirements"], 5, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_requirements"], 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["checked_transaction_runtime_input_requirements"], 5, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blockers"], 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blocker_classes"], 0, "unexpected stdout: {}", stdout);
+    let summaries = target["runtime_required_transaction_invariant_checked_subcondition_summaries"]
+        .as_array()
+        .expect("transaction invariant summaries array");
+    assert!(summaries.is_empty(), "claim guards should be checked-runtime now: {}", stdout);
+    let runtime_inputs =
+        target["transaction_runtime_input_requirement_summaries"].as_array().expect("transaction runtime input summaries array");
+    assert!(
+        runtime_inputs.iter().any(|value| value.as_str().is_some_and(|summary| {
+            summary.contains("consume-input:VestingGrant:grant:consume-input-data=Input:grant.data")
+                && summary.contains("consume-load-cell-input")
+        })),
+        "unexpected transaction runtime input summaries: {}",
+        stdout
+    );
+    let checked_runtime_inputs = target["checked_transaction_runtime_input_requirement_summaries"]
+        .as_array()
+        .expect("checked transaction runtime input summaries array");
+    assert!(
+        checked_runtime_inputs.iter().any(|value| value.as_str().is_some_and(|summary| {
+            summary.contains("consume-input:VestingGrant:grant:consume-input-data=Input:grant.data")
+                && summary.contains("consume-load-cell-input")
+                && summary.contains("(checked-runtime)")
+                && !summary.contains("blocker=")
+                && !summary.contains("blocker_class=")
+        })),
+        "unexpected checked transaction runtime input summaries: {}",
+        stdout
+    );
+    assert!(
+        checked_runtime_inputs.iter().any(|value| value.as_str().is_some_and(|summary| {
+            summary.contains("create-output:Token:tokens:create-output-fields=Output:tokens.fields")
+                && summary.contains("create-output-field-verifier")
+                && summary.contains("(checked-runtime)")
+                && !summary.contains("blocker=")
+                && !summary.contains("blocker_class=")
+        })),
+        "unexpected checked transaction runtime input summaries: {}",
+        stdout
+    );
+    assert!(
+        checked_runtime_inputs.iter().any(|value| value.as_str().is_some_and(|summary| {
+            summary.contains("create-output:VestingGrant:updated_grant:create-output-lock=Output:updated_grant.lock_hash")
+                && summary.contains("create-output-lock-hash-32[32]")
+                && summary.contains("(checked-runtime)")
+                && !summary.contains("blocker=")
+                && !summary.contains("blocker_class=")
+        })),
+        "unexpected checked transaction runtime input summaries: {}",
+        stdout
+    );
+    let runtime_required_inputs = target["runtime_required_transaction_runtime_input_requirement_summaries"]
+        .as_array()
+        .expect("runtime-required transaction runtime input summaries array");
+    assert!(runtime_required_inputs.is_empty(), "claim input requirements should be checked-runtime now: {}", stdout);
+    let runtime_input_blockers = target["runtime_required_transaction_runtime_input_blocker_summaries"]
+        .as_array()
+        .expect("runtime-required transaction runtime input blocker summaries array");
+    assert!(runtime_input_blockers.is_empty(), "claim blockers should be checked-runtime now: {}", stdout);
+    let runtime_input_blocker_classes = target["runtime_required_transaction_runtime_input_blocker_class_summaries"]
+        .as_array()
+        .expect("runtime-required transaction runtime input blocker class summaries array");
+    assert!(runtime_input_blocker_classes.is_empty(), "claim blocker classes should be checked-runtime now: {}", stdout);
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--deny-runtime-obligations").output().unwrap();
+    assert!(
+        output.status.success(),
+        "checked obligations should satisfy deny-runtime-obligations: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cellc_check_reports_resource_conservation_blocker_class() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store {
+    amount: u64
+}
+
+action withdraw(token: Token, fee: u64) -> Token {
+    verification
+        let amount = token.amount
+        let remaining = amount - fee
+        consume token
+        let out = create Token {
+            amount: remaining
+        }
+        return out
+}
+"#,
+    )
+    .unwrap();
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--json").output().unwrap();
+    assert!(json_output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&json_output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    let target = &stdout["checked_targets"][0];
+    assert_eq!(target["runtime_required_transaction_runtime_input_requirements"], 1, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blockers"], 1, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blocker_classes"], 1, "unexpected stdout: {}", stdout);
+
+    let runtime_inputs = target["runtime_required_transaction_runtime_input_requirement_summaries"]
+        .as_array()
+        .expect("runtime-required transaction runtime input summaries array");
+    assert!(
+        runtime_inputs.iter().any(|value| value.as_str().is_some_and(|summary| {
+            summary.contains("resource-conservation:Token:resource-conservation-proof=Transaction:Token.input-output-conservation")
+                && summary.contains("resource-conservation-consume-create-accounting")
+                && summary.contains("(runtime-required)")
+                && summary.contains("blocker=resource conservation is not fully lowered for this consumed-input/created-output shape")
+                && summary.contains("blocker_class=resource-conservation-proof-gap")
+        })),
+        "unexpected runtime-required transaction runtime input summaries: {}",
+        stdout
+    );
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--deny-runtime-obligations").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("resource-conservation:Token"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("runtime-required transaction runtime input blocker classes"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("resource-conservation-proof-gap"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_check_reports_explicit_output_binding_without_mutable_state_blockers() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+shared Ledger has store {
+    balance: u128,
+    owner: Address,
+}
+
+action credit(ledger_before: Ledger, delta: u128) -> ledger_after: Ledger {
+    verification
+        require ledger_after.owner == ledger_before.owner
+        require ledger_after.balance == ledger_before.balance + delta
+}
+"#,
+    )
+    .unwrap();
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--json").output().unwrap();
+    assert!(json_output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&json_output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    let target = &stdout["checked_targets"][0];
+    assert_eq!(target["runtime_required_transaction_runtime_input_requirements"], 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blockers"], 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blocker_classes"], 0, "unexpected stdout: {}", stdout);
+
+    let runtime_inputs = target["runtime_required_transaction_runtime_input_requirement_summaries"]
+        .as_array()
+        .expect("runtime-required transaction runtime input summaries array");
+    assert!(runtime_inputs.is_empty(), "unexpected runtime-required transaction runtime input summaries: {}", stdout);
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--deny-runtime-obligations").output().unwrap();
+    assert!(
+        output.status.success(),
+        "explicit output requirements should not report mutable-state runtime blockers: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cellc_check_reports_settle_finalization_blocker_class() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Fingerprint {
+    digest: Hash,
+}
+
+fn pass_digest(digest: Hash) -> Hash {
+    return digest
+}
+
+action issue(digest: Hash) -> Fingerprint {
+    verification
+        let dynamic_digest = pass_digest(digest)
+        let token = create Fingerprint {
+            digest: dynamic_digest
+        }
+        return token
+}
+"#,
+    )
+    .unwrap();
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--json").output().unwrap();
+    assert!(json_output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&json_output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    let target = &stdout["checked_targets"][0];
+    assert_eq!(target["runtime_required_transaction_runtime_input_requirements"], 1, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blockers"], 1, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blocker_classes"], 1, "unexpected stdout: {}", stdout);
+
+    let runtime_inputs = target["runtime_required_transaction_runtime_input_requirement_summaries"]
+        .as_array()
+        .expect("runtime-required transaction runtime input summaries array");
+    assert!(
+        runtime_inputs.iter().any(|value| value.as_str().is_some_and(|summary| {
+            summary.contains("create-output:Fingerprint")
+                && summary.contains("(runtime-required)")
+                && summary.contains("blocker=create output field verifier is incomplete")
+                && summary.contains("blocker_class=create-output-verification-gap")
+        })),
+        "unexpected runtime-required transaction runtime input summaries: {}",
+        stdout
+    );
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--deny-runtime-obligations").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("create-output:Fingerprint"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("create-output-verification-gap"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("create output field verifier is incomplete"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_check_reports_linear_collection_ownership_blocker_class() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource NFT {
+    token_id: u64
+    owner: Address
+}
+
+action batch_mint(owner: Address) -> Vec<NFT> {
+    verification
+        let mut nfts = Vec::new()
+        let nft = create NFT {
+            token_id: 1,
+            owner: owner
+        }
+        nfts.push(nft)
+        return nfts
+}
+"#,
+    )
+    .unwrap();
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--json").output().unwrap();
+    assert!(json_output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&json_output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    let target = &stdout["checked_targets"][0];
+    assert_eq!(target["transaction_runtime_input_requirements"], 2, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_requirements"], 1, "unexpected stdout: {}", stdout);
+    assert_eq!(target["checked_transaction_runtime_input_requirements"], 1, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blockers"], 1, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blocker_classes"], 1, "unexpected stdout: {}", stdout);
+
+    let runtime_inputs = target["runtime_required_transaction_runtime_input_requirement_summaries"]
+        .as_array()
+        .expect("runtime-required transaction runtime input summaries array");
+    assert!(
+        runtime_inputs.iter().any(|value| value.as_str().is_some_and(|summary| {
+            summary.contains("linear-collection:NFT:linear-collection-ownership=Transaction:NFT.collection-payload")
+                && summary.contains("cell-backed-collection-linear-ownership-model")
+                && summary.contains("(runtime-required)")
+                && summary.contains("blocker=cell-backed collection ownership is not backed by an executable linear collection model")
+                && summary.contains("blocker_class=linear-collection-ownership-gap")
+        })),
+        "unexpected runtime-required transaction runtime input summaries: {}",
+        stdout
+    );
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--deny-runtime-obligations").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("linear-collection:NFT"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("linear-collection-ownership"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("linear-collection-ownership-gap"), "unexpected stderr: {}", stderr);
+    assert!(
+        stderr.contains("cell-backed collection ownership is not backed by an executable linear collection model"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn cellc_check_accepts_u128_mutable_state_transition_with_u64_delta() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+shared Ledger has store {
+    balance: u128,
+    owner: Address,
+}
+
+action credit(ledger_before: Ledger, delta: u64) -> ledger_after: Ledger {
+    verification
+        require ledger_after.owner == ledger_before.owner
+        require ledger_after.balance == ledger_before.balance + delta
+}
+"#,
+    )
+    .unwrap();
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--json").output().unwrap();
+    assert!(json_output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&json_output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    let target = &stdout["checked_targets"][0];
+    assert_eq!(target["runtime_required_transaction_runtime_input_requirements"], 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blockers"], 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blocker_classes"], 0, "unexpected stdout: {}", stdout);
+
+    let runtime_inputs = target["runtime_required_transaction_runtime_input_requirement_summaries"]
+        .as_array()
+        .expect("runtime-required transaction runtime input summaries array");
+    assert!(runtime_inputs.is_empty(), "unexpected runtime-required transaction runtime input summaries: {}", stdout);
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--deny-runtime-obligations").output().unwrap();
+    assert!(output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn cellc_check_reports_claim_source_predicate_blocker_class() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store {
+    amount: u64
+}
+
+resource VestingReceipt has store {
+    amount: u64
+    beneficiary: Address
+    cliff_timepoint: u64
+}
+
+action redeem_after_cliff(receipt: VestingReceipt) -> Token {
+    verification
+        let now = env::current_timepoint()
+        require now >= receipt.cliff_timepoint, "cliff not reached"
+
+        consume receipt
+
+        create Token {
+            amount: receipt.amount
+        } with_lock(receipt.beneficiary)
+}
+"#,
+    )
+    .unwrap();
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--json").output().unwrap();
+    assert!(json_output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&json_output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    let target = &stdout["checked_targets"][0];
+    assert_eq!(target["transaction_runtime_input_requirements"], 3, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_requirements"], 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["checked_transaction_runtime_input_requirements"], 3, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blockers"], 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_transaction_runtime_input_blocker_classes"], 0, "unexpected stdout: {}", stdout);
+
+    let runtime_inputs = target["runtime_required_transaction_runtime_input_requirement_summaries"]
+        .as_array()
+        .expect("runtime-required transaction runtime input summaries array");
+    assert!(runtime_inputs.is_empty(), "unexpected runtime-required transaction runtime input summaries: {}", stdout);
+
+    let checked_runtime_inputs = target["checked_transaction_runtime_input_requirement_summaries"]
+        .as_array()
+        .expect("checked transaction runtime input summaries array");
+    assert!(
+        checked_runtime_inputs.iter().any(|value| value.as_str().is_some_and(|summary| {
+            summary.contains("consume-input:VestingReceipt:receipt:consume-input-data=Input:receipt.data")
+                && summary.contains("consume-load-cell-input")
+                && summary.contains("(checked-runtime)")
+        })),
+        "unexpected checked transaction runtime input summaries: {}",
+        stdout
+    );
+    // Using consume instead of claim, so only consume-input runtime requirements are present.
+    // The checked_transaction_runtime_input_requirements count is 3:
+    // 1. consume-input:VestingReceipt
+    // 2. create-output:Token (fields)
+    // 3. create-output:Token (lock_hash)
+}
+
+#[test]
+fn cellc_check_reports_pool_invariant_policy_families() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store {
+    symbol: [u8; 8]
+    amount: u64
+}
+
+receipt LPReceipt has store {
+    pool_id: Hash
+    lp_amount: u64
+    provider: Address
+}
+
+shared Pool has store {
+    token_a_symbol: [u8; 8]
+    token_b_symbol: [u8; 8]
+    reserve_a: u64
+    reserve_b: u64
+    total_lp: u64
+    fee_rate_bps: u16
+}
+
+action seed_pool(token_a: Token, token_b: Token, fee_rate_bps: u16, provider: Address) -> (Pool, LPReceipt) {
+    verification
+        require token_a.symbol != token_b.symbol, "same token"
+        require token_a.amount > 0 && token_b.amount > 0, "zero liquidity"
+        require fee_rate_bps <= 10000, "fee too high"
+        require token_a.type_hash() != token_b.type_hash(), "same token type"
+
+        let initial_lp: u64 = token_a.amount
+        consume token_a
+        consume token_b
+
+        let pool = create Pool {
+            token_a_symbol: token_a.symbol,
+            token_b_symbol: token_b.symbol,
+            reserve_a: token_a.amount,
+            reserve_b: token_b.amount,
+            total_lp: initial_lp,
+            fee_rate_bps: fee_rate_bps
+        }
+
+        let receipt = create LPReceipt {
+            pool_id: pool.type_hash(),
+            lp_amount: initial_lp,
+            provider: provider
+        } with_lock(provider)
+
+        (pool, receipt)
+}
+"#,
+    )
+    .unwrap();
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--json").output().unwrap();
+    assert!(json_output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&json_output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    let target = &stdout["checked_targets"][0];
+    assert!(target["checked_pool_invariant_families"].as_u64().unwrap() > 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["runtime_required_pool_invariant_families"].as_u64().unwrap(), 0, "unexpected stdout: {}", stdout);
+    assert_eq!(target["pool_runtime_input_requirements"].as_u64().unwrap(), 0, "unexpected stdout: {}", stdout);
+    let runtime_inputs = target["pool_runtime_input_requirement_summaries"].as_array().expect("runtime input summaries array");
+    assert!(runtime_inputs.is_empty(), "checked seed_pool identity should leave no Pool runtime inputs: {}", stdout);
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--deny-runtime-obligations").output().unwrap();
+    assert!(
+        output.status.success(),
+        "checked seed_pool identity should satisfy deny-runtime-obligations: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cellc_check_reports_checked_pool_invariant_families_without_runtime_blockers() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let amm_source = std::fs::read_to_string(manifest_dir.join("examples").join("amm_pool.cell"))
+        .unwrap()
+        .replace("use cellscript::fungible_token::Token", "resource Token has store {\n    symbol: [u8; 8]\n    amount: u64\n}");
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("src").join("main.cell"), amm_source).unwrap();
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--json").output().unwrap();
+    assert!(json_output.status.success(), "unexpected failure: {}", String::from_utf8_lossy(&json_output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    let target = &stdout["checked_targets"][0];
+    assert!(target["checked_pool_invariant_families"].as_u64().unwrap() > 0, "unexpected stdout: {}", stdout);
+    assert!(target["runtime_required_pool_invariant_families"].as_u64().unwrap() > 0, "unexpected stdout: {}", stdout);
+    assert!(target["runtime_required_pool_invariant_blocker_classes"].as_u64().unwrap() > 0, "unexpected stdout: {}", stdout);
+    let blocker_classes = target["runtime_required_pool_invariant_blocker_class_summaries"]
+        .as_array()
+        .expect("runtime-required Pool invariant blocker class summaries array");
+    assert!(
+        blocker_classes.iter().any(|value| value.as_str().is_some_and(|summary| summary.contains("pool-create:Pool"))),
+        "AMM pool admission blockers should remain explicit: {}",
+        stdout
+    );
+    assert!(
+        !blocker_classes.iter().any(|value| value
+            .as_str()
+            .is_some_and(|summary| { summary.contains("pool-mutation-invariants:Pool:reserve-conservation") })),
+        "reserve-conservation should be checked-runtime, not in blocker classes: {}",
+        stdout
+    );
+    let runtime_inputs = target["pool_runtime_input_requirement_summaries"].as_array().expect("runtime input summaries array");
+    assert!(
+        !runtime_inputs.iter().any(|value| value.as_str().is_some_and(|summary| { summary.contains("reserve-conservation=") })),
+        "checked reserve-conservation should not appear in runtime input summaries: {}",
+        stdout
+    );
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--deny-runtime-obligations").output().unwrap();
+    assert!(
+        !output.status.success(),
+        "full AMM policy debt should still fail deny-runtime-obligations: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn cellc_check_uses_manifest_policy_defaults() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[policy]
+production = true
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Fingerprint {
+    digest: Hash,
+}
+
+fn pass_digest(digest: Hash) -> Hash {
+    return digest
+}
+
+action issue(digest: Hash) -> Fingerprint {
+    verification
+        let dynamic_digest = pass_digest(digest)
+        let token = create Fingerprint {
+            digest: dynamic_digest
+        }
+        return token
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("check policy failed"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("output-verification-incomplete"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_build_uses_manifest_policy_before_writing_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[policy]
+deny_ckb_runtime = true
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Fingerprint {
+    digest: Hash,
+}
+
+fn pass_digest(digest: Hash) -> Hash {
+    return digest
+}
+
+action issue(digest: Hash) -> Fingerprint {
+    verification
+        let dynamic_digest = pass_digest(digest)
+        let token = create Fingerprint {
+            digest: dynamic_digest
+        }
+        return token
+}
+"#,
+    )
+    .unwrap();
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").arg("--target-profile").arg("ckb").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("check policy failed"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("CKB runtime features"), "unexpected stderr: {}", stderr);
+    assert!(!root.join("build").join("main.s").exists());
+    assert!(!root.join("build").join("main.s.meta.json").exists());
+}
+
+#[test]
+fn cellc_test_subcommand_compiles_test_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests").join("math.cell"),
+        r#"
+module demo::tests::math
+
+action adds() -> u64 {
+    verification
+        1 + 2
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Test compile complete"));
+    assert!(stdout.contains("Compiled 1 test file(s)"));
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["status"], "ok");
+    assert_eq!(stdout["test_files"], 1);
+    assert_eq!(stdout["passed"], 1);
+    assert_eq!(stdout["failed"], 0);
+    assert_eq!(stdout["no_run"], true);
+    assert_eq!(stdout["execution"], "disabled");
+    let tests = stdout["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 1);
+    assert_eq!(tests[0]["status"], "passed");
+    assert!(tests[0]["path"].as_str().unwrap().ends_with("tests/math.cell"));
+}
+
+#[test]
+fn cellc_test_subcommand_supports_expected_compile_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests").join("negative.cell"),
+        r#"
+// cellscript-test: expect-error: pure function cannot call action
+module demo::tests::negative
+
+action impure() -> u64 {
+    verification
+        1
+
+}
+fn helper() -> u64 {
+    impure()
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Test compile complete"));
+    assert!(stdout.contains("Compiled 1 test file(s)"));
+}
+
+#[test]
+fn cellc_test_subcommand_rejects_missing_expected_error_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests").join("negative.cell"),
+        r#"
+// cellscript-test: expect-error: this text is intentionally absent
+module demo::tests::negative
+
+action impure() -> u64 {
+    verification
+        1
+
+}
+fn helper() -> u64 {
+    impure()
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("expected error text not found"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_test_subcommand_supports_target_directive() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests").join("elf.cell"),
+        r#"
+// cellscript-test: target: riscv64-elf
+module demo::tests::elf
+
+action main() -> u64 {
+    verification
+        0
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Compiled 1 test file(s)"), "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn cellc_test_subcommand_supports_policy_directives() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests").join("policy.cell"),
+        r#"
+// cellscript-test: deny-runtime-obligations
+// cellscript-test: expect-error: create-output:Fingerprint
+module demo::tests::policy
+
+resource Fingerprint {
+    digest: Hash,
+}
+
+fn pass_digest(digest: Hash) -> Hash {
+    return digest
+}
+
+action issue(digest: Hash) -> Fingerprint {
+    verification
+        let dynamic_digest = pass_digest(digest)
+        let token = create Fingerprint {
+            digest: dynamic_digest
+        }
+        return token
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Compiled 1 test file(s)"), "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn cellc_test_subcommand_supports_runtime_metadata_directives() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests").join("metadata.cell"),
+        r#"
+// cellscript-test: expect-not-standalone
+// cellscript-test: expect-ckb-runtime
+// cellscript-test: expect-runtime-feature: verify-output-cell
+// cellscript-test: expect-no-runtime-feature: consume-expression
+// cellscript-test: expect-verifier-obligation: create-output:Fingerprint
+// cellscript-test: expect-no-verifier-obligation: not-present
+module demo::tests::metadata
+
+resource Fingerprint {
+    digest: Hash,
+}
+
+fn pass_digest(digest: Hash) -> Hash {
+    return digest
+}
+
+action issue(digest: Hash) -> Fingerprint {
+    verification
+        let dynamic_digest = pass_digest(digest)
+        let token = create Fingerprint {
+            digest: dynamic_digest
+        }
+        return token
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Compiled 1 test file(s)"), "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn cellc_test_subcommand_rejects_missing_runtime_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests").join("metadata.cell"),
+        r#"
+// cellscript-test: expect-runtime-feature: not-present
+module demo::tests::metadata
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("expected runtime metadata to contain 'not-present'"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_test_subcommand_supports_entrypoint_metadata_directives() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests").join("entries.cell"),
+        r#"
+// cellscript-test: expect-artifact-format: RISC-V assembly
+// cellscript-test: expect-action: run
+// cellscript-test: expect-function: helper
+// cellscript-test: expect-no-action: helper
+// cellscript-test: expect-no-lock: run
+module demo::tests::entries
+
+fn helper(x: u64) -> u64 {
+    x + 1
+}
+
+action run(x: u64) -> u64 {
+    verification
+        helper(x)
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Compiled 1 test file(s)"), "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn cellc_test_subcommand_rejects_missing_entrypoint_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests").join("entries.cell"),
+        r#"
+// cellscript-test: expect-function: missing_helper
+module demo::tests::entries
+
+action run(x: u64) -> u64 {
+    verification
+        x
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("expected function metadata to contain 'missing_helper'"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_test_subcommand_rejects_unknown_directives() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests").join("typo.cell"),
+        r#"
+// cellscript-test: expect-eror: typo should not be ignored
+module demo::tests::typo
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown cellscript-test directive"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("expect-eror"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_test_subcommand_rejects_conflicting_expectations() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests").join("conflict.cell"),
+        r#"
+// cellscript-test: expect-success
+// cellscript-test: expect-fail
+module demo::tests::conflict
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("test").arg("--no-run").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("conflicting cellscript-test directives"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_doc_subcommand_generates_markdown_docs() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action ping() -> u64 {
+    verification
+        1
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("doc")
+        .arg("--format")
+        .arg("markdown")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+    assert_eq!(summary["format"], "markdown");
+    assert!(summary["output"].as_str().unwrap().ends_with("docs/cellscript-api.md"));
+    assert!(summary["output_size_bytes"].as_u64().unwrap() > 0);
+
+    let docs = std::fs::read_to_string(root.join("docs").join("cellscript-api.md")).unwrap();
+    assert!(docs.contains("## Module `demo::main`"));
+    assert!(docs.contains("### action `ping`"));
+    assert!(docs.contains("## Lowering Audit Report"));
+    assert!(docs.contains("### Verifier Obligations"));
+}
+
+#[test]
+fn cellc_init_subcommand_supports_json_summary() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("demo_pkg");
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).arg("init").arg("demo").arg(&root).arg("--lib").arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+    assert_eq!(summary["kind"], "library");
+    assert_eq!(summary["package"], "demo");
+    assert!(summary["manifest"].as_str().unwrap().ends_with("demo_pkg/Cell.toml"));
+    assert_eq!(summary["entry"], "src/lib.cell");
+    assert!(root.join("Cell.toml").exists());
+    assert!(root.join("src").join("lib.cell").exists());
+    assert!(!root.join("src").join("main.cell").exists());
+
+    let manifest: toml::Value = std::fs::read_to_string(root.join("Cell.toml")).unwrap().parse().unwrap();
+    assert_eq!(manifest["package"]["entry"].as_str(), Some("src/lib.cell"));
+}
+
+#[test]
+fn cellc_new_subcommand_supports_json_summary_and_vcs_none() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("demo_pkg");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .arg("new")
+        .arg("demo")
+        .arg("--path")
+        .arg(&root)
+        .arg("--lib")
+        .arg("--vcs")
+        .arg("none")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+    assert_eq!(summary["command"], "new");
+    assert_eq!(summary["kind"], "library");
+    assert_eq!(summary["package"], "demo");
+    assert_eq!(summary["vcs"], "none");
+    assert_eq!(summary["git_initialized"], false);
+    assert!(summary["manifest"].as_str().unwrap().ends_with("demo_pkg/Cell.toml"));
+    assert_eq!(summary["entry"], "src/lib.cell");
+    assert!(root.join("Cell.toml").exists());
+    assert!(root.join("src").join("lib.cell").exists());
+    assert!(!root.join("src").join("main.cell").exists());
+    assert!(!root.join(".git").exists());
+
+    let manifest: toml::Value = std::fs::read_to_string(root.join("Cell.toml")).unwrap().parse().unwrap();
+    assert_eq!(manifest["package"]["entry"].as_str(), Some("src/lib.cell"));
+}
+
+#[test]
+fn cellc_new_subcommand_initializes_git_by_default() {
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("git_pkg");
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).arg("new").arg("git_demo").arg("--path").arg(&root).arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+    assert_eq!(summary["command"], "new");
+    assert_eq!(summary["kind"], "binary");
+    assert_eq!(summary["package"], "git_demo");
+    assert_eq!(summary["vcs"], "git");
+    assert_eq!(summary["git_initialized"], true);
+    assert_eq!(summary["entry"], "src/main.cell");
+    assert!(root.join(".git").exists());
+    assert!(root.join("src").join("main.cell").exists());
+}
+
+#[test]
+fn cellc_explain_subcommand_reports_runtime_error() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("explain").arg("E0018").arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+    assert_eq!(summary["code"], 18);
+    assert_eq!(summary["ecode"], "E0018");
+    assert_eq!(summary["name"], "fixed-byte-comparison-unresolved");
+    assert!(summary["description"].as_str().unwrap().contains("fixed-byte verifier comparison"));
+    assert!(summary["hint"].as_str().unwrap().contains("schema-backed"));
+}
+
+#[test]
+fn cellc_explain_profile_reports_ckb_v0_14_contract() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("explain-profile").arg("ckb").arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["profile"], "ckb");
+    assert_eq!(summary["witness_abi"], "ckb-molecule-witness-args+cellscript-entry-witness-v1");
+    assert_eq!(summary["lock_args_abi"], "ckb-script-args-typed-fixed-bytes");
+    assert_eq!(summary["source_encoding"], "ckb-source-group-high-bit");
+    assert_eq!(summary["spawn_ipc_abi"], "ckb-vm-v2-spawn-ipc-syscalls-2601-2608");
+    assert_eq!(summary["since_abi"], "ckb-since-block-timestamp-epoch-number-with-fraction");
+    assert_eq!(summary["cell_dep_abi"], "ckb-cell-dep-outpoint-and-dep-group");
+    assert_eq!(summary["script_ref_abi"], "ckb-script-code-hash-hash-type-args");
+    assert_eq!(summary["output_data_abi"], "ckb-outputs-and-outputs-data-index-aligned");
+    assert_eq!(summary["capacity_floor_abi"], "ckb-output-capacity-floor-shannons");
+    assert_eq!(summary["type_id_abi"], "ckb-type-id-v1");
+    let boundaries = summary["boundaries"].as_array().unwrap();
+    assert!(
+        boundaries.iter().any(|boundary| boundary.as_str().unwrap_or_default().contains("outputs and outputs_data are index-aligned")),
+        "missing outputs_data boundary: {boundaries:?}"
+    );
+    assert!(
+        boundaries.iter().any(|boundary| boundary.as_str().unwrap_or_default().contains("lock_args parameters are typed script args")),
+        "missing lock_args boundary: {boundaries:?}"
+    );
+    assert!(
+        boundaries.iter().any(|boundary| boundary.as_str().unwrap_or_default().contains("capacity floors are declared")),
+        "missing capacity floor boundary: {boundaries:?}"
+    );
+}
+
+#[test]
+fn cellc_explain_proof_reports_covenant_proof_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("token.cell");
+    std::fs::write(
+        &input,
+        r#"
+module test
+
+resource Token has store, replace, relock, consume {
+    amount: u64,
+}
+
+action transfer_token(token: Token, to: Address) -> next_token: Token {
+    verification
+        std::lifecycle::transfer(token, next_token, to) {
+            amount
+        }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("explain-proof").arg(&input).arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let proof_plan = summary["proof_plan"].as_array().expect("proof_plan array");
+    // std::lifecycle::transfer decomposes into consume + create proof plan records.
+    let consume_plan = proof_plan
+        .iter()
+        .find(|plan| plan["feature"].as_str().is_some_and(|feature| feature.starts_with("consume-input:Token")))
+        .expect("consume-input ProofPlan record");
+    let create_plan = proof_plan
+        .iter()
+        .find(|plan| plan["feature"].as_str().is_some_and(|feature| feature.starts_with("create-output:Token")))
+        .expect("create-output ProofPlan record");
+
+    assert_eq!(summary["status"], "ok");
+    assert_eq!(summary["proof_plan_summary"]["record_count"].as_u64().unwrap(), proof_plan.len() as u64);
+    assert!(summary["proof_plan_summary"]["macro_provenance_count"].as_u64().unwrap() > 0);
+    assert_eq!(consume_plan["trigger"], "explicit_entry");
+    assert_eq!(consume_plan["scope"], "transaction");
+    assert_eq!(create_plan["trigger"], "explicit_entry");
+    assert_eq!(create_plan["scope"], "transaction");
+    assert!(consume_plan["reads"].as_array().unwrap().iter().any(|read| read == "input"));
+    assert!(create_plan["reads"].as_array().unwrap().iter().any(|read| read == "output"));
+    assert!(consume_plan["coverage"].as_array().unwrap().iter().any(|coverage| {
+        coverage.as_str().is_some_and(|coverage| coverage.contains("transaction-scoped relation over explicit input/output views"))
+    }));
+    assert!(create_plan["coverage"].as_array().unwrap().iter().any(|coverage| {
+        coverage.as_str().is_some_and(|coverage| coverage.contains("transaction-scoped relation over explicit input/output views"))
+    }));
+}
+
+#[test]
+fn cellc_explain_proof_human_reports_macro_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("token.cell");
+    std::fs::write(
+        &input,
+        r#"
+module test
+
+resource Token has store, replace, relock, consume {
+    amount: u64,
+}
+
+action transfer_token(token: Token, to: Address) -> next_token: Token {
+    verification
+        std::lifecycle::transfer(token, next_token, to) {
+            amount
+        }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("explain-proof").arg(&input).output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Summary:"), "unexpected stdout: {}", stdout);
+    assert!(stdout.contains("macro_provenance_records:"), "unexpected stdout: {}", stdout);
+    assert!(stdout.contains("macro_provenance:"), "unexpected stdout: {}", stdout);
+    // std::lifecycle::transfer decomposes; check for consume/create provenance instead of transfer.
+    assert!(
+        stdout.contains("macro_expansion:create=create-output") || stdout.contains("consume-input"),
+        "unexpected stdout: {}",
+        stdout
+    );
+}
+
+#[test]
+fn cellc_explain_proof_reports_declared_invariant() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("token.cell");
+    std::fs::write(
+        &input,
+        r#"
+module test
+
+invariant token_conservation {
+    trigger: type_group
+    scope: group
+    reads: group_inputs<Token>.amount, group_outputs<Token>.amount
+    assert_conserved(Token.amount, scope = group)
+    assert_invariant(true, "token amount is conserved")
+}
+
+resource Token {
+    amount: u64,
+}
+
+action run() -> u64 {
+    verification
+        return 0
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("explain-proof").arg(&input).arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let proof_plan = summary["proof_plan"].as_array().expect("proof_plan array");
+    let declared =
+        proof_plan.iter().find(|plan| plan["origin"] == "invariant:token_conservation").expect("declared invariant ProofPlan record");
+
+    assert_eq!(summary["status"], "ok");
+    assert!(summary["proof_plan_summary"]["runtime_required_count"].as_u64().unwrap() > 0);
+    assert!(summary["proof_plan_summary"]["metadata_only_gap_count"].as_u64().unwrap() > 0);
+    assert_eq!(summary["proof_plan_summary"]["has_runtime_required_gaps"], true);
+    assert_eq!(declared["category"], "declared-invariant");
+    assert_eq!(declared["trigger"], "type_group");
+    assert_eq!(declared["scope"], "group");
+    assert_eq!(declared["codegen_coverage_status"], "gap:metadata-only");
+    assert_eq!(declared["on_chain_checked"], false);
+    assert!(declared["input_output_relation_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check == "assert_conserved:Token.amount=metadata-only"));
+}
+
+#[test]
+fn cellc_explain_proof_warns_for_lock_group_transaction_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("token.cell");
+    std::fs::write(
+        &input,
+        r#"
+module test
+
+invariant lock_scans_transaction {
+    trigger: lock_group
+    scope: transaction
+    reads: inputs<Token>.amount, outputs<Token>.amount
+    assert_sum(outputs<Token>.amount) <= assert_sum(inputs<Token>.amount)
+}
+
+resource Token {
+    amount: u64,
+}
+
+action run() -> u64 {
+    verification
+        return 0
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("explain-proof").arg(&input).arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let proof_plan = summary["proof_plan"].as_array().expect("proof_plan array");
+    let declared = proof_plan
+        .iter()
+        .find(|plan| plan["origin"] == "invariant:lock_scans_transaction")
+        .expect("lock-group transaction invariant ProofPlan record");
+
+    assert_eq!(declared["trigger"], "lock_group");
+    assert_eq!(declared["scope"], "transaction");
+    assert!(declared["coverage"].as_array().unwrap().iter().any(|coverage| {
+        coverage.as_str().is_some_and(|coverage| coverage.contains("only inputs sharing this lock script trigger the verifier"))
+    }));
+    assert!(declared["diagnostics"].as_array().unwrap().iter().any(|diagnostic| {
+        diagnostic["severity"] == "warning"
+            && diagnostic["message"].as_str().is_some_and(|message| message.contains("do not imply type-group conservation"))
+    }));
+}
+
+#[test]
+fn cellc_explain_proof_summary_reports_fail_closed_diagnostics() {
+    let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/language/v0_14_witness_source.cell");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("explain-proof").arg(&input).arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let proof_summary = &summary["proof_plan_summary"];
+    assert!(proof_summary["fail_closed_count"].as_u64().unwrap() > 0, "unexpected summary: {}", summary);
+    assert!(proof_summary["diagnostic_error_count"].as_u64().unwrap() > 0, "unexpected summary: {}", summary);
+    assert_eq!(proof_summary["has_fail_closed_gaps"], true);
+    assert_eq!(proof_summary["has_blocking_diagnostics"], true);
+}
+
+#[test]
+fn cellc_check_denies_metadata_only_declared_invariant() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+invariant token_conservation {
+    trigger: type_group
+    scope: group
+    reads: group_inputs<Token>.amount, group_outputs<Token>.amount
+    assert_invariant(true, "token amount is conserved")
+}
+
+resource Token {
+    amount: u64,
+}
+
+action run() -> u64 {
+    verification
+        return 0
+}
+"#,
+    )
+    .unwrap();
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--deny-runtime-obligations").output().unwrap();
+    assert!(!output.status.success(), "unexpected success: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("runtime-required ProofPlan gaps"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("invariant:token_conservation"), "unexpected stderr: {}", stderr);
+    assert!(stderr.contains("gap:metadata-only"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_clean_subcommand_supports_json_summary() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::create_dir_all(root.join(".cell").join("cache")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("clean").arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+    assert_eq!(summary["removed"], 2);
+    assert_eq!(summary["removed_paths"].as_array().unwrap().len(), 2);
+    assert!(!root.join("target").exists());
+    assert!(!root.join(".cell").join("cache").exists());
+}
+
+#[test]
+fn cellc_info_subcommand_supports_json_summary() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+authors = ["Audit Bot"]
+description = "demo package"
+license = "MIT"
+entry = "src/main.cell"
+
+[dependencies]
+math = "1"
+
+[policy]
+deny_fail_closed = true
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("info").arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+    assert_eq!(summary["manifest"], "Cell.toml");
+    assert_eq!(summary["package"]["name"], "demo");
+    assert_eq!(summary["package"]["authors"][0], "Audit Bot");
+    assert_eq!(summary["dependencies"]["math"], "1");
+    assert_eq!(summary["policy"]["deny_fail_closed"], true);
+}
+
+#[test]
+fn cellc_add_and_remove_subcommands_honor_dev_path_and_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+entry = "src/main.cell"
+source_roots = ["contracts", "shared"]
+
+[build]
+target = "riscv64-elf"
+target_profile = "ckb"
+out_dir = "artifacts"
+"#,
+    )
+    .unwrap();
+
+    let add_output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("add")
+        .arg("--dev")
+        .arg("--path")
+        .arg("../math")
+        .arg("--json")
+        .arg("math")
+        .output()
+        .unwrap();
+    assert!(add_output.status.success(), "stderr: {}", String::from_utf8_lossy(&add_output.stderr));
+
+    let add_summary: serde_json::Value = serde_json::from_slice(&add_output.stdout).unwrap();
+    assert_eq!(add_summary["status"], "ok");
+    assert_eq!(add_summary["target"], "dev-dependencies");
+    assert_eq!(add_summary["added"][0], "math");
+    assert_eq!(add_summary["dependency"]["path"], "../math");
+
+    let manifest: toml::Value = std::fs::read_to_string(root.join("Cell.toml")).unwrap().parse().unwrap();
+    assert_eq!(manifest["package"]["source_roots"].as_array().unwrap().len(), 2);
+    assert_eq!(manifest["build"]["target"].as_str().unwrap(), "riscv64-elf");
+    assert_eq!(manifest["build"]["target_profile"].as_str().unwrap(), "ckb");
+    assert_eq!(manifest["build"]["out_dir"].as_str().unwrap(), "artifacts");
+    assert_eq!(manifest["dev_dependencies"]["math"]["path"].as_str().unwrap(), "../math");
+    assert!(manifest.get("dependencies").and_then(|value| value.get("math")).is_none());
+
+    let remove_output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("remove")
+        .arg("--dev")
+        .arg("--json")
+        .arg("math")
+        .output()
+        .unwrap();
+    assert!(remove_output.status.success(), "stderr: {}", String::from_utf8_lossy(&remove_output.stderr));
+
+    let remove_summary: serde_json::Value = serde_json::from_slice(&remove_output.stdout).unwrap();
+    assert_eq!(remove_summary["status"], "ok");
+    assert_eq!(remove_summary["target"], "dev-dependencies");
+    assert_eq!(remove_summary["removed"][0], "math");
+    assert!(remove_summary["missing"].as_array().unwrap().is_empty());
+
+    let manifest_after: toml::Value = std::fs::read_to_string(root.join("Cell.toml")).unwrap().parse().unwrap();
+    assert_eq!(manifest_after["package"]["source_roots"].as_array().unwrap().len(), 2);
+    assert_eq!(manifest_after["build"]["target"].as_str().unwrap(), "riscv64-elf");
+    assert_eq!(manifest_after["build"]["target_profile"].as_str().unwrap(), "ckb");
+    assert_eq!(manifest_after["build"]["out_dir"].as_str().unwrap(), "artifacts");
+    assert!(manifest_after.get("dev_dependencies").and_then(|value| value.get("math")).is_none());
+}
+
+#[test]
+fn cellc_install_path_updates_lockfile_and_remove_prunes_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let dep_root = root.join("math");
+    let util_root = root.join("util");
+
+    std::fs::create_dir_all(dep_root.join("src")).unwrap();
+    std::fs::create_dir_all(util_root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dep_root.join("Cell.toml"),
+        r#"
+[package]
+name = "math"
+version = "0.2.0"
+
+[dependencies.util]
+version = "0.1.0"
+path = "../util"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        util_root.join("Cell.toml"),
+        r#"
+[package]
+name = "util"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+
+    let install = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("install")
+        .arg("math")
+        .arg("--path")
+        .arg("math")
+        .output()
+        .unwrap();
+    assert!(install.status.success(), "stderr: {}", String::from_utf8_lossy(&install.stderr));
+
+    let manifest: toml::Value = std::fs::read_to_string(root.join("Cell.toml")).unwrap().parse().unwrap();
+    assert_eq!(manifest["dependencies"]["math"]["path"].as_str().unwrap(), "math");
+
+    let lockfile: cellscript::package::Lockfile = toml::from_str(&std::fs::read_to_string(root.join("Cell.lock")).unwrap()).unwrap();
+    let locked = lockfile.dependencies.get("math").expect("math should be locked");
+    assert_eq!(locked.version, "0.2.0");
+    assert!(matches!(&locked.source, cellscript::package::LockedSource::Path { path } if path == "math"));
+    let util = lockfile.dependencies.get("util").expect("transitive util should be locked");
+    assert_eq!(util.version, "0.1.0");
+
+    let update = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("update").output().unwrap();
+    assert!(update.status.success(), "stderr: {}", String::from_utf8_lossy(&update.stderr));
+    let update_stdout = String::from_utf8_lossy(&update.stdout);
+    assert!(update_stdout.contains("Updated 2 dependencies"), "{update_stdout}");
+    assert!(!update_stdout.contains("Warning: lockfile is not consistent"), "{update_stdout}");
+
+    let remove = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("remove").arg("math").output().unwrap();
+    assert!(remove.status.success(), "stderr: {}", String::from_utf8_lossy(&remove.stderr));
+
+    let pruned: cellscript::package::Lockfile = toml::from_str(&std::fs::read_to_string(root.join("Cell.lock")).unwrap()).unwrap();
+    assert!(!pruned.dependencies.contains_key("math"));
+    assert!(!pruned.dependencies.contains_key("util"));
+}
+
+#[test]
+fn cellc_metadata_subcommand_emits_lowering_runtime_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+shared Config {
+    threshold: u64
+}
+
+resource Token has store, replace, relock, consume, burn {
+    amount: u64
+}
+
+action update(amount: u64) -> u64 {
+    verification
+        let cfg = read_ref<Config>()
+        let token = create Token { amount: amount }
+        consume token
+        return cfg.threshold
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("metadata").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"lowering\""));
+    assert!(stdout.contains("\"runtime\""));
+    assert!(stdout.contains("\"fail_closed_runtime_features\""));
+    assert!(stdout.contains("\"verifier_obligations\""));
+    assert!(stdout.contains("\"source\": \"Input\""));
+    assert!(stdout.contains("\"source\": \"CellDep\""));
+    assert!(stdout.contains("\"source\": \"Output\""));
+    assert!(stdout.contains("\"elf_compatible\": true"));
+    assert!(stdout.contains("\"ckb_runtime_required\": true"));
+    assert!(stdout.contains("read-cell-dep"));
+    assert!(stdout.contains("verify-output-cell"));
+    assert!(!stdout.contains("schema-field-access"));
+}
+
+#[test]
+fn cellc_explain_generics_reports_checked_vec_instantiations() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action address_helpers(owner: Address, candidate: Address) -> bool {
+    verification
+        let mut owners = Vec::with_capacity(2)
+        owners.push(owner)
+        owners.insert(0, candidate)
+        owners.swap(0, 1)
+        let removed = owners.remove(1)
+        owners.push(removed)
+        owners.truncate(1)
+        owners.set(0, owner)
+
+        if owners.contains(owner) {
+            return owners.first() == owner
+        }
+
+        false
+
+}
+action hash_helpers(first: Hash, second: Hash) -> bool {
+    verification
+        let mut keys = Vec::new()
+        keys.push(first)
+        keys.push(second)
+        let popped = keys.pop()
+        keys.push(popped)
+        keys.swap(0, 1)
+        keys.reverse()
+
+        if keys.first() == first {
+            return keys.last() == second
+        }
+
+        false
+}
+"#,
+    )
+    .unwrap();
+
+    let json_output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("explain-generics").arg("--json").output().unwrap();
+    assert!(json_output.status.success(), "stderr: {}", String::from_utf8_lossy(&json_output.stderr));
+    let summary: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+    assert!(summary["count"].as_u64().unwrap() >= 2);
+    let instantiations = summary["collection_instantiations"].as_array().unwrap();
+
+    let address = instantiations
+        .iter()
+        .find(|instantiation| instantiation["collection_ty"] == "Vec<Address>")
+        .expect("Vec<Address> instantiation should be explained");
+    assert_eq!(address["scope_kind"], "action");
+    assert_eq!(address["scope_name"], "address_helpers");
+    assert_eq!(address["element_ty"], "Address");
+    assert_eq!(address["element_width_bytes"], 32);
+    assert_eq!(address["max_elements"], 8);
+    assert_eq!(address["backing"], "stack-fixed-buffer:256");
+    assert_eq!(address["status"], "checked-runtime");
+    let address_helpers = address["helpers"].as_array().unwrap();
+    for helper in ["contains", "index", "insert", "push", "remove", "set", "swap", "truncate", "with_capacity"] {
+        assert!(
+            address_helpers.iter().any(|value| value.as_str() == Some(helper)),
+            "missing Address helper {helper}: {address_helpers:?}"
+        );
+    }
+    assert!(
+        !address_helpers.iter().any(|value| value.as_str() == Some("new")),
+        "Vec<Address> was constructed with Vec::with_capacity, not Vec::new: {address_helpers:?}"
+    );
+
+    let hash = instantiations
+        .iter()
+        .find(|instantiation| instantiation["collection_ty"] == "Vec<Hash>")
+        .expect("Vec<Hash> instantiation should be explained");
+    assert_eq!(hash["scope_kind"], "action");
+    assert_eq!(hash["scope_name"], "hash_helpers");
+    assert_eq!(hash["element_ty"], "Hash");
+    assert_eq!(hash["element_width_bytes"], 32);
+    assert_eq!(hash["max_elements"], 8);
+    assert_eq!(hash["backing"], "stack-fixed-buffer:256");
+    assert_eq!(hash["status"], "checked-runtime");
+    let hash_helpers = hash["helpers"].as_array().unwrap();
+    for helper in ["index", "new", "pop", "push", "reverse", "swap"] {
+        assert!(hash_helpers.iter().any(|value| value.as_str() == Some(helper)), "missing Hash helper {helper}: {hash_helpers:?}");
+    }
+
+    let text_output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("explain-generics").output().unwrap();
+    assert!(text_output.status.success(), "stderr: {}", String::from_utf8_lossy(&text_output.stderr));
+    let stdout = String::from_utf8_lossy(&text_output.stdout);
+    assert!(stdout.contains("Checked bounded generic collection instantiations"), "{}", stdout);
+    assert!(stdout.contains("Vec<Address> -> Address"), "{}", stdout);
+    assert!(stdout.contains("Vec<Hash> -> Hash"), "{}", stdout);
+    assert!(stdout.contains("with_capacity"), "{}", stdout);
+}
+
+#[test]
+fn cellc_action_build_emits_builder_plan_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[build]
+target_profile = "ckb"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store, replace, relock, consume {
+    amount: u64,
+}
+
+action mint(amount: u64) -> Token {
+    verification
+        create Token { amount: amount }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("action")
+        .arg("build")
+        .arg("--action")
+        .arg("mint")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["status"], "ok");
+    assert_eq!(plan["policy"], "cellscript-action-builder-plan-v1");
+    assert_eq!(plan["headless"], true);
+    assert_eq!(plan["ui_scope"], "none");
+    assert_eq!(plan["action"], "mint");
+    assert_eq!(plan["target_profile"], "ckb");
+    assert!(plan["entry_witness_abi"]["required"].as_bool().unwrap());
+    assert_eq!(plan["builder_requirements"]["created_outputs"].as_array().unwrap().len(), 1);
+    assert!(plan["ckb"]["capacity_evidence_contract"]["required"].as_bool().unwrap());
+    assert_eq!(plan["transaction_draft"]["format"], "cellscript-ccc-transaction-draft-v1");
+    assert_eq!(plan["transaction_draft"]["state"], "ActionPlan");
+    assert_eq!(plan["transaction_draft"]["ccc_compatible"], true);
+    assert_eq!(plan["transaction_draft"]["can_submit"], false);
+    assert_eq!(plan["transaction_draft"]["ckb_vm_execution"], false);
+    assert_eq!(plan["transaction_draft"]["tx_pool_acceptance"], false);
+    assert_eq!(plan["transaction_draft"]["requires_live_cell_resolution"], true);
+    assert_eq!(plan["transaction_draft"]["requires_packed_materialization"], true);
+    assert_eq!(plan["transaction_draft"]["packed_materialization"]["transaction"], "ckb_types::packed::Transaction");
+    assert_eq!(plan["transaction_draft"]["packed_materialization"]["script"], "ckb_types::packed::Script");
+    assert_eq!(plan["transaction_draft"]["packed_materialization"]["out_point"], "ckb_types::packed::OutPoint");
+    assert_eq!(plan["transaction_draft"]["packed_materialization"]["realizer"], "cellscript-ckb-adapter via ckb-sdk-rust or CCC");
+    assert!(plan["transaction_draft"]["required_evidence"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item == "tx_pool_acceptance")));
+    assert_eq!(plan["adapter_contract"]["schema"], "cellscript-ckb-adapter-contract-v0.19");
+    assert_eq!(plan["adapter_contract"]["compiler_core_dependency"], "no-ckb-sdk-rust");
+    assert_eq!(plan["adapter_contract"]["compiler_output_state"], "ActionPlan");
+    assert_eq!(plan["adapter_contract"]["adapter_output_state"], "ResolvedActionTx");
+    assert_eq!(plan["adapter_contract"]["accepted_output_state"], "AcceptedActionTx");
+    assert_eq!(plan["adapter_contract"]["must_not_infer_protocol_semantics_from_action_name"], true);
+    assert_eq!(plan["adapter_contract"]["witness_policy"]["entry_payload_abi"], "cellscript-entry-witness-v1");
+    assert_eq!(plan["adapter_contract"]["witness_policy"]["default_action_payload_field"], "input_type");
+    assert_eq!(plan["adapter_contract"]["witness_policy"]["lock_signature_policy"], "explicit-adapter-owned-do-not-overwrite");
+    assert!(plan["adapter_contract"]["resolved_tx_required_fields"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item == "outputs_data") && items.iter().any(|item| item == "lineage")));
+    assert_eq!(plan["adapter_contract"]["acceptance_report_template"]["schema"], "cellscript-ckb-action-acceptance-report-v0.19");
+    assert_eq!(plan["adapter_contract"]["acceptance_report_template"]["state"], "AcceptedActionTx");
+    assert_eq!(plan["adapter_contract"]["acceptance_report_template"]["action_selector"], "mint");
+    assert!(plan["adapter_contract"]["acceptance_report_template"]["metadata_hash"].as_str().is_some_and(|hash| hash.len() == 64));
+    assert!(plan["adapter_contract"]["acceptance_report_template"]["known_limitations"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item.as_str().is_some_and(|text| text.contains("Template only")))));
+    assert_eq!(plan["preview"]["format"], "cellscript-action-preview-v1");
+    assert_eq!(plan["preview"]["action"], "mint");
+    assert!(plan["preview"]["warnings"].as_array().is_some_and(|warnings| !warnings.is_empty()));
+}
+
+#[test]
+fn cellc_gen_builder_typescript_emits_package_scaffold() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[build]
+target_profile = "ckb"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store, replace, relock, consume {
+    amount: u64,
+}
+
+action mint(amount: u64, owner: Address) -> Token {
+    verification
+        create Token { amount: amount }
+}
+"#,
+    )
+    .unwrap();
+
+    let metadata_path = root.join("mint.meta.json");
+    let metadata = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("metadata")
+        .arg("--output")
+        .arg(&metadata_path)
+        .output()
+        .unwrap();
+    assert!(metadata.status.success(), "stderr: {}", String::from_utf8_lossy(&metadata.stderr));
+
+    let output_dir = root.join("generated-builder");
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("gen-builder")
+        .arg("--target")
+        .arg("typescript")
+        .arg("--metadata")
+        .arg(&metadata_path)
+        .arg("--action")
+        .arg("mint")
+        .arg("--output")
+        .arg(&output_dir)
+        .arg("--package-name")
+        .arg("@demo/token-builder")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+    assert_eq!(summary["schema"], "cellscript-generated-builder-summary-v0.20");
+    assert_eq!(summary["target"], "typescript");
+    assert_eq!(summary["package_name"], "@demo/token-builder");
+    assert_eq!(summary["action_count"], 1);
+    assert_eq!(summary["actions"][0], "mint");
+    assert!(summary["metadata_hash"].as_str().is_some_and(|hash| hash.len() == 64));
+
+    let package_json: serde_json::Value = serde_json::from_slice(&std::fs::read(output_dir.join("package.json")).unwrap()).unwrap();
+    assert_eq!(package_json["name"], "@demo/token-builder");
+    assert_eq!(package_json["type"], "module");
+    assert_eq!(package_json["scripts"]["build"], "tsc -p tsconfig.json");
+    assert_eq!(package_json["scripts"]["test"], "npm run build && node --test test/*.test.mjs");
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(output_dir.join("cellscript-builder-manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["schema"], "cellscript-generated-action-builder-v0.20");
+    assert_eq!(manifest["target"], "typescript");
+    assert_eq!(manifest["actions"][0]["name"], "mint");
+    assert_eq!(manifest["runtime_contract"]["requires_live_cell_resolution"], true);
+    assert_eq!(manifest["runtime_contract"]["requires_dry_run_before_submit"], true);
+    assert_eq!(manifest["runtime_contract"]["must_not_infer_protocol_semantics_from_action_name"], true);
+    assert!(manifest["runtime_error_catalog"]
+        .as_array()
+        .is_some_and(|errors| errors.iter().any(|error| { error["code"] == 25 && error["name"] == "entry-witness-abi-invalid" })));
+
+    let index_ts = std::fs::read_to_string(output_dir.join("src").join("index.ts")).unwrap();
+    assert!(index_ts.contains("export interface MintParams"), "{index_ts}");
+    assert!(index_ts.contains("amount: bigint | number | string;"), "{index_ts}");
+    assert!(index_ts.contains("owner: HexString | Uint8Array;"), "{index_ts}");
+    assert!(index_ts.contains("export function planMint"), "{index_ts}");
+    assert!(index_ts.contains("createActionBuilder"), "{index_ts}");
+    assert!(index_ts.contains("ActionBuilderResult"), "{index_ts}");
+    assert!(index_ts.contains("submittedTxHashFromRuntime"), "{index_ts}");
+    assert!(index_ts.contains("CellScript builder runtime missing dryRun adapter"), "{index_ts}");
+    assert!(index_ts.contains("runtimeErrorCatalog"), "{index_ts}");
+    assert!(index_ts.contains("explainCellScriptRuntimeError"), "{index_ts}");
+    assert!(index_ts.contains("runtimeErrorContextForAction"), "{index_ts}");
+    assert!(index_ts.contains("deployment record has no status"), "{index_ts}");
+    assert!(index_ts.contains("deployment status is"), "{index_ts}");
+    assert!(index_ts.contains("validateCellScriptDeploymentTrust"), "{index_ts}");
+    assert!(index_ts.contains("publisher_signature required by trust policy"), "{index_ts}");
+    assert!(index_ts.contains("live deployment evidence deployment_status"), "{index_ts}");
+    assert!(index_ts.contains("canSubmit: false"), "{index_ts}");
+    assert!(index_ts.contains("live_cell_availability"), "{index_ts}");
+    assert!(index_ts.contains("export const metadata = {"), "{index_ts}");
+    assert!(!index_ts.contains("import metadataJson"), "{index_ts}");
+
+    let builder_test = std::fs::read_to_string(output_dir.join("test").join("builder.test.mjs")).unwrap();
+    assert!(builder_test.contains("node:test"), "{builder_test}");
+    assert!(builder_test.contains("plans all generated actions without submitting"), "{builder_test}");
+    assert!(builder_test.contains("delegates live-cell resolution and transaction build to runtime"), "{builder_test}");
+    assert!(builder_test.contains("delegates dry-run and submit modes to runtime"), "{builder_test}");
+    assert!(builder_test.contains("rejects missing runtime adapters and malformed runtime shapes"), "{builder_test}");
+    assert!(builder_test.contains("maps runtime errors to action field context"), "{builder_test}");
+    assert!(builder_test.contains("rejects mismatched lockfile identity"), "{builder_test}");
+    assert!(builder_test.contains("rejects mismatched deployment identity"), "{builder_test}");
+    assert!(builder_test.contains("trust policy requires a deployment record"), "{builder_test}");
+
+    let generated_metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(output_dir.join("src").join("metadata.json")).unwrap()).unwrap();
+    assert_eq!(generated_metadata["actions"][0]["name"], "mint");
+}
+
+#[test]
+fn cellc_gen_builder_lockfile_identity_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[build]
+target_profile = "ckb"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+resource Token has store, replace, relock, consume {
+    amount: u64,
+}
+
+action mint(amount: u64, owner: Address) -> Token {
+    verification
+        create Token { amount: amount }
+}
+"#,
+    )
+    .unwrap();
+
+    let metadata_path = root.join("mint.meta.json");
+    let metadata_output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("metadata")
+        .arg("--output")
+        .arg(&metadata_path)
+        .output()
+        .unwrap();
+    assert!(metadata_output.status.success(), "stderr: {}", String::from_utf8_lossy(&metadata_output.stderr));
+
+    let metadata: cellscript::CompileMetadata = serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+    let build_info = locked_build_from_metadata_for_test(&metadata);
+    let deployment_network = "aggron4";
+    let deployment_code_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let deployment_out_point = "0xaaaa:0";
+    let mut lockfile = cellscript::package::Lockfile {
+        version: 1,
+        package: cellscript::package::LockfilePackageInfo {
+            name: "demo".to_string(),
+            version: "0.1.0".to_string(),
+            namespace: None,
+            source_hash: metadata.source_hash.clone(),
+        },
+        dependencies: Default::default(),
+        package_build: Some(build_info.clone()),
+        deployment: Default::default(),
+    };
+    lockfile.deployment.insert(
+        deployment_network.to_string(),
+        cellscript::package::LockfileDeploymentRef {
+            record: deployment_out_point.to_string(),
+            record_hash: None,
+            code_hash: Some(deployment_code_hash.to_string()),
+            out_point: Some(deployment_out_point.to_string()),
+            data_hash: Some(deployment_code_hash.to_string()),
+        },
+    );
+    let lockfile_path = root.join("Cell.lock");
+    std::fs::write(&lockfile_path, toml::to_string_pretty(&lockfile).unwrap()).unwrap();
+
+    let deployed = cellscript::package::DeployedManifest {
+        version: 1,
+        schema: None,
+        package: cellscript::package::DeployedPackageInfo {
+            name: "demo".to_string(),
+            version: "0.1.0".to_string(),
+            source_hash: metadata.source_hash.clone(),
+        },
+        build: Some(cellscript::package::DeployedBuildInfo {
+            compiler_version: build_info.compiler_version.clone(),
+            artifact_hash: build_info.artifact_hash.clone(),
+            metadata_hash: build_info.metadata_hash.clone(),
+            schema_hash: build_info.schema_hash.clone(),
+            abi_hash: build_info.abi_hash.clone(),
+            constraints_hash: build_info.constraints_hash.clone(),
+        }),
+        deployments: vec![cellscript::package::DeploymentRecord {
+            network: deployment_network.to_string(),
+            chain_id: "ckb-testnet".to_string(),
+            tx_hash: "0xaaaa".to_string(),
+            output_index: 0,
+            code_hash: deployment_code_hash.to_string(),
+            hash_type: "data1".to_string(),
+            dep_type: "code".to_string(),
+            data_hash: deployment_code_hash.to_string(),
+            out_point: deployment_out_point.to_string(),
+            artifact_hash: build_info.artifact_hash.clone(),
+            metadata_hash: build_info.metadata_hash.clone(),
+            schema_hash: build_info.schema_hash.clone(),
+            abi_hash: build_info.abi_hash.clone(),
+            constraints_hash: build_info.constraints_hash.clone(),
+            compiler_version: build_info.compiler_version.clone(),
+            type_id: None,
+            script_role: Some(cellscript::package::ScriptRole::Type),
+            status: Some(cellscript::package::DeploymentStatus::Active),
+            upgrade_lineage: None,
+            audit_report_hash: None,
+            publisher_signature: None,
+            cell_deps: vec![],
+        }],
+    };
+    let deployed_path = root.join("Deployed.toml");
+    std::fs::write(&deployed_path, toml::to_string_pretty(&deployed).unwrap()).unwrap();
+
+    let output_dir = root.join("locked-builder");
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("gen-builder")
+        .arg("--target")
+        .arg("typescript")
+        .arg("--metadata")
+        .arg(&metadata_path)
+        .arg("--lockfile")
+        .arg(&lockfile_path)
+        .arg("--deployed")
+        .arg(&deployed_path)
+        .arg("--deployment-network")
+        .arg(deployment_network)
+        .arg("--action")
+        .arg("mint")
+        .arg("--output")
+        .arg(&output_dir)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["lockfile_verified"], true);
+    assert_eq!(summary["deployment_verified"], true);
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(output_dir.join("cellscript-builder-manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["locked_identity"]["schema"], "cellscript-builder-locked-identity-v0.20");
+    assert_eq!(manifest["deployment_identity"]["schema"], "cellscript-builder-deployment-identity-v0.20");
+    assert_eq!(manifest["deployment_identity"]["deployments"][0]["network"], deployment_network);
+    assert_eq!(manifest["locked_identity"]["build"]["metadata_hash"], build_info.metadata_hash.as_deref().unwrap());
+
+    let index_ts = std::fs::read_to_string(output_dir.join("src").join("index.ts")).unwrap();
+    assert!(index_ts.contains("validateCellScriptLockfile"), "{index_ts}");
+    assert!(index_ts.contains("validateCellScriptDeployment"), "{index_ts}");
+    assert!(index_ts.contains("assertCellScriptLockfile(options.lockfile)"), "{index_ts}");
+    assert!(
+        index_ts.contains(
+            "assertCellScriptDeployment(options.lockfile, options.deployment, options.liveDeploymentEvidence, options.trustPolicy)"
+        ),
+        "{index_ts}"
+    );
+
+    let mut bad_lockfile = lockfile;
+    bad_lockfile.package_build.as_mut().unwrap().metadata_hash = Some("bad_metadata_hash".to_string());
+    let bad_lockfile_path = root.join("Bad.lock");
+    std::fs::write(&bad_lockfile_path, toml::to_string_pretty(&bad_lockfile).unwrap()).unwrap();
+
+    let rejected = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("gen-builder")
+        .arg("--target")
+        .arg("typescript")
+        .arg("--metadata")
+        .arg(&metadata_path)
+        .arg("--lockfile")
+        .arg(&bad_lockfile_path)
+        .arg("--action")
+        .arg("mint")
+        .arg("--output")
+        .arg(root.join("bad-builder"))
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(stderr.contains("generated builder identity verification failed"), "{stderr}");
+    assert!(stderr.contains("metadata_hash mismatch"), "{stderr}");
+
+    let mut bad_deployed = deployed.clone();
+    bad_deployed.deployments[0].code_hash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+    let bad_deployed_path = root.join("BadDeployed.toml");
+    std::fs::write(&bad_deployed_path, toml::to_string_pretty(&bad_deployed).unwrap()).unwrap();
+
+    let rejected_deployment = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("gen-builder")
+        .arg("--target")
+        .arg("typescript")
+        .arg("--metadata")
+        .arg(&metadata_path)
+        .arg("--lockfile")
+        .arg(&lockfile_path)
+        .arg("--deployed")
+        .arg(&bad_deployed_path)
+        .arg("--deployment-network")
+        .arg(deployment_network)
+        .arg("--action")
+        .arg("mint")
+        .arg("--output")
+        .arg(root.join("bad-deployment-builder"))
+        .output()
+        .unwrap();
+    assert!(!rejected_deployment.status.success());
+    let stderr = String::from_utf8_lossy(&rejected_deployment.stderr);
+    assert!(stderr.contains("generated builder deployment identity verification failed"), "{stderr}");
+    assert!(stderr.contains("code_hash mismatch"), "{stderr}");
+
+    let mut missing_status_deployed = deployed.clone();
+    missing_status_deployed.deployments[0].status = None;
+    let missing_status_deployed_path = root.join("MissingStatusDeployed.toml");
+    std::fs::write(&missing_status_deployed_path, toml::to_string_pretty(&missing_status_deployed).unwrap()).unwrap();
+
+    let rejected_missing_status = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("gen-builder")
+        .arg("--target")
+        .arg("typescript")
+        .arg("--metadata")
+        .arg(&metadata_path)
+        .arg("--lockfile")
+        .arg(&lockfile_path)
+        .arg("--deployed")
+        .arg(&missing_status_deployed_path)
+        .arg("--deployment-network")
+        .arg(deployment_network)
+        .arg("--action")
+        .arg("mint")
+        .arg("--output")
+        .arg(root.join("missing-status-deployment-builder"))
+        .output()
+        .unwrap();
+    assert!(!rejected_missing_status.status.success());
+    let stderr = String::from_utf8_lossy(&rejected_missing_status.stderr);
+    assert!(stderr.contains("generated builder deployment identity verification failed"), "{stderr}");
+    assert!(stderr.contains("has no status"), "{stderr}");
+
+    let mut deprecated_deployed = deployed;
+    deprecated_deployed.deployments[0].status = Some(cellscript::package::DeploymentStatus::Deprecated);
+    let deprecated_deployed_path = root.join("DeprecatedDeployed.toml");
+    std::fs::write(&deprecated_deployed_path, toml::to_string_pretty(&deprecated_deployed).unwrap()).unwrap();
+
+    let rejected_deprecated = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("gen-builder")
+        .arg("--target")
+        .arg("typescript")
+        .arg("--metadata")
+        .arg(&metadata_path)
+        .arg("--lockfile")
+        .arg(&lockfile_path)
+        .arg("--deployed")
+        .arg(&deprecated_deployed_path)
+        .arg("--deployment-network")
+        .arg(deployment_network)
+        .arg("--action")
+        .arg("mint")
+        .arg("--output")
+        .arg(root.join("deprecated-deployment-builder"))
+        .output()
+        .unwrap();
+    assert!(!rejected_deprecated.status.success());
+    let stderr = String::from_utf8_lossy(&rejected_deprecated.stderr);
+    assert!(stderr.contains("generated builder deployment identity verification failed"), "{stderr}");
+    assert!(stderr.contains("not active"), "{stderr}");
+}
+
+#[test]
+fn cellc_entry_witness_subcommand_emits_parameterized_witness_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action main(amount: u64) -> u64 {
+    verification
+        return amount
+}
+"#,
+    )
+    .unwrap();
+
+    let output_path = root.join("witness.bin");
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("entry-witness")
+        .arg("--action")
+        .arg("main")
+        .arg("--arg")
+        .arg("77")
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["status"], "ok");
+    assert_eq!(stdout["abi"], "cellscript-entry-witness-v1");
+    assert_eq!(stdout["entry_kind"], "action");
+    assert_eq!(stdout["entry"], "main");
+    assert_eq!(stdout["witness_hex"], "43534152477631004d00000000000000");
+    assert_eq!(stdout["witness_size_bytes"], 16);
+    assert_eq!(stdout["payload_params"][0], "amount");
+    assert_eq!(stdout["payload_args"], 1);
+
+    let mut expected = b"CSARGv1\0".to_vec();
+    expected.extend_from_slice(&77u64.to_le_bytes());
+    assert_eq!(std::fs::read(output_path).unwrap(), expected);
+}
+
+#[test]
+fn cellc_abi_subcommand_explains_entry_witness_layout() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+struct Snapshot {
+    amount: u64,
+}
+
+action main(snapshot: Snapshot, amount: u64) -> u64 {
+    verification
+        return amount
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("abi").arg("--action").arg("main").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["status"], "ok");
+    assert_eq!(stdout["abi"], "cellscript-entry-witness-v1");
+    assert_eq!(stdout["entry_kind"], "action");
+    assert_eq!(stdout["entry"], "main");
+    assert_eq!(stdout["payload_params"][0], "snapshot");
+    assert_eq!(stdout["payload_params"][1], "amount");
+    assert_eq!(stdout["layout"]["abi_slots_used"], 3);
+    assert_eq!(stdout["layout"]["min_witness_bytes"], 20);
+    assert_eq!(stdout["params"][0]["name"], "snapshot");
+    assert_eq!(stdout["params"][0]["abi_kind"], "schema-pointer");
+    assert_eq!(stdout["params"][0]["witness_bytes"], 4);
+    assert_eq!(stdout["params"][0]["slot_start"], 0);
+    assert_eq!(stdout["params"][0]["slot_end"], 1);
+    assert_eq!(stdout["params"][1]["name"], "amount");
+    assert_eq!(stdout["params"][1]["abi_kind"], "scalar");
+    assert_eq!(stdout["params"][1]["witness_bytes"], 8);
+}
+
+#[test]
+fn cellc_scheduler_plan_consumes_shared_touch_hints() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+shared Ledger has store {
+    balance: u64,
+}
+
+action credit(ledger_before: Ledger, delta: u64) -> ledger_after: Ledger {
+    verification
+        require ledger_after.balance == ledger_before.balance + delta
+
+}
+action debit(ledger_before: Ledger, delta: u64) -> ledger_after: Ledger {
+    verification
+        require ledger_after.balance == ledger_before.balance - delta
+
+}
+action read_only(value: u64) -> u64 {
+    verification
+        return value
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("scheduler-plan")
+        .arg("--target-profile")
+        .arg("ckb")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["status"], "ok");
+    assert_eq!(stdout["policy"], "cellscript-scheduler-hints-v1");
+    assert_eq!(stdout["action_count"], 3);
+    assert_eq!(stdout["conflict_count"], 1);
+    assert_eq!(stdout["conflicts"][0]["left"], "credit");
+    assert_eq!(stdout["conflicts"][0]["right"], "debit");
+    assert_eq!(stdout["conflicts"][0]["policy"], "must-not-run-in-parallel");
+    assert_eq!(stdout["serial_required_actions"][0], "credit");
+    assert_eq!(stdout["serial_required_actions"][1], "debit");
+    assert!(stdout["estimated_cycles"]["total"].as_u64().unwrap() > 0);
+    let read_only = stdout["actions"].as_array().unwrap().iter().find(|action| action["action"] == "read_only").unwrap();
+    assert_eq!(read_only["admission"], "parallel-candidate");
+}
+
+#[test]
+fn cellc_ckb_hash_emits_default_blake2b_vector() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("ckb-hash").arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["status"], "ok");
+    assert_eq!(stdout["algorithm"], "blake2b-256");
+    assert_eq!(stdout["personalization"], "ckb-default-hash");
+    assert_eq!(stdout["input_bytes"], 0);
+    assert_eq!(stdout["hash"], "44f4c69744d5f8c55d642062949dcae49bc4e7ef43d388c5a12f42b5633d163e");
+
+    let text = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("ckb-hash").arg("--hex").arg("00").output().unwrap();
+    assert!(text.status.success(), "stderr: {}", String::from_utf8_lossy(&text.stderr));
+    assert_eq!(String::from_utf8_lossy(&text.stdout).trim().len(), 64);
+}
+
+#[test]
+fn cellc_ckb_std_compat_reports_runtime_boundary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("ckb-std-compat").arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["schema"], "cellscript-ckb-std-compat-report-v0.19");
+    assert_eq!(report["runtime_policy"], "inline");
+    assert_eq!(report["compiler_core_dependency"], "no-ckb-std");
+    assert_eq!(report["test_evidence"]["compat_tests"], "tests/ckb_std_compat.rs");
+    assert_eq!(report["test_evidence"]["packed_transaction_materialization"], true);
+    assert_eq!(report["test_evidence"]["script_construction_api"], true);
+    assert_eq!(report["ckb_std_refs"]["type_id"], "ckb_std::type_id");
+    assert_eq!(report["inline_abi"]["fields"]["cell_occupied_capacity"], 6);
+    assert_eq!(report["witness_args_policy"]["entry_payload_abi"], "cellscript-entry-witness-v1");
+    assert_eq!(report["witness_args_policy"]["final_witness_args_owner"], "adapter");
+    assert_eq!(report["witness_args_policy"]["lock_signature_policy"], "explicit-adapter-owned-do-not-overwrite");
+    assert_eq!(report["adapter_boundary"]["transaction_realizer"], "ckb-sdk-rust-or-CCC-adapter");
+    assert_eq!(report["adapter_boundary"]["compiler_core_uses_ckb_sdk_rust"], false);
+    assert_eq!(report["adapter_boundary"]["script_construction"]["packed_type"], "ckb_types::packed::Script");
+    assert_eq!(report["adapter_boundary"]["script_construction"]["evidence_schema"], "cellscript-ckb-script-evidence-v0.19");
+    assert!(report["adapter_boundary"]["script_construction"]["supports"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item == "script_ref_readback")));
+    assert!(report["adapter_boundary"]["script_construction"]["supports"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item == "explicit_cell_dep_binding")));
+    assert!(report["non_goals"].as_array().is_some_and(|items| items.iter().any(|item| item == "does-not-execute-ckb-vm")));
+}
+
+#[test]
+fn cellc_opt_report_compares_all_optimization_levels() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let source = root.join("main.cell");
+    std::fs::write(
+        &source,
+        r#"
+module demo::main
+
+action main(value: u64) -> u64 {
+    verification
+        let doubled = value + value
+        return doubled
+}
+"#,
+    )
+    .unwrap();
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).arg("opt-report").arg(&source).arg("--target").arg("riscv64-asm").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["status"], "ok");
+    assert_eq!(stdout["policy"], "cellscript-opt-report-v1");
+    assert_eq!(stdout["baseline_opt_level"], 0);
+    let rows = stdout["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 4);
+    for (index, row) in rows.iter().enumerate() {
+        assert_eq!(row["opt_level"], index as u64);
+        assert_eq!(row["artifact_format"], "RISC-V assembly");
+        assert_eq!(row["constraints_status"], "warn");
+        assert!(row["artifact_size_bytes"].as_u64().unwrap() > 0);
+        assert!(row["artifact_size_delta_from_o0"].is_i64());
+    }
+}
+
+#[test]
+fn cellc_entry_witness_subcommand_encodes_schema_backed_params() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+struct Snapshot {
+    amount: u64,
+}
+
+action main(snapshot: Snapshot, amount: u64) -> u64 {
+    verification
+        return amount
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("entry-witness")
+        .arg("--action")
+        .arg("main")
+        .arg("--arg")
+        .arg("0500000000000000")
+        .arg("--arg")
+        .arg("5")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["witness_hex"], "43534152477631000800000005000000000000000500000000000000");
+    assert_eq!(stdout["payload_params"][0], "snapshot");
+    assert_eq!(stdout["payload_params"][1], "amount");
+}
+
+#[test]
+fn cellc_entry_witness_subcommand_rejects_wrong_width_fixed_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action owned(owner: Address) -> u64 {
+    verification
+        return 0
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("entry-witness")
+        .arg("--action")
+        .arg("owned")
+        .arg("--arg")
+        .arg("0x010203")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("parameter 'owner' expects 32 byte(s), got 3"), "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn cellc_fmt_subcommand_formats_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    let source_path = root.join("src").join("main.cell");
+    std::fs::write(&source_path, "module demo::main\naction ping(x:u64)->u64{\nverification\nx\n}\n").unwrap();
+
+    let dirty_check =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("fmt").arg("--check").arg("--json").output().unwrap();
+    assert!(!dirty_check.status.success(), "unexpected success: {}", String::from_utf8_lossy(&dirty_check.stdout));
+    let stdout: serde_json::Value = serde_json::from_slice(&dirty_check.stdout).unwrap();
+    assert_eq!(stdout["status"], "failed");
+    assert_eq!(stdout["mode"], "check");
+    assert_eq!(stdout["changed"], 1);
+    assert!(stdout["changed_files"][0].as_str().unwrap().ends_with("src/main.cell"));
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("fmt").status().unwrap();
+    assert!(status.success());
+
+    let formatted = std::fs::read_to_string(&source_path).unwrap();
+    assert!(formatted.contains("action ping(x: u64) -> u64 {\n    verification"));
+
+    let check = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("fmt").arg("--check").arg("--json").output().unwrap();
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
+    let stdout: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(stdout["status"], "ok");
+    assert_eq!(stdout["mode"], "check");
+    assert_eq!(stdout["changed"], 0);
+}
+
+#[cfg(not(feature = "vm-runner"))]
+#[test]
+fn cellc_run_subcommand_without_vm_runner_degrades_gracefully() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).arg("run").output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("simulate") || stderr.contains("experimental") || stderr.contains("Cell.toml") || stderr.contains("compile")
+    );
+}
+
+#[cfg(feature = "vm-runner")]
+#[test]
+fn cellc_run_subcommand_executes_pure_elf_package() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+action main() -> u64 {
+    verification
+        0
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("run").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Run complete"));
+    assert!(stdout.contains("Artifact format: RISC-V ELF"));
+    assert!(stdout.contains("Cycles:"));
+}
+
+#[cfg(feature = "vm-runner")]
+#[test]
+fn cellc_run_subcommand_rejects_parameterized_schema_elf() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+struct Snapshot {
+    amount: u64,
+}
+
+action main(snapshot: Snapshot) -> u64 {
+    verification
+        snapshot.amount
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("run").output().unwrap();
+    assert!(!output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no-argument pure ELF entrypoints"), "stderr: {}", stderr);
+    assert!(stderr.contains("action main"), "stderr: {}", stderr);
+}
+
+#[cfg(feature = "vm-runner")]
+#[test]
+fn cellc_run_subcommand_rejects_ckb_runtime_elf() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("main.cell"),
+        r#"
+module demo::main
+
+shared Config {
+    threshold: u64,
+}
+
+action main() -> u64 {
+    verification
+        let cfg = read_ref<Config>()
+        cfg.threshold
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("run").output().unwrap();
+    assert!(!output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot provide CKB transaction/syscall context"), "stderr: {}", stderr);
+    assert!(stderr.contains("read-cell-dep"), "stderr: {}", stderr);
+}
+
+// ── Workspace e2e tests ──────────────────────────────────────────────────────
+
+#[test]
+fn cellc_workspace_build_compiles_all_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Workspace root Cell.toml
+    let workspace_toml = r#"[workspace]
+members = ["pkg_a", "pkg_b"]
+"#;
+    std::fs::write(root.join("Cell.toml"), workspace_toml).unwrap();
+
+    // Member pkg_a
+    let pkg_a = root.join("pkg_a");
+    std::fs::create_dir_all(pkg_a.join("src")).unwrap();
+    std::fs::write(
+        pkg_a.join("Cell.toml"),
+        r#"[package]
+name = "pkg_a"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_a.join("src").join("main.cell"),
+        r#"module pkg_a
+action hello() -> u64 {
+    verification
+        let x: u64 = 42
+        return x
+}
+"#,
+    )
+    .unwrap();
+
+    // Member pkg_b
+    let pkg_b = root.join("pkg_b");
+    std::fs::create_dir_all(pkg_b.join("src")).unwrap();
+    std::fs::write(
+        pkg_b.join("Cell.toml"),
+        r#"[package]
+name = "pkg_b"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_b.join("src").join("main.cell"),
+        r#"module pkg_b
+action world() -> u64 {
+    verification
+        let y: u64 = 99
+        return y
+}
+"#,
+    )
+    .unwrap();
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").arg("--workspace").arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+    let members = summary["results"].as_array().unwrap();
+    assert_eq!(members.len(), 2);
+}
+
+#[test]
+fn cellc_workspace_build_specific_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    let workspace_toml = r#"[workspace]
+members = ["alpha", "beta"]
+"#;
+    std::fs::write(root.join("Cell.toml"), workspace_toml).unwrap();
+
+    // Member alpha
+    let alpha = root.join("alpha");
+    std::fs::create_dir_all(alpha.join("src")).unwrap();
+    std::fs::write(
+        alpha.join("Cell.toml"),
+        r#"[package]
+name = "alpha"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        alpha.join("src").join("main.cell"),
+        r#"module alpha
+action run() -> u64 { verification let x: u64 = 1 return x }
+"#,
+    )
+    .unwrap();
+
+    // Member beta
+    let beta = root.join("beta");
+    std::fs::create_dir_all(beta.join("src")).unwrap();
+    std::fs::write(
+        beta.join("Cell.toml"),
+        r#"[package]
+name = "beta"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        beta.join("src").join("main.cell"),
+        r#"module beta
+action run() -> u64 { verification let y: u64 = 2 return y }
+"#,
+    )
+    .unwrap();
+
+    // Build only the "alpha" member
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("build")
+        .arg("-p")
+        .arg("alpha")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+    let members = summary["results"].as_array().unwrap();
+    assert_eq!(members.len(), 1);
+    assert!(members[0]["member"].as_str().unwrap().contains("alpha"));
+}
+
+#[test]
+fn cellc_workspace_check_all_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    let workspace_toml = r#"[workspace]
+members = ["lib_a"]
+"#;
+    std::fs::write(root.join("Cell.toml"), workspace_toml).unwrap();
+
+    let lib_a = root.join("lib_a");
+    std::fs::create_dir_all(lib_a.join("src")).unwrap();
+    std::fs::write(
+        lib_a.join("Cell.toml"),
+        r#"[package]
+name = "lib_a"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        lib_a.join("src").join("main.cell"),
+        r#"module lib_a
+action compute() -> u64 { verification let v: u64 = 7 return v }
+"#,
+    )
+    .unwrap();
+
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("check").arg("--workspace").arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["status"], "ok");
+}
+
+// ── Incremental compilation e2e tests ────────────────────────────────────────
+
+#[test]
+fn cellc_incremental_cache_hit_on_second_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Set up a minimal package
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"[package]
+name = "cache_test"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+
+    let source = r#"module cache_test
+action compute() -> u64 {
+    verification
+        let x: u64 = 123
+        return x
+}
+"#;
+    std::fs::write(root.join("src").join("main.cell"), source).unwrap();
+
+    // First build
+    let output1 = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").arg("--json").output().unwrap();
+    assert!(output1.status.success(), "stderr: {}", String::from_utf8_lossy(&output1.stderr));
+    let summary1: serde_json::Value = serde_json::from_slice(&output1.stdout).unwrap();
+    assert_eq!(summary1["status"], "ok");
+    // First build should not be a cache hit
+    assert_eq!(summary1["cache_hit"], false);
+
+    // Second build (same source, same options)
+    let output2 = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").arg("--json").output().unwrap();
+    assert!(output2.status.success(), "stderr: {}", String::from_utf8_lossy(&output2.stderr));
+    let summary2: serde_json::Value = serde_json::from_slice(&output2.stdout).unwrap();
+    assert_eq!(summary2["status"], "ok");
+    // Second build should be a cache hit
+    assert_eq!(summary2["cache_hit"], true);
+}
+
+#[test]
+fn cellc_incremental_cache_invalidated_on_source_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Set up a minimal package
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"[package]
+name = "inval_test"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+
+    let source_v1 = r#"module inval_test
+action compute() -> u64 {
+    verification
+        let x: u64 = 1
+        return x
+}
+"#;
+    std::fs::write(root.join("src").join("main.cell"), source_v1).unwrap();
+
+    // Build v1
+    let output1 = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").arg("--json").output().unwrap();
+    assert!(output1.status.success(), "stderr: {}", String::from_utf8_lossy(&output1.stderr));
+
+    // Modify source
+    let source_v2 = r#"module inval_test
+action compute() -> u64 {
+    verification
+        let x: u64 = 2
+        return x
+}
+"#;
+    std::fs::write(root.join("src").join("main.cell"), source_v2).unwrap();
+
+    // Build v2 - should NOT be a cache hit since source changed
+    let output2 = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").arg("--json").output().unwrap();
+    assert!(output2.status.success(), "stderr: {}", String::from_utf8_lossy(&output2.stderr));
+    let summary2: serde_json::Value = serde_json::from_slice(&output2.stdout).unwrap();
+    assert_eq!(summary2["cache_hit"], false);
+}
+
+#[test]
+fn cellc_clean_cache_flag_removes_incremental_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Set up a minimal package
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"[package]
+name = "clean_test"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+
+    let source = r#"module clean_test
+action compute() -> u64 {
+    verification
+        let x: u64 = 55
+        return x
+}
+"#;
+    std::fs::write(root.join("src").join("main.cell"), source).unwrap();
+
+    // Build to populate incremental cache
+    let output = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").arg("--json").output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Verify cache directory was created
+    let cache_dir = root.join(".cell").join("build").join("cache");
+    assert!(cache_dir.exists(), "incremental cache directory should exist after build");
+
+    // Clean with --cache flag
+    let clean_output =
+        Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("clean").arg("--cache").arg("--json").output().unwrap();
+    assert!(clean_output.status.success(), "stderr: {}", String::from_utf8_lossy(&clean_output.stderr));
+
+    // Verify cache directory was removed
+    assert!(!cache_dir.exists(), "incremental cache directory should be removed after clean --cache");
+
+    // Verify next build is NOT a cache hit
+    let output2 = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").arg("--json").output().unwrap();
+    assert!(output2.status.success(), "stderr: {}", String::from_utf8_lossy(&output2.stderr));
+    let summary2: serde_json::Value = serde_json::from_slice(&output2.stdout).unwrap();
+    assert_eq!(summary2["cache_hit"], false, "build after clean --cache should not be a cache hit");
+}
+
+#[test]
+fn cellc_entry_action_bypasses_incremental_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Set up a minimal package
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cell.toml"),
+        r#"[package]
+name = "entry_bypass"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+
+    let source = r#"module entry_bypass
+action compute() -> u64 {
+    verification
+        let x: u64 = 10
+        return x
+}
+"#;
+    std::fs::write(root.join("src").join("main.cell"), source).unwrap();
+
+    // First build (default entry scope)
+    let output1 = Command::new(env!("CARGO_BIN_EXE_cellc")).current_dir(root).arg("build").arg("--json").output().unwrap();
+    assert!(output1.status.success(), "stderr: {}", String::from_utf8_lossy(&output1.stderr));
+
+    // Build with --entry-action: should bypass cache and produce a fresh compile
+    let output2 = Command::new(env!("CARGO_BIN_EXE_cellc"))
+        .current_dir(root)
+        .arg("build")
+        .arg("--entry-action")
+        .arg("compute")
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(output2.status.success(), "stderr: {}", String::from_utf8_lossy(&output2.stderr));
+    let summary2: serde_json::Value = serde_json::from_slice(&output2.stdout).unwrap();
+    assert_eq!(summary2["cache_hit"], false, "--entry-action should bypass incremental cache");
+}

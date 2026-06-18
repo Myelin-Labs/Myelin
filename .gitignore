@@ -1,0 +1,28 @@
+# Compiled files
+/target/
+/target-codex/
+**/.cell/build/
+**/*.rs.bk
+*.pdb
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Cargo
+Cargo.lock
+
+# Documentation
+/target/doc/
+.qoder/
+
+# Temporary files
+*.tmp
+*.bak
+
+# UTXO hotspots tracking (generated file)
+utxo_hotspots.txt

@@ -1,0 +1,56 @@
+[package]
+name = "spora-exec"
+version = "0.1.0"
+edition = "2021"
+authors = ["Spora developers"]
+license = "MIT"
+description = "Cell execution layer for Spora DAG blockchain"
+
+[dependencies]
+# Serialization
+borsh = { version = "1.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+
+# Hashing (unified blake3)
+blake3 = "1.5"
+blake2b_simd = { workspace = true }
+
+# Crypto
+secp256k1 = { version = "0.29", features = ["recovery", "global-context"] }
+
+# Errors
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Collections
+indexmap = "=2.2.6"
+
+# Parallel execution
+rayon = "1.10"
+parking_lot = "0.12"
+
+# CKB-VM integration for script execution
+ckb-vm = { version = "0.24", features = ["asm", "detect-asm"], optional = true }
+byteorder = { version = "1.5", optional = true }
+
+# Spora dependencies
+spora-hashes = { path = "../crypto/hashes", version = "0.1.0" }
+
+# Logging
+log = "0.4"
+
+# For testing blake3 known vectors
+hex = { version = "0.4", optional = true }
+
+[dev-dependencies]
+# Testing
+proptest = "1.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[features]
+default = ["vm"]
+vm = ["ckb-vm", "byteorder", "hex"]  # VM integration enabled
+
+[[bench]]
+name = "serialization_bench"
+harness = false

@@ -1,0 +1,28 @@
+[package]
+name = "spora-mempool"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Cell transaction memory pool"
+
+[dependencies]
+# Core dependencies
+spora-exec = { path = "../exec", version = "0.1.0" }
+
+# Collections (deterministic)
+indexmap = "=2.2.6"
+
+# Hashing
+blake3 = "1.5"
+
+# Concurrency
+parking_lot = "0.12"
+
+# Errors
+thiserror = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.10"

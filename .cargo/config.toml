@@ -1,0 +1,8 @@
+[env]
+INSTA_UPDATE = "always"
+LIBCLANG_PATH = "/opt/homebrew/opt/llvm/lib"
+DYLD_LIBRARY_PATH = "/opt/homebrew/opt/llvm/lib"
+DYLD_FALLBACK_LIBRARY_PATH = "/opt/homebrew/opt/llvm/lib"
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/opt/homebrew/opt/llvm/lib"]

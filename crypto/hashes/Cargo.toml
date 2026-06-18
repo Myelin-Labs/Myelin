@@ -1,0 +1,40 @@
+[package]
+name = "spora-hashes"
+description = "Spora hashing functions"
+rust-version.workspace = true
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+include.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+no-asm = ["keccak"]
+
+[dependencies]
+borsh.workspace = true
+faster-hex.workspace = true
+spora-utils.workspace = true
+keccak = { workspace = true, optional = true }
+serde.workspace = true
+wasm-bindgen.workspace = true
+workflow-wasm.workspace = true
+blake3.workspace = true
+sha2.workspace = true
+
+[target.'cfg(any(target_os = "windows", not(target_arch = "x86_64")))'.dependencies]
+keccak.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+insta.workspace = true
+rand.workspace = true
+sha3.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+
+[[bench]]
+name = "bench"
+harness = false
