@@ -153,7 +153,21 @@ The full Myelin protocol gate also exercises the Tendermint mode in
 the same run, so a silent fallback to static committee would fail
 the gate.
 
-## 5. Equivocation: explicit limitation
+## 5. Legacy `verify_certificate` path is closed
+
+`Tendermint::verify_certificate` (the legacy `ConsensusEngine` API
+shape) now returns `Err(ConsensusError::LegacyCertificatePathUnsupported)`.
+A `CommitteeCertificate` carries no `(height, round)`, so it is
+not a structurally valid Tendermint precommit certificate. The
+typed `verify_precommit_certificate` API is the only path. This
+prevents callers from accidentally using the wrong API shape and
+silently finalising a block at `(height=0, round=0)`.
+
+Covered by `tendermint_does_not_silently_fall_back_to_static_committee`,
+which now also asserts the `LegacyCertificatePathUnsupported`
+return.
+
+## 6. Equivocation: explicit limitation
 
 Full BFT equivocation evidence is intentionally out of scope for
 this milestone. Myelin is a finite-session Cell ledger; the
@@ -169,6 +183,9 @@ The current invariant is structural:
   with ConsensusError::DuplicateValidator.
 - A precommit under the wrong (height, round, block_hash) is
   rejected with WrongHeight / WrongRound / WrongBlockHash.
+- The legacy verify_certificate path returns
+  LegacyCertificatePathUnsupported so the typed precommit API
+  cannot be bypassed.
 ```
 
 Cross-round or cross-height equivocation detection requires a
@@ -181,7 +198,7 @@ session benchmarking and pressure testing; the L1 court/projection
 path is what makes it CKB-aligned."
 ```
 
-## 6. Test inventory (consensus)
+## 7. Test inventory (consensus)
 
 ```text
 cargo test -p myelin-consensus

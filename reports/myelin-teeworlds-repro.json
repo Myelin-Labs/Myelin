@@ -16,12 +16,12 @@
       "static_committee_signatures": 2
     },
     "court_bundle_verification": {
-      "checks": 14,
+      "checks": 20,
       "failed_checks": [],
       "valid": true
     },
     "fixture": {
-      "average_elapsed_ns": 11016874,
+      "average_elapsed_ns": 10959472,
       "block_hash": "c74f510a61e3e3f2684b1fc261313bdd7097a9a3f7f55e625d331a5b4f7ee13f",
       "chunk_bytes": 262144,
       "chunks": 1,
@@ -51,7 +51,7 @@
       "l1_court_implemented": false,
       "molecule_transaction_bytes": 2616,
       "tendermint_evidence": {
-        "block_hash": "c0a190d449a801fb5f90b5d2047aa007487f4643edbe74d5a7081fcabc312523",
+        "block_hash": "e723f508dad09c5e190b05553c985db5d70d767267e9669eb9780ec9cbb5469d",
         "certificate_step": "precommit",
         "consensus_kind": "tendermint",
         "finalised": true,
@@ -60,13 +60,13 @@
         "round": 0,
         "signatures": [
           {
-            "signature": "3294885ee68dd5e980bc721c5a19fdd90947edcb1153cac4f73ccdb35b31f7ea750d10a4f94755c0b0b3d1f468be887c693a7a4fd98998990731eae759cb05fb",
-            "signature_hash": "c6743e6ee37492d93c2ba1d2ef4ffaf7f89d4b452fc0a2506b558a2cfccbd37b",
+            "signature": "54e6aff141c1f75af109c6b07475ec87c4b66a71f095b9e615bfd71518e5c20c8497ae3beeabb3dc8104ccd46fdfb2c5a54fe14a2188602985bc51859d1d239e",
+            "signature_hash": "c2bd40bbd9ec77acff0396ccf1d5f73df0775530ab0f547609006f7797d13b26",
             "validator_id": "validator-0"
           },
           {
-            "signature": "0725793afe958e6779d2da600dcd430badef424d805d3e1ed2b1a0ed2126b4974d68e7c650b8c95b229087317073991b5ab519169d7b3f9c86891ff39a9e3282",
-            "signature_hash": "462ca32e7364a52c4d40d5246f0f97e1e5086804d53ac76c32aa643072f2f81e",
+            "signature": "903adfab5390869c5b2c5c3a8f43dc36e24879b871bf2517b5431468402a989f271705d532ed76cc341ef25bc2268615874ad8404ad34560ca716e719377c514",
+            "signature_hash": "cf3283c667f7b075b6e1a893bece803e33238ec7aeab5a790751ff48149d8bb9",
             "validator_id": "validator-1"
           }
         ],
@@ -77,7 +77,7 @@
       }
     },
     "court_bundle_verification": {
-      "checks": 14,
+      "checks": 20,
       "failed_checks": [],
       "valid": true
     },

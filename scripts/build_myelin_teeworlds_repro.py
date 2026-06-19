@@ -12,8 +12,15 @@ import sys
 from pathlib import Path
 
 MYELIN_ROOT = Path(__file__).resolve().parent.parent
-TEEWORLDS_ROOT = "/Users/arthur/RustroverProjects/teeworlds"
-ACCEPTANCE_DIR = "/tmp/myelin-teeworlds-acceptance"
+# TEEWORLDS_ROOT is overridable. The default is the local-machine path
+# used during the standalone Myelin audit; CI / other developers should
+# set TEEWORLDS_ROOT to their own clone.
+TEEWORLDS_ROOT = os.environ.get("TEEWORLDS_ROOT", str(Path.home() / "RustroverProjects" / "teeworlds"))
+# ACCEPTANCE_DIR is the directory the Teeworlds acceptance script writes
+# its raw reports into. The acceptance script defaults to
+# /tmp/myelin-teeworlds-acceptance; if it was redirected, ACCEPTANCE_DIR
+# must agree.
+ACCEPTANCE_DIR = os.environ.get("MYELIN_TEEWORLDS_ACCEPTANCE_DIR", "/tmp/myelin-teeworlds-acceptance")
 REPORT_PATH = MYELIN_ROOT / "reports" / "myelin-teeworlds-repro.json"
 
 def run_myelin(*args):

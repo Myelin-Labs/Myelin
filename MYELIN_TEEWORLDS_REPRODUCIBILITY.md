@@ -125,26 +125,77 @@ tendermint_evidence:
   finalised        : true
 ```
 
-The `verify-court-bundle` path detects the Tendermint evidence
-and runs `verify_precommit_certificate` against the phase-one
-fixture Tendermint engine. The block hash used in the
-challenge-payload-hash is the Tendermint block hash, not the
-static-closed-committee block hash; the two are guaranteed to
-differ by signature-domain separation.
+## 6. Court-bundle data-binding contract
+
+The hardening pass added a structural data-binding guarantee to
+the Teeworlds court-bundle path. The court-bundle now embeds the
+canonical `MyelinBlock` whose fields are derived from the
+runtime evidence:
+
+```text
+bundle.block:
+  version                     : 1
+  parent_hash                 : 0x00..00
+  number                      : 1
+  timestamp_ms                : 0
+  consensus_kind              : "static-closed-committee" | "tendermint"
+  state_root_before           : <derived from session_id + chunk_index>
+  state_root_after            : <derived from old_state_root + commitment + map_hash + config_hash>
+  ordered_cell_tx_commitments : [chunk_commitment]
+  data_commitments            : [chunk_commitment]
+  scheduler_commitment        : <derived from session_id + chunk_index + commitment>
+  block_hash                  : <MyelinBlock::hash()>
+```
+
+The static-closed-committee certificate and the Tendermint
+precommit certificate are both bound to `bundle.block.block_hash`,
+which means both engines sign the **same canonical block** but
+with different signature domains. This is the structural
+guarantee that the runtime evidence, the finality certificate,
+and the court-bundle record all refer to the same block.
+
+The verifier (`verify-court-bundle`) now performs six new
+data-binding checks:
+
+```text
+- block-hash-recomputes:
+    MyelinBlock::hash() over bundle.block fields == bundle.block.block_hash
+- block-state-root-before-matches:
+    bundle.block.state_root_before == bundle.old_state_root
+- block-state-root-after-matches:
+    bundle.block.state_root_after == bundle.new_state_root
+- block-scheduler-commitment-matches:
+    bundle.block.scheduler_commitment == bundle.scheduler_report_hash
+- block-data-commitment-matches:
+    bundle.block.data_commitments[0] == bundle.chunk_commitment
+- evidence-block-hash-matches-canonical-block:
+    finality_evidence.block_hash == bundle.block.block_hash
+```
+
+The new tests in `cli/src/main.rs::tests` cover both the
+positive path (well-formed bundle verifies with 20/20 checks
+pass) and the negative path (tampered `state_root_after` causes
+the data-binding check to fail). The audit tests now pass at
+20/20 instead of the previous 14/14.
 
 The new test `teeworlds_court_bundle_tendermint_precommit_path_verifies`
 covers the full round-trip:
 
 ```text
 - builds a Tendermint-mode court bundle;
-- asserts the static and Tendermint block hashes differ;
-- asserts the static and Tendermint signatures differ;
-- asserts the bundle verifier passes;
-- asserts the verifier emits `tendermint-certificate` (not
-  `committee-certificate`).
+- asserts the static and Tendermint block hashes agree (both
+  engines sign the same canonical block);
+- asserts the static and Tendermint signatures differ (they
+  use different signature domains);
+- asserts the bundle verifier passes with 20/20 checks;
+- asserts the verifier emits `tendermint-certificate` and the
+  data-binding checks (`block-hash-recomputes`,
+  `evidence-block-hash-matches-canonical-block`);
+- asserts the verifier does NOT emit `committee-certificate`
+  (Tendermint is the active finality path).
 ```
 
-## 6. The reproducible JSON report
+## 7. The reproducible JSON report
 
 The Myelin tree keeps a single committed Teeworlds reproducibility
 report:

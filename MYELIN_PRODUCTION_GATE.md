@@ -78,9 +78,24 @@ The full gate is the recommended form for any merge or release.
 scripts/myelin_production_gate.sh
 ```
 
-The default `RUN_TEEWORLDS=1` runs the Teeworlds acceptance. Set
-`RUN_TEEWORLDS=0` to skip it on machines that don't have the
-Teeworlds checkout.
+The default `RUN_TEEWORLDS=1` runs the Teeworlds acceptance and
+**the gate hard-fails** if the Teeworlds replayer or the
+`rust-tools` manifest is missing. To intentionally run on a
+machine without the Teeworlds checkout, set
+`ALLOW_SKIP_TEEWORLDS=1` to downgrade the missing-Teeworlds case
+to a skip with a printed warning instead of a hard fail.
+
+```bash
+# Default: Teeworlds acceptance is required; missing replayer is a
+# hard failure.
+scripts/myelin_production_gate.sh
+
+# Explicit skip: Teeworlds acceptance is skipped with a warning.
+ALLOW_SKIP_TEEWORLDS=1 scripts/myelin_production_gate.sh
+
+# Opt out of Teeworlds entirely (same as ALLOW_SKIP_TEEWORLDS=1).
+RUN_TEEWORLDS=0 scripts/myelin_production_gate.sh
+```
 
 The Teeworlds path is at:
 
@@ -88,9 +103,9 @@ The Teeworlds path is at:
 TEEWORLDS_ROOT=/Users/arthur/RustroverProjects/teeworlds
 ```
 
-This is overridable by env var. The gate also detects whether the
-replayer and the `rust-tools` manifest are present, and skips the
-Teeworlds acceptance if either is missing.
+This is overridable by env var. The gate verifies both the
+replayer and the `rust-tools` manifest are present before
+running the Teeworlds acceptance.
 
 ## 6. Live run
 

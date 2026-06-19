@@ -633,35 +633,13 @@ impl ConsensusEngine for Tendermint {
         ConsensusKind::Tendermint
     }
 
-    fn verify_certificate(&self, block_hash: Hash32, certificate: &CommitteeCertificate) -> Result<()> {
-        if certificate.block_hash != block_hash {
-            return Err(ConsensusError::WrongBlockHash);
-        }
-
-        let mut seen = HashSet::with_capacity(certificate.signatures.len());
-        let mut signed_power = 0u64;
-        for signature in &certificate.signatures {
-            if !seen.insert(signature.validator_id.as_str()) {
-                return Err(ConsensusError::DuplicateValidator);
-            }
-            let validator = self
-                .validators
-                .get(&signature.validator_id)
-                .ok_or_else(|| ConsensusError::UnknownValidator(signature.validator_id.clone()))?;
-            let expected = deterministic_tendermint_precommit(validator, block_hash, 0, 0);
-            if signature.signature != expected {
-                return Err(ConsensusError::InvalidSignature(signature.validator_id.clone()));
-            }
-            signed_power = signed_power
-                .checked_add(validator.weight)
-                .ok_or_else(|| ConsensusError::InvalidConfig("precommit power overflow".to_owned()))?;
-        }
-
-        if signed_power < self.quorum_power {
-            return Err(ConsensusError::QuorumNotMet { signed_weight: signed_power, quorum_weight: self.quorum_power });
-        }
-
-        Ok(())
+    fn verify_certificate(&self, _block_hash: Hash32, _certificate: &CommitteeCertificate) -> Result<()> {
+        // Tendermint finality is always height-bound, round-bound, and
+        // block-hash-bound. The legacy CommitteeCertificate API is not
+        // a structurally valid Tendermint certificate: it carries no
+        // (height, round). Reject it explicitly so callers cannot
+        // accidentally use the wrong API shape.
+        Err(ConsensusError::LegacyCertificatePathUnsupported)
     }
 }
 
@@ -745,6 +723,11 @@ pub enum ConsensusError {
         /// Weight required for finality.
         quorum_weight: u64,
     },
+    /// Tendermint does not implement the legacy generic CommitteeCertificate
+    /// path. Use `verify_precommit_certificate` with a typed
+    /// `TendermintPrecommitCertificate` instead.
+    #[error("tendermint does not implement verify_certificate; use verify_precommit_certificate with a typed TendermintPrecommitCertificate")]
+    LegacyCertificatePathUnsupported,
 }
 
 /// Consensus result type.
@@ -1013,40 +996,32 @@ weight = 1
 
     #[test]
     fn tendermint_does_not_silently_fall_back_to_static_committee() {
-        // A real Tendermint precommit certificate is not valid as a static
-        // committee certificate, because Tendermint's precommit signature
-        // domain is different from StaticClosedCommittee's signature domain.
+        // Tendermint's legacy `verify_certificate` path is explicitly
+        // rejected: a CommitteeCertificate carries no (height, round),
+        // so it is not a structurally valid Tendermint precommit. A
+        // caller who tries to use the legacy path must get an explicit
+        // error, never a silent acceptance.
         let tendermint_engine = tendermint();
         let static_engine = committee();
 
         let block = block_for(ConsensusKind::StaticClosedCommittee);
         let block_hash = block.hash();
 
-        // Build a Tendermint precommit certificate on the same block hash and
-        // hand it to the static-committee verifier. It must be rejected as an
-        // invalid signature for *every* signer, because the signature domains
-        // differ. The verifier must not be tricked into accepting it.
+        // Build a Tendermint precommit certificate on the same block hash
+        // and hand its signatures to the static-committee verifier as a
+        // CommitteeCertificate. The signature domains differ, so the
+        // static engine must reject as InvalidSignature.
         let precommit = tendermint_engine.precommit_certificate_for_fixture(block_hash, block.number, 0, &["alice", "bob"]).unwrap();
-
-        // The static engine has alice/bob/carol, so the validator ids are
-        // known. The signatures were produced under the Tendermint precommit
-        // domain, so they must fail StaticClosedCommittee's signature check.
-        // We extract the precommit's signatures and hand them to the static
-        // engine as a CommitteeCertificate to prove the cross-engine check
-        // does not silently succeed.
         let cross_cert = CommitteeCertificate { block_hash, signatures: precommit.signatures.clone() };
         assert!(matches!(static_engine.verify_certificate(block_hash, &cross_cert), Err(ConsensusError::InvalidSignature(_))));
 
-        // Conversely, the Tendermint engine must reject a static-committee
-        // certificate because the Tendermint verifier expects a precommit
-        // under the Tendermint signature domain. Built through the
-        // CommitteeCertificate (legacy path used by the ConsensusEngine trait),
-        // it must still be rejected when the height/round match.
+        // The Tendermint engine's legacy `verify_certificate` path must
+        // explicitly reject the generic CommitteeCertificate API shape.
         let static_cert = static_engine.certificate_for_fixture(block_hash, &["alice", "bob"]).unwrap();
-        // Tendermint's verify_certificate checks signatures at (height=0, round=0).
-        // The static-committee signatures were produced under a different
-        // domain, so they must be invalid.
-        assert!(matches!(tendermint_engine.verify_certificate(block_hash, &static_cert), Err(ConsensusError::InvalidSignature(_))));
+        assert!(matches!(
+            tendermint_engine.verify_certificate(block_hash, &static_cert),
+            Err(ConsensusError::LegacyCertificatePathUnsupported)
+        ));
     }
 
     #[test]

@@ -228,18 +228,24 @@ if failed:
 print("forbidden parent path audit passed")
 PY
 
-# 11. Teeworlds acceptance, optional
+# 11. Teeworlds acceptance, required by default
 if [[ "${RUN_TEEWORLDS}" == "1" ]]; then
   REPLAYER="${TEEWORLDS_ROOT}/ckb/build/replayer_stripped"
-  if [[ -f "${REPLAYER}" && -f "${TEEWORLDS_ROOT}/rust-tools/Cargo.toml" ]]; then
+  if [[ ! -f "${REPLAYER}" || ! -f "${TEEWORLDS_ROOT}/rust-tools/Cargo.toml" ]]; then
+    if [[ "${ALLOW_SKIP_TEEWORLDS:-0}" == "1" ]]; then
+      printf '\n==> ALLOW_SKIP_TEEWORLDS=1: missing replayer or rust-tools manifest at %s; skipping Teeworlds acceptance\n' "${TEEWORLDS_ROOT}"
+    else
+      printf '\nERROR: Teeworlds acceptance is required by default. Missing replayer (%s) or rust-tools manifest (%s).\n' "${REPLAYER}" "${TEEWORLDS_ROOT}/rust-tools/Cargo.toml"
+      printf 'Set ALLOW_SKIP_TEEWORLDS=1 to skip Teeworlds explicitly, or set TEEWORLDS_ROOT to a valid clone.\n'
+      exit 1
+    fi
+  else
     TEEWORLDS_OUTPUT_DIR="${OUTPUT_DIR}/teeworlds" \
       run_step "Run Teeworlds acceptance gate" \
         "${SCRIPT_DIR}/myelin_teeworlds_acceptance.sh"
 
     run_step "Regenerate Teeworlds reproducibility report" \
       python3 "${SCRIPT_DIR}/build_myelin_teeworlds_repro.py"
-  else
-    printf '\n==> Skip Teeworlds acceptance: missing replayer or rust-tools manifest at %s\n' "${TEEWORLDS_ROOT}"
   fi
 else
   printf '\n==> Skip Teeworlds acceptance because RUN_TEEWORLDS=%s\n' "${RUN_TEEWORLDS}"

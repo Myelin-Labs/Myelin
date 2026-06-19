@@ -509,7 +509,65 @@ struct TeeworldsVmProbeReport {
     error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct TeeworldsBundleBlock {
+    /// Block format version.
+    version: u32,
+    /// Parent block hash (zero for the session genesis block).
+    parent_hash: String,
+    /// Session-local block number.
+    number: u64,
+    /// Block timestamp in milliseconds.
+    timestamp_ms: u64,
+    /// Consensus engine kind: "static-closed-committee" or "tendermint".
+    consensus_kind: String,
+    /// State root before the block's transitions.
+    state_root_before: String,
+    /// State root after the block's transitions.
+    state_root_after: String,
+    /// Ordered CellTx commitments admitted into this block.
+    ordered_cell_tx_commitments: Vec<String>,
+    /// Published data-availability chunk commitments.
+    data_commitments: Vec<String>,
+    /// Commitment to the CellDAG scheduler report.
+    scheduler_commitment: String,
+    /// Block hash; MUST match `block.hash()` over the fields above.
+    block_hash: String,
+}
+
+impl TeeworldsBundleBlock {
+    fn to_myelin_block(&self) -> std::result::Result<MyelinBlock, String> {
+        let parse_32 = |hex_str: &str, label: &str| -> std::result::Result<[u8; 32], String> {
+            parse_hex_32(hex_str).ok_or_else(|| format!("{label} must be 32-byte hex"))
+        };
+        let consensus_kind = match self.consensus_kind.as_str() {
+            "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
+            "tendermint" => ConsensusKind::Tendermint,
+            other => return Err(format!("unknown consensus_kind in bundle block: {other}")),
+        };
+        let ordered_cell_tx_commitments = self
+            .ordered_cell_tx_commitments
+            .iter()
+            .map(|h| parse_32(h, "ordered_cell_tx_commitments"))
+            .collect::<std::result::Result<Vec<_>, String>>()?;
+        let data_commitments =
+            self.data_commitments.iter().map(|h| parse_32(h, "data_commitments")).collect::<std::result::Result<Vec<_>, String>>()?;
+        Ok(MyelinBlock {
+            version: self.version,
+            parent_hash: parse_32(&self.parent_hash, "parent_hash")?,
+            number: self.number,
+            timestamp_ms: self.timestamp_ms,
+            consensus_kind,
+            state_root_before: parse_32(&self.state_root_before, "state_root_before")?,
+            state_root_after: parse_32(&self.state_root_after, "state_root_after")?,
+            ordered_cell_tx_commitments,
+            data_commitments,
+            scheduler_commitment: parse_32(&self.scheduler_commitment, "scheduler_commitment")?,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
 struct TeeworldsCourtBundleReport {
     source: String,
     mock_tx_json_hash: String,
@@ -525,6 +583,12 @@ struct TeeworldsCourtBundleReport {
     config_hash: String,
     chunk_commitment: String,
     scheduler_report_hash: String,
+    /// Canonical MyelinBlock whose data fields match the bundle's runtime
+    /// evidence. The block's `block_hash()` MUST equal the hash that the
+    /// static-closed-committee certificate or Tendermint precommit
+    /// certificate is bound to. This is the data-binding guarantee the
+    /// verifier relies on.
+    block: TeeworldsBundleBlock,
     molecule_transaction_bytes: usize,
     molecule_transaction_hex: String,
     molecule_transaction_hash: String,
@@ -562,6 +626,7 @@ struct CourtBundleCheck {
 struct TeeworldsCourtBundleInput {
     chunk_payload_hex: String,
     chunk_payload_hash: String,
+    chunk_commitment: String,
     molecule_transaction_hex: String,
     molecule_transaction_hash: String,
     challenge_payload_hash: String,
@@ -569,6 +634,11 @@ struct TeeworldsCourtBundleInput {
     new_state_root: String,
     scheduler_report_hash: String,
     ckb_projection: TeeworldsChunkProjectionInput,
+    /// Canonical MyelinBlock whose data fields match the runtime evidence.
+    /// The verifier recomputes `block.hash()` from these fields and asserts
+    /// the result equals the active block hash that the finality certificate
+    /// is bound to. This is the data-binding guarantee.
+    block: TeeworldsBundleBlock,
     static_committee_evidence: StaticCommitteeEvidenceInput,
     /// Optional Tendermint precommit evidence. When present, the challenge
     /// payload hash binds to the Tendermint block hash and the static
@@ -952,39 +1022,70 @@ fn teeworlds_court_bundle(
     let chunk_payload_hash = blake3_32(b"myelin:teeworlds-chunk-payload:v1", chunk);
     let scheduler_report_hash = blake3_chunks(b"myelin:teeworlds-scheduler-report:v1", &[&session_id, &index_bytes, &commitment]);
 
-    let static_evidence = static_committee_evidence_for_commitments(vec![commitment]);
-    let (block_hash, tendermint_evidence, evidence_notes) = match consensus_kind {
+    // Build the canonical MyelinBlock from the runtime evidence. This is
+    // the data-binding anchor: every field below is derived from the
+    // session / chunk / map / config, and the block hash that the
+    // finality certificate is bound to is `MyelinBlock::hash()` over
+    // these exact fields.
+    let canonical_block = MyelinBlock {
+        version: 1,
+        parent_hash: [0; 32],
+        number: 1,
+        timestamp_ms: 0,
+        consensus_kind,
+        state_root_before: old_state_root,
+        state_root_after: new_state_root,
+        ordered_cell_tx_commitments: vec![commitment],
+        data_commitments: vec![commitment],
+        scheduler_commitment: scheduler_report_hash,
+    };
+    let canonical_block_hash = canonical_block.hash();
+
+    let (static_evidence, tendermint_evidence, evidence_notes) = match consensus_kind {
         ConsensusKind::StaticClosedCommittee => {
-            let h = parse_hex_32(&static_evidence.block_hash).expect("fixture block hash is hex");
-            (h, None, vec!["This bundle carries static-closed-committee evidence.".to_owned()])
+            // Build a static-closed-committee cert over the same canonical
+            // block. The cert's `block_hash` MUST equal `canonical_block_hash`.
+            let committee_config = static_fixture_committee_config();
+            let committee = StaticClosedCommittee::new(committee_config.clone()).expect("static fixture committee");
+            let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
+            let cert = committee
+                .certificate_for_fixture(canonical_block_hash, &["validator-0", "validator-1"])
+                .expect("static fixture certificate");
+            committee.finalise_block(canonical_block.clone(), cert.clone()).expect("static fixture finality");
+            let signatures = cert
+                .signatures
+                .iter()
+                .map(|signature| CommitteeSignatureEvidenceReport {
+                    validator_id: signature.validator_id.clone(),
+                    signature: hex::encode(signature.signature),
+                    signature_hash: hex::encode(blake3_32(b"myelin:static-committee-signature-hash:v1", &signature.signature)),
+                })
+                .collect::<Vec<_>>();
+            let evidence = StaticCommitteeEvidenceReport {
+                consensus_kind: ConsensusKind::StaticClosedCommittee.as_str(),
+                block_hash: hex::encode(canonical_block_hash),
+                quorum_weight: committee_config.quorum_weight,
+                signer_ids,
+                signatures,
+                finalised: true,
+            };
+            (evidence, None, vec!["This bundle carries static-closed-committee evidence over the canonical MyelinBlock.".to_owned()])
         }
         ConsensusKind::Tendermint => {
-            // Build a Tendermint block on the same chunk commitment and reuse
-            // the same data_commitments / scheduler_commitment as the static
-            // path. The Tendermint precommit binds (block_hash, height, round)
-            // and is independent of the static committee's signature domain.
-            let tendermint_block = MyelinBlock {
-                version: 1,
-                parent_hash: [0; 32],
-                number: 1,
-                timestamp_ms: 0,
-                consensus_kind: ConsensusKind::Tendermint,
-                state_root_before: [0; 32],
-                state_root_after: [9; 32],
-                ordered_cell_tx_commitments: vec![[7; 32]],
-                data_commitments: vec![commitment],
-                scheduler_commitment: [8; 32],
-            };
-            let block_hash = tendermint_block.hash();
+            // Build a Tendermint precommit cert over the same canonical
+            // block. The cert's `block_hash` and `height` MUST equal
+            // `canonical_block_hash` and `canonical_block.number`. The
+            // Tendermint signature domain is independent of the static
+            // committee's, so the two paths are not interchangeable.
             let tendermint_engine = tendermint_fixture_engine();
-            let height = tendermint_block.number;
+            let height = canonical_block.number;
             let round = 0u32;
             let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
             let cert = tendermint_engine
-                .precommit_certificate_for_fixture(block_hash, height, round, &["validator-0", "validator-1"])
+                .precommit_certificate_for_fixture(canonical_block_hash, height, round, &["validator-0", "validator-1"])
                 .expect("tendermint fixture certificate");
             tendermint_engine
-                .finalise_block_with_precommit(tendermint_block.clone(), round, cert.clone())
+                .finalise_block_with_precommit(canonical_block.clone(), round, cert.clone())
                 .expect("tendermint fixture finality");
             let signatures = cert
                 .signatures
@@ -997,7 +1098,7 @@ fn teeworlds_court_bundle(
                 .collect::<Vec<_>>();
             let tendermint_evidence = TendermintEvidenceReport {
                 consensus_kind: ConsensusKind::Tendermint.as_str(),
-                block_hash: hex::encode(block_hash),
+                block_hash: hex::encode(canonical_block_hash),
                 quorum_power: 2,
                 height,
                 round,
@@ -1006,11 +1107,25 @@ fn teeworlds_court_bundle(
                 certificate_step: "precommit",
                 finalised: true,
             };
-            let mut notes = vec!["This bundle carries Tendermint precommit evidence.".to_owned()];
-            notes.push("The static-closed-committee evidence block is reported for completeness; the challenge-payload-hash binds to the Tendermint block hash.".to_owned());
-            (block_hash, Some(tendermint_evidence), notes)
+            // Static evidence is still emitted so the bundle surface stays
+            // uniform, but it is informational only — the active finality
+            // path is the Tendermint precommit.
+            let committee_config = static_fixture_committee_config();
+            let quorum_weight = committee_config.quorum_weight;
+            let static_evidence = StaticCommitteeEvidenceReport {
+                consensus_kind: ConsensusKind::StaticClosedCommittee.as_str(),
+                block_hash: hex::encode(canonical_block_hash),
+                quorum_weight,
+                signer_ids: vec![],
+                signatures: vec![],
+                finalised: false,
+            };
+            let mut notes = vec!["This bundle carries Tendermint precommit evidence over the canonical MyelinBlock.".to_owned()];
+            notes.push("The static-closed-committee evidence slot is informational; the challenge-payload-hash binds to the canonical block hash.".to_owned());
+            (static_evidence, Some(tendermint_evidence), notes)
         }
     };
+    let block_hash = canonical_block_hash;
 
     let challenge_payload_hash = blake3_chunks(
         b"myelin:single-chunk-challenge-payload:v1",
@@ -1023,6 +1138,20 @@ fn teeworlds_court_bundle(
     notes.push(
         "It proves the disputed chunk has CKB-compatible transaction shape; it is not yet an on-chain CKB court script.".to_owned(),
     );
+
+    let bundle_block = TeeworldsBundleBlock {
+        version: canonical_block.version,
+        parent_hash: hex::encode(canonical_block.parent_hash),
+        number: canonical_block.number,
+        timestamp_ms: canonical_block.timestamp_ms,
+        consensus_kind: canonical_block.consensus_kind.as_str().to_string(),
+        state_root_before: hex::encode(canonical_block.state_root_before),
+        state_root_after: hex::encode(canonical_block.state_root_after),
+        ordered_cell_tx_commitments: canonical_block.ordered_cell_tx_commitments.iter().map(hex::encode).collect(),
+        data_commitments: canonical_block.data_commitments.iter().map(hex::encode).collect(),
+        scheduler_commitment: hex::encode(canonical_block.scheduler_commitment),
+        block_hash: hex::encode(canonical_block_hash),
+    };
 
     Ok(TeeworldsCourtBundleReport {
         source: path.display().to_string(),
@@ -1039,6 +1168,7 @@ fn teeworlds_court_bundle(
         config_hash: hex::encode(config_hash),
         chunk_commitment: hex::encode(commitment),
         scheduler_report_hash: hex::encode(scheduler_report_hash),
+        block: bundle_block,
         molecule_transaction_bytes: molecule_transaction.len(),
         molecule_transaction_hex: hex::encode(&molecule_transaction),
         molecule_transaction_hash: hex::encode(molecule_transaction_hash),
@@ -1153,15 +1283,82 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
         .ok_or_else(|| CliError::InvalidFixture("scheduler_report_hash must be 32-byte hex".to_owned()))?;
     let molecule_transaction_hash = parse_hex_32(&bundle.molecule_transaction_hash)
         .ok_or_else(|| CliError::InvalidFixture("molecule_transaction_hash must be 32-byte hex".to_owned()))?;
-    // The challenge payload hash binds to the consensus block hash. When
-    // Tendermint evidence is present, that block hash is the Tendermint
-    // block hash; otherwise it is the static-closed-committee block hash.
-    let active_block_hash = match &bundle.tendermint_evidence {
+
+    // ─── Data-binding reconstruction ────────────────────────────────────
+    // Reconstruct the canonical MyelinBlock from the bundle's data fields
+    // and assert that its hash matches the supplied active block hash.
+    // This is the structural guarantee that the finality certificate is
+    // bound to THIS bundle's runtime evidence, not to a free-floating
+    // claimed block hash.
+    let reconstructed_block =
+        bundle.block.to_myelin_block().map_err(|error| CliError::InvalidFixture(format!("bundle block: {error}")))?;
+    let reconstructed_block_hash = reconstructed_block.hash();
+    let supplied_block_hash = parse_hex_32(&bundle.block.block_hash)
+        .ok_or_else(|| CliError::InvalidFixture("bundle.block.block_hash must be 32-byte hex".to_owned()))?;
+    push_check(
+        &mut checks,
+        "block-hash-recomputes",
+        reconstructed_block_hash == supplied_block_hash,
+        Some(hex::encode(reconstructed_block_hash)),
+        Some(hex::encode(supplied_block_hash)),
+        "bundle.block fields rehash to bundle.block.block_hash",
+    );
+
+    // The block's runtime fields must match the bundle's runtime evidence.
+    push_check(
+        &mut checks,
+        "block-state-root-before-matches",
+        reconstructed_block.state_root_before == old_state_root,
+        Some(hex::encode(reconstructed_block.state_root_before)),
+        Some(hex::encode(old_state_root)),
+        "bundle.block.state_root_before == bundle.old_state_root",
+    );
+    push_check(
+        &mut checks,
+        "block-state-root-after-matches",
+        reconstructed_block.state_root_after == new_state_root,
+        Some(hex::encode(reconstructed_block.state_root_after)),
+        Some(hex::encode(new_state_root)),
+        "bundle.block.state_root_after == bundle.new_state_root",
+    );
+    push_check(
+        &mut checks,
+        "block-scheduler-commitment-matches",
+        reconstructed_block.scheduler_commitment == scheduler_report_hash,
+        Some(hex::encode(reconstructed_block.scheduler_commitment)),
+        Some(hex::encode(scheduler_report_hash)),
+        "bundle.block.scheduler_commitment == bundle.scheduler_report_hash",
+    );
+    // The bundle's `chunk_commitment` field is what was committed to the
+    // cell_data_hash chain. The block's `data_commitments[0]` MUST equal
+    // that commitment.
+    let bundle_chunk_commitment = parse_hex_32(&bundle.chunk_commitment)
+        .ok_or_else(|| CliError::InvalidFixture("chunk_commitment must be 32-byte hex".to_owned()))?;
+    push_check(
+        &mut checks,
+        "block-data-commitment-matches",
+        reconstructed_block.data_commitments.first().copied() == Some(bundle_chunk_commitment),
+        Some(hex::encode(reconstructed_block.data_commitments.first().copied().unwrap_or([0; 32]))),
+        Some(hex::encode(bundle_chunk_commitment)),
+        "bundle.block.data_commitments[0] == bundle.chunk_commitment",
+    );
+    // The active block hash is the reconstructed hash. The supplied
+    // static-committee / Tendermint `block_hash` fields must equal it.
+    let active_block_hash = reconstructed_block_hash;
+    let supplied_evidence_block_hash = match &bundle.tendermint_evidence {
         Some(tm) => parse_hex_32(&tm.block_hash)
             .ok_or_else(|| CliError::InvalidFixture("tendermint block_hash must be 32-byte hex".to_owned()))?,
         None => parse_hex_32(&bundle.static_committee_evidence.block_hash)
             .ok_or_else(|| CliError::InvalidFixture("static committee block_hash must be 32-byte hex".to_owned()))?,
     };
+    push_check(
+        &mut checks,
+        "evidence-block-hash-matches-canonical-block",
+        supplied_evidence_block_hash == active_block_hash,
+        Some(hex::encode(active_block_hash)),
+        Some(hex::encode(supplied_evidence_block_hash)),
+        "finality evidence block_hash matches the data-bound canonical block hash",
+    );
     let expected_challenge_payload_hash = hex::encode(blake3_chunks(
         b"myelin:single-chunk-challenge-payload:v1",
         &[
@@ -1783,6 +1980,26 @@ mod tests {
         assert!(verification.valid);
         assert!(verification.checks.iter().all(|check| check.ok));
         assert!(verification.checks.iter().any(|check| check.name == "committee-certificate"));
+        // The data-binding checks must all pass on a fresh, well-formed bundle.
+        assert!(verification.checks.iter().any(|check| check.name == "block-hash-recomputes"));
+        assert!(verification.checks.iter().any(|check| check.name == "block-state-root-before-matches"));
+        assert!(verification.checks.iter().any(|check| check.name == "block-state-root-after-matches"));
+        assert!(verification.checks.iter().any(|check| check.name == "block-scheduler-commitment-matches"));
+        assert!(verification.checks.iter().any(|check| check.name == "block-data-commitment-matches"));
+        assert!(verification.checks.iter().any(|check| check.name == "evidence-block-hash-matches-canonical-block"));
+
+        // Negative check: tampering with state_root_after must make the
+        // data-binding check fail.
+        let mut tampered_report = report.clone();
+        tampered_report.block.state_root_after = "11".repeat(32);
+        tampered_report.new_state_root = "11".repeat(32);
+        let tampered_path = std::env::temp_dir().join(format!("myelin-court-bundle-tampered-{}.json", std::process::id()));
+        std::fs::write(&tampered_path, serde_json::to_vec(&tampered_report).unwrap()).unwrap();
+        let tampered_verification = verify_teeworlds_court_bundle(tampered_path.clone()).unwrap();
+        let _ = std::fs::remove_file(tampered_path);
+        assert!(!tampered_verification.valid, "tampered state_root_after must fail the data-binding check");
+        let tampering_failed = tampered_verification.checks.iter().any(|check| !check.ok);
+        assert!(tampering_failed, "tampered bundle must report at least one failed check");
     }
 
     #[test]
@@ -1821,14 +2038,17 @@ mod tests {
         assert!(tm.finalised);
         assert_eq!(tm.signatures.len(), 2);
 
-        // The challenge payload hash must bind to the Tendermint block hash,
-        // not the static-committee block hash.
+        // The static-committee and Tendermint block hashes MUST agree: both
+        // engines sign the same canonical MyelinBlock (same data fields,
+        // same data-binding block hash), but with different signature
+        // domains. The two engines cannot drift on what was finalised.
         let static_block_hash = hex::decode(&report.static_committee_evidence.block_hash).unwrap();
         let tendermint_block_hash = hex::decode(&tm.block_hash).unwrap();
-        assert_ne!(static_block_hash, tendermint_block_hash, "static and tendermint block hashes must differ");
+        assert_eq!(static_block_hash, tendermint_block_hash, "static and tendermint must sign the same canonical block hash");
 
         // The Tendermint signatures must be domain-separated from the static
-        // committee signatures. The two sets of signatures should differ.
+        // committee signatures. The two sets of signatures should differ
+        // even though the underlying block hash is the same.
         let static_signatures: Vec<&str> = report.static_committee_evidence.signatures.iter().map(|s| s.signature.as_str()).collect();
         let tendermint_signatures: Vec<&str> = tm.signatures.iter().map(|s| s.signature.as_str()).collect();
         assert_ne!(
@@ -1844,6 +2064,8 @@ mod tests {
         assert!(verification.valid);
         assert!(verification.checks.iter().all(|check| check.ok));
         assert!(verification.checks.iter().any(|check| check.name == "tendermint-certificate"));
+        assert!(verification.checks.iter().any(|check| check.name == "block-hash-recomputes"));
+        assert!(verification.checks.iter().any(|check| check.name == "evidence-block-hash-matches-canonical-block"));
         // The static-committee-certificate check must NOT be present when
         // Tendermint evidence is in the bundle; otherwise the bundle would
         // be claiming both engines.
