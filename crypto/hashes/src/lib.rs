@@ -1,7 +1,7 @@
 mod blake3;
 mod hashers;
 
-use myelin_utils::{
+use myelin_core_utils::{
     hex::{FromHex, ToHex},
     mem_size::MemSizeEstimator,
     serde_impl_deser_fixed_bytes_ref, serde_impl_ser_fixed_bytes_ref,

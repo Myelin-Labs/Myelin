@@ -9,10 +9,12 @@ use myelin_consensus::{
     SelectedConsensus, StaticClosedCommittee, StaticCommitteeConfig, Tendermint, TendermintConfig,
 };
 use myelin_exec::{
-    build_cell_tx_execution_report, deserialize_transaction_molecule, project_cell_tx_to_ckb, serialize_transaction_molecule,
-    CellInput, CellOutput, CellTx, CkbProjectionReport, OutPoint, ResolvedCell, Script, ScriptVersion, SemanticProfile,
-    SimpleDataProvider, TransactionScriptVerifier, VmSemantics,
+    build_cell_tx_execution_report, celltx::compute_wtxid, deserialize_transaction_molecule, project_cell_tx_to_ckb,
+    serialize_transaction_molecule, CellInput, CellOutput, CellTx, CkbProjectionReport, OutPoint, ResolvedCell, Script, ScriptVersion,
+    SemanticProfile, SimpleDataProvider, TransactionScriptVerifier, VmSemantics,
 };
+use myelin_mempool::CellPool;
+use myelin_state::CellStateTree;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{fs, path::PathBuf, process::Command, sync::Arc, time::Instant};
@@ -33,6 +35,15 @@ enum Commands {
     Committee(CommitteeArgs),
     /// Teeworlds fixture commands.
     Teeworlds(TeeworldsArgs),
+    /// Off-chain runtime smoke commands.
+    ///
+    /// These commands wire the off-chain kernel crates
+    /// (`myelin-mempool`, `myelin-state`, `myelin-muhash`,
+    /// `myelin-math`) into the binary so the production path
+    /// genuinely exercises them. They are not a permissionless
+    /// L2 simulation; they are a single-shot integration smoke
+    /// for the off-chain kernel surface.
+    Runtime(RuntimeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -228,6 +239,30 @@ struct TeeworldsDoctorArgs {
 }
 
 #[derive(Debug, Args)]
+struct RuntimeArgs {
+    #[command(subcommand)]
+    command: RuntimeCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum RuntimeCommand {
+    /// Run a deterministic off-chain kernel smoke: build a CellPool,
+    /// admit one valid CellTx, apply it to a CellStateTree, then
+    /// run finality through the selected consensus engine.
+    Smoke(RuntimeSmokeArgs),
+}
+
+#[derive(Debug, Args)]
+struct RuntimeSmokeArgs {
+    /// Consensus engine: "static-closed-committee" (default) or "tendermint".
+    #[arg(long, default_value = "static-closed-committee")]
+    consensus: String,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct OutputArgs {
     /// Optional output JSON path.
     #[arg(long)]
@@ -295,6 +330,12 @@ fn run() -> Result<()> {
             }
             TeeworldsCommand::Doctor(args) => {
                 let report = teeworlds_doctor(&args.teeworlds_root);
+                write_json(args.out, &report)
+            }
+        },
+        Commands::Runtime(args) => match args.command {
+            RuntimeCommand::Smoke(args) => {
+                let report = runtime_smoke(&args.consensus)?;
                 write_json(args.out, &report)
             }
         },
@@ -1907,6 +1948,138 @@ fn semantic_profile_label(profile: SemanticProfile) -> &'static str {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct RuntimeSmokeReport {
+    /// Schema tag for downstream consumers.
+    schema: &'static str,
+    /// Consensus engine used for the smoke finality.
+    consensus_kind: &'static str,
+    /// CellTx id (Myelin txid, blake3 domain-separated).
+    cell_tx_id: String,
+    /// CellTx witness txid (the key the mempool indexes by).
+    cell_wtxid: String,
+    /// Pool size before admitting the CellTx.
+    pool_size_before: usize,
+    /// Pool size after admitting the CellTx.
+    pool_size_after: usize,
+    /// Cell state root before applying the CellTx.
+    state_root_before: String,
+    /// Cell state root after applying the CellTx.
+    state_root_after: String,
+    /// Finalised block hash from the selected consensus engine.
+    certificate_hash: String,
+    /// Always true on the smoke path; the smoke command fails hard
+    /// rather than reporting `finalised: false`.
+    finalised: bool,
+}
+
+fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
+    let consensus_kind = match consensus {
+        "static-closed-committee" | "static_closed_committee" => ConsensusKind::StaticClosedCommittee,
+        "tendermint" => ConsensusKind::Tendermint,
+        other => return Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
+    };
+
+    // Build a single valid CellTx. This is the same shape used by
+    // `celltx simple-report` so the smoke is reproducible.
+    let tx = CellTx::new(
+        vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
+        vec![],
+        vec![CellOutput { lock: Script::new([2; 32], 1, vec![0x42]), type_: None, capacity: 100 }],
+        vec![b"myelin-runtime-smoke-output".to_vec()],
+        vec![b"myelin-runtime-smoke-witness".to_vec()],
+    )
+    .map_err(|error| CliError::InvalidFixture(error.to_owned()))?;
+    let txid = tx.id();
+    let wtxid = compute_wtxid(&tx);
+
+    // 1. Create a CellPool (myelin-mempool) and admit the CellTx.
+    let pool = CellPool::new(64);
+    let pool_size_before = pool.stats().total_txs;
+    let wtxid_returned =
+        pool.add(tx.clone(), 1_000, 50_000).map_err(|error| CliError::InvalidFixture(format!("mempool add: {error}")))?;
+    if wtxid_returned != wtxid {
+        return Err(CliError::InvalidFixture(format!(
+            "mempool returned wtxid mismatch: expected {}, got {}",
+            hex::encode(wtxid),
+            hex::encode(wtxid_returned)
+        )));
+    }
+    let pool_size_after = pool.stats().total_txs;
+
+    // 2. Create a CellStateTree (myelin-state) and apply the CellTx.
+    let mut tree = CellStateTree::new();
+    let state_root_before = tree.root();
+    // Insert a small entry that anchors the smoke CellTx in the
+    // state tree. The outpoint hash is the wtxid, the entry is
+    // derived from the CellTx's first output.
+    let mut entry_hasher = blake3::Hasher::new();
+    entry_hasher.update(b"myelin:runtime-smoke-entry:v1");
+    entry_hasher.update(&wtxid);
+    let outpoint_hash = myelin_hashes::Hash::from(*entry_hasher.finalize().as_bytes());
+    let outpoint = OutPoint::new(wtxid, 0);
+    let entry = myelin_state::CellEntry {
+        capacity: 100,
+        data_bytes: 30,
+        lock_hash: myelin_hashes::Hash::from([2; 32]),
+        type_hash: None,
+        data_hash: myelin_hashes::Hash::from(blake3_32(b"myelin:runtime-smoke-data:v1", b"myelin-runtime-smoke-output")),
+        created_block_number: 1,
+        is_cellbase: false,
+        lock_script: Some(Script::new([2; 32], 1, vec![0x42])),
+        type_script: None,
+        data: Some(b"myelin-runtime-smoke-output".to_vec()),
+    };
+    tree.insert_with_outpoint(outpoint_hash, outpoint, entry);
+    let state_root_after = tree.root();
+
+    // 3. Build a MyelinBlock anchored on the new state root, then
+    //    run the selected consensus engine to finalise it.
+    let block = MyelinBlock {
+        version: 1,
+        parent_hash: [0; 32],
+        number: 1,
+        timestamp_ms: 0,
+        consensus_kind,
+        state_root_before: *state_root_before.as_ref(),
+        state_root_after: *state_root_after.as_ref(),
+        ordered_cell_tx_commitments: vec![wtxid],
+        data_commitments: vec![wtxid],
+        scheduler_commitment: [0; 32],
+    };
+    let certificate_hash = match consensus_kind {
+        ConsensusKind::StaticClosedCommittee => {
+            let committee_config = static_fixture_committee_config();
+            let committee = StaticClosedCommittee::new(committee_config).expect("static fixture committee");
+            let cert =
+                committee.certificate_for_fixture(block.hash(), &["validator-0", "validator-1"]).expect("static fixture certificate");
+            let finalised = committee.finalise_block(block.clone(), cert).expect("static fixture finality");
+            hex::encode(finalised.block_hash)
+        }
+        ConsensusKind::Tendermint => {
+            let tendermint_engine = tendermint_fixture_engine();
+            let cert = tendermint_engine
+                .precommit_certificate_for_fixture(block.hash(), block.number, 0, &["validator-0", "validator-1"])
+                .expect("tendermint fixture certificate");
+            let finalised = tendermint_engine.finalise_block_with_precommit(block, 0, cert).expect("tendermint fixture finality");
+            hex::encode(finalised.block_hash)
+        }
+    };
+
+    Ok(RuntimeSmokeReport {
+        schema: "myelin-runtime-smoke-v1",
+        consensus_kind: consensus_kind.as_str(),
+        cell_tx_id: hex::encode(txid),
+        cell_wtxid: hex::encode(wtxid),
+        pool_size_before,
+        pool_size_after,
+        state_root_before: hex::encode(<myelin_hashes::Hash as AsRef<[u8]>>::as_ref(&state_root_before)),
+        state_root_after: hex::encode(<myelin_hashes::Hash as AsRef<[u8]>>::as_ref(&state_root_after)),
+        certificate_hash,
+        finalised: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2070,5 +2243,65 @@ mod tests {
         // Tendermint evidence is in the bundle; otherwise the bundle would
         // be claiming both engines.
         assert!(!verification.checks.iter().any(|check| check.name == "committee-certificate"));
+    }
+
+    #[test]
+    fn runtime_smoke_static_closed_committee_finalises_a_block() {
+        let report = runtime_smoke("static-closed-committee").expect("smoke static");
+        assert_eq!(report.schema, "myelin-runtime-smoke-v1");
+        assert_eq!(report.consensus_kind, "static-closed-committee");
+        assert_eq!(report.cell_tx_id.len(), 64);
+        assert_eq!(report.cell_wtxid.len(), 64);
+        assert_eq!(report.pool_size_before, 0);
+        assert_eq!(report.pool_size_after, 1);
+        assert_eq!(report.state_root_before.len(), 64);
+        assert_eq!(report.state_root_after.len(), 64);
+        assert_ne!(report.state_root_before, report.state_root_after);
+        assert_eq!(report.certificate_hash.len(), 64);
+        assert!(report.finalised);
+    }
+
+    #[test]
+    fn runtime_smoke_tendermint_finalises_a_block() {
+        let report = runtime_smoke("tendermint").expect("smoke tendermint");
+        assert_eq!(report.schema, "myelin-runtime-smoke-v1");
+        assert_eq!(report.consensus_kind, "tendermint");
+        assert_eq!(report.cell_tx_id.len(), 64);
+        assert_eq!(report.cell_wtxid.len(), 64);
+        assert_eq!(report.pool_size_before, 0);
+        assert_eq!(report.pool_size_after, 1);
+        assert_eq!(report.state_root_before.len(), 64);
+        assert_eq!(report.state_root_after.len(), 64);
+        assert_ne!(report.state_root_before, report.state_root_after);
+        assert_eq!(report.certificate_hash.len(), 64);
+        assert!(report.finalised);
+    }
+
+    #[test]
+    fn runtime_smoke_state_is_consensus_agnostic_but_certificates_differ() {
+        // The CellTx + state mutation is consensus-independent: the
+        // txid, wtxid, and state roots MUST be identical across both
+        // engines. Only the certificate_hash (the finalisation signature
+        // domain) is allowed to differ.
+        let static_report = runtime_smoke("static-closed-committee").expect("smoke static");
+        let tendermint_report = runtime_smoke("tendermint").expect("smoke tendermint");
+
+        assert_eq!(static_report.cell_tx_id, tendermint_report.cell_tx_id);
+        assert_eq!(static_report.cell_wtxid, tendermint_report.cell_wtxid);
+        assert_eq!(static_report.state_root_before, tendermint_report.state_root_before);
+        assert_eq!(static_report.state_root_after, tendermint_report.state_root_after);
+        assert_eq!(static_report.pool_size_before, tendermint_report.pool_size_before);
+        assert_eq!(static_report.pool_size_after, tendermint_report.pool_size_after);
+        assert_ne!(
+            static_report.certificate_hash, tendermint_report.certificate_hash,
+            "the two engines must use different signature domains"
+        );
+    }
+
+    #[test]
+    fn runtime_smoke_rejects_unknown_consensus_kind() {
+        let err = runtime_smoke("not-a-real-engine").expect_err("must reject unknown");
+        let msg = format!("{err}");
+        assert!(msg.contains("unknown consensus engine"), "got: {msg}");
     }
 }

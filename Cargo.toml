@@ -4,6 +4,7 @@ exclude = ["cellscript"]
 members = [
     "cli",
     "consensus",
+    "core-utils",
     "crypto/hashes",
     "exec",
     "math",
@@ -37,6 +38,7 @@ log = "0.4.20"
 myelin-exec = { version = "0.1.0", path = "exec" }
 myelin-consensus = { version = "0.1.0", path = "consensus" }
 myelin-cli = { version = "0.1.0", path = "cli" }
+myelin-core-utils = { version = "0.1.0", path = "core-utils" }
 myelin-hashes = { version = "0.1.0", path = "crypto/hashes" }
 myelin-math = { version = "0.1.0", path = "math" }
 myelin-mempool = { version = "0.1.0", path = "mempool" }

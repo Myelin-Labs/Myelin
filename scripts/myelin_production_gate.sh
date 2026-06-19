@@ -142,6 +142,77 @@ print(json.dumps({
 }, indent=2, sort_keys=True))
 PY
 
+# 8b. Runtime smoke — exercise myelin-state + myelin-mempool + both consensus
+#     engines end-to-end through the binary, not just the unit tests.
+RUNTIME_STATIC_REPORT="${OUTPUT_DIR}/runtime-smoke-static.json"
+RUNTIME_TENDERMINT_REPORT="${OUTPUT_DIR}/runtime-smoke-tendermint.json"
+
+run_step "Smoke: runtime smoke (static-closed-committee)" \
+  cargo run -p myelin-cli -- runtime smoke \
+    --consensus static-closed-committee \
+    --out "${RUNTIME_STATIC_REPORT}"
+
+run_step "Smoke: runtime smoke (tendermint)" \
+  cargo run -p myelin-cli -- runtime smoke \
+    --consensus tendermint \
+    --out "${RUNTIME_TENDERMINT_REPORT}"
+
+run_step "Validate runtime smoke reports" \
+  python3 - "${RUNTIME_STATIC_REPORT}" "${RUNTIME_TENDERMINT_REPORT}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+static_report = json.loads(Path(sys.argv[1]).read_text())
+tendermint_report = json.loads(Path(sys.argv[2]).read_text())
+
+def require(condition, message):
+    if not condition:
+        raise SystemExit(f"production gate failed: {message}")
+
+# Both reports must be in the v1 schema and finalised.
+for report, kind in ((static_report, "static-closed-committee"),
+                     (tendermint_report, "tendermint")):
+    require(report["schema"] == "myelin-runtime-smoke-v1",
+            f"{kind} schema must be myelin-runtime-smoke-v1")
+    require(report["consensus_kind"] == kind, f"{kind} consensus_kind")
+    require(report["finalised"] is True, f"{kind} finalised")
+    require(len(report["cell_tx_id"]) == 64, f"{kind} txid length")
+    require(len(report["cell_wtxid"]) == 64, f"{kind} wtxid length")
+    require(len(report["state_root_before"]) == 64, f"{kind} state_root_before length")
+    require(len(report["state_root_after"]) == 64, f"{kind} state_root_after length")
+    require(len(report["certificate_hash"]) == 64, f"{kind} certificate_hash length")
+    require(report["pool_size_before"] == 0, f"{kind} pool empty before")
+    require(report["pool_size_after"] == 1, f"{kind} pool has 1 tx after")
+    require(report["state_root_before"] != report["state_root_after"],
+            f"{kind} state must mutate")
+
+# The CellTx + state mutation is consensus-independent: txid, wtxid, and
+# both state roots MUST be identical across both engines. Only the
+# certificate_hash (signature domain) is allowed to differ.
+require(static_report["cell_tx_id"] == tendermint_report["cell_tx_id"],
+        "cell txid must match across engines")
+require(static_report["cell_wtxid"] == tendermint_report["cell_wtxid"],
+        "cell wtxid must match across engines")
+require(static_report["state_root_before"] == tendermint_report["state_root_before"],
+        "state_root_before must match across engines")
+require(static_report["state_root_after"] == tendermint_report["state_root_after"],
+        "state_root_after must match across engines")
+require(static_report["certificate_hash"] != tendermint_report["certificate_hash"],
+        "the two engines must use different signature domains")
+
+print(json.dumps({
+    "txid": static_report["cell_tx_id"],
+    "state_root_after": static_report["state_root_after"],
+    "static_certificate_hash": static_report["certificate_hash"],
+    "tendermint_certificate_hash": tendermint_report["certificate_hash"],
+}, indent=2, sort_keys=True))
+PY
+
+# 8c. Dependency tree must not reintroduce the forbidden bloated surface.
+run_step "Scan dependency tree for forbidden crates" \
+  bash -c "set -e; cargo tree -p myelin-cli -e normal > '${OUTPUT_DIR}/cli-tree.txt'; cargo tree -p myelin-exec -e normal > '${OUTPUT_DIR}/exec-tree.txt'; if rg -q 'workflow-node|workflow-perf-monitor' '${OUTPUT_DIR}/cli-tree.txt' '${OUTPUT_DIR}/exec-tree.txt'; then echo 'forbidden workflow crate leaked back into dependency tree' >&2; rg -n 'workflow-node|workflow-perf-monitor' '${OUTPUT_DIR}/cli-tree.txt' '${OUTPUT_DIR}/exec-tree.txt' >&2; exit 1; fi; echo 'dependency tree clean of workflow-* crates'; cat '${OUTPUT_DIR}/cli-tree.txt' | sed -n '1,40p'"
+
 # 9. Stale-surface grep
 run_step "Scan Myelin tree for stale identity" python3 - <<'PY'
 import subprocess

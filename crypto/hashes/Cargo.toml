@@ -14,7 +14,7 @@ no-asm = ["keccak"]
 
 [dependencies]
 faster-hex.workspace = true
-myelin-utils.workspace = true
+myelin-core-utils.workspace = true
 keccak = { workspace = true, optional = true }
 serde.workspace = true
 blake3.workspace = true

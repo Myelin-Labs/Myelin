@@ -1,0 +1,18 @@
+[package]
+name = "myelin-core-utils"
+description = "Myelin core utility surface (hex, mem_size, serde bytes) for hot-path crates"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[dependencies]
+faster-hex.workspace = true
+hex.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
