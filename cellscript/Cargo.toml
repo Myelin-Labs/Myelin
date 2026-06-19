@@ -5,11 +5,6 @@ members = [
     "examples/ckb-sdk-builder",
 ]
 exclude = [
-    "proposals/novaseal/agreement-profile-v0/harness/ckb_vm",
-    "proposals/novaseal/v0-mvp-skeleton/harness/ckb_vm",
-    "proposals/novaseal/v0-mvp-skeleton/verifier/novaseal_btc_verifier",
-    "proposals/novaseal/v0-mvp-skeleton/verifier/novaseal_btc_verifier_core",
-    "proposals/novaseal/v0-mvp-skeleton/verifier/novaseal_btc_verifier_riscv",
 ]
 resolver = "2"
 
@@ -33,12 +28,9 @@ exclude = [
     "cellscript-*.png",
     "docs/",
     "docs/wiki/",
-    "editors/",
-    "proposals/",
     "scripts/__pycache__/",
     "src/bin/",
     "tools/",
-    "website/",
 ]
 
 [[bin]]
@@ -73,9 +65,6 @@ colored = "2.1"
 
 camino = "1.1"
 ckb-vm = { version = "0.24", features = ["asm", "detect-asm"], optional = true }
-
-# NovaSeal certifier uses sha2 in src/cli/novaseal_certification.rs
-sha2 = "0.10"
 
 # LSP
 tower-lsp = "0.20"

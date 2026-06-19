@@ -7,9 +7,10 @@ It is a protocol seed for an off-chain finite Cell ledger, not a CKB full-node
 fork and not a new L1.
 
 The precise early positioning is experimental: Myelin is a CKB-native
-isomorphic session runtime, not a finished trustless L2. The static committee is
-the fast path for sessions; projection and the future L1 court path are the CKB
-alignment boundary.
+isomorphic session runtime, not a finished trustless or permissionless L2.
+Static committee and Tendermint-style precommit finality are selectable session
+fast paths; projection and the future L1 court path are the CKB alignment
+boundary.
 
 In one sentence: Myelin is an off-chain Cell session ledger. It moves
 high-frequency state transitions off-chain, keeps them finite and typed, and
@@ -25,8 +26,9 @@ off-chain finite Cell ledger:
   typed-cell scheduler witnesses, and CellDAG scheduling.
 - `state/` - live Cell state roots and data-availability proof primitives.
 - `mempool/` - Cell transaction pool and deterministic conflict scoring.
-- `consensus/` - selectable finality engines; phase one is a static closed
-  committee over canonical session block hashes.
+- `consensus/` - selectable finality engines: static closed committee and
+  Tendermint-style weighted precommit finality over canonical session block
+  hashes.
 - `crypto/`, `math/`, `utils/` - local support crates retained by the execution
   and state kernel.
 
@@ -50,16 +52,17 @@ transitions and exits.
 
 Current Myelin security is intentionally narrower than a finished permissionless
 L2:
-phase-one blocks use static committee finality for session benchmarking and
-pressure testing. The CKB-style projection and court path is what keeps the
-runtime aligned with CKB semantics; it is not a claim of permissionless security
-yet.
+phase-one blocks use selectable closed-validator finality for session
+benchmarking and pressure testing. The CKB-style projection and court path is
+what keeps the runtime aligned with CKB semantics; it is not a claim of
+permissionless security yet.
 
 The correct early public claim is:
 
 ```text
-Myelin currently uses static committee finality for session benchmarking and
-pressure testing; the L1 court/projection path is what makes it CKB-aligned.
+Myelin currently uses selectable closed-validator finality for session
+benchmarking and pressure testing; the L1 court/projection path is what makes
+it CKB-aligned.
 ```
 
 Core demos must prefer the `ckb-compatible` semantic profile:
@@ -111,8 +114,8 @@ scripts/myelin_protocol_gate.sh
 It checks the active Myelin tree for removed source-chain and legacy serializer
 vocabulary, proves the native dependency graph has no removed serializer
 package, runs the focused Rust workspace checks, emits a simple CellTx execution
-report, finalises a demo block through the selected static closed-committee
-consensus engine, and then runs the Teeworlds acceptance gate.
+report, finalises demo blocks through the selected static closed-committee and
+Tendermint consensus engines, and then runs the Teeworlds acceptance gate.
 
 The narrower Teeworlds integration gate is:
 

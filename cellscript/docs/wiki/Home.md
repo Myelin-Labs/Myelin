@@ -114,7 +114,7 @@ The fastest way to get oriented is to compile the token example:
 ```bash
 git clone https://github.com/a19q3/CellScript.git
 cd CellScript
-./scripts/cellscript_gate.sh dev
+cargo check --locked -p cellscript --all-targets
 cargo run --locked --bin cellc -- examples/token.cell --target riscv64-elf --target-profile ckb --primitive-strict 0.16 -o /tmp/token.elf
 cargo run --locked --bin cellc -- verify-artifact /tmp/token.elf --expect-target-profile ckb
 ```
@@ -148,7 +148,7 @@ Keep two levels separate:
 Release-facing CKB evidence comes from the repository root:
 
 ```bash
-./scripts/cellscript_gate.sh release
+./scripts/cellscript_ckb_release_gate.sh full
 ```
 
 The bundled examples are covered by the current local production evidence suite.

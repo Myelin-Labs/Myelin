@@ -6,7 +6,7 @@
 use clap::{Args, Parser, Subcommand};
 use myelin_consensus::{
     CommitteeCertificate, CommitteeSignature, CommitteeValidator, ConsensusConfig, ConsensusEngine, ConsensusKind, MyelinBlock,
-    SelectedConsensus, StaticClosedCommittee, StaticCommitteeConfig,
+    SelectedConsensus, StaticClosedCommittee, StaticCommitteeConfig, Tendermint, TendermintConfig,
 };
 use myelin_exec::{
     build_cell_tx_execution_report, deserialize_transaction_molecule, project_cell_tx_to_ckb, serialize_transaction_molecule,
@@ -101,6 +101,10 @@ struct TeeworldsInspectArgs {
     /// Tape chunk size in bytes.
     #[arg(long, default_value_t = 262_144)]
     chunk_bytes: usize,
+    /// Consensus engine for the finality evidence: "static-closed-committee"
+    /// (default) or "tendermint".
+    #[arg(long, default_value = "static-closed-committee")]
+    consensus: String,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -117,6 +121,10 @@ struct TeeworldsBenchArgs {
     /// Number of measured runs.
     #[arg(long, default_value_t = 3)]
     runs: usize,
+    /// Consensus engine for the finality evidence: "static-closed-committee"
+    /// (default) or "tendermint".
+    #[arg(long, default_value = "static-closed-committee")]
+    consensus: String,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -148,6 +156,10 @@ struct TeeworldsBuildFixtureArgs {
     /// Number of measured Myelin benchmark runs.
     #[arg(long, default_value_t = 3)]
     runs: usize,
+    /// Consensus engine for the finality evidence: "static-closed-committee"
+    /// (default) or "tendermint".
+    #[arg(long, default_value = "static-closed-committee")]
+    consensus: String,
     /// Optional output JSON path for the combined report.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -186,6 +198,10 @@ struct TeeworldsCourtBundleArgs {
     /// Zero-based disputed chunk index.
     #[arg(long, default_value_t = 0)]
     chunk_index: usize,
+    /// Consensus engine for the bundle evidence: "static-closed-committee"
+    /// (default) or "tendermint".
+    #[arg(long, default_value = "static-closed-committee")]
+    consensus: String,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -253,11 +269,11 @@ fn run() -> Result<()> {
         },
         Commands::Teeworlds(args) => match args.command {
             TeeworldsCommand::Inspect(args) => {
-                let report = inspect_teeworlds_mock_tx(args.mock_tx, args.chunk_bytes)?;
+                let report = inspect_teeworlds_mock_tx(args.mock_tx, args.chunk_bytes, &args.consensus)?;
                 write_json(args.out, &report)
             }
             TeeworldsCommand::Bench(args) => {
-                let report = bench_teeworlds_mock_tx(args.mock_tx, args.chunk_bytes, args.runs)?;
+                let report = bench_teeworlds_mock_tx(args.mock_tx, args.chunk_bytes, args.runs, &args.consensus)?;
                 write_json(args.out, &report)
             }
             TeeworldsCommand::BuildFixture(args) => {
@@ -270,7 +286,7 @@ fn run() -> Result<()> {
                 write_json(args.out, &report)
             }
             TeeworldsCommand::CourtBundle(args) => {
-                let report = teeworlds_court_bundle(args.mock_tx, args.chunk_bytes, args.chunk_index)?;
+                let report = teeworlds_court_bundle(args.mock_tx, args.chunk_bytes, args.chunk_index, &args.consensus)?;
                 write_json(args.out, &report)
             }
             TeeworldsCommand::VerifyCourtBundle(args) => {
@@ -314,20 +330,30 @@ struct CommitteeDemoReport {
     block_hash: String,
     quorum_weight: u64,
     signer_ids: Vec<String>,
+    certificate_height: u64,
+    certificate_round: Option<u32>,
+    certificate_step: &'static str,
     finalised: bool,
 }
 
 fn finalise_demo_from_config(path: PathBuf) -> Result<CommitteeDemoReport> {
     let config_text = fs::read_to_string(path)?;
     let config = ConsensusConfig::from_toml_str(&config_text)?;
+    let selected = SelectedConsensus::from_config(config.clone())?;
+    match config.kind {
+        ConsensusKind::StaticClosedCommittee => finalise_static_demo(config, selected),
+        ConsensusKind::Tendermint => finalise_tendermint_demo(config, selected),
+    }
+}
+
+fn finalise_static_demo(config: ConsensusConfig, selected: SelectedConsensus) -> Result<CommitteeDemoReport> {
     let static_config = config
         .static_committee
-        .clone()
         .ok_or_else(|| CliError::InvalidFixture("demo finality requires a static committee config".to_owned()))?;
-    let selected = SelectedConsensus::from_config(config)?;
     let committee = StaticClosedCommittee::new(static_config.clone())?;
-    let block = demo_block(vec![[0xA1; 32]]);
+    let block = demo_block(vec![[0xA1; 32]], ConsensusKind::StaticClosedCommittee);
     let block_hash = block.hash();
+    let height = block.number;
     let signer_ids = quorum_signers(&static_config)?;
     let signer_refs = signer_ids.iter().map(String::as_str).collect::<Vec<_>>();
     let certificate = committee.certificate_for_fixture(block_hash, &signer_refs)?;
@@ -337,6 +363,44 @@ fn finalise_demo_from_config(path: PathBuf) -> Result<CommitteeDemoReport> {
         block_hash: hex::encode(block_hash),
         quorum_weight: static_config.quorum_weight,
         signer_ids,
+        certificate_height: height,
+        certificate_round: None,
+        certificate_step: "commit",
+        finalised: true,
+    })
+}
+
+fn finalise_tendermint_demo(config: ConsensusConfig, selected: SelectedConsensus) -> Result<CommitteeDemoReport> {
+    let tendermint_config =
+        config.tendermint.ok_or_else(|| CliError::InvalidFixture("demo finality requires a tendermint config".to_owned()))?;
+    let tendermint = Tendermint::new(tendermint_config.clone())?;
+    let block = demo_block(vec![[0xB1; 32]], ConsensusKind::Tendermint);
+    let block_hash = block.hash();
+    let height = block.number;
+    let round = 0;
+    let signer_ids = tendermint_quorum_signers(&tendermint_config)?;
+    let signer_refs = signer_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let certificate = tendermint.precommit_certificate_for_fixture(block_hash, height, round, &signer_refs)?;
+    match selected {
+        SelectedConsensus::Tendermint(engine) => {
+            engine.finalise_block_with_precommit(block, round, certificate)?;
+        }
+        other => {
+            return Err(myelin_consensus::ConsensusError::WrongEngine {
+                expected: ConsensusKind::Tendermint.as_str(),
+                actual: other.kind().as_str(),
+            }
+            .into());
+        }
+    }
+    Ok(CommitteeDemoReport {
+        consensus_kind: ConsensusKind::Tendermint.as_str(),
+        block_hash: hex::encode(block_hash),
+        quorum_weight: tendermint_config.quorum_power,
+        signer_ids,
+        certificate_height: height,
+        certificate_round: Some(round),
+        certificate_step: "precommit",
         finalised: true,
     })
 }
@@ -353,6 +417,19 @@ fn quorum_signers(config: &StaticCommitteeConfig) -> Result<Vec<String>> {
         }
     }
     Err(CliError::InvalidFixture("static committee config cannot satisfy quorum".to_owned()))
+}
+
+fn tendermint_quorum_signers(config: &TendermintConfig) -> Result<Vec<String>> {
+    let mut signers = Vec::new();
+    let mut power = 0u64;
+    for validator in &config.validators {
+        signers.push(validator.id.clone());
+        power = power.checked_add(validator.weight).ok_or_else(|| CliError::InvalidFixture("validator power overflow".to_owned()))?;
+        if power >= config.quorum_power {
+            return Ok(signers);
+        }
+    }
+    Err(CliError::InvalidFixture("tendermint config cannot satisfy quorum".to_owned()))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -453,7 +530,13 @@ struct TeeworldsCourtBundleReport {
     molecule_transaction_hash: String,
     challenge_payload_hash: String,
     ckb_projection: TeeworldsChunkProjectionReport,
+    /// Selectable finality evidence: static closed committee OR Tendermint
+    /// weighted precommit certificate. The same `signatures` field carries
+    /// both modes; the `consensus_kind` field disambiguates.
     static_committee_evidence: StaticCommitteeEvidenceReport,
+    /// Tendermint-only fields: precommit round, certificate step, height.
+    /// `None` for static-closed-committee bundles.
+    tendermint_evidence: Option<TendermintEvidenceReport>,
     court_verifiable: bool,
     l1_court_implemented: bool,
     notes: Vec<String>,
@@ -487,6 +570,10 @@ struct TeeworldsCourtBundleInput {
     scheduler_report_hash: String,
     ckb_projection: TeeworldsChunkProjectionInput,
     static_committee_evidence: StaticCommitteeEvidenceInput,
+    /// Optional Tendermint precommit evidence. When present, the challenge
+    /// payload hash binds to the Tendermint block hash and the static
+    /// committee evidence block hash is reported for completeness only.
+    tendermint_evidence: Option<TendermintEvidenceInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -509,6 +596,17 @@ struct StaticCommitteeEvidenceInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct TendermintEvidenceInput {
+    block_hash: String,
+    quorum_power: u64,
+    height: u64,
+    round: u32,
+    signer_ids: Vec<String>,
+    signatures: Vec<CommitteeSignatureEvidenceInput>,
+    finalised: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct CommitteeSignatureEvidenceInput {
     validator_id: String,
     signature: String,
@@ -522,6 +620,19 @@ struct StaticCommitteeEvidenceReport {
     quorum_weight: u64,
     signer_ids: Vec<String>,
     signatures: Vec<CommitteeSignatureEvidenceReport>,
+    finalised: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TendermintEvidenceReport {
+    consensus_kind: &'static str,
+    block_hash: String,
+    quorum_power: u64,
+    height: u64,
+    round: u32,
+    signer_ids: Vec<String>,
+    signatures: Vec<CommitteeSignatureEvidenceReport>,
+    certificate_step: &'static str,
     finalised: bool,
 }
 
@@ -558,10 +669,11 @@ struct ToolCheck {
     path: Option<String>,
 }
 
-fn inspect_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize) -> Result<TeeworldsFixtureReport> {
+fn inspect_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize, consensus: &str) -> Result<TeeworldsFixtureReport> {
     if chunk_bytes == 0 {
         return Err(CliError::InvalidFixture("chunk-bytes must be non-zero".to_owned()));
     }
+    let consensus_kind = parse_teeworlds_consensus(consensus)?;
 
     let bytes = fs::read(&path)?;
     let fixture_hash = *blake3::hash(&bytes).as_bytes();
@@ -590,7 +702,7 @@ fn inspect_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize) -> Result<Teewor
         })
         .collect::<Vec<_>>();
     let ckb_projection_possible = chunks.iter().all(|chunk| chunk.ckb_projection.ckb_projection_possible);
-    let finality = finalise_teeworlds_fixture_block(&chunks);
+    let finality = finalise_teeworlds_fixture_block(&chunks, consensus_kind);
 
     Ok(TeeworldsFixtureReport {
         source: path.display().to_string(),
@@ -605,6 +717,14 @@ fn inspect_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize) -> Result<Teewor
         chunks,
         finality,
     })
+}
+
+fn parse_teeworlds_consensus(consensus: &str) -> Result<ConsensusKind> {
+    match consensus {
+        "static-closed-committee" | "static_closed_committee" => Ok(ConsensusKind::StaticClosedCommittee),
+        "tendermint" => Ok(ConsensusKind::Tendermint),
+        other => Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
+    }
 }
 
 fn teeworlds_doctor(teeworlds_root: &std::path::Path) -> TeeworldsDoctorReport {
@@ -777,10 +897,20 @@ fn teeworlds_vm_probe(args: &TeeworldsVmProbeArgs) -> Result<TeeworldsVmProbeRep
     })
 }
 
-fn teeworlds_court_bundle(path: PathBuf, chunk_bytes: usize, chunk_index: usize) -> Result<TeeworldsCourtBundleReport> {
+fn teeworlds_court_bundle(
+    path: PathBuf,
+    chunk_bytes: usize,
+    chunk_index: usize,
+    consensus: &str,
+) -> Result<TeeworldsCourtBundleReport> {
     if chunk_bytes == 0 {
         return Err(CliError::InvalidFixture("chunk-bytes must be non-zero".to_owned()));
     }
+    let consensus_kind = match consensus {
+        "static-closed-committee" | "static_closed_committee" => ConsensusKind::StaticClosedCommittee,
+        "tendermint" => ConsensusKind::Tendermint,
+        other => return Err(CliError::InvalidFixture(format!("unknown consensus engine for court-bundle: {other}"))),
+    };
 
     let bytes = fs::read(&path)?;
     let fixture_hash = *blake3::hash(&bytes).as_bytes();
@@ -821,13 +951,78 @@ fn teeworlds_court_bundle(path: PathBuf, chunk_bytes: usize, chunk_index: usize)
         blake3_chunks(b"myelin:teeworlds-new-state-root:v1", &[&old_state_root, &commitment, &map_hash, &config_hash]);
     let chunk_payload_hash = blake3_32(b"myelin:teeworlds-chunk-payload:v1", chunk);
     let scheduler_report_hash = blake3_chunks(b"myelin:teeworlds-scheduler-report:v1", &[&session_id, &index_bytes, &commitment]);
-    let static_committee_evidence = static_committee_evidence_for_commitments(vec![commitment]);
-    let block_hash = parse_hex_32(&static_committee_evidence.block_hash).expect("fixture block hash is hex");
+
+    let static_evidence = static_committee_evidence_for_commitments(vec![commitment]);
+    let (block_hash, tendermint_evidence, evidence_notes) = match consensus_kind {
+        ConsensusKind::StaticClosedCommittee => {
+            let h = parse_hex_32(&static_evidence.block_hash).expect("fixture block hash is hex");
+            (h, None, vec!["This bundle carries static-closed-committee evidence.".to_owned()])
+        }
+        ConsensusKind::Tendermint => {
+            // Build a Tendermint block on the same chunk commitment and reuse
+            // the same data_commitments / scheduler_commitment as the static
+            // path. The Tendermint precommit binds (block_hash, height, round)
+            // and is independent of the static committee's signature domain.
+            let tendermint_block = MyelinBlock {
+                version: 1,
+                parent_hash: [0; 32],
+                number: 1,
+                timestamp_ms: 0,
+                consensus_kind: ConsensusKind::Tendermint,
+                state_root_before: [0; 32],
+                state_root_after: [9; 32],
+                ordered_cell_tx_commitments: vec![[7; 32]],
+                data_commitments: vec![commitment],
+                scheduler_commitment: [8; 32],
+            };
+            let block_hash = tendermint_block.hash();
+            let tendermint_engine = tendermint_fixture_engine();
+            let height = tendermint_block.number;
+            let round = 0u32;
+            let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
+            let cert = tendermint_engine
+                .precommit_certificate_for_fixture(block_hash, height, round, &["validator-0", "validator-1"])
+                .expect("tendermint fixture certificate");
+            tendermint_engine
+                .finalise_block_with_precommit(tendermint_block.clone(), round, cert.clone())
+                .expect("tendermint fixture finality");
+            let signatures = cert
+                .signatures
+                .iter()
+                .map(|signature| CommitteeSignatureEvidenceReport {
+                    validator_id: signature.validator_id.clone(),
+                    signature: hex::encode(signature.signature),
+                    signature_hash: hex::encode(blake3_32(b"myelin:tendermint-precommit-signature-hash:v1", &signature.signature)),
+                })
+                .collect::<Vec<_>>();
+            let tendermint_evidence = TendermintEvidenceReport {
+                consensus_kind: ConsensusKind::Tendermint.as_str(),
+                block_hash: hex::encode(block_hash),
+                quorum_power: 2,
+                height,
+                round,
+                signer_ids,
+                signatures,
+                certificate_step: "precommit",
+                finalised: true,
+            };
+            let mut notes = vec!["This bundle carries Tendermint precommit evidence.".to_owned()];
+            notes.push("The static-closed-committee evidence block is reported for completeness; the challenge-payload-hash binds to the Tendermint block hash.".to_owned());
+            (block_hash, Some(tendermint_evidence), notes)
+        }
+    };
+
     let challenge_payload_hash = blake3_chunks(
         b"myelin:single-chunk-challenge-payload:v1",
         &[&old_state_root, &chunk_payload_hash, &new_state_root, &scheduler_report_hash, &molecule_transaction_hash, &block_hash],
     );
     let court_verifiable = ckb_projection.ckb_projection_possible && ckb_projection.semantic_profile == "ckb-compatible";
+
+    let mut notes = evidence_notes;
+    notes.push("This is a single-chunk court input bundle for CKB-style adjudication design.".to_owned());
+    notes.push(
+        "It proves the disputed chunk has CKB-compatible transaction shape; it is not yet an on-chain CKB court script.".to_owned(),
+    );
 
     Ok(TeeworldsCourtBundleReport {
         source: path.display().to_string(),
@@ -849,13 +1044,11 @@ fn teeworlds_court_bundle(path: PathBuf, chunk_bytes: usize, chunk_index: usize)
         molecule_transaction_hash: hex::encode(molecule_transaction_hash),
         challenge_payload_hash: hex::encode(challenge_payload_hash),
         ckb_projection,
-        static_committee_evidence,
+        static_committee_evidence: static_evidence,
+        tendermint_evidence,
         court_verifiable,
         l1_court_implemented: false,
-        notes: vec![
-            "This is a single-chunk court input bundle for CKB-style adjudication design.".to_owned(),
-            "It proves the disputed chunk has CKB-compatible transaction shape and static-committee evidence; it is not yet an on-chain CKB court script.".to_owned(),
-        ],
+        notes,
     })
 }
 
@@ -960,11 +1153,25 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
         .ok_or_else(|| CliError::InvalidFixture("scheduler_report_hash must be 32-byte hex".to_owned()))?;
     let molecule_transaction_hash = parse_hex_32(&bundle.molecule_transaction_hash)
         .ok_or_else(|| CliError::InvalidFixture("molecule_transaction_hash must be 32-byte hex".to_owned()))?;
-    let block_hash = parse_hex_32(&bundle.static_committee_evidence.block_hash)
-        .ok_or_else(|| CliError::InvalidFixture("static committee block_hash must be 32-byte hex".to_owned()))?;
+    // The challenge payload hash binds to the consensus block hash. When
+    // Tendermint evidence is present, that block hash is the Tendermint
+    // block hash; otherwise it is the static-closed-committee block hash.
+    let active_block_hash = match &bundle.tendermint_evidence {
+        Some(tm) => parse_hex_32(&tm.block_hash)
+            .ok_or_else(|| CliError::InvalidFixture("tendermint block_hash must be 32-byte hex".to_owned()))?,
+        None => parse_hex_32(&bundle.static_committee_evidence.block_hash)
+            .ok_or_else(|| CliError::InvalidFixture("static committee block_hash must be 32-byte hex".to_owned()))?,
+    };
     let expected_challenge_payload_hash = hex::encode(blake3_chunks(
         b"myelin:single-chunk-challenge-payload:v1",
-        &[&old_state_root, &chunk_payload_hash, &new_state_root, &scheduler_report_hash, &molecule_transaction_hash, &block_hash],
+        &[
+            &old_state_root,
+            &chunk_payload_hash,
+            &new_state_root,
+            &scheduler_report_hash,
+            &molecule_transaction_hash,
+            &active_block_hash,
+        ],
     ));
     push_check(
         &mut checks,
@@ -975,64 +1182,123 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
         "challenge payload hash recomputes from bundle fields",
     );
 
-    let signature_hashes_ok = bundle.static_committee_evidence.signatures.iter().all(|signature| {
-        decode_hex_field(&signature.signature, "signature")
-            .map(|bytes| hex::encode(blake3_32(b"myelin:static-committee-signature-hash:v1", &bytes)) == signature.signature_hash)
-            .unwrap_or(false)
-    });
+    let signature_hashes_ok = match &bundle.tendermint_evidence {
+        Some(tm) => tm.signatures.iter().all(|signature| {
+            decode_hex_field(&signature.signature, "signature")
+                .map(|bytes| {
+                    hex::encode(blake3_32(b"myelin:tendermint-precommit-signature-hash:v1", &bytes)) == signature.signature_hash
+                })
+                .unwrap_or(false)
+        }),
+        None => bundle.static_committee_evidence.signatures.iter().all(|signature| {
+            decode_hex_field(&signature.signature, "signature")
+                .map(|bytes| hex::encode(blake3_32(b"myelin:static-committee-signature-hash:v1", &bytes)) == signature.signature_hash)
+                .unwrap_or(false)
+        }),
+    };
+    let signature_count = match &bundle.tendermint_evidence {
+        Some(tm) => tm.signatures.len(),
+        None => bundle.static_committee_evidence.signatures.len(),
+    };
     push_check(
         &mut checks,
         "committee-signature-hashes",
         signature_hashes_ok,
         Some("all signature hashes recompute".to_owned()),
-        Some(format!("{} signatures", bundle.static_committee_evidence.signatures.len())),
+        Some(format!("{} signatures", signature_count)),
         "each signature hash matches its embedded signature bytes",
     );
 
-    let signer_ids =
-        bundle.static_committee_evidence.signatures.iter().map(|signature| signature.validator_id.clone()).collect::<Vec<_>>();
+    let signer_ids = match &bundle.tendermint_evidence {
+        Some(tm) => tm.signatures.iter().map(|signature| signature.validator_id.clone()).collect::<Vec<_>>(),
+        None => bundle.static_committee_evidence.signatures.iter().map(|signature| signature.validator_id.clone()).collect::<Vec<_>>(),
+    };
+    let expected_signer_ids = match &bundle.tendermint_evidence {
+        Some(tm) => &tm.signer_ids,
+        None => &bundle.static_committee_evidence.signer_ids,
+    };
     push_check(
         &mut checks,
         "committee-signer-ids",
-        signer_ids == bundle.static_committee_evidence.signer_ids,
+        signer_ids == *expected_signer_ids,
         Some(format!("{:?}", signer_ids)),
-        Some(format!("{:?}", bundle.static_committee_evidence.signer_ids)),
+        Some(format!("{:?}", expected_signer_ids)),
         "signer id list matches embedded certificate signatures",
     );
 
-    let committee_config = static_fixture_committee_config();
-    let committee = StaticClosedCommittee::new(committee_config.clone())?;
-    let signatures = bundle
-        .static_committee_evidence
-        .signatures
-        .iter()
-        .map(|signature| {
-            let bytes = parse_hex_64(&signature.signature)
-                .ok_or_else(|| CliError::InvalidFixture("committee signature must be 64-byte hex".to_owned()))?;
-            Ok(CommitteeSignature { validator_id: signature.validator_id.clone(), signature: bytes })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let certificate = CommitteeCertificate { block_hash, signatures };
-    let certificate_ok = committee.verify_certificate(block_hash, &certificate).is_ok();
-    push_check(
-        &mut checks,
-        "committee-certificate",
-        certificate_ok,
-        Some(format!("quorum weight {}", committee_config.quorum_weight)),
-        Some(format!(
-            "quorum weight {}, finalised {}",
-            bundle.static_committee_evidence.quorum_weight, bundle.static_committee_evidence.finalised
-        )),
-        "static committee certificate verifies against the phase-one fixture committee",
-    );
-    push_check(
-        &mut checks,
-        "committee-quorum-weight",
-        bundle.static_committee_evidence.quorum_weight == committee_config.quorum_weight,
-        Some(committee_config.quorum_weight.to_string()),
-        Some(bundle.static_committee_evidence.quorum_weight.to_string()),
-        "bundle quorum weight matches the phase-one fixture committee",
-    );
+    if let Some(tm) = &bundle.tendermint_evidence {
+        // Tendermint precommit certificate verification
+        let tendermint_engine = tendermint_fixture_engine();
+        let signatures = tm
+            .signatures
+            .iter()
+            .map(|signature| {
+                let bytes = parse_hex_64(&signature.signature)
+                    .ok_or_else(|| CliError::InvalidFixture("tendermint signature must be 64-byte hex".to_owned()))?;
+                Ok(CommitteeSignature { validator_id: signature.validator_id.clone(), signature: bytes })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let certificate = myelin_consensus::TendermintPrecommitCertificate {
+            block_hash: active_block_hash,
+            height: tm.height,
+            round: tm.round,
+            signatures,
+        };
+        let certificate_ok =
+            tendermint_engine.verify_precommit_certificate(active_block_hash, tm.height, tm.round, &certificate).is_ok();
+        push_check(
+            &mut checks,
+            "tendermint-certificate",
+            certificate_ok,
+            Some(format!("quorum power {} height {} round {}", 2, tm.height, tm.round)),
+            Some(format!("quorum power {}, finalised {}", tm.quorum_power, tm.finalised)),
+            "Tendermint precommit certificate verifies against the phase-one fixture engine",
+        );
+        push_check(
+            &mut checks,
+            "tendermint-quorum-power",
+            tm.quorum_power == 2,
+            Some("2".to_owned()),
+            Some(tm.quorum_power.to_string()),
+            "bundle Tendermint quorum power matches the phase-one fixture engine",
+        );
+    } else {
+        // Static-closed-committee certificate verification
+        let block_hash = active_block_hash;
+        let committee_config = static_fixture_committee_config();
+        let committee = StaticClosedCommittee::new(committee_config.clone())?;
+        let signatures = bundle
+            .static_committee_evidence
+            .signatures
+            .iter()
+            .map(|signature| {
+                let bytes = parse_hex_64(&signature.signature)
+                    .ok_or_else(|| CliError::InvalidFixture("committee signature must be 64-byte hex".to_owned()))?;
+                Ok(CommitteeSignature { validator_id: signature.validator_id.clone(), signature: bytes })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let certificate = CommitteeCertificate { block_hash, signatures };
+        let certificate_ok = committee.verify_certificate(block_hash, &certificate).is_ok();
+        push_check(
+            &mut checks,
+            "committee-certificate",
+            certificate_ok,
+            Some(format!("quorum weight {}", committee_config.quorum_weight)),
+            Some(format!(
+                "quorum weight {}, finalised {}",
+                bundle.static_committee_evidence.quorum_weight, bundle.static_committee_evidence.finalised
+            )),
+            "static committee certificate verifies against the phase-one fixture committee",
+        );
+        push_check(
+            &mut checks,
+            "committee-quorum-weight",
+            bundle.static_committee_evidence.quorum_weight == committee_config.quorum_weight,
+            Some(committee_config.quorum_weight.to_string()),
+            Some(bundle.static_committee_evidence.quorum_weight.to_string()),
+            "bundle quorum weight matches the phase-one fixture committee",
+        );
+    }
     push_check(
         &mut checks,
         "court-verifiable-profile",
@@ -1122,7 +1388,7 @@ fn build_and_bench_teeworlds_fixture(args: TeeworldsBuildFixtureArgs) -> Result<
         )));
     }
 
-    let benchmark = bench_teeworlds_mock_tx(args.mock_tx_output.clone(), args.chunk_bytes, args.runs)?;
+    let benchmark = bench_teeworlds_mock_tx(args.mock_tx_output.clone(), args.chunk_bytes, args.runs, &args.consensus)?;
     Ok(TeeworldsBuildFixtureReport {
         teeworlds_root: args.teeworlds_root.display().to_string(),
         command,
@@ -1133,16 +1399,17 @@ fn build_and_bench_teeworlds_fixture(args: TeeworldsBuildFixtureArgs) -> Result<
     })
 }
 
-fn bench_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize, runs: usize) -> Result<TeeworldsBenchmarkReport> {
+fn bench_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize, runs: usize, consensus: &str) -> Result<TeeworldsBenchmarkReport> {
     if runs == 0 {
         return Err(CliError::InvalidFixture("runs must be non-zero".to_owned()));
     }
+    let _consensus_kind = parse_teeworlds_consensus(consensus)?;
 
     let mut measured_runs = Vec::with_capacity(runs);
     let mut last_fixture = None;
     for index in 0..runs {
         let start = Instant::now();
-        let fixture = inspect_teeworlds_mock_tx(path.clone(), chunk_bytes)?;
+        let fixture = inspect_teeworlds_mock_tx(path.clone(), chunk_bytes, consensus)?;
         let elapsed_ns = start.elapsed().as_nanos();
         measured_runs.push(TeeworldsBenchmarkRun {
             index,
@@ -1161,15 +1428,55 @@ fn bench_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize, runs: usize) -> Re
     })
 }
 
-fn finalise_teeworlds_fixture_block(chunks: &[TeeworldsChunkReport]) -> CommitteeDemoReport {
+fn finalise_teeworlds_fixture_block(chunks: &[TeeworldsChunkReport], consensus_kind: ConsensusKind) -> CommitteeDemoReport {
     let data_commitments = chunks.iter().map(|chunk| parse_hex_32(&chunk.commitment).expect("chunk commitment")).collect::<Vec<_>>();
-    let evidence = static_committee_evidence_for_commitments(data_commitments);
-    CommitteeDemoReport {
-        consensus_kind: evidence.consensus_kind,
-        block_hash: evidence.block_hash,
-        quorum_weight: evidence.quorum_weight,
-        signer_ids: evidence.signer_ids,
-        finalised: evidence.finalised,
+    match consensus_kind {
+        ConsensusKind::StaticClosedCommittee => {
+            let evidence = static_committee_evidence_for_commitments(data_commitments);
+            CommitteeDemoReport {
+                consensus_kind: evidence.consensus_kind,
+                block_hash: evidence.block_hash,
+                quorum_weight: evidence.quorum_weight,
+                signer_ids: evidence.signer_ids,
+                certificate_height: 1,
+                certificate_round: None,
+                certificate_step: "commit",
+                finalised: evidence.finalised,
+            }
+        }
+        ConsensusKind::Tendermint => {
+            let tendermint_block = MyelinBlock {
+                version: 1,
+                parent_hash: [0; 32],
+                number: 1,
+                timestamp_ms: 0,
+                consensus_kind: ConsensusKind::Tendermint,
+                state_root_before: [0; 32],
+                state_root_after: [9; 32],
+                ordered_cell_tx_commitments: vec![[7; 32]],
+                data_commitments,
+                scheduler_commitment: [8; 32],
+            };
+            let tendermint_engine = tendermint_fixture_engine();
+            let block_hash = tendermint_block.hash();
+            let height = tendermint_block.number;
+            let round = 0u32;
+            let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
+            let cert = tendermint_engine
+                .precommit_certificate_for_fixture(block_hash, height, round, &["validator-0", "validator-1"])
+                .expect("tendermint fixture certificate");
+            tendermint_engine.finalise_block_with_precommit(tendermint_block, round, cert).expect("tendermint fixture finality");
+            CommitteeDemoReport {
+                consensus_kind: ConsensusKind::Tendermint.as_str(),
+                block_hash: hex::encode(block_hash),
+                quorum_weight: 2,
+                signer_ids,
+                certificate_height: height,
+                certificate_round: Some(round),
+                certificate_step: "precommit",
+                finalised: true,
+            }
+        }
     }
 }
 
@@ -1184,10 +1491,25 @@ fn static_fixture_committee_config() -> StaticCommitteeConfig {
     }
 }
 
+fn tendermint_fixture_config() -> TendermintConfig {
+    TendermintConfig {
+        quorum_power: 2,
+        validators: vec![
+            CommitteeValidator { id: "validator-0".to_owned(), public_key: [1; 32], weight: 1 },
+            CommitteeValidator { id: "validator-1".to_owned(), public_key: [2; 32], weight: 1 },
+            CommitteeValidator { id: "validator-2".to_owned(), public_key: [3; 32], weight: 1 },
+        ],
+    }
+}
+
+fn tendermint_fixture_engine() -> Tendermint {
+    Tendermint::new(tendermint_fixture_config()).expect("tendermint fixture engine")
+}
+
 fn static_committee_evidence_for_commitments(data_commitments: Vec<[u8; 32]>) -> StaticCommitteeEvidenceReport {
     let committee_config = static_fixture_committee_config();
     let committee = StaticClosedCommittee::new(committee_config.clone()).expect("static fixture committee");
-    let block = demo_block(data_commitments);
+    let block = demo_block(data_commitments, ConsensusKind::StaticClosedCommittee);
     let block_hash = block.hash();
     let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
     let certificate = committee.certificate_for_fixture(block_hash, &["validator-0", "validator-1"]).expect("fixture certificate");
@@ -1211,13 +1533,13 @@ fn static_committee_evidence_for_commitments(data_commitments: Vec<[u8; 32]>) ->
     }
 }
 
-fn demo_block(data_commitments: Vec<[u8; 32]>) -> MyelinBlock {
+fn demo_block(data_commitments: Vec<[u8; 32]>, consensus_kind: ConsensusKind) -> MyelinBlock {
     MyelinBlock {
         version: 1,
         parent_hash: [0; 32],
         number: 1,
         timestamp_ms: 0,
-        consensus_kind: ConsensusKind::StaticClosedCommittee,
+        consensus_kind,
         state_root_before: [0; 32],
         state_root_after: [9; 32],
         ordered_cell_tx_commitments: vec![[7; 32]],
@@ -1440,7 +1762,7 @@ mod tests {
         });
         std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
 
-        let report = teeworlds_court_bundle(path.clone(), 4, 0).unwrap();
+        let report = teeworlds_court_bundle(path.clone(), 4, 0, "static-closed-committee").unwrap();
         let _ = std::fs::remove_file(path);
 
         assert!(report.court_verifiable);
@@ -1461,5 +1783,70 @@ mod tests {
         assert!(verification.valid);
         assert!(verification.checks.iter().all(|check| check.ok));
         assert!(verification.checks.iter().any(|check| check.name == "committee-certificate"));
+    }
+
+    #[test]
+    fn teeworlds_court_bundle_tendermint_precommit_path_verifies() {
+        let path = std::env::temp_dir().join(format!("myelin-tendermint-court-bundle-test-{}.json", std::process::id()));
+        let json = serde_json::json!({
+            "tx": {
+                "witnesses": [
+                    "0x",
+                    "0x7469636b6e657874",
+                    "0x6d6170",
+                    "0x636667"
+                ]
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+
+        let report = teeworlds_court_bundle(path.clone(), 4, 0, "tendermint").unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert!(report.court_verifiable);
+        assert!(!report.l1_court_implemented);
+        assert_eq!(report.chunk_index, 0);
+        assert_eq!(report.chunk_bytes, 4);
+        assert_eq!(report.ckb_projection.semantic_profile, "ckb-compatible");
+        assert!(report.ckb_projection.ckb_projection_possible);
+
+        // The static-closed-committee evidence is reported for completeness;
+        // the Tendermint evidence is the active finality path.
+        let tm = report.tendermint_evidence.as_ref().expect("tendermint evidence must be present");
+        assert_eq!(tm.consensus_kind, "tendermint");
+        assert_eq!(tm.quorum_power, 2);
+        assert_eq!(tm.height, 1);
+        assert_eq!(tm.round, 0);
+        assert_eq!(tm.certificate_step, "precommit");
+        assert!(tm.finalised);
+        assert_eq!(tm.signatures.len(), 2);
+
+        // The challenge payload hash must bind to the Tendermint block hash,
+        // not the static-committee block hash.
+        let static_block_hash = hex::decode(&report.static_committee_evidence.block_hash).unwrap();
+        let tendermint_block_hash = hex::decode(&tm.block_hash).unwrap();
+        assert_ne!(static_block_hash, tendermint_block_hash, "static and tendermint block hashes must differ");
+
+        // The Tendermint signatures must be domain-separated from the static
+        // committee signatures. The two sets of signatures should differ.
+        let static_signatures: Vec<&str> = report.static_committee_evidence.signatures.iter().map(|s| s.signature.as_str()).collect();
+        let tendermint_signatures: Vec<&str> = tm.signatures.iter().map(|s| s.signature.as_str()).collect();
+        assert_ne!(
+            static_signatures, tendermint_signatures,
+            "Tendermint precommit signatures must be domain-separated from static-committee signatures"
+        );
+
+        let bundle_path = std::env::temp_dir().join(format!("myelin-tendermint-court-bundle-report-test-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&report).unwrap()).unwrap();
+        let verification = verify_teeworlds_court_bundle(bundle_path.clone()).unwrap();
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "tendermint-certificate"));
+        // The static-committee-certificate check must NOT be present when
+        // Tendermint evidence is in the bundle; otherwise the bundle would
+        // be claiming both engines.
+        assert!(!verification.checks.iter().any(|check| check.name == "committee-certificate"));
     }
 }

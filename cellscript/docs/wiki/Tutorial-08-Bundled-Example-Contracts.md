@@ -216,7 +216,7 @@ cellc examples/nft.cell --entry-action transfer --target riscv64-elf --target-pr
 For release-facing CKB evidence, run the CellScript acceptance gate:
 
 ```bash
-./scripts/cellscript_gate.sh release
+./scripts/cellscript_ckb_release_gate.sh full
 ```
 
 This wrapper runs compiler/backend evidence and the syntax-combination CI

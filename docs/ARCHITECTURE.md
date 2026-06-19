@@ -4,16 +4,18 @@ Myelin is a CKB-style isomorphic session runtime for typed Cell execution and
 single-chunk L1 adjudication. It narrows the repository to an off-chain finite
 Cell ledger built around typed Cell execution.
 
-It is not a CKB full-node fork, not a new L1, and not a permissionless L2 in its
-current phase. Phase one uses static closed-committee finality for session
-benchmarking and pressure testing; CKB-style projection reports and the future
-court path are the CKB-aligned parts of the design.
+It is not a CKB full-node fork, not a new L1, and not a finished permissionless
+L2 in its current phase. Phase one uses selectable closed-validator finality for
+session benchmarking and pressure testing: static closed committee and
+Tendermint-style weighted precommit finality. CKB-style projection reports and
+the future court path are the CKB-aligned parts of the design.
 
 The public claim boundary is:
 
 ```text
-Myelin currently uses static committee finality for session benchmarking and
-pressure testing; the L1 court/projection path is what makes it CKB-aligned.
+Myelin currently uses selectable closed-validator finality for session
+benchmarking and pressure testing; the L1 court/projection path is what makes
+it CKB-aligned.
 ```
 
 ## Kept
@@ -69,7 +71,7 @@ flags.
 The project should keep this claim ladder visible:
 
 ```text
-static committee finality -> useful session fast path and benchmark harness
+closed-validator finality -> useful session fast path and benchmark harness
 projection report         -> concrete CKB-style semantic evidence
 court bundle              -> executable input shape for disputed chunks
 future court script       -> actual L1 adjudication path

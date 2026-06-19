@@ -59,7 +59,7 @@ It is suitable for:
 - compiling and inspecting the bundled examples;
 - exploring schema-backed CKB Cell effects, metadata, constraints, and CKB target-profile
   checks;
-- trying the local VS Code extension and LSP tooling.
+- trying the local LSP tooling.
 
 It is not yet recommended for unaudited mainnet deployment without manual
 review. The current focus is developer-readiness, diagnostics, ProofPlan /
@@ -397,27 +397,16 @@ CellScript includes production-style local language tooling for early users:
   compiler crate exposes an `LspServer`; `cellc --lsp` provides a full
   `tower-lsp` JSON-RPC transport over stdio. Completions include flow
   states after `Type::`.
-- **VS Code extension** — syntax highlighting, snippets, on-save diagnostics,
-  compiler-backed formatting, scratch compilation, metadata/constraints/production
-  reports, entry-witness ABI selection, action build plans, TypeScript builder
-  generation, package/registry verification, active-file builder assumptions,
-  transaction template, deploy plan, profile, audit-bundle reports,
-  CKB target-profile arguments, and
-  status-bar feedback. It shells out to `cellc` (or a `cargo run` fallback), so
-  behavior stays identical to CLI and CI gates.
-
 The 0.19 ecosystem-reuse work adds a formal headless
 `cellscript-ckb-adapter` crate. The compiler emits semantic action plans and
 ABI evidence; the adapter uses `ckb-sdk-rust` to materialize CKB transaction
 shape and local-node acceptance evidence. It is not a wallet UI, frontend kit,
 or CellFabric intent engine.
 
-- [VS Code extension](editors/vscode-cellscript)
 - [Runtime error codes](docs/CELLSCRIPT_RUNTIME_ERROR_CODES.md)
 - [Entry witness ABI](docs/CELLSCRIPT_ENTRY_WITNESS_ABI.md)
 - [Collections support matrix](docs/CELLSCRIPT_COLLECTIONS_SUPPORT_MATRIX.md)
 - [Output bindings](docs/CELLSCRIPT_OUTPUT_BINDINGS.md)
-- [Historical signature-direction execution plan](docs/archive/0.13/CELLSCRIPT_SIGNATURE_DIRECTION_EXECUTION_PLAN.md)
 - [CKB target profile tutorial](docs/wiki/Tutorial-05-CKB-Target-Profiles.md)
 - [CKB deployment manifest](docs/CELLSCRIPT_CKB_DEPLOYMENT_MANIFEST.md)
 - [Capacity and builder contract](docs/CELLSCRIPT_CAPACITY_AND_BUILDER_CONTRACT.md)
@@ -435,18 +424,6 @@ or CellFabric intent engine.
 - [Collections matrix example](docs/examples/collections_matrix.md)
 - [Deployment manifest example](docs/examples/deployment_manifest.md)
 - [Output append example](docs/examples/output_append.md)
-- [0.20 generated builder roadmap](docs/CELLSCRIPT_0_20_ROADMAP.md)
-- [Roadmap overview](roadmap/CELLSCRIPT_ROADMAP.md)
-- [0.13 release scope](docs/releases/CELLSCRIPT_0_13_RELEASE_SCOPE.md)
-- [0.14 roadmap](roadmap/CELLSCRIPT_0_14_ROADMAP.md)
-- [0.14 release notes](docs/releases/CELLSCRIPT_0_14_RELEASE_NOTES.md)
-- [0.15 roadmap](roadmap/CELLSCRIPT_0_15_ROADMAP.md)
-- [0.15 release notes](docs/releases/CELLSCRIPT_0_15_RELEASE_NOTES.md)
-- [0.16 roadmap](roadmap/CELLSCRIPT_0_16_ROADMAP.md)
-- [0.16 release notes](docs/releases/CELLSCRIPT_0_16_RELEASE_NOTES.md)
-- [0.17 roadmap](docs/0.17/CELLSCRIPT_0_17_ROADMAP.md)
-- [0.18 roadmap](docs/CELLSCRIPT_0_18_ROADMAP.md)
-- [0.19 roadmap](docs/CELLSCRIPT_0_19_ROADMAP.md)
 
 ---
 
@@ -544,7 +521,6 @@ CKB cycle/capacity estimates.
 |---|---|---|
 | **CLI** | `cli/` + `main.rs` | `cellc` binary with all subcommands |
 | **LSP** | `lsp/` + `lsp/server.rs` | In-process `LspServer` + `tower-lsp` JSON-RPC over stdio (`cellc --lsp`) |
-| **VS Code** | `editors/vscode-cellscript/` | Shells out to `cellc` for LSP startup, reports, action-builder generation, and package/registry verification |
 | **Formatter** | `fmt/` | Idempotent formatter for `cellc fmt` and LSP |
 | **Doc generator** | `docgen/` | HTML/Markdown/JSON docs from AST + metadata |
 | **Simulator** | `simulate.rs` | Simulated evaluator — emits `TraceEvent` logs without ckb-vm |
@@ -732,7 +708,6 @@ registry dependency resolution remain experimental and fail-closed.
 | `cellc info` | Print manifest and package information |
 | `cellc package verify` | Verify package/source/build identity against `Cell.lock` |
 | `cellc registry verify` | Verify deployment identity against `Cell.lock` and `Deployed.toml`; `--live` adds CKB RPC evidence |
-| `cellc certify --plugin novaseal-profile-v0` | Run the deterministic compiler-hosted NovaSeal profile certification (consumes `target/novaseal-*.json` and the local certifier source) |
 | `cellc repl` | Start the interactive REPL |
 | `cellc run` | Run ELF entrypoints via VM runner or simulator |
 | `cellc publish` / registry `install` / registry-backed `update` / `login` | Experimental registry flows, fail-closed |
@@ -760,9 +735,7 @@ registry dependency resolution remain experimental and fail-closed.
 cellscript/
 ├── src/                 # compiler, parser, type checker, lowering, codegen, CLI
 ├── examples/            # example contracts and protocol patterns
-├── tests/               # compiler and CLI tests
-└── editors/
-    └── vscode-cellscript/
+└── tests/               # compiler and CLI tests
 ```
 
 Development style and backend/codegen rules are tracked in

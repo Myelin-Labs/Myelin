@@ -1,0 +1,102 @@
+{
+  "schema": "myelin-teeworlds-repro-v1",
+  "shared_metrics": {
+    "court_bundle_status": "valid",
+    "projection_status": "ckb-compatible",
+    "tape_bytes": 2162,
+    "vm_cycles": 15139695
+  },
+  "static_closed_committee": {
+    "court_bundle": {
+      "court_verifiable": true,
+      "l1_court_implemented": false,
+      "molecule_transaction_bytes": 2616,
+      "static_committee_finalised": true,
+      "static_committee_quorum_weight": 2,
+      "static_committee_signatures": 2
+    },
+    "court_bundle_verification": {
+      "checks": 14,
+      "failed_checks": [],
+      "valid": true
+    },
+    "fixture": {
+      "average_elapsed_ns": 11016874,
+      "block_hash": "c74f510a61e3e3f2684b1fc261313bdd7097a9a3f7f55e625d331a5b4f7ee13f",
+      "chunk_bytes": 262144,
+      "chunks": 1,
+      "ckb_projection_possible": true,
+      "consensus_kind": "static-closed-committee",
+      "finalised": true,
+      "quorum_weight": 2,
+      "semantic_profile": "ckb-compatible",
+      "signer_ids": [
+        "validator-0",
+        "validator-1"
+      ],
+      "tape_bytes": 2162
+    },
+    "vm_probe": {
+      "ckb_strict": true,
+      "cycles": 15139695,
+      "max_cycles": 70000000,
+      "replayer": "/Users/arthur/RustroverProjects/teeworlds/ckb/build/replayer_stripped",
+      "success": true
+    }
+  },
+  "teeworlds_root": "/Users/arthur/RustroverProjects/teeworlds",
+  "tendermint": {
+    "court_bundle": {
+      "court_verifiable": true,
+      "l1_court_implemented": false,
+      "molecule_transaction_bytes": 2616,
+      "tendermint_evidence": {
+        "block_hash": "c0a190d449a801fb5f90b5d2047aa007487f4643edbe74d5a7081fcabc312523",
+        "certificate_step": "precommit",
+        "consensus_kind": "tendermint",
+        "finalised": true,
+        "height": 1,
+        "quorum_power": 2,
+        "round": 0,
+        "signatures": [
+          {
+            "signature": "3294885ee68dd5e980bc721c5a19fdd90947edcb1153cac4f73ccdb35b31f7ea750d10a4f94755c0b0b3d1f468be887c693a7a4fd98998990731eae759cb05fb",
+            "signature_hash": "c6743e6ee37492d93c2ba1d2ef4ffaf7f89d4b452fc0a2506b558a2cfccbd37b",
+            "validator_id": "validator-0"
+          },
+          {
+            "signature": "0725793afe958e6779d2da600dcd430badef424d805d3e1ed2b1a0ed2126b4974d68e7c650b8c95b229087317073991b5ab519169d7b3f9c86891ff39a9e3282",
+            "signature_hash": "462ca32e7364a52c4d40d5246f0f97e1e5086804d53ac76c32aa643072f2f81e",
+            "validator_id": "validator-1"
+          }
+        ],
+        "signer_ids": [
+          "validator-0",
+          "validator-1"
+        ]
+      }
+    },
+    "court_bundle_verification": {
+      "checks": 14,
+      "failed_checks": [],
+      "valid": true
+    },
+    "fixture": {
+      "block_hash": "c0a190d449a801fb5f90b5d2047aa007487f4643edbe74d5a7081fcabc312523",
+      "certificate_height": 1,
+      "certificate_round": 0,
+      "certificate_step": "precommit",
+      "chunks": 1,
+      "ckb_projection_possible": true,
+      "consensus_kind": "tendermint",
+      "finalised": true,
+      "quorum_weight": 2,
+      "semantic_profile": "ckb-compatible",
+      "signer_ids": [
+        "validator-0",
+        "validator-1"
+      ],
+      "tape_bytes": 2162
+    }
+  }
+}

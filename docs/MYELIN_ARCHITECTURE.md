@@ -23,7 +23,7 @@ CellScript source
   -> CellDAG scheduler
   -> deterministic script verification
   -> Cell state root
-  -> static committee finality
+  -> selectable closed-validator finality
   -> Teeworlds pressure-test report
 ```
 
@@ -40,12 +40,12 @@ libraries where they are the correct narrow dependency. A CKB projection layer
 answers whether a Myelin transition can be represented as a CKB-style
 transaction/context; it does not run a CKB node.
 
-Current Myelin security should be described precisely: static committee finality
-is a fast path for session benchmarking and pressure testing. Projection reports
-show whether a transition is CKB-style projectable; the future L1 court path is
-what can make disputed chunks adjudicable on CKB. Until that court path is
-implemented and exercised, Myelin should not be described as a permissionless
-L2.
+Current Myelin security should be described precisely: selectable
+closed-validator finality is a fast path for session benchmarking and pressure
+testing. Projection reports show whether a transition is CKB-style projectable;
+the future L1 court path is what can make disputed chunks adjudicable on CKB.
+Until that court path is implemented and exercised, Myelin should not be
+described as a permissionless L2.
 
 The strongest current public description is therefore: an experimental
 CKB-native isomorphic session runtime, using Teeworlds as the first pressure
@@ -82,8 +82,8 @@ Keep and harden:
 - `myelin-state`: live/consumed/created Cell state, state root, proof objects.
 - `myelin-mempool`: admission queue, fee/cycle scoring, RBF, dependency
   tracking.
-- `myelin-consensus`: explicit consensus selection and phase-one static
-  closed-committee finality.
+- `myelin-consensus`: explicit consensus selection with static closed-committee
+  and Tendermint-style weighted precommit finality.
 - `myelin-hashes`, `myelin-math`, `myelin-muhash`, `myelin-utils`: deterministic
   hashing, integer, accumulator, and support code.
 
@@ -91,7 +91,8 @@ Extend:
 
 - typed-cell metadata ingestion at admission time.
 - scheduler witness and conflict-hash verification.
-- static committee certificates over deterministic block hashes.
+- static committee certificates and Tendermint precommit certificates over
+  deterministic block hashes.
 - CKB-style projection reports for CellTxs and execution chunks. This is the
   credibility hinge: every serious demo should say whether the transition is
   projectable into a CKB-style transaction/context, or list explicit deviation
@@ -253,9 +254,10 @@ For early protocol discussions, `ckb-compatible` is the default acceptance
 profile. `myelin-native` can exist for engineering experiments, but it should
 not carry the main L2/isomorphism claim.
 
-## Static Committee Finality
+## Selectable Finality
 
-Phase one finality is a static committee, configured from TOML:
+Phase one finality is selectable. A static closed committee is configured from
+TOML:
 
 ```toml
 kind = "static-closed-committee"
@@ -274,6 +276,30 @@ public_key = "0202020202020202020202020202020202020202020202020202020202020202"
 weight = 1
 ```
 
+Tendermint-style weighted precommit finality is configured from TOML:
+
+```toml
+kind = "tendermint"
+
+[tendermint]
+quorum_power = 2
+
+[[tendermint.validators]]
+id = "validator-0"
+public_key = "0101010101010101010101010101010101010101010101010101010101010101"
+weight = 1
+
+[[tendermint.validators]]
+id = "validator-1"
+public_key = "0202020202020202020202020202020202020202020202020202020202020202"
+weight = 1
+
+[[tendermint.validators]]
+id = "validator-2"
+public_key = "0303030303030303030303030303030303030303030303030303030303030303"
+weight = 1
+```
+
 The consensus trait must allow:
 
 ```rust
@@ -284,18 +310,19 @@ pub trait ConsensusEngine {
 }
 ```
 
-`StaticClosedCommittee` is the working implementation now, selected through
-`SelectedConsensus::from_config`. Other consensus engines may be added later
-only through the same `ConsensusEngine` trait, with explicit selection in
-configuration. The trust model is direct: a quorum of configured validators
-finalises Myelin blocks. This is useful for sessions and pressure testing; it
-is not permissionless security.
+`StaticClosedCommittee` and `Tendermint` are selected through
+`SelectedConsensus::from_config`. Consensus changes stay behind the same
+`ConsensusEngine` trait, with explicit selection in configuration. The trust
+model is direct: a quorum of configured validators finalises Myelin blocks.
+This is useful for sessions and pressure testing; it is not permissionless
+security.
 
 Public wording should use this boundary:
 
 ```text
-Myelin currently uses static committee finality for session benchmarking and
-pressure testing; the L1 court/projection path is what makes it CKB-aligned.
+Myelin currently uses selectable closed-validator finality for session
+benchmarking and pressure testing; the L1 court/projection path is what makes
+it CKB-aligned.
 ```
 
 ## CKB-Style Projection
@@ -552,8 +579,8 @@ Completed in this preparation pass:
 - Myelin workspace crate names and imports use the `myelin-*` prefix.
 - Old L1 mining and consensus vocabulary is absent from active Myelin code.
 - `myelin-consensus` provides `ConsensusEngine`, `SelectedConsensus`,
-  canonical `MyelinBlock` hashing, and working `StaticClosedCommittee`
-  finality.
+  canonical `MyelinBlock` hashing, working `StaticClosedCommittee` finality,
+  and working `Tendermint` precommit finality.
 - `myelin-exec::projection` provides `simple CellTx -> CKB projection report`
   using the CKB Molecule transaction layout. `myelin-cli teeworlds inspect`,
   `bench`, and `build-fixture` now attach the same projection status to every

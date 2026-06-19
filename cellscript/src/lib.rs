@@ -13585,11 +13585,35 @@ fn typed_cell_scheduler_plan_metadata(
         push_typed_cell_scheduler_access_plan(&mut accesses, "read_ref", "CellDep", index, &pattern.binding, ty, type_defs);
     }
     for (index, pattern) in body.create_set.iter().enumerate() {
-        push_typed_cell_scheduler_access_plan(&mut accesses, &pattern.operation, "Output", index, &pattern.binding, &pattern.ty, type_defs);
+        push_typed_cell_scheduler_access_plan(
+            &mut accesses,
+            &pattern.operation,
+            "Output",
+            index,
+            &pattern.binding,
+            &pattern.ty,
+            type_defs,
+        );
     }
     for pattern in &body.mutate_set {
-        push_typed_cell_scheduler_access_plan(&mut accesses, "consume", "Input", pattern.input_index, &pattern.binding, &pattern.ty, type_defs);
-        push_typed_cell_scheduler_access_plan(&mut accesses, "create", "Output", pattern.output_index, &pattern.binding, &pattern.ty, type_defs);
+        push_typed_cell_scheduler_access_plan(
+            &mut accesses,
+            "consume",
+            "Input",
+            pattern.input_index,
+            &pattern.binding,
+            &pattern.ty,
+            type_defs,
+        );
+        push_typed_cell_scheduler_access_plan(
+            &mut accesses,
+            "create",
+            "Output",
+            pattern.output_index,
+            &pattern.binding,
+            &pattern.ty,
+            type_defs,
+        );
     }
 
     Some(TypedCellSchedulerPlanMetadata {
@@ -14389,27 +14413,14 @@ fn metadata_conflict_key_policy(policy: &ir::IrIdentityPolicy) -> Option<(String
     let ir::IrIdentityPolicy::Field(path) = policy else {
         return None;
     };
-    let fields = path
-        .split('+')
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
+    let fields = path.split('+').map(str::trim).filter(|field| !field.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>();
     if fields.is_empty() {
         return None;
     }
     if fields.len() == 1 {
-        Some((
-            format!("field({})", fields[0]),
-            fields,
-            TYPED_CELL_SINGLE_FIELD_CONFLICT_KEY_ENCODING.to_string(),
-        ))
+        Some((format!("field({})", fields[0]), fields, TYPED_CELL_SINGLE_FIELD_CONFLICT_KEY_ENCODING.to_string()))
     } else {
-        Some((
-            format!("composite({})", fields.join(",")),
-            fields,
-            TYPED_CELL_COMPOSITE_CONFLICT_KEY_ENCODING.to_string(),
-        ))
+        Some((format!("composite({})", fields.join(",")), fields, TYPED_CELL_COMPOSITE_CONFLICT_KEY_ENCODING.to_string()))
     }
 }
 
@@ -25644,6 +25655,7 @@ action transfer_token(token: Token, to: Address) -> next_token: Token {
             scheduler_witness_abi: SCHEDULER_WITNESS_ABI_MOLECULE.to_string(),
             scheduler_witness_hex: scheduler_witness_hex.to_string(),
             scheduler_witness_molecule_hex: scheduler_witness_molecule_hex.to_string(),
+            typed_cell_scheduler_plan: None,
             consume_set: vec![],
             read_refs: vec![],
             create_set: vec![],

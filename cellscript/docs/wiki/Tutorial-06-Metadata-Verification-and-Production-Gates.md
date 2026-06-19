@@ -167,9 +167,6 @@ cellc proof-diff old.meta.json new.meta.json --json
 cellc audit-bundle src/main.cell --output target/audit
 ```
 
-For the review-finding closure matrix, see
-`docs/0.17/review_findings_closure.md`.
-
 ## Suggested Compiler CI Gate
 
 For CKB packages, a useful compiler CI gate is:
@@ -218,10 +215,10 @@ For repository work, use the unified gate wrapper instead of hand-picking
 component scripts:
 
 ```bash
-./scripts/cellscript_gate.sh dev
-./scripts/cellscript_gate.sh ci
-./scripts/cellscript_gate.sh backend
-./scripts/cellscript_gate.sh release
+cargo check --locked -p cellscript --all-targets
+./scripts/cellscript_ckb_release_gate.sh quick
+./scripts/cellscript_strict_backend_audit.sh full
+./scripts/cellscript_ckb_release_gate.sh full
 ```
 
 `dev` is the local fast path. `ci` is the pull-request gate. `backend` is for
@@ -235,21 +232,21 @@ to chain evidence. Run the CKB acceptance gate from the CellScript repository
 root:
 
 ```bash
-./scripts/cellscript_gate.sh release
+./scripts/cellscript_ckb_release_gate.sh full
 ```
 
 For pre-push checks, the development gate runs the compiler checks, strict
 backend quick audit, syntax-combination quick audit, and diff checks:
 
 ```bash
-./scripts/cellscript_gate.sh dev
+cargo check --locked -p cellscript --all-targets
 ```
 
 If you specifically need the old compile-only production acceptance pass,
 `./scripts/cellscript_ckb_release_gate.sh quick` remains supported and delegates
-to `./scripts/cellscript_gate.sh release-quick`. The legacy
+to `./scripts/cellscript_ckb_release_gate.sh quick`. The legacy
 `./scripts/cellscript_ckb_release_gate.sh full` command is also supported as a
-compatibility wrapper for `./scripts/cellscript_gate.sh release`. The production
+compatibility wrapper for `./scripts/cellscript_ckb_release_gate.sh full`. The production
 mode is the release-facing gate because it first runs compiler and
 backend-contract evidence, then runs builder-backed local CKB transactions and
 stateful scenario/action coverage.

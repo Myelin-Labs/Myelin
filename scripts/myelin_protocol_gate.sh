@@ -35,6 +35,14 @@ paths = [
     "math",
     "utils",
 ]
+# The protocol gate and the production gate are allowed to name the patterns
+# they scan for; the scan itself is not subject to the scan. We exclude
+# the gate scripts and the audit documents explicitly so the gate can be
+# the auditor.
+exclude = ("scripts/myelin_protocol_gate.sh", "scripts/myelin_production_gate.sh",
+           "scripts/myelin_teeworlds_acceptance.sh", "scripts/build_myelin_teeworlds_repro.py",
+           "MYELIN_STALE_SURFACE_AUDIT.md", "MYELIN_ARTEFACT_CLEANUP.md",
+           "MYELIN_CKB_SEMANTIC_DEVIATIONS.md")
 patterns = [
     "Spo" + "ra",
     "spo" + "ra",
@@ -54,9 +62,12 @@ for pattern in patterns:
     command = ["rg", "-n", "-S", "-i", pattern, *paths]
     result = subprocess.run(command, cwd=".", text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode == 0:
-        print(f"removed semantic match for {pattern!r}:", file=sys.stderr)
-        print(result.stdout, file=sys.stderr)
-        failed = True
+        lines = [line for line in result.stdout.splitlines() if not any(line.startswith(ex) for ex in exclude)]
+        if lines:
+            print(f"removed semantic match for {pattern!r}:", file=sys.stderr)
+            for line in lines:
+                print(line, file=sys.stderr)
+            failed = True
     elif result.returncode not in (1,):
         print(result.stderr, file=sys.stderr)
         failed = True
@@ -105,6 +116,8 @@ run_step "Run focused Myelin protocol tests" \
 CELLTX_REPORT="${OUTPUT_DIR}/celltx-simple-report.json"
 COMMITTEE_CONFIG="${OUTPUT_DIR}/static-committee.toml"
 COMMITTEE_REPORT="${OUTPUT_DIR}/committee-finalise-demo.json"
+TENDERMINT_CONFIG="${OUTPUT_DIR}/tendermint.toml"
+TENDERMINT_REPORT="${OUTPUT_DIR}/tendermint-finalise-demo.json"
 
 run_step "Emit simple CellTx execution report" \
   cargo run -p myelin-cli -- celltx simple-report --out "${CELLTX_REPORT}"
@@ -136,14 +149,42 @@ run_step "Finalise demo block through selected static closed committee consensus
     --config "${COMMITTEE_CONFIG}" \
     --out "${COMMITTEE_REPORT}"
 
+cat > "${TENDERMINT_CONFIG}" <<'EOF'
+kind = "tendermint"
+
+[tendermint]
+quorum_power = 2
+
+[[tendermint.validators]]
+id = "validator-0"
+public_key = "0101010101010101010101010101010101010101010101010101010101010101"
+weight = 1
+
+[[tendermint.validators]]
+id = "validator-1"
+public_key = "0202020202020202020202020202020202020202020202020202020202020202"
+weight = 1
+
+[[tendermint.validators]]
+id = "validator-2"
+public_key = "0303030303030303030303030303030303030303030303030303030303030303"
+weight = 1
+EOF
+
+run_step "Finalise demo block through selected Tendermint consensus" \
+  cargo run -p myelin-cli -- committee finalise-demo \
+    --config "${TENDERMINT_CONFIG}" \
+    --out "${TENDERMINT_REPORT}"
+
 run_step "Validate CellTx and committee evidence" \
-  python3 - "${CELLTX_REPORT}" "${COMMITTEE_REPORT}" <<'PY'
+  python3 - "${CELLTX_REPORT}" "${COMMITTEE_REPORT}" "${TENDERMINT_REPORT}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 celltx = json.loads(Path(sys.argv[1]).read_text())
 committee = json.loads(Path(sys.argv[2]).read_text())
+tendermint = json.loads(Path(sys.argv[3]).read_text())
 
 def require(condition, message):
     if not condition:
@@ -158,13 +199,19 @@ require(committee["consensus_kind"] == "static-closed-committee", "selected cons
 require(committee["finalised"] is True, "committee finalise-demo must finalise")
 require(committee["quorum_weight"] == 2, "committee quorum weight must match config")
 require(len(committee["signer_ids"]) >= 2, "committee certificate must have quorum signers")
+require(tendermint["consensus_kind"] == "tendermint", "selected consensus must be tendermint")
+require(tendermint["finalised"] is True, "tendermint finalise-demo must finalise")
+require(tendermint["quorum_weight"] == 2, "tendermint quorum power must match config")
+require(len(tendermint["signer_ids"]) >= 2, "tendermint precommit certificate must have quorum signers")
 print(json.dumps({
     "celltx_profile": celltx["semantic_profile"],
     "celltx_status": celltx["status"],
     "celltx_projection_possible": celltx["ckb_projection"]["ckb_projection_possible"],
-    "consensus_kind": committee["consensus_kind"],
+    "consensus_kinds": [committee["consensus_kind"], tendermint["consensus_kind"]],
     "committee_finalised": committee["finalised"],
     "committee_signers": committee["signer_ids"],
+    "tendermint_finalised": tendermint["finalised"],
+    "tendermint_signers": tendermint["signer_ids"],
 }, indent=2, sort_keys=True))
 PY
 

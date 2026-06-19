@@ -170,13 +170,6 @@ fn referenced_v014_runtime_helpers(ir: &IrModule) -> BTreeSet<String> {
     if helpers.contains("__xudt_require_owner_mode_type_args_current_script") {
         helpers.insert("__xudt_require_owner_mode_type_args".to_string());
     }
-    if helpers.contains("__novaseal_bip340_require_signature") {
-        helpers.insert("__ckb_pipe".to_string());
-        helpers.insert("__ckb_pipe_write".to_string());
-        helpers.insert("__ckb_close".to_string());
-        helpers.insert("__ckb_spawn_with_fd1".to_string());
-        helpers.insert("__ckb_wait".to_string());
-    }
     helpers
 }
 
@@ -288,7 +281,6 @@ fn is_v014_runtime_helper(func: &str) -> bool {
             | "__ckb_hash_pair"
             | "__ckb_hash_blake2b"
             | "__ckb_hash_data_packed"
-            | "__novaseal_bip340_require_signature"
     )
 }
 
@@ -5527,18 +5519,6 @@ impl CodeGenerator {
         }
     }
 
-    fn emit_fixed_byte_source_word_to(&mut self, dest_reg: &str, base_reg: &str, source: &ExpectedFixedByteSource, word_index: usize) {
-        self.emit(format!("li {}, 0", dest_reg));
-        for byte_index in 0..8 {
-            let absolute = word_index * 8 + byte_index;
-            self.emit_fixed_byte_source_byte_to("t1", base_reg, source, absolute);
-            if byte_index > 0 {
-                self.emit(format!("slli t1, t1, {}", byte_index * 8));
-            }
-            self.emit(format!("or {}, {}, t1", dest_reg, dest_reg));
-        }
-    }
-
     fn emit_fixed_byte_source_pointer_to(&mut self, dest_reg: &str, source: &ExpectedFixedByteSource) -> bool {
         match source {
             ExpectedFixedByteSource::SchemaField(source) => {
@@ -9240,85 +9220,6 @@ impl CodeGenerator {
 
     fn emit_call(&mut self, dest: Option<&IrVar>, func: &str, args: &[IrOperand]) -> Result<()> {
         if self.emit_ckb_fixed_hash_call(dest, func, args)? {
-            return Ok(());
-        }
-        if func == "__novaseal_bip340_require_signature" {
-            self.emit(format!("# call {} args={}", func, args.len()));
-            if args.len() != 3 {
-                self.emit("# cellscript abi: fail closed because BIP340 verifier requires message, pubkey, signature");
-                self.emit_fail(CellScriptRuntimeError::FixedByteComparisonUnresolved);
-                return Ok(());
-            }
-            let Some(message) = self.expected_fixed_byte_source(&args[0], 32) else {
-                self.emit("# cellscript abi: fail closed because BIP340 message is not a 32-byte value");
-                self.emit_fail(CellScriptRuntimeError::FixedByteComparisonUnresolved);
-                return Ok(());
-            };
-            let Some(pubkey) = self.expected_fixed_byte_source(&args[1], 32) else {
-                self.emit("# cellscript abi: fail closed because BIP340 pubkey is not a 32-byte value");
-                self.emit_fail(CellScriptRuntimeError::FixedByteComparisonUnresolved);
-                return Ok(());
-            };
-            let Some(signature) = self.expected_fixed_byte_source(&args[2], 64) else {
-                self.emit("# cellscript abi: fail closed because BIP340 signature is not a 64-byte value");
-                self.emit_fail(CellScriptRuntimeError::FixedByteComparisonUnresolved);
-                return Ok(());
-            };
-            self.emit_prepare_fixed_byte_source(&message, 32, "novaseal bip340 message");
-            self.emit_prepare_fixed_byte_source(&pubkey, 32, "novaseal bip340 pubkey");
-            self.emit_prepare_fixed_byte_source(&signature, 64, "novaseal bip340 signature");
-            self.emit("# cellscript abi: NovaSeal BIP340 verifier IPC envelope via VM2 pipe/spawn/wait");
-            let pipe_ok = self.fresh_label("novaseal_bip340_pipe_ok");
-            self.emit("call __ckb_pipe");
-            self.emit(format!("beqz a0, {}", pipe_ok));
-            self.emit_fail(CellScriptRuntimeError::SyscallFailed);
-            self.emit_label(&pipe_ok);
-            self.emit("addi s10, a1, 0");
-            self.emit("addi s11, a2, 0");
-            self.emit("# cellscript abi: spawn manifest-bound CellDep#0 verifier with read fd inherited");
-            self.emit("li a0, 0");
-            self.emit("addi a1, s10, 0");
-            self.emit("call __ckb_spawn_with_fd1");
-            let spawn_ok = self.fresh_label("novaseal_bip340_spawn_ok");
-            self.emit(format!("beqz a0, {}", spawn_ok));
-            self.emit_fail(CellScriptRuntimeError::SyscallFailed);
-            self.emit_label(&spawn_ok);
-            self.emit("addi s9, a1, 0");
-            self.emit("# cellscript abi: write 18 u64 words for cellscript-btc-bip340-ipc-v0 envelope");
-            for word in 0..18 {
-                self.emit(format!("# cellscript abi: novaseal bip340 ipc word {}", word));
-                self.emit("addi a0, s11, 0");
-                match word {
-                    0 => {
-                        let magic = u64::from_le_bytes(*b"NSBV0IPC");
-                        self.emit(format!("li a1, {}", magic));
-                    }
-                    1 => {
-                        self.emit("li a1, 65536");
-                    }
-                    2..=5 => self.emit_fixed_byte_source_word_to("a1", "t6", &message, word - 2),
-                    6..=9 => self.emit_fixed_byte_source_word_to("a1", "t6", &pubkey, word - 6),
-                    10..=17 => self.emit_fixed_byte_source_word_to("a1", "t6", &signature, word - 10),
-                    _ => unreachable!(),
-                }
-                self.emit("call __ckb_pipe_write");
-                let write_ok = self.fresh_label("novaseal_bip340_write_ok");
-                self.emit(format!("beqz a0, {}", write_ok));
-                self.emit_fail(CellScriptRuntimeError::SyscallFailed);
-                self.emit_label(&write_ok);
-            }
-            self.emit("addi a0, s11, 0");
-            self.emit("call __ckb_close");
-            let close_ok = self.fresh_label("novaseal_bip340_close_ok");
-            self.emit(format!("beqz a0, {}", close_ok));
-            self.emit_fail(CellScriptRuntimeError::SyscallFailed);
-            self.emit_label(&close_ok);
-            self.emit("addi a0, s9, 0");
-            self.emit("call __ckb_wait");
-            let wait_ok = self.fresh_label("novaseal_bip340_wait_ok");
-            self.emit(format!("beqz a0, {}", wait_ok));
-            self.emit_fail(CellScriptRuntimeError::SyscallFailed);
-            self.emit_label(&wait_ok);
             return Ok(());
         }
         if func.contains("::") {

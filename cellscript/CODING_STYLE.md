@@ -15,10 +15,10 @@ project contract.
 - Use enums and typed fields when the concept already has a structured
   representation.
 - Error messages should name the rejected boundary and the next valid action.
-- Run `./scripts/cellscript_gate.sh dev` before committing routine compiler or
+- Run `cargo check --locked -p cellscript --all-targets` before committing routine compiler or
   documentation changes.
-- Run `./scripts/cellscript_gate.sh ci` before merge-readiness claims.
-- Run `./scripts/cellscript_gate.sh backend` for IR, codegen, assembler, ABI,
+- Run `./scripts/cellscript_ckb_release_gate.sh quick` before merge-readiness claims.
+- Run `./scripts/cellscript_strict_backend_audit.sh full` for IR, codegen, assembler, ABI,
   ELF, or RISC-V changes.
 - Focused commands such as `cargo check --locked -p cellscript --all-targets`,
   `cargo test --locked -p cellscript`, clippy with `-D warnings`, and
@@ -117,8 +117,8 @@ implicit backend contracts more implicit.
   semantics are intentionally unavailable.
 - Release notes should separate highlights, scope boundaries, validation
   commands, and links to detailed docs.
-- Do not keep roadmap promises in `docs/`. Release notes may describe what
-  shipped; future plans belong in dedicated roadmap/proposal files.
+- Do not keep roadmap promises in `docs/`. Active docs describe the current
+  compiler boundary.
 
 ## Tests
 

@@ -2,7 +2,6 @@
 //! Command-line interface and subcommand implementation
 
 pub mod commands;
-mod novaseal_certification;
 
 use crate::error::Result;
 use commands::{CliParser, CommandExecutor};

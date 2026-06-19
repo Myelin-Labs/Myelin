@@ -1,49 +1,39 @@
 # CellScript Gate Policy
 
-CellScript uses one top-level gate entry point:
+CellScript uses one release gate entry point:
 
 ```bash
-./scripts/cellscript_gate.sh <dev|ci|backend|release>
+./scripts/cellscript_ckb_release_gate.sh <quick|full>
 ```
 
 The lower-level audit scripts remain available for focused debugging, but they
-are implementation details of the gate policy. Prefer the unified gate when
-deciding whether a change is ready.
+are implementation details of the gate policy. Prefer the release gate when
+making merge-readiness or production claims.
 
 ## Gate Modes
 
 | Mode | When to run | Evidence boundary |
 |---|---|---|
-| `dev` | Local development before pushing | Formatting, Rust check, strict backend quick audit, syntax-combination quick audit, whitespace diff check |
-| `ci` | Pull requests, pushes, and routine merge readiness | Full Rust tests, clippy, strict backend CI audit, syntax-combination CI audit through the strict backend runner, package verification, script syntax checks |
-| `backend` | Changes touching IR, codegen, assembler, ABI, ELF, or RISC-V behavior | Full Rust tests, clippy, and strict backend full audit, including stateful CKB scenarios |
-| `release` | Nightly/stable release candidates and any production CKB claim | `ci` plus tooling/docs boundary checks, VS Code validation, builder-backed CKB production acceptance, and stateful scenario/action coverage |
+| `quick` | Pull requests, pushes, and routine merge readiness | Rust formatting/check/test/clippy, syntax-combination quick audit, builder tooling, and compile-only CKB production acceptance |
+| `full` | Nightly/stable release candidates and any production CKB claim | `quick` plus deep syntax-combination audit, builder-backed CKB production acceptance, and stateful scenario/action coverage |
 
-`release-quick` is an internal compatibility mode used by
-`scripts/cellscript_ckb_release_gate.sh quick`; it runs the unified CI gate plus
-compile-only production acceptance.
+For local iteration, run the focused component that matches the change and then
+run `quick` before making a merge-readiness claim.
 
 ## Command Cheatsheet
 
 ```bash
 # Local fast path
-./scripts/cellscript_gate.sh dev
+cargo check --locked -p cellscript --all-targets
 
 # Default CI/PR gate
-./scripts/cellscript_gate.sh ci
+./scripts/cellscript_ckb_release_gate.sh quick
 
 # Strict compiler-contract gate for backend work
-./scripts/cellscript_gate.sh backend
+./scripts/cellscript_strict_backend_audit.sh full
 
 # Release-facing CKB production gate
-./scripts/cellscript_gate.sh release
-```
-
-The old release wrapper remains supported:
-
-```bash
-./scripts/cellscript_ckb_release_gate.sh quick  # delegates to cellscript_gate.sh release-quick
-./scripts/cellscript_ckb_release_gate.sh full   # delegates to cellscript_gate.sh release
+./scripts/cellscript_ckb_release_gate.sh full
 ```
 
 ## Lower-Level Components
@@ -57,7 +47,6 @@ Use these only when you need a focused failure:
 ./scripts/cellscript_strict_backend_audit.sh ci
 ./scripts/cellscript_strict_backend_audit.sh full
 ./scripts/ckb_cellscript_acceptance.sh --production --stateful-scenarios
-./scripts/cellscript_0_14_scope_audit.sh
 ```
 
 Passing one component does not imply the corresponding higher-level gate passed.

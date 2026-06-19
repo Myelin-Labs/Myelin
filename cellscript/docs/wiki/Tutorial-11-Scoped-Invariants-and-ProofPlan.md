@@ -403,7 +403,6 @@ commands unless you create a `Cell.toml` there.
   metadata verification.
 - Use `Tutorial-08-Bundled-Example-Contracts` to see production-oriented example
   contracts.
-- Read `docs/releases/CELLSCRIPT_0_15_RELEASE_NOTES.md` for the release boundary.
-- Read `roadmap/CELLSCRIPT_0_16_ROADMAP.md` and
-  `docs/releases/CELLSCRIPT_0_16_1_RELEASE_NOTES.md` for the implemented
-  0.16 ProofPlan soundness and metadata-assurance boundary.
+- Read `docs/CELLSCRIPT_GATE_POLICY.md` for the current release-gate boundary.
+- Read `docs/CELLSCRIPT_METADATA_SYSTEM_AUDIT.md` for the current metadata
+  assurance boundary.

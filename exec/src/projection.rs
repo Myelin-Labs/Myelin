@@ -217,4 +217,88 @@ mod tests {
         assert_eq!(report.semantic_profile, SemanticProfile::CkbInspiredOnly);
         assert!(matches!(report.blockers.first(), Some(ProjectionBlocker::OutputsDataLengthMismatch { outputs: 1, outputs_data: 0 })));
     }
+
+    #[test]
+    fn empty_witness_set_is_a_warning_not_a_blocker() {
+        // A CellTx with no witnesses is still projectable. It carries a
+        // non-fatal warning so the consumer can see the deviation.
+        let tx = CellTx::new(
+            vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
+            vec![],
+            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
+            vec![vec![0xAA, 0xBB]],
+            vec![],
+        )
+        .unwrap();
+
+        let report = project_cell_tx_to_ckb(&tx);
+        assert!(report.ckb_projection_possible);
+        assert_eq!(report.semantic_profile, SemanticProfile::CkbCompatible);
+        assert!(report.blockers.is_empty());
+        assert!(report.warnings.iter().any(|w| matches!(w, ProjectionWarning::EmptyWitnessSet)));
+    }
+
+    #[test]
+    fn cellbase_style_context_is_a_warning_not_a_blocker() {
+        // A CellTx with no inputs is cellbase-shaped. It still projects
+        // to a CKB-shaped transaction; the warning is informational.
+        let tx = CellTx::new(
+            vec![],
+            vec![],
+            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
+            vec![vec![0xAA, 0xBB]],
+            vec![vec![0xCC]],
+        )
+        .unwrap();
+
+        let report = project_cell_tx_to_ckb(&tx);
+        assert!(report.ckb_projection_possible);
+        assert_eq!(report.semantic_profile, SemanticProfile::CkbCompatible);
+        assert!(report.warnings.iter().any(|w| matches!(w, ProjectionWarning::CellbaseStyleContext)));
+    }
+
+    #[test]
+    fn ckb_style_tx_hash_is_deterministic() {
+        let tx = CellTx::new(
+            vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
+            vec![],
+            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
+            vec![vec![0xAA, 0xBB]],
+            vec![vec![0xCC]],
+        )
+        .unwrap();
+        let r1 = project_cell_tx_to_ckb(&tx);
+        let r2 = project_cell_tx_to_ckb(&tx);
+        assert_eq!(r1.ckb_raw_tx_hash, r2.ckb_raw_tx_hash);
+        assert_eq!(r1.ckb_wtx_hash, r2.ckb_wtx_hash);
+        assert_eq!(r1.source_txid, r2.source_txid);
+        assert_eq!(r1.molecule_transaction_bytes, r2.molecule_transaction_bytes);
+    }
+
+    #[test]
+    fn witness_change_does_not_affect_raw_tx_hash_but_affects_wtx_hash() {
+        // CKB raw transaction hash is the hash of the raw transaction
+        // (without witnesses). CKB wtxid hashes the full transaction
+        // including witnesses. The projection must report both.
+        let tx_a = CellTx::new(
+            vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
+            vec![],
+            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
+            vec![vec![0xAA]],
+            vec![vec![0xCC]],
+        )
+        .unwrap();
+        let tx_b = CellTx::new(
+            vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
+            vec![],
+            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
+            vec![vec![0xAA]],
+            vec![vec![0xDD]],
+        )
+        .unwrap();
+        let r_a = project_cell_tx_to_ckb(&tx_a);
+        let r_b = project_cell_tx_to_ckb(&tx_b);
+        assert_eq!(r_a.ckb_raw_tx_hash, r_b.ckb_raw_tx_hash, "raw tx hash is witness-independent");
+        assert_ne!(r_a.ckb_wtx_hash, r_b.ckb_wtx_hash, "wtxid is witness-dependent");
+    }
 }

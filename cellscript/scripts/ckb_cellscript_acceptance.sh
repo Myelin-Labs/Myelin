@@ -279,7 +279,6 @@ SOURCE_PROVENANCE_PATHS = [
     "Cargo.toml",
     "src",
     "examples",
-    "scripts/cellscript_gate.sh",
     "scripts/cellscript_ckb_release_gate.sh",
     "scripts/ckb_cellscript_acceptance.sh",
     "scripts/validate_ckb_cellscript_production_evidence.py",

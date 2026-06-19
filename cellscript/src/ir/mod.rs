@@ -4076,9 +4076,6 @@ impl IrGenerator {
                     blocks,
                     vars,
                 ),
-                "verifier::btc::bip340::require_signature" if call.args.len() == 3 => {
-                    self.lower_void_runtime_call("__novaseal_bip340_require_signature", &call.args, current, blocks, vars)
-                }
                 "ckb::cell_lock_hash_low" if call.args.len() == 1 => self.lower_simple_runtime_call(
                     "__ckb_cell_lock_hash_low",
                     "ckb_cell_lock_hash_low",

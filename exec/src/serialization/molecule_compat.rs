@@ -881,7 +881,7 @@ pub fn deserialize_transaction_molecule(bytes: &[u8]) -> Result<CellTx, Molecule
 pub struct CkbRawHeader {
     /// Header version.
     pub version: u32,
-    /// Compact proof-of-work target.
+    /// Compact CKB header target field.
     pub compact_target: u32,
     /// Unix timestamp in milliseconds.
     pub timestamp: u64,
@@ -906,7 +906,7 @@ pub struct CkbRawHeader {
 pub struct CkbHeader {
     /// Raw header fields.
     pub raw: CkbRawHeader,
-    /// Proof-of-work nonce.
+    /// CKB header nonce field.
     pub nonce: u128,
 }
 

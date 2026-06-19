@@ -69,7 +69,7 @@ merge can have no state continuation.
 
 | Track | Status | Implementation / evidence | Release gate |
 |---|---|---|---|
-| Canonical action / lock surface | Done for this slice | Parser, formatter, examples, wiki, VS Code grammar/snippets, and syntax-combo accepted cases use `verification` and action-level `transition`. | `scripts/cellscript_syntax_combo_audit.sh quick/ci/deep`; VS Code validate and dry-run in the release gate. |
+| Canonical action / lock surface | Done for this slice | Parser, formatter, examples, wiki, LSP, and syntax-combo accepted cases use `verification` and action-level `transition`. | `scripts/cellscript_syntax_combo_audit.sh quick/ci/deep`. |
 | `verification` section boundary | Done for this slice | `verification` replaces `where` in public examples and editor snippets; lifecycle statements remain proof obligations, not runtime execution. | Syntax-combo parser, formatter, type/effect, metadata, and codegen oracles. |
 | Local sugar expansion | Done for this slice | `preserve` and anonymous `require { ... }` are checked against canonical field equality and pure-boolean grouping rules. | Required bug classes `SCA-BUG-PRESERVE-TYPE-EQUIVALENCE` and `SCA-BUG-REQUIRE-BLOCK-PURITY`. |
 | Stdlib lifecycle helper boundary | Done for this slice | `std::lifecycle::*` and `std::receipt::*` helpers must validate arity/cell kind and lower to consume/create/locked-output obligations. | Required bug classes `SCA-BUG-STD-LIFECYCLE-LOCKED-OUTPUT`, `SCA-BUG-STDLIB-ARGUMENT-VALIDATION`, and `SCA-BUG-RECEIPT-LIFECYCLE-OUTPUT`. |

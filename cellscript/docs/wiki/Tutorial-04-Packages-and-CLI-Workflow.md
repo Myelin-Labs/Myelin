@@ -259,20 +259,20 @@ still be resolver-safe because it is a runtime verifier artifact. Its manifest
 or registry record must identify the verifier capability, IPC ABI, artifact
 hashes, build profile, TCB/security status, and any production CellDep pins.
 
-A NovaSeal starter project, by contrast, is not dependency-safe merely because
-it contains useful `.cell` code. If users are expected to copy it and edit terms,
+A starter project, by contrast, is not dependency-safe merely because it
+contains useful `.cell` code. If users are expected to copy it and edit terms,
 authorities, manifests, or deployment pins, it belongs in a cookbook or template
 flow such as:
 
 ```bash
-cellc new my_agreement --template novaseal/mvb-starter
-cellc cookbook copy novaseal/agreement-profile ./my-agreement
+cellc new my_contract --template ckb/basic-cell
+cellc cookbook copy examples/token ./my-contract
 ```
 
 It should not be installed with:
 
 ```bash
-cellc add novaseal/mvb-starter
+cellc add examples/token
 ```
 
 This keeps the registry as a verifiable dependency and artifact discovery layer,
