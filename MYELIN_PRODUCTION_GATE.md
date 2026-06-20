@@ -270,6 +270,12 @@ public-chain DA/court inclusion and finality, wallet funding/change-output
 construction, an implemented CKB court script, permissionless validator
 operation, or sustained production load.
 
+For release positioning, use `MYELIN_PRODUCTION_REHEARSAL_REPORT.md`. For a
+compact map of positive and negative evidence coverage, use
+`docs/adversarial-evidence-matrix.md`. For the next public CKB testnet run, use
+`docs/public-testnet-rehearsal-runbook.md`. These are reviewer-facing artefacts,
+not additional gates.
+
 The separate optional live-devnet smoke is:
 
 ```bash
