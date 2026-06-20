@@ -1,0 +1,120 @@
+module myelin::settlement_final
+
+resource SettlementFinal has store, create
+    identity(field(intent_hash))
+{
+    intent_hash: Hash,
+    court_bundle_hash: Hash,
+    da_manifest_hash: Hash,
+    challenge_payload_hash: Hash,
+    final_state_root: Hash,
+}
+
+action verify_final_settlement(expected_type_args: [u8; 64], expected_da_type_code_hash: Hash, expected_da_type_args: [u8; 64]) -> u64 {
+    verification
+        let output = source::group_output(0)
+        if ckb::cell_exists(source::group_input(0)) {
+            return 58
+        }
+        if !ckb::cell_exists(source::cell_dep(0)) {
+            return 59
+        }
+        let da_input = source::cell_dep(0)
+        if !ckb::cell_exists(source::input(1)) {
+            return 62
+        }
+        let authority_input = source::input(1)
+        if ckb::cell_exists(source::group_output(1)) {
+            return 57
+        }
+        if ckb::cell_data_size(output) != 160 {
+            return 50
+        }
+        if ckb::cell_data_size(da_input) != 160 {
+            return 60
+        }
+        if ckb::cell_data_size(authority_input) != 192 {
+            return 63
+        }
+        if ckb::cell_type_args_empty(output) {
+            return 51
+        }
+        let data_hash: Hash = ckb::cell_data_hash(output)
+        let intent_hash: Hash = ckb::cell_data_hash_at(output, 0)
+        let court_bundle_hash: Hash = ckb::cell_data_hash_at(output, 32)
+        let da_manifest_hash: Hash = ckb::cell_data_hash_at(output, 64)
+        let challenge_payload_hash: Hash = ckb::cell_data_hash_at(output, 96)
+        let final_state_root: Hash = ckb::cell_data_hash_at(output, 128)
+        if intent_hash == Hash::zero() {
+            return 52
+        }
+        if court_bundle_hash == Hash::zero() {
+            return 53
+        }
+        if da_manifest_hash == Hash::zero() {
+            return 54
+        }
+        if challenge_payload_hash == Hash::zero() {
+            return 55
+        }
+        if final_state_root == Hash::zero() {
+            return 56
+        }
+        let authority_intent_hash: Hash = ckb::cell_data_hash_at(authority_input, 0)
+        if authority_intent_hash != intent_hash {
+            return 64
+        }
+        let authority_session_id: Hash = ckb::cell_data_hash_at(authority_input, 32)
+        if authority_session_id == Hash::zero() {
+            return 65
+        }
+        let authority_participant_set_hash: Hash = ckb::cell_data_hash_at(authority_input, 64)
+        if authority_participant_set_hash == Hash::zero() {
+            return 66
+        }
+        let authority_escrow_input_cells_hash: Hash = ckb::cell_data_hash_at(authority_input, 96)
+        if authority_escrow_input_cells_hash == Hash::zero() {
+            return 67
+        }
+        let authority_session_lineage_commitment: Hash = ckb::cell_data_hash_at(authority_input, 128)
+        if authority_session_lineage_commitment == Hash::zero() {
+            return 68
+        }
+        let authority_commitment: Hash = ckb::cell_data_hash_at(authority_input, 160)
+        if authority_commitment == Hash::zero() {
+            return 69
+        }
+        let published_da_manifest_hash: Hash = ckb::cell_data_hash_at(da_input, 0)
+        if published_da_manifest_hash != da_manifest_hash {
+            return 61
+        }
+        let da_data_hash: Hash = ckb::cell_data_hash(da_input)
+        ckb::require_cell_type_script_hash_type(da_input, expected_da_type_code_hash, script::hash_type_data2())
+        ckb::require_cell_type_args_prefix_hash(da_input, da_data_hash)
+        ckb::require_cell_type_args_suffix_hash(da_input, da_manifest_hash)
+        let da_lock_hash: Hash = ckb::cell_lock_hash(da_input)
+        ckb::require_cell_lock_hash(authority_input, da_lock_hash)
+        ckb::require_cell_lock_hash(output, da_lock_hash)
+        let expected_da_type = script::new(expected_da_type_code_hash, script::hash_type_data2(), script::args(expected_da_type_args))
+        script::require_cell_type_matches(da_input, expected_da_type)
+        ckb::require_cell_type_args_prefix_hash(output, authority_session_id)
+        ckb::require_cell_type_args_suffix_hash(output, data_hash)
+        let type_code_hash: Hash = ckb::cell_type_code_hash(output)
+        let type_hash_type = ckb::cell_type_hash_type(output)
+        if ckb::cell_exists(source::output(2)) {
+            return 70
+        }
+        if ckb::cell_exists(source::output(1)) {
+            let candidate = source::output(1)
+            if ckb::cell_data_size(candidate) == 160 {
+                let candidate_type_code_hash: Hash = ckb::cell_type_code_hash(candidate)
+                let candidate_type_hash_type = ckb::cell_type_hash_type(candidate)
+                if candidate_type_code_hash == type_code_hash && candidate_type_hash_type == type_hash_type {
+                    return 70
+                }
+            }
+        }
+        let expected_type = script::new(type_code_hash, type_hash_type, script::args(expected_type_args))
+        script::require_cell_type_matches(output, expected_type)
+        return 0
+}

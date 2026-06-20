@@ -65,6 +65,16 @@ The rehearsal operator must also have:
    labelled rehearsal-provider evidence.
 ```
 
+Copy the tracked Myelin CellScript verifier sources into the rehearsal
+artefact directory before submission:
+
+```bash
+cp cellscript/examples/myelin/da-anchor-carrier.cell "$MYELIN_REHEARSAL_DIR/"
+cp cellscript/examples/myelin/settlement-carrier.cell "$MYELIN_REHEARSAL_DIR/"
+cp cellscript/examples/myelin/da-anchor-final.cell "$MYELIN_REHEARSAL_DIR/"
+cp cellscript/examples/myelin/settlement-final.cell "$MYELIN_REHEARSAL_DIR/"
+```
+
 ## Phase 1: Build Session Artefacts
 
 Use deterministic fixture session data for the first rehearsal unless real game
