@@ -83,9 +83,11 @@ cp docs/templates/public-testnet-rehearsal/operator-runbook.json "$MYELIN_REHEAR
 cp docs/templates/public-testnet-rehearsal/*.template.json "$MYELIN_REHEARSAL_DIR/"
 ```
 
-The `.template.json` files are shape references only. Replace their placeholder
-hashes, signatures, and deployment out-points before using them as CLI inputs.
-After replacement, save them with the filenames used below:
+The `.template.json` files are shape references only. Prefer the helper
+commands below for cryptographic evidence, then use the templates only as a
+review checklist or fallback. Replace all placeholder hashes, signatures, and
+deployment out-points before using a copied template as CLI input. After
+replacement, save them with the filenames used below:
 
 ```text
 external-da-receipt.json
@@ -126,7 +128,41 @@ session-court-verify.json has valid = true
 
 ## Phase 2: Build DA Evidence
 
-For a rehearsal-provider receipt:
+First build an in-memory DA manifest to expose the payload hash and segment
+root that the provider receipt must sign:
+
+```bash
+cargo run -p myelin-cli -- session da-manifest \
+  --bundle "$MYELIN_REHEARSAL_DIR/session-court.json" \
+  --out "$MYELIN_REHEARSAL_DIR/session-da-in-memory.json"
+
+export MYELIN_DA_PAYLOAD_HASH=$(jq -r '.molecule_transaction_hash' "$MYELIN_REHEARSAL_DIR/session-da-in-memory.json")
+export MYELIN_DA_SEGMENT_ROOT=$(jq -r '.segment_root' "$MYELIN_REHEARSAL_DIR/session-da-in-memory.json")
+```
+
+Ask the DA provider to sign those exact fields, then generate the receipt JSON:
+
+```bash
+cargo run -p myelin-cli -- session external-da-receipt \
+  --payload-hash "$MYELIN_DA_PAYLOAD_HASH" \
+  --segment-root "$MYELIN_DA_SEGMENT_ROOT" \
+  --provider "$MYELIN_DA_PROVIDER" \
+  --namespace session-court-payloads \
+  --receipt-id "$MYELIN_DA_RECEIPT_ID" \
+  --availability-window production-retention-30d \
+  --service-level production \
+  --retention-seconds 2592000 \
+  --retrieval-endpoint "$MYELIN_DA_RETRIEVAL_ENDPOINT" \
+  --audit-log-commitment "$MYELIN_DA_AUDIT_LOG_COMMITMENT" \
+  --provider-pubkey-hash "$MYELIN_DA_PROVIDER_PUBKEY_HASH" \
+  --provider-signature "$MYELIN_DA_PROVIDER_SIGNATURE" \
+  --out "$MYELIN_REHEARSAL_DIR/external-da-receipt.json"
+```
+
+`--provider-secret-key` exists for disposable rehearsal keys only. Do not pass
+real provider or custody keys through shell history.
+
+Then build the durable DA manifest with the provider receipt:
 
 ```bash
 cargo run -p myelin-cli -- session da-manifest \
@@ -166,6 +202,32 @@ cargo run -p myelin-cli -- session verify-da-anchor-package \
   --manifest "$MYELIN_REHEARSAL_DIR/session-da.json" \
   --bundle "$MYELIN_REHEARSAL_DIR/session-court.json" \
   --out "$MYELIN_REHEARSAL_DIR/session-da-anchor-package-verify.json"
+```
+
+Build a base settlement intent, generate court economics deployment evidence
+from it, then rebuild the intent with that evidence bound:
+
+```bash
+cargo run -p myelin-cli -- session settlement-intent \
+  --bundle "$MYELIN_REHEARSAL_DIR/session-court.json" \
+  --da-manifest "$MYELIN_REHEARSAL_DIR/session-da.json" \
+  --kind disputed-close \
+  --current-time-ms 60000 \
+  --challenge-window-ms 60000 \
+  --out "$MYELIN_REHEARSAL_DIR/session-settlement-intent.base.json"
+
+cargo run -p myelin-cli -- session court-economics-deployment-evidence \
+  --intent "$MYELIN_REHEARSAL_DIR/session-settlement-intent.base.json" \
+  --network ckb-testnet \
+  --verifier-code-hash "$MYELIN_COURT_VERIFIER_CODE_HASH" \
+  --verifier-hash-type data2 \
+  --verifier-code-dep-tx-hash "$MYELIN_COURT_VERIFIER_CODE_DEP_TX_HASH" \
+  --verifier-code-dep-index "$MYELIN_COURT_VERIFIER_CODE_DEP_INDEX" \
+  --audited-source-hash "$MYELIN_COURT_VERIFIER_SOURCE_HASH" \
+  --audit-report-hash "$MYELIN_COURT_VERIFIER_AUDIT_HASH" \
+  --ckb-enforceable-checked \
+  --testnet-beta-ready \
+  --out "$MYELIN_REHEARSAL_DIR/court-economics-deployment.json"
 
 cargo run -p myelin-cli -- session settlement-intent \
   --bundle "$MYELIN_REHEARSAL_DIR/session-court.json" \
@@ -181,6 +243,37 @@ cargo run -p myelin-cli -- session verify-settlement-intent \
   --bundle "$MYELIN_REHEARSAL_DIR/session-court.json" \
   --da-manifest "$MYELIN_REHEARSAL_DIR/session-da.json" \
   --out "$MYELIN_REHEARSAL_DIR/session-settlement-intent-verify.json"
+```
+
+Build a base settlement package, generate participant authority and
+threshold-lock deployment evidence from it, then rebuild the package with that
+evidence bound:
+
+```bash
+cargo run -p myelin-cli -- session settlement-package \
+  --intent "$MYELIN_REHEARSAL_DIR/session-settlement-intent.json" \
+  --bundle "$MYELIN_REHEARSAL_DIR/session-court.json" \
+  --da-manifest "$MYELIN_REHEARSAL_DIR/session-da.json" \
+  --out "$MYELIN_REHEARSAL_DIR/session-settlement-package.base.json"
+
+cargo run -p myelin-cli -- session authority-signature-evidence \
+  --package "$MYELIN_REHEARSAL_DIR/session-settlement-package.base.json" \
+  --signer-secret-key "$MYELIN_REHEARSAL_AUTHORITY_SIGNER_KEY_0" \
+  --signer-secret-key "$MYELIN_REHEARSAL_AUTHORITY_SIGNER_KEY_1" \
+  --out "$MYELIN_REHEARSAL_DIR/authority-signature-evidence.json"
+
+cargo run -p myelin-cli -- session threshold-lock-deployment-evidence \
+  --package "$MYELIN_REHEARSAL_DIR/session-settlement-package.base.json" \
+  --network ckb-testnet \
+  --code-hash "$MYELIN_THRESHOLD_LOCK_CODE_HASH" \
+  --hash-type data2 \
+  --code-dep-tx-hash "$MYELIN_THRESHOLD_LOCK_CODE_DEP_TX_HASH" \
+  --code-dep-index "$MYELIN_THRESHOLD_LOCK_CODE_DEP_INDEX" \
+  --audited-source-hash "$MYELIN_THRESHOLD_LOCK_SOURCE_HASH" \
+  --audit-report-hash "$MYELIN_THRESHOLD_LOCK_AUDIT_HASH" \
+  --ckb-enforceable-checked \
+  --testnet-beta-ready \
+  --out "$MYELIN_REHEARSAL_DIR/threshold-lock-deployment.json"
 
 cargo run -p myelin-cli -- session settlement-package \
   --intent "$MYELIN_REHEARSAL_DIR/session-settlement-intent.json" \

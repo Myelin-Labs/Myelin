@@ -3,6 +3,12 @@
 These files are starter artefacts for `docs/public-testnet-rehearsal-runbook.md`.
 They are not gates and they are not proof of production readiness.
 
+For signed or commitment-bound evidence, prefer the `myelin session
+external-da-receipt`, `authority-signature-evidence`,
+`threshold-lock-deployment-evidence`, and
+`court-economics-deployment-evidence` helpers. These templates are primarily
+shape references and fallback review aids.
+
 Use them as follows:
 
 ```text

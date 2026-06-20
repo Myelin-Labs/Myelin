@@ -320,6 +320,14 @@ enum SessionCommand {
     SubmitSettlementPackage(SessionSubmitSettlementPackageArgs),
     /// Build a compact CKB carrier transaction submission for a DA or settlement package.
     CarrierSubmission(Box<SessionCarrierSubmissionArgs>),
+    /// Emit a signed external DA receipt document for a DA manifest rehearsal.
+    ExternalDaReceipt(SessionExternalDaReceiptArgs),
+    /// Emit participant authority signature evidence from a settlement package.
+    AuthoritySignatureEvidence(SessionAuthoritySignatureEvidenceArgs),
+    /// Emit threshold-lock deployment evidence from a settlement package.
+    ThresholdLockDeploymentEvidence(SessionThresholdLockDeploymentEvidenceArgs),
+    /// Emit court-economics deployment evidence from a settlement intent.
+    CourtEconomicsDeploymentEvidence(SessionCourtEconomicsDeploymentEvidenceArgs),
     /// Verify submitted transaction presence/status through CKB JSON-RPC.
     VerifySubmissionInclusion(SessionVerifySubmissionInclusionArgs),
     /// Verify committed submission has enough CKB confirmation depth.
@@ -701,6 +709,151 @@ struct SessionCarrierSubmissionArgs {
 }
 
 #[derive(Debug, Args)]
+struct SessionExternalDaReceiptArgs {
+    /// Court replay payload hash from the in-memory DA manifest.
+    #[arg(long)]
+    payload_hash: String,
+    /// DA segment root from the in-memory DA manifest.
+    #[arg(long)]
+    segment_root: String,
+    /// DA provider identifier.
+    #[arg(long, default_value = "public-testnet-rehearsal-da-provider")]
+    provider: String,
+    /// Provider namespace for the stored court payload.
+    #[arg(long, default_value = "session-court-payloads")]
+    namespace: String,
+    /// Provider receipt id.
+    #[arg(long)]
+    receipt_id: String,
+    /// Human-readable availability window.
+    #[arg(long, default_value = "testnet-rehearsal-retention-window")]
+    availability_window: String,
+    /// Optional service level. Use "production" only when the provider signs production SLA fields.
+    #[arg(long)]
+    service_level: Option<String>,
+    /// Optional retention window in seconds.
+    #[arg(long)]
+    retention_seconds: Option<u64>,
+    /// Optional HTTPS retrieval endpoint.
+    #[arg(long)]
+    retrieval_endpoint: Option<String>,
+    /// Optional 32-byte audit log commitment.
+    #[arg(long)]
+    audit_log_commitment: Option<String>,
+    /// Provider secp256k1 secret key. Rehearsal helper only; prefer external signing for real providers.
+    #[arg(long)]
+    provider_secret_key: Option<String>,
+    /// Provider 20-byte pubkey hash when using an externally created signature.
+    #[arg(long)]
+    provider_pubkey_hash: Option<String>,
+    /// Provider recoverable secp256k1 signature when using external signing.
+    #[arg(long)]
+    provider_signature: Option<String>,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionAuthoritySignatureEvidenceArgs {
+    /// JSON package emitted by `session settlement-package`.
+    #[arg(long)]
+    package: PathBuf,
+    /// Participant authority secp256k1 secret key. Repeat for each signer.
+    #[arg(long = "signer-secret-key", required = true)]
+    signer_secret_keys: Vec<String>,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionThresholdLockDeploymentEvidenceArgs {
+    /// JSON package emitted by `session settlement-package`.
+    #[arg(long)]
+    package: PathBuf,
+    /// CKB network: ckb-testnet or ckb-mainnet.
+    #[arg(long, default_value = "ckb-testnet")]
+    network: String,
+    /// Deployed threshold-lock code hash.
+    #[arg(long)]
+    code_hash: String,
+    /// Deployed threshold-lock hash type.
+    #[arg(long, default_value = "data2")]
+    hash_type: String,
+    /// Deployed threshold-lock code dep tx hash.
+    #[arg(long)]
+    code_dep_tx_hash: String,
+    /// Deployed threshold-lock code dep output index.
+    #[arg(long, default_value = "0x0")]
+    code_dep_index: String,
+    /// Audited threshold-lock source hash.
+    #[arg(long)]
+    audited_source_hash: String,
+    /// Audit report hash for the threshold-lock deployment.
+    #[arg(long)]
+    audit_report_hash: String,
+    /// Optional deployment policy. Defaults from network.
+    #[arg(long)]
+    deployment_policy: Option<String>,
+    /// Set after the deployed code dep and lock args have been checked.
+    #[arg(long)]
+    ckb_enforceable_checked: bool,
+    /// Set after public-chain testnet evidence has been checked.
+    #[arg(long)]
+    testnet_beta_ready: bool,
+    /// Mainnet-only production readiness marker.
+    #[arg(long)]
+    production_ready: bool,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionCourtEconomicsDeploymentEvidenceArgs {
+    /// JSON intent emitted by `session settlement-intent`.
+    #[arg(long)]
+    intent: PathBuf,
+    /// CKB network: ckb-testnet or ckb-mainnet.
+    #[arg(long, default_value = "ckb-testnet")]
+    network: String,
+    /// Deployed court/dispute verifier code hash.
+    #[arg(long)]
+    verifier_code_hash: String,
+    /// Deployed court/dispute verifier hash type.
+    #[arg(long, default_value = "data2")]
+    verifier_hash_type: String,
+    /// Deployed court/dispute verifier code dep tx hash.
+    #[arg(long)]
+    verifier_code_dep_tx_hash: String,
+    /// Deployed court/dispute verifier code dep output index.
+    #[arg(long, default_value = "0x0")]
+    verifier_code_dep_index: String,
+    /// Audited court/dispute verifier source hash.
+    #[arg(long)]
+    audited_source_hash: String,
+    /// Audit report hash for the court/dispute deployment.
+    #[arg(long)]
+    audit_report_hash: String,
+    /// Optional deployment policy. Defaults from network.
+    #[arg(long)]
+    deployment_policy: Option<String>,
+    /// Set after the deployed court verifier code dep has been checked.
+    #[arg(long)]
+    ckb_enforceable_checked: bool,
+    /// Set after public-chain testnet court evidence has been checked.
+    #[arg(long)]
+    testnet_beta_ready: bool,
+    /// Mainnet-only production readiness marker.
+    #[arg(long)]
+    production_ready: bool,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct SessionVerifySubmissionInclusionArgs {
     /// JSON report emitted by a session submit-* command.
     #[arg(long)]
@@ -975,6 +1128,25 @@ fn run() -> Result<()> {
             SessionCommand::CarrierSubmission(args) => {
                 let out = args.out.clone();
                 let report = session_carrier_submission(*args)?;
+                write_json(out, &report)
+            }
+            SessionCommand::ExternalDaReceipt(args) => {
+                let out = args.out.clone();
+                let report = session_external_da_receipt(args)?;
+                write_json(out, &report)
+            }
+            SessionCommand::AuthoritySignatureEvidence(args) => {
+                let report = session_authority_signature_evidence(args.package, args.signer_secret_keys)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::ThresholdLockDeploymentEvidence(args) => {
+                let out = args.out.clone();
+                let report = session_threshold_lock_deployment_evidence(args)?;
+                write_json(out, &report)
+            }
+            SessionCommand::CourtEconomicsDeploymentEvidence(args) => {
+                let out = args.out.clone();
+                let report = session_court_economics_deployment_evidence(args)?;
                 write_json(out, &report)
             }
             SessionCommand::VerifySubmissionInclusion(args) => {
@@ -2885,6 +3057,245 @@ fn external_da_receipt_provider_signature_valid(receipt: &SessionExternalDaRecei
     let mut provider_signature_array = [0u8; 65];
     provider_signature_array.copy_from_slice(&provider_signature);
     secp256k1_signature_matches_pubkey_hash(&provider_message_hash, &provider_signature_array, &provider_pubkey_hash_array)
+}
+
+fn session_external_da_receipt(args: SessionExternalDaReceiptArgs) -> Result<Value> {
+    let payload_hash = bare_hex_32_arg(&args.payload_hash, "external DA receipt payload_hash")?;
+    let segment_root = bare_hex_32_arg(&args.segment_root, "external DA receipt segment_root")?;
+    let audit_log_commitment = args
+        .audit_log_commitment
+        .as_deref()
+        .map(|commitment| bare_hex_32_arg(commitment, "external DA receipt audit_log_commitment"))
+        .transpose()?;
+    let provider_message_fields = ExternalDaReceiptSignatureFields {
+        schema: "myelin-external-da-receipt-v2",
+        provider: &args.provider,
+        namespace: &args.namespace,
+        payload_hash: &payload_hash,
+        segment_root: &segment_root,
+        receipt_id: &args.receipt_id,
+        availability_window: &args.availability_window,
+        service_level: args.service_level.as_deref(),
+        retention_seconds: args.retention_seconds,
+        retrieval_endpoint: args.retrieval_endpoint.as_deref(),
+        audit_log_commitment: audit_log_commitment.as_deref(),
+    };
+    let provider_message_hash = external_da_receipt_provider_message_hash(&provider_message_fields);
+    let (provider_pubkey_hash, provider_signature) = match args.provider_secret_key.as_deref() {
+        Some(secret_key) => {
+            if args.provider_pubkey_hash.is_some() || args.provider_signature.is_some() {
+                return Err(CliError::InvalidFixture(
+                    "external DA receipt accepts either --provider-secret-key or externally supplied --provider-pubkey-hash/--provider-signature, not both"
+                        .to_owned(),
+                ));
+            }
+            sign_recoverable_pubkey_hash20(&provider_message_hash, secret_key, "external DA provider secret key")?
+        }
+        None => {
+            let provider_pubkey_hash = args
+                .provider_pubkey_hash
+                .as_deref()
+                .ok_or_else(|| {
+                    CliError::InvalidFixture(
+                        "external DA receipt requires --provider-pubkey-hash without --provider-secret-key".to_owned(),
+                    )
+                })
+                .and_then(|value| bare_hex_20_arg(value, "external DA receipt provider_pubkey_hash"))?;
+            let provider_signature = args
+                .provider_signature
+                .as_deref()
+                .ok_or_else(|| {
+                    CliError::InvalidFixture(
+                        "external DA receipt requires --provider-signature without --provider-secret-key".to_owned(),
+                    )
+                })
+                .and_then(|value| recoverable_signature_hex_arg(value, "external DA receipt provider_signature"))?;
+            let pubkey_hash: [u8; 20] = hex::decode(&provider_pubkey_hash)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| CliError::InvalidFixture("external DA receipt provider_pubkey_hash must be 20 bytes".to_owned()))?;
+            let signature: [u8; 65] = hex::decode(&provider_signature)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| CliError::InvalidFixture("external DA receipt provider_signature must be 65 bytes".to_owned()))?;
+            if !secp256k1_signature_matches_pubkey_hash(&provider_message_hash, &signature, &pubkey_hash) {
+                return Err(CliError::InvalidFixture(
+                    "external DA receipt provider_signature does not recover to provider_pubkey_hash".to_owned(),
+                ));
+            }
+            (provider_pubkey_hash, provider_signature)
+        }
+    };
+    let mut receipt = serde_json::json!({
+        "schema": "myelin-external-da-receipt-v2",
+        "provider": args.provider,
+        "namespace": args.namespace,
+        "payload_hash": payload_hash,
+        "segment_root": segment_root,
+        "receipt_id": args.receipt_id,
+        "availability_window": args.availability_window,
+        "provider_pubkey_hash": provider_pubkey_hash,
+        "provider_signature": provider_signature
+    });
+    if let Some(service_level) = args.service_level {
+        receipt["service_level"] = Value::String(service_level);
+    }
+    if let Some(retention_seconds) = args.retention_seconds {
+        receipt["retention_seconds"] = Value::Number(serde_json::Number::from(retention_seconds));
+    }
+    if let Some(retrieval_endpoint) = args.retrieval_endpoint {
+        receipt["retrieval_endpoint"] = Value::String(retrieval_endpoint);
+    }
+    if let Some(audit_log_commitment) = audit_log_commitment {
+        receipt["audit_log_commitment"] = Value::String(audit_log_commitment);
+    }
+    Ok(receipt)
+}
+
+fn session_authority_signature_evidence(
+    package_path: PathBuf,
+    signer_secret_keys: Vec<String>,
+) -> Result<SessionAuthoritySignatureEvidence> {
+    let package = read_json_report::<SessionSettlementPackageReport>(&package_path)?;
+    let auth = &package.settlement_authority.authority_authentication;
+    let message_hash = parse_hex_32(&auth.message_hash)
+        .ok_or_else(|| CliError::InvalidFixture("settlement authority message_hash must be 32-byte hex".to_owned()))?;
+    let mut signer_pubkey_hashes = Vec::with_capacity(signer_secret_keys.len());
+    let mut signatures = Vec::with_capacity(signer_secret_keys.len());
+    for secret_key in &signer_secret_keys {
+        let (pubkey_hash, signature) = sign_recoverable_pubkey_hash20(&message_hash, secret_key, "authority signer secret key")?;
+        signer_pubkey_hashes.push(pubkey_hash);
+        signatures.push(signature);
+    }
+    normalize_authority_signature_evidence(
+        SessionAuthoritySignatureEvidence {
+            schema: "myelin-session-authority-signature-evidence-v1".to_owned(),
+            signature_scheme: auth.signature_scheme.clone(),
+            participant_set_hash: auth.participant_set_hash.clone(),
+            threshold: auth.threshold,
+            signer_count: 0,
+            message_hash: auth.message_hash.clone(),
+            signer_pubkey_hashes,
+            signatures,
+            attestation_hashes: Vec::new(),
+            signature_verified: false,
+            evidence_commitment_algorithm: String::new(),
+            evidence_commitment: String::new(),
+        },
+        auth,
+    )
+}
+
+fn session_threshold_lock_deployment_evidence(
+    args: SessionThresholdLockDeploymentEvidenceArgs,
+) -> Result<SessionThresholdLockDeploymentEvidence> {
+    let package = read_json_report::<SessionSettlementPackageReport>(&args.package)?;
+    let auth = &package.settlement_authority.authority_authentication;
+    let deployment_policy = args.deployment_policy.unwrap_or_else(|| match args.network.as_str() {
+        "ckb-mainnet" => "mainnet-production-threshold-lock-v1".to_owned(),
+        _ => "testnet-beta-threshold-lock-v1".to_owned(),
+    });
+    normalize_threshold_lock_deployment_evidence(
+        SessionThresholdLockDeploymentEvidence {
+            schema: "myelin-session-threshold-lock-deployment-v1".to_owned(),
+            network: args.network,
+            code_hash: args.code_hash,
+            hash_type: args.hash_type,
+            code_dep_tx_hash: args.code_dep_tx_hash,
+            code_dep_index: args.code_dep_index,
+            audited_source_hash: args.audited_source_hash,
+            audit_report_hash: args.audit_report_hash,
+            deployment_policy,
+            ckb_lock_args_hash: auth.ckb_lock_args_hash.clone(),
+            threshold: auth.threshold,
+            signer_pubkey_hashes: auth.signer_pubkey_hashes.clone(),
+            ckb_enforceable_checked: args.ckb_enforceable_checked,
+            testnet_beta_ready: args.testnet_beta_ready,
+            production_ready: args.production_ready,
+            evidence_commitment_algorithm: String::new(),
+            evidence_commitment: String::new(),
+        },
+        auth,
+    )
+}
+
+fn session_court_economics_deployment_evidence(
+    args: SessionCourtEconomicsDeploymentEvidenceArgs,
+) -> Result<SessionCourtEconomicsDeploymentEvidence> {
+    let intent = read_json_report::<SessionSettlementIntentReport>(&args.intent)?;
+    let economics = &intent.court_economics;
+    let deployment_policy = args.deployment_policy.unwrap_or_else(|| match args.network.as_str() {
+        "ckb-mainnet" => "mainnet-production-court-dispute-economics-v1".to_owned(),
+        _ => "testnet-beta-court-dispute-economics-v1".to_owned(),
+    });
+    normalize_court_economics_deployment_evidence(
+        SessionCourtEconomicsDeploymentEvidence {
+            schema: "myelin-session-court-economics-deployment-v1".to_owned(),
+            network: args.network,
+            verifier_code_hash: args.verifier_code_hash,
+            verifier_hash_type: args.verifier_hash_type,
+            verifier_code_dep_tx_hash: args.verifier_code_dep_tx_hash,
+            verifier_code_dep_index: args.verifier_code_dep_index,
+            audited_source_hash: args.audited_source_hash,
+            audit_report_hash: args.audit_report_hash,
+            deployment_policy,
+            economics_commitment: economics.economics_commitment.clone(),
+            challenge_payload_hash: economics.challenge_payload_hash.clone(),
+            da_availability_commitment: economics.da_availability_commitment.clone(),
+            minimum_dispute_bond_shannons: economics.minimum_dispute_bond_shannons,
+            loser_slash_bps: economics.loser_slash_bps,
+            settlement_after_deadline_only: economics.settlement_after_deadline_only,
+            da_evidence_required: economics.da_evidence_required,
+            ckb_enforceable_checked: args.ckb_enforceable_checked,
+            testnet_beta_ready: args.testnet_beta_ready,
+            production_ready: args.production_ready,
+            evidence_commitment_algorithm: String::new(),
+            evidence_commitment: String::new(),
+        },
+        economics,
+    )
+}
+
+fn sign_recoverable_pubkey_hash20(message_hash: &[u8; 32], secret_key_hex: &str, label: &str) -> Result<(String, String)> {
+    let secret_key_bytes: [u8; 32] = decode_hex_bytes(secret_key_hex)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| CliError::InvalidFixture(format!("{label} must be a 32-byte hex secp256k1 secret key")))?;
+    let secret_key = SecretKey::from_slice(&secret_key_bytes)
+        .map_err(|_| CliError::InvalidFixture(format!("{label} is not a valid secp256k1 secret key")))?;
+    let secp = Secp256k1::new();
+    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+    let pubkey_hash = secp256k1_pubkey_hash20(&public_key);
+    let message = Message::from_digest_slice(message_hash).expect("blake3 hash is a valid secp256k1 message digest");
+    let signature = secp.sign_ecdsa_recoverable(&message, &secret_key);
+    let (recovery_id, compact_signature) = signature.serialize_compact();
+    let mut signature_bytes = [0u8; 65];
+    signature_bytes[..64].copy_from_slice(&compact_signature);
+    signature_bytes[64] = recovery_id.to_i32() as u8;
+    Ok((hex::encode(pubkey_hash), hex::encode(signature_bytes)))
+}
+
+fn bare_hex_32_arg(value: &str, field: &str) -> Result<String> {
+    let bytes = decode_hex_bytes(value).ok_or_else(|| CliError::InvalidFixture(format!("{field} must be 32-byte hex")))?;
+    if bytes.len() != 32 {
+        return Err(CliError::InvalidFixture(format!("{field} must decode to exactly 32 bytes")));
+    }
+    Ok(hex::encode(bytes))
+}
+
+fn bare_hex_20_arg(value: &str, field: &str) -> Result<String> {
+    let bytes = decode_hex_bytes(value).ok_or_else(|| CliError::InvalidFixture(format!("{field} must be 20-byte hex")))?;
+    if bytes.len() != 20 {
+        return Err(CliError::InvalidFixture(format!("{field} must decode to exactly 20 bytes")));
+    }
+    Ok(hex::encode(bytes))
+}
+
+fn recoverable_signature_hex_arg(value: &str, field: &str) -> Result<String> {
+    let bytes = decode_hex_bytes(value).ok_or_else(|| CliError::InvalidFixture(format!("{field} must be 65-byte hex")))?;
+    if bytes.len() != 65 {
+        return Err(CliError::InvalidFixture(format!("{field} must decode to exactly 65 bytes")));
+    }
+    Ok(hex::encode(bytes))
 }
 
 fn external_da_receipt_production_guarantee_checked(
@@ -12818,6 +13229,52 @@ mod tests {
     }
 
     #[test]
+    fn session_external_da_receipt_helper_feeds_production_da_manifest() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = write_temp_json("external-da-helper-open", &open);
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = write_temp_json("external-da-helper-commit", &commit);
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = write_temp_json("external-da-helper-court", &bundle);
+        let in_memory_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("in-memory DA manifest");
+        let receipt = session_external_da_receipt(SessionExternalDaReceiptArgs {
+            payload_hash: in_memory_manifest.molecule_transaction_hash.clone(),
+            segment_root: in_memory_manifest.segment_root.clone(),
+            provider: "fixture-external-da".to_owned(),
+            namespace: "session-court-payloads".to_owned(),
+            receipt_id: "helper-receipt-0001".to_owned(),
+            availability_window: "production-retention-30d".to_owned(),
+            service_level: Some("production".to_owned()),
+            retention_seconds: Some(30 * 24 * 60 * 60),
+            retrieval_endpoint: Some("https://da.example.invalid/session-court-payloads/helper-receipt-0001".to_owned()),
+            audit_log_commitment: Some(format!("0x{}", "a5".repeat(32))),
+            provider_secret_key: Some("44".repeat(32)),
+            provider_pubkey_hash: None,
+            provider_signature: None,
+            out: None,
+        })
+        .expect("generate signed external DA receipt");
+        let receipt_path = write_temp_json("external-da-helper-receipt", &receipt);
+        let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-helper-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&storage_dir);
+
+        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), Some(receipt_path.clone()))
+            .expect("DA manifest accepts helper-generated receipt");
+
+        let _ = std::fs::remove_file(receipt_path);
+        let _ = std::fs::remove_file(bundle_path);
+        let _ = std::fs::remove_dir_all(storage_dir);
+
+        let receipt = manifest.availability.external_receipt.as_ref().expect("external receipt");
+        assert!(receipt.provider_signature_verified);
+        assert!(receipt.production_guarantee_checked);
+        assert!(manifest.availability.external_receipt_checked);
+        assert!(manifest.availability.production_ready);
+    }
+
+    #[test]
     fn session_da_manifest_rejects_tampered_segment_root() {
         let open = session_open_fixture("static-closed-committee").expect("open session");
         let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-tamper-{}.json", std::process::id()));
@@ -13523,6 +13980,71 @@ mod tests {
             .iter()
             .any(|check| check.name == "settlement-authority-participant-signature-evidence" && check.ok));
         assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-authentication-ready" && check.ok));
+    }
+
+    #[test]
+    fn session_rehearsal_evidence_helpers_bind_to_package_and_intent() {
+        let (base_package, intent, bundle_path, da_manifest_path, intent_path) =
+            settlement_package_fixture("rehearsal-evidence-helpers");
+        let package_path = write_temp_json("rehearsal-evidence-helper-package", &base_package);
+
+        let signature_evidence = session_authority_signature_evidence(package_path.clone(), vec!["11".repeat(32), "22".repeat(32)])
+            .expect("authority signature helper evidence");
+        let threshold_deployment = session_threshold_lock_deployment_evidence(SessionThresholdLockDeploymentEvidenceArgs {
+            package: package_path.clone(),
+            network: "ckb-testnet".to_owned(),
+            code_hash: format!("0x{}", "a1".repeat(32)),
+            hash_type: "data2".to_owned(),
+            code_dep_tx_hash: format!("0x{}", "b2".repeat(32)),
+            code_dep_index: "0x0".to_owned(),
+            audited_source_hash: format!("0x{}", "c3".repeat(32)),
+            audit_report_hash: format!("0x{}", "d4".repeat(32)),
+            deployment_policy: None,
+            ckb_enforceable_checked: true,
+            testnet_beta_ready: true,
+            production_ready: false,
+            out: None,
+        })
+        .expect("threshold-lock deployment helper evidence");
+        let court_deployment = session_court_economics_deployment_evidence(SessionCourtEconomicsDeploymentEvidenceArgs {
+            intent: intent_path.clone(),
+            network: "ckb-testnet".to_owned(),
+            verifier_code_hash: format!("0x{}", "e1".repeat(32)),
+            verifier_hash_type: "data2".to_owned(),
+            verifier_code_dep_tx_hash: format!("0x{}", "e2".repeat(32)),
+            verifier_code_dep_index: "0x0".to_owned(),
+            audited_source_hash: format!("0x{}", "e3".repeat(32)),
+            audit_report_hash: format!("0x{}", "e4".repeat(32)),
+            deployment_policy: None,
+            ckb_enforceable_checked: true,
+            testnet_beta_ready: true,
+            production_ready: false,
+            out: None,
+        })
+        .expect("court economics deployment helper evidence");
+
+        let auth = &base_package.settlement_authority.authority_authentication;
+        assert!(signature_evidence.signature_verified);
+        assert_eq!(signature_evidence.signer_count, 2);
+        assert_eq!(signature_evidence.message_hash, auth.message_hash);
+        assert_eq!(threshold_deployment.ckb_lock_args_hash, auth.ckb_lock_args_hash);
+        assert_eq!(threshold_deployment.signer_pubkey_hashes, auth.signer_pubkey_hashes);
+        assert_eq!(threshold_deployment.deployment_policy, "testnet-beta-threshold-lock-v1");
+        assert!(threshold_deployment.testnet_beta_ready);
+        assert!(!threshold_deployment.production_ready);
+        assert_eq!(court_deployment.economics_commitment, intent.court_economics.economics_commitment);
+        assert_eq!(court_deployment.da_availability_commitment, intent.court_economics.da_availability_commitment);
+        assert_eq!(court_deployment.deployment_policy, "testnet-beta-court-dispute-economics-v1");
+        assert!(court_deployment.testnet_beta_ready);
+        assert!(!court_deployment.production_ready);
+        assert_eq!(signature_evidence.evidence_commitment.len(), 64);
+        assert_eq!(threshold_deployment.evidence_commitment.len(), 64);
+        assert_eq!(court_deployment.evidence_commitment.len(), 64);
+
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
     }
 
     #[test]
