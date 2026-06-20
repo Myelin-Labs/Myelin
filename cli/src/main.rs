@@ -2632,9 +2632,23 @@ fn da_availability_evidence(
     let proof_molecule_hash_bytes = blake3_32(b"myelin:session-da-proof-molecule:v1", &proof_bytes);
     let committee_id = "myelin-replicated-da-committee-testnet-beta-v1";
     let mut attestation_hashes = Vec::new();
-    for member in ["da-node-0", "da-node-1", "da-node-2"] {
-        let attestation = blake3_chunks(
-            b"myelin:session-da-availability-attestation:v1",
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"myelin:session-da-availability-commitment:v1");
+    hasher.update(&session_id_bytes);
+    hasher.update(&court_bundle_hash_bytes);
+    hasher.update(&payload_hash_bytes);
+    hasher.update(&segment_root_bytes);
+    hasher.update(&proof_molecule_hash_bytes);
+    hasher.update(committee_id.as_bytes());
+    let required_attestations = 2;
+    let signature_scheme = "secp256k1-recoverable-blake3-pubkey-hash20";
+    let secp = Secp256k1::new();
+    let mut attester_pubkey_hashes = Vec::new();
+    let mut attestation_signatures = Vec::new();
+    let mut attestation_signature_verified = true;
+    for (member, secret_key_bytes) in [("da-node-0", [0x31u8; 32]), ("da-node-1", [0x32u8; 32]), ("da-node-2", [0x33u8; 32])] {
+        let attestation_message = blake3_chunks(
+            b"myelin:session-da-availability-attestation-message:v1",
             &[
                 &session_id_bytes,
                 &court_bundle_hash_bytes,
@@ -2645,38 +2659,56 @@ fn da_availability_evidence(
                 member.as_bytes(),
             ],
         );
+        let secret_key = SecretKey::from_slice(&secret_key_bytes).expect("static DA attester key is valid");
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let pubkey_hash = secp256k1_pubkey_hash20(&public_key);
+        let message = Message::from_digest_slice(&attestation_message).expect("DA attestation message hash is valid");
+        let signature = secp.sign_ecdsa_recoverable(&message, &secret_key);
+        let (recovery_id, compact_signature) = signature.serialize_compact();
+        let mut signature_bytes = [0u8; 65];
+        signature_bytes[..64].copy_from_slice(&compact_signature);
+        signature_bytes[64] = recovery_id.to_i32() as u8;
+        attestation_signature_verified &=
+            secp256k1_signature_matches_pubkey_hash(&attestation_message, &signature_bytes, &pubkey_hash);
+        let attestation = blake3_chunks(
+            b"myelin:session-da-availability-signature-attestation:v1",
+            &[&attestation_message, &pubkey_hash, &signature_bytes],
+        );
+        attester_pubkey_hashes.push(hex::encode(pubkey_hash));
+        attestation_signatures.push(hex::encode(signature_bytes));
         attestation_hashes.push(hex::encode(attestation));
     }
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"myelin:session-da-availability-commitment:v1");
-    hasher.update(&session_id_bytes);
-    hasher.update(&court_bundle_hash_bytes);
-    hasher.update(&payload_hash_bytes);
-    hasher.update(&segment_root_bytes);
-    hasher.update(&proof_molecule_hash_bytes);
-    hasher.update(committee_id.as_bytes());
+    for pubkey_hash in &attester_pubkey_hashes {
+        hasher.update(pubkey_hash.as_bytes());
+    }
+    for signature in &attestation_signatures {
+        hasher.update(signature.as_bytes());
+    }
     for attestation in &attestation_hashes {
         hasher.update(attestation.as_bytes());
     }
     let availability_commitment = *hasher.finalize().as_bytes();
-    let required_attestations = 2;
-    let attestation_count = u32::try_from(attestation_hashes.len()).expect("static DA committee fits into u32");
+    let attestation_count = u32::try_from(attestation_signatures.len()).expect("static DA committee fits into u32");
     let retrieval_probe_count = if local_da_published { 2 } else { 1 };
     Ok(SessionDaAvailabilityEvidence {
         schema: "myelin-da-availability-v1".to_owned(),
         mode: "replicated-da-committee".to_owned(),
         committee_id: committee_id.to_owned(),
+        signature_scheme: signature_scheme.to_owned(),
         required_attestations,
         attestation_count,
         retrieval_probe_count,
         payload_hash: molecule_transaction_hash.to_owned(),
         segment_root: segment_root.to_owned(),
         proof_molecule_hash: hex::encode(proof_molecule_hash_bytes),
+        attester_pubkey_hashes,
+        attestation_signatures,
         attestation_hashes,
         availability_commitment_algorithm:
-            "blake3(myelin:session-da-availability-commitment:v1,session_id,court_bundle_hash,payload_hash,segment_root,proof_molecule_hash,committee_id,attestation_hashes)"
+            "blake3(myelin:session-da-availability-commitment:v1,session_id,court_bundle_hash,payload_hash,segment_root,proof_molecule_hash,committee_id,attester_pubkey_hashes,attestation_signatures,attestation_hashes)"
                 .to_owned(),
         availability_commitment: hex::encode(availability_commitment),
+        attestation_signature_verified: attestation_signature_verified && attestation_count >= required_attestations,
         availability_checked: true,
         testnet_beta_ready: false,
         production_ready: false,
@@ -3419,15 +3451,19 @@ struct SessionDaAvailabilityEvidence {
     schema: String,
     mode: String,
     committee_id: String,
+    signature_scheme: String,
     required_attestations: u32,
     attestation_count: u32,
     retrieval_probe_count: u32,
     payload_hash: String,
     segment_root: String,
     proof_molecule_hash: String,
+    attester_pubkey_hashes: Vec<String>,
+    attestation_signatures: Vec<String>,
     attestation_hashes: Vec<String>,
     availability_commitment_algorithm: String,
     availability_commitment: String,
+    attestation_signature_verified: bool,
     availability_checked: bool,
     testnet_beta_ready: bool,
     production_ready: bool,
@@ -4744,16 +4780,27 @@ fn verify_session_da_manifest(
         &mut checks,
         "da-availability-ready",
         manifest.availability.availability_checked
+            && manifest.availability.attestation_signature_verified
+            && manifest.availability.attestation_signatures.len() == manifest.availability.attester_pubkey_hashes.len()
+            && manifest.availability.attestation_count >= manifest.availability.required_attestations
             && !manifest.availability.testnet_beta_ready
             && !manifest.availability.production_ready,
-        Some("availability_checked && !testnet_beta_ready && !production_ready".to_owned()),
+        Some(
+            "availability_checked && attestation_signature_verified && signatures match attesters && attestation_count >= required_attestations && !testnet_beta_ready && !production_ready"
+                .to_owned(),
+        ),
         Some(format!(
-            "{} && !{} && !{}",
+            "{} && {} && {} == {} && {} >= {} && !{} && !{}",
             manifest.availability.availability_checked,
+            manifest.availability.attestation_signature_verified,
+            manifest.availability.attestation_signatures.len(),
+            manifest.availability.attester_pubkey_hashes.len(),
+            manifest.availability.attestation_count,
+            manifest.availability.required_attestations,
             manifest.availability.testnet_beta_ready,
             manifest.availability.production_ready
         )),
-        "DA manifest carries a deterministic availability commitment without claiming external DA readiness",
+        "DA manifest carries locally verified committee signatures without claiming external DA readiness",
     );
     push_check(
         &mut checks,
@@ -10426,6 +10473,16 @@ mod tests {
         assert!(manifest.proof_valid);
         assert_eq!(manifest.availability.schema, "myelin-da-availability-v1");
         assert_eq!(manifest.availability.mode, "replicated-da-committee");
+        assert_eq!(manifest.availability.signature_scheme, "secp256k1-recoverable-blake3-pubkey-hash20");
+        assert_eq!(manifest.availability.attester_pubkey_hashes.len(), 3);
+        assert_eq!(manifest.availability.attestation_signatures.len(), 3);
+        assert!(manifest.availability.attestation_signature_verified);
+        assert!(manifest.availability.attester_pubkey_hashes.iter().all(|hash| hash.len() == 40 && hex::decode(hash).is_ok()));
+        assert!(manifest
+            .availability
+            .attestation_signatures
+            .iter()
+            .all(|signature| signature.len() == 130 && hex::decode(signature).is_ok()));
         assert!(manifest.availability.availability_checked);
         assert!(!manifest.availability.testnet_beta_ready);
         assert!(!manifest.availability.production_ready);
@@ -10530,12 +10587,15 @@ mod tests {
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
 
         let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
-        let cases: [DaManifestTamperCase; 6] = [
+        let cases: [DaManifestTamperCase; 9] = [
             ("availability-commitment", |manifest| manifest.availability.availability_commitment = "22".repeat(32)),
             ("availability-payload-hash", |manifest| manifest.availability.payload_hash = "23".repeat(32)),
             ("availability-segment-root", |manifest| manifest.availability.segment_root = "24".repeat(32)),
             ("availability-proof-hash", |manifest| manifest.availability.proof_molecule_hash = "25".repeat(32)),
+            ("availability-pubkey", |manifest| manifest.availability.attester_pubkey_hashes[0] = "26".repeat(20)),
+            ("availability-signature", |manifest| manifest.availability.attestation_signatures[0] = "27".repeat(65)),
             ("availability-attestation-count", |manifest| manifest.availability.attestation_count = 1),
+            ("availability-signature-verified", |manifest| manifest.availability.attestation_signature_verified = false),
             ("availability-checked", |manifest| manifest.availability.availability_checked = false),
         ];
         for (label, mutate) in cases {

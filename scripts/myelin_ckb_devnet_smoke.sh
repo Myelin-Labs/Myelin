@@ -263,9 +263,14 @@ if [[ "$settlement_valid" != "true" ]]; then
 fi
 da_availability_schema="$(jq -r '.availability.schema' "$WORKDIR/myelin/session-da.json")"
 da_availability_mode="$(jq -r '.availability.mode' "$WORKDIR/myelin/session-da.json")"
+da_availability_signature_scheme="$(jq -r '.availability.signature_scheme' "$WORKDIR/myelin/session-da.json")"
 da_availability_checked="$(jq -r '.availability.availability_checked' "$WORKDIR/myelin/session-da.json")"
 da_availability_testnet_ready="$(jq -r '.availability.testnet_beta_ready' "$WORKDIR/myelin/session-da.json")"
 da_availability_production_ready="$(jq -r '.availability.production_ready' "$WORKDIR/myelin/session-da.json")"
+da_availability_required_attestations="$(jq -r '.availability.required_attestations' "$WORKDIR/myelin/session-da.json")"
+da_availability_pubkey_hash_count="$(jq -r '.availability.attester_pubkey_hashes | length' "$WORKDIR/myelin/session-da.json")"
+da_availability_signature_count="$(jq -r '.availability.attestation_signatures | length' "$WORKDIR/myelin/session-da.json")"
+da_availability_signature_verified="$(jq -r '.availability.attestation_signature_verified' "$WORKDIR/myelin/session-da.json")"
 da_availability_payload_hash="$(jq -r '.availability.payload_hash' "$WORKDIR/myelin/session-da.json")"
 da_availability_segment_root="$(jq -r '.availability.segment_root' "$WORKDIR/myelin/session-da.json")"
 da_availability_commitment="$(jq -r '.availability.availability_commitment' "$WORKDIR/myelin/session-da.json")"
@@ -273,6 +278,18 @@ da_manifest_molecule_hash="$(jq -r '.molecule_transaction_hash' "$WORKDIR/myelin
 da_manifest_segment_root="$(jq -r '.segment_root' "$WORKDIR/myelin/session-da.json")"
 if [[ "$da_availability_schema" != "myelin-da-availability-v1" || "$da_availability_mode" != "replicated-da-committee" ]]; then
   echo "DA manifest did not expose replicated DA availability evidence" >&2
+  exit 1
+fi
+if [[ "$da_availability_signature_scheme" != "secp256k1-recoverable-blake3-pubkey-hash20" ]]; then
+  echo "DA availability evidence must expose the secp256k1 recoverable signature scheme" >&2
+  exit 1
+fi
+if (( da_availability_pubkey_hash_count < da_availability_required_attestations || da_availability_signature_count < da_availability_required_attestations )); then
+  echo "DA availability evidence must expose threshold pubkey hashes and signatures" >&2
+  exit 1
+fi
+if [[ "$da_availability_signature_verified" != "true" ]]; then
+  echo "DA availability signatures must verify locally" >&2
   exit 1
 fi
 if [[ "$da_availability_checked" != "true" || "$da_availability_testnet_ready" != "false" || "$da_availability_production_ready" != "false" ]]; then

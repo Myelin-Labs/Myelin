@@ -481,11 +481,10 @@ authority commitment in the smoke report, and consumes it in the final
 settlement transaction. It also submits a competing final-settlement output probe
 before the valid final settlement and requires live CKB script verification to
 reject it. This proves deployed compact-payload script semantics for the local
-devnet carrier and final-script paths, plus deterministic DA-availability
-commitments and locally verified authority-authentication signatures. It still
-does not claim external DA availability guarantees, deployed threshold-lock
-authority enforcement, production key management, or complete court-dispute
-economics.
+devnet carrier and final-script paths, plus locally verified DA committee
+signatures and authority-authentication signatures. It still does not claim
+external DA availability guarantees, deployed threshold-lock authority
+enforcement, production key management, or complete court-dispute economics.
 `teeworlds court-bundle` materialises one disputed chunk as a self-contained
 court-input bundle: chunk payload bytes, CKB Molecule transaction bytes,
 CKB-style projection evidence, deterministic challenge hashes, and

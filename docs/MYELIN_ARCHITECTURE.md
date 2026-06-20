@@ -530,11 +530,12 @@ creation policy; those signatures are not yet deployed CKB threshold-lock
 enforcement. Production key custody and deployment policy remain separate
 operational work.
 Settlement intents carry a recomputable `court_economics` policy commitment
-over participant/escrow binding, DA availability, and challenge timing, while
-leaving complete court/dispute economics explicitly out of scope. Submission
-readiness carries an `operational_policy` commitment over confirmation depth,
-stability, fee policy, retry identity, live key-submission evidence, and
-monitoring checks; it can be testnet-beta ready while keeping
+over participant/escrow binding, locally signature-verified DA committee
+availability evidence, and challenge timing, while leaving external DA
+availability guarantees and complete court/dispute economics explicitly out of
+scope. Submission readiness carries an `operational_policy` commitment over
+confirmation depth, stability, fee policy, retry identity, live key-submission
+evidence, and monitoring checks; it can be testnet-beta ready while keeping
 `production_ready = false` until operator custody and runbooks are complete.
 The resulting `myelin-ckb-devnet-smoke-v1` report proves devnet CKB acceptance,
 deployed compact-payload type-script execution, final-script strict readiness,
