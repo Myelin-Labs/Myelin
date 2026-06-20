@@ -2642,9 +2642,9 @@ fn external_da_receipt_evidence(
         .get("schema")
         .and_then(Value::as_str)
         .ok_or_else(|| CliError::InvalidFixture(format!("external DA receipt is missing schema: {}", receipt_path.display())))?;
-    if schema != "myelin-external-da-receipt-v1" {
+    if schema != "myelin-external-da-receipt-v2" {
         return Err(CliError::InvalidFixture(format!(
-            "external DA receipt has unsupported schema {schema}; expected myelin-external-da-receipt-v1"
+            "external DA receipt has unsupported schema {schema}; expected myelin-external-da-receipt-v2"
         )));
     }
     let string_field = |field: &str| -> Result<String> {
@@ -2663,6 +2663,8 @@ fn external_da_receipt_evidence(
     let receipt_segment_root = string_field("segment_root")?;
     let receipt_id = string_field("receipt_id")?;
     let availability_window = string_field("availability_window")?;
+    let provider_pubkey_hash = string_field("provider_pubkey_hash")?;
+    let provider_signature = string_field("provider_signature")?;
     if receipt_payload_hash != payload_hash {
         return Err(CliError::InvalidFixture(format!(
             "external DA receipt payload_hash mismatch: expected {payload_hash}, got {receipt_payload_hash}"
@@ -2679,9 +2681,39 @@ fn external_da_receipt_evidence(
     if parse_hex_32(&receipt_segment_root).is_none() {
         return Err(CliError::InvalidFixture("external DA receipt segment_root must be 32-byte hex".to_owned()));
     }
-    let receipt_hash = hex::encode(blake3_32(b"myelin:external-da-receipt-document:v1", &receipt_bytes));
+    let provider_pubkey_hash_bytes = decode_hex_bytes(&provider_pubkey_hash)
+        .ok_or_else(|| CliError::InvalidFixture("external DA receipt provider_pubkey_hash must be hex".to_owned()))?;
+    if provider_pubkey_hash_bytes.len() != 20 {
+        return Err(CliError::InvalidFixture("external DA receipt provider_pubkey_hash must be a 20-byte pubkey hash".to_owned()));
+    }
+    let mut provider_pubkey_hash_array = [0u8; 20];
+    provider_pubkey_hash_array.copy_from_slice(&provider_pubkey_hash_bytes);
+    let provider_signature_bytes = decode_hex_bytes(&provider_signature)
+        .ok_or_else(|| CliError::InvalidFixture("external DA receipt provider_signature must be hex".to_owned()))?;
+    if provider_signature_bytes.len() != 65 {
+        return Err(CliError::InvalidFixture(
+            "external DA receipt provider_signature must be a 65-byte recoverable secp256k1 signature".to_owned(),
+        ));
+    }
+    let mut provider_signature_array = [0u8; 65];
+    provider_signature_array.copy_from_slice(&provider_signature_bytes);
+    let provider_message_hash = external_da_receipt_provider_message_hash(
+        schema,
+        &provider,
+        &namespace,
+        &receipt_payload_hash,
+        &receipt_segment_root,
+        &receipt_id,
+        &availability_window,
+    );
+    let provider_signature_verified =
+        secp256k1_signature_matches_pubkey_hash(&provider_message_hash, &provider_signature_array, &provider_pubkey_hash_array);
+    if !provider_signature_verified {
+        return Err(CliError::InvalidFixture("external DA receipt provider_signature does not match provider_pubkey_hash".to_owned()));
+    }
+    let receipt_hash = hex::encode(blake3_32(b"myelin:external-da-receipt-document:v2", &receipt_bytes));
     let receipt_commitment = hex::encode(blake3_chunks(
-        b"myelin:external-da-receipt-commitment:v1",
+        b"myelin:external-da-receipt-commitment:v2",
         &[
             provider.as_bytes(),
             namespace.as_bytes(),
@@ -2689,6 +2721,9 @@ fn external_da_receipt_evidence(
             receipt_segment_root.as_bytes(),
             receipt_id.as_bytes(),
             availability_window.as_bytes(),
+            provider_pubkey_hash.as_bytes(),
+            provider_signature.as_bytes(),
+            hex::encode(provider_message_hash).as_bytes(),
             receipt_hash.as_bytes(),
         ],
     ));
@@ -2700,9 +2735,72 @@ fn external_da_receipt_evidence(
         segment_root: receipt_segment_root,
         receipt_id,
         availability_window,
+        signature_scheme: "secp256k1-recoverable-blake3-pubkey-hash20".to_owned(),
+        provider_pubkey_hash,
+        provider_signature,
+        provider_message_hash: hex::encode(provider_message_hash),
+        provider_signature_verified,
         receipt_hash,
         receipt_commitment,
     }))
+}
+
+fn external_da_receipt_provider_message_hash(
+    schema: &str,
+    provider: &str,
+    namespace: &str,
+    payload_hash: &str,
+    segment_root: &str,
+    receipt_id: &str,
+    availability_window: &str,
+) -> [u8; 32] {
+    blake3_chunks(
+        b"myelin:external-da-receipt-provider-signature:v2",
+        &[
+            schema.as_bytes(),
+            provider.as_bytes(),
+            namespace.as_bytes(),
+            payload_hash.as_bytes(),
+            segment_root.as_bytes(),
+            receipt_id.as_bytes(),
+            availability_window.as_bytes(),
+        ],
+    )
+}
+
+fn external_da_receipt_provider_signature_valid(receipt: &SessionExternalDaReceiptEvidence) -> bool {
+    if receipt.signature_scheme != "secp256k1-recoverable-blake3-pubkey-hash20" {
+        return false;
+    }
+    let provider_message_hash = external_da_receipt_provider_message_hash(
+        &receipt.schema,
+        &receipt.provider,
+        &receipt.namespace,
+        &receipt.payload_hash,
+        &receipt.segment_root,
+        &receipt.receipt_id,
+        &receipt.availability_window,
+    );
+    if receipt.provider_message_hash != hex::encode(provider_message_hash) {
+        return false;
+    }
+    let Some(provider_pubkey_hash) = decode_hex_bytes(&receipt.provider_pubkey_hash) else {
+        return false;
+    };
+    if provider_pubkey_hash.len() != 20 {
+        return false;
+    }
+    let Some(provider_signature) = decode_hex_bytes(&receipt.provider_signature) else {
+        return false;
+    };
+    if provider_signature.len() != 65 {
+        return false;
+    }
+    let mut provider_pubkey_hash_array = [0u8; 20];
+    provider_pubkey_hash_array.copy_from_slice(&provider_pubkey_hash);
+    let mut provider_signature_array = [0u8; 65];
+    provider_signature_array.copy_from_slice(&provider_signature);
+    secp256k1_signature_matches_pubkey_hash(&provider_message_hash, &provider_signature_array, &provider_pubkey_hash_array)
 }
 
 fn da_availability_evidence(
@@ -2782,7 +2880,7 @@ fn da_availability_evidence(
     for attestation in &attestation_hashes {
         hasher.update(attestation.as_bytes());
     }
-    let external_receipt_checked = external_receipt.is_some();
+    let external_receipt_checked = external_receipt.as_ref().is_some_and(external_da_receipt_provider_signature_valid);
     if let Some(receipt) = external_receipt.as_ref() {
         hasher.update(receipt.schema.as_bytes());
         hasher.update(receipt.provider.as_bytes());
@@ -2791,6 +2889,11 @@ fn da_availability_evidence(
         hasher.update(receipt.segment_root.as_bytes());
         hasher.update(receipt.receipt_id.as_bytes());
         hasher.update(receipt.availability_window.as_bytes());
+        hasher.update(receipt.signature_scheme.as_bytes());
+        hasher.update(receipt.provider_pubkey_hash.as_bytes());
+        hasher.update(receipt.provider_signature.as_bytes());
+        hasher.update(receipt.provider_message_hash.as_bytes());
+        hasher.update(&[receipt.provider_signature_verified as u8]);
         hasher.update(receipt.receipt_hash.as_bytes());
         hasher.update(receipt.receipt_commitment.as_bytes());
     }
@@ -2809,14 +2912,14 @@ fn da_availability_evidence(
         payload_hash: molecule_transaction_hash.to_owned(),
         segment_root: segment_root.to_owned(),
         proof_molecule_hash: hex::encode(proof_molecule_hash_bytes),
-        external_receipt_count: u32::from(external_receipt_checked),
+        external_receipt_count: u32::from(external_receipt.is_some()),
         external_receipt_checked,
         external_receipt,
         attester_pubkey_hashes,
         attestation_signatures,
         attestation_hashes,
         availability_commitment_algorithm:
-            "blake3(myelin:session-da-availability-commitment:v1,session_id,court_bundle_hash,payload_hash,segment_root,proof_molecule_hash,committee_id,attester_pubkey_hashes,attestation_signatures,attestation_hashes,external_receipt)"
+            "blake3(myelin:session-da-availability-commitment:v1,session_id,court_bundle_hash,payload_hash,segment_root,proof_molecule_hash,committee_id,attester_pubkey_hashes,attestation_signatures,attestation_hashes,provider_signed_external_receipt)"
                 .to_owned(),
         availability_commitment: hex::encode(availability_commitment),
         attestation_signature_verified: attestation_signature_verified && attestation_count >= required_attestations,
@@ -3643,6 +3746,11 @@ struct SessionExternalDaReceiptEvidence {
     segment_root: String,
     receipt_id: String,
     availability_window: String,
+    signature_scheme: String,
+    provider_pubkey_hash: String,
+    provider_signature: String,
+    provider_message_hash: String,
+    provider_signature_verified: bool,
     receipt_hash: String,
     receipt_commitment: String,
 }
@@ -4993,21 +5101,28 @@ fn verify_session_da_manifest(
             && manifest.availability.attestation_signature_verified
             && manifest.availability.attestation_signatures.len() == manifest.availability.attester_pubkey_hashes.len()
             && manifest.availability.attestation_count >= manifest.availability.required_attestations
+            && manifest.availability.external_receipt_count
+                == u32::from(manifest.availability.external_receipt.as_ref().is_some())
+            && (manifest.availability.external_receipt.is_none() || manifest.availability.external_receipt_checked)
             && manifest.availability.testnet_beta_ready
                 == (manifest.local_da_published && manifest.availability.external_receipt_checked)
             && !manifest.availability.production_ready,
         Some(
-            "availability_checked && attestation_signature_verified && signatures match attesters && attestation_count >= required_attestations && testnet_beta_ready == local_da_published && external_receipt_checked && !production_ready"
+            "availability_checked && attestation_signature_verified && signatures match attesters && attestation_count >= required_attestations && external_receipt_count == external_receipt presence && present external receipt checked && testnet_beta_ready == local_da_published && external_receipt_checked && !production_ready"
                 .to_owned(),
         ),
         Some(format!(
-            "{} && {} && {} == {} && {} >= {} && {} == ({} && {}) && !{}",
+            "{} && {} && {} == {} && {} >= {} && {} == {} && ({} || {}) && {} == ({} && {}) && !{}",
             manifest.availability.availability_checked,
             manifest.availability.attestation_signature_verified,
             manifest.availability.attestation_signatures.len(),
             manifest.availability.attester_pubkey_hashes.len(),
             manifest.availability.attestation_count,
             manifest.availability.required_attestations,
+            manifest.availability.external_receipt_count,
+            u32::from(manifest.availability.external_receipt.as_ref().is_some()),
+            manifest.availability.external_receipt.is_none(),
+            manifest.availability.external_receipt_checked,
             manifest.availability.testnet_beta_ready,
             manifest.local_da_published,
             manifest.availability.external_receipt_checked,
@@ -10376,16 +10491,42 @@ mod tests {
     }
 
     fn write_external_da_receipt(payload_hash: &str, segment_root: &str) -> PathBuf {
+        let schema = "myelin-external-da-receipt-v2";
+        let provider = "fixture-external-da";
+        let namespace = "session-court-payloads";
+        let receipt_id = format!("receipt-{payload_hash}-{segment_root}");
+        let availability_window = "testnet-beta-retention-7d";
+        let message_hash = external_da_receipt_provider_message_hash(
+            schema,
+            provider,
+            namespace,
+            payload_hash,
+            segment_root,
+            &receipt_id,
+            availability_window,
+        );
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[0x44u8; 32]).expect("static external DA provider key is valid");
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let provider_pubkey_hash = secp256k1_pubkey_hash20(&public_key);
+        let message = Message::from_digest_slice(&message_hash).expect("external DA receipt message hash is valid");
+        let signature = secp.sign_ecdsa_recoverable(&message, &secret_key);
+        let (recovery_id, compact_signature) = signature.serialize_compact();
+        let mut signature_bytes = [0u8; 65];
+        signature_bytes[..64].copy_from_slice(&compact_signature);
+        signature_bytes[64] = recovery_id.to_i32() as u8;
         write_temp_json(
             "external-da-receipt",
             &serde_json::json!({
-                "schema": "myelin-external-da-receipt-v1",
-                "provider": "fixture-external-da",
-                "namespace": "session-court-payloads",
+                "schema": schema,
+                "provider": provider,
+                "namespace": namespace,
                 "payload_hash": payload_hash,
                 "segment_root": segment_root,
-                "receipt_id": format!("receipt-{payload_hash}-{segment_root}"),
-                "availability_window": "testnet-beta-retention-7d"
+                "receipt_id": receipt_id,
+                "availability_window": availability_window,
+                "provider_pubkey_hash": hex::encode(provider_pubkey_hash),
+                "provider_signature": hex::encode(signature_bytes)
             }),
         )
     }
@@ -11174,9 +11315,15 @@ mod tests {
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
         let in_memory_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("in-memory DA manifest");
         let receipt_path = write_external_da_receipt(&in_memory_manifest.molecule_transaction_hash, &in_memory_manifest.segment_root);
+        let mut bad_receipt_json: Value = serde_json::from_slice(&std::fs::read(&receipt_path).expect("read external DA receipt"))
+            .expect("external DA receipt JSON");
+        bad_receipt_json["provider_signature"] = Value::String("00".repeat(65));
+        let bad_receipt_path = write_temp_json("external-da-receipt-bad-signature", &bad_receipt_json);
         let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-external-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&storage_dir);
 
+        let bad_receipt_error = session_da_manifest(bundle_path.clone(), None, Some(bad_receipt_path.clone()))
+            .expect_err("external DA receipt with bad provider signature should be rejected");
         let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), Some(receipt_path.clone()))
             .expect("external DA receipt manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-manifest-external-{}.json", std::process::id()));
@@ -11193,15 +11340,26 @@ mod tests {
         let _ = std::fs::remove_file(manifest_path);
         let _ = std::fs::remove_file(tampered_path);
         let _ = std::fs::remove_file(receipt_path);
+        let _ = std::fs::remove_file(bad_receipt_path);
         let _ = std::fs::remove_file(bundle_path);
         let _ = std::fs::remove_dir_all(storage_dir);
 
+        assert!(
+            bad_receipt_error.to_string().contains("provider_signature does not match provider_pubkey_hash"),
+            "{bad_receipt_error}"
+        );
         assert!(manifest.local_da_published);
         assert_eq!(manifest.availability.external_receipt_count, 1);
         assert!(manifest.availability.external_receipt_checked);
         assert!(manifest.availability.external_receipt.as_ref().is_some_and(|receipt| {
-            receipt.payload_hash == manifest.molecule_transaction_hash
+            receipt.schema == "myelin-external-da-receipt-v2"
+                && receipt.payload_hash == manifest.molecule_transaction_hash
                 && receipt.segment_root == manifest.segment_root
+                && receipt.signature_scheme == "secp256k1-recoverable-blake3-pubkey-hash20"
+                && receipt.provider_pubkey_hash.len() == 40
+                && receipt.provider_signature.len() == 130
+                && receipt.provider_message_hash.len() == 64
+                && receipt.provider_signature_verified
                 && receipt.receipt_hash.len() == 64
                 && receipt.receipt_commitment.len() == 64
         }));

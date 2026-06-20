@@ -312,10 +312,11 @@ bounded retry and monitoring cadence.
 
 For external DA evidence, `session da-manifest` also accepts
 `--external-da-receipt reports/external-da-receipt.json`. The receipt must use
-`myelin-external-da-receipt-v1` and bind to the manifest payload hash and segment
-root. With sealed local DA storage and a matching receipt, the DA availability
-evidence can be `testnet_beta_ready`; it still keeps `production_ready = false`
-and does not set `l1_da_published`.
+`myelin-external-da-receipt-v2`, bind to the manifest payload hash and segment
+root, and carry a provider recoverable secp256k1 signature over the receipt
+fields. With sealed local DA storage and a matching provider-signed receipt, the
+DA availability evidence can be `testnet_beta_ready`; it still keeps
+`production_ready = false` and does not set `l1_da_published`.
 
 The Teeworlds command consumes the CKB mock transaction produced by xxuejie's
 `teeworlds-cli utils build-test-tx`, splits the tape witness into bounded
@@ -335,8 +336,9 @@ Merkle `SegmentProof` for the exact Molecule transaction bytes needed by court
 replay, and `session verify-da-manifest` binds that proof back to the court
 bundle. With `--storage-dir`, the payload is durably written to a sealed local
 DA segment and the proof is rebuilt from `SegmentReader`; with
-`--external-da-receipt`, a provider-neutral receipt is schema-checked and
-hash-bound into the DA availability commitment. `session da-anchor-package` converts that
+`--external-da-receipt`, a provider-neutral receipt is schema-checked,
+provider-signature checked, and hash-bound into the DA availability commitment.
+`session da-anchor-package` converts that
 verified manifest into a deterministic CKB-compatible DA anchor CellTx package,
 and `session verify-da-anchor-package` recomputes the manifest hash, embedded
 Molecule transaction, CellTx ids, and projection. `session submit-da-anchor-package`
