@@ -3808,7 +3808,19 @@ fn normalize_court_economics_deployment_evidence(
     if deployment.network == "ckb-testnet" && deployment.production_ready {
         return Err(CliError::InvalidFixture("court economics deployment testnet evidence cannot claim production_ready".to_owned()));
     }
+    let provided_commitment = if deployment.evidence_commitment.trim().is_empty() {
+        None
+    } else {
+        Some(parse_hex_32(&deployment.evidence_commitment).ok_or_else(|| {
+            CliError::InvalidFixture("court economics deployment evidence_commitment must be 32-byte hex".to_owned())
+        })?)
+    };
     let commitment = court_economics_deployment_commitment(&deployment)?;
+    if provided_commitment.is_some_and(|provided| provided != commitment) {
+        return Err(CliError::InvalidFixture(
+            "court economics deployment evidence_commitment does not match normalized fields".to_owned(),
+        ));
+    }
     deployment.evidence_commitment_algorithm =
         "blake3(myelin:session-court-economics-deployment-evidence:v1,normalized-fields)".to_owned();
     deployment.evidence_commitment = hex::encode(commitment);
@@ -13052,6 +13064,35 @@ mod tests {
         assert!(verification.valid);
         assert!(verification.checks.iter().all(|check| check.ok));
         assert!(verification.checks.iter().any(|check| check.name == "court-economics-ready" && check.ok));
+    }
+
+    #[test]
+    fn session_settlement_intent_rejects_stale_court_economics_deployment_commitment() {
+        let (_package, intent, bundle_path, da_manifest_path, intent_path) =
+            settlement_package_fixture("court-economics-stale-deployment-commitment");
+        let mut deployment = production_court_economics_deployment_fixture(&intent.court_economics);
+        deployment.evidence_commitment = "66".repeat(32);
+        let deployment_path = write_temp_json("court-economics-stale-deployment-evidence", &deployment);
+
+        let error = session_settlement_intent_with_court_deployment(
+            bundle_path.clone(),
+            da_manifest_path.clone(),
+            "disputed-close",
+            60_000,
+            60_000,
+            Some(deployment_path.clone()),
+        )
+        .expect_err("stale court economics deployment commitment should be rejected");
+
+        let _ = std::fs::remove_file(deployment_path);
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(
+            error.to_string().contains("court economics deployment evidence_commitment does not match normalized fields"),
+            "{error}"
+        );
     }
 
     #[test]
