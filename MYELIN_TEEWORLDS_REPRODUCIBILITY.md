@@ -61,7 +61,7 @@ vm_cycles                 : 15_139_695
 semantic_profile          : ckb-compatible
 ckb_projection_possible   : true (every chunk)
 static_committee_finalised: true
-court_checks              : 14
+court_checks              : 16
 ```
 
 The numbers match the previously reported values byte-for-byte.
@@ -76,7 +76,7 @@ static_committee_evidence.finalised: true
 signatures                : 2 (validator-0, validator-1)
 quorum_weight             : 2
 challenge_payload_hash    : present, 64 hex chars
-verify-court-bundle       : valid (all 14 checks ok)
+verify-court-bundle       : valid (all 16 checks ok)
 ```
 
 ## 4. Verifiable properties
@@ -89,7 +89,7 @@ The audit required:
 | 2 | No hidden local state | `TEEWORLDS_ROOT` is the only required path; the rest of the state lives in `OUTPUT_DIR` (default `/tmp/myelin-teeworlds-acceptance`). |
 | 3 | Deterministic fixture / chunk loading | `teeworlds-cli utils build-scripted-tape --seed 1 --ticks 300 --clients 1 --input-every 5` is deterministic. The mock-tx is built from the resulting tape. |
 | 4 | Structured VM execution report | `vm-probe.json` reports `replayer`, `tape_bytes`, `map_bytes`, `config_bytes`, `max_cycles`, `ckb_strict: true`, `success: true`, `cycles: <u64>`, `error: null`. |
-| 5 | Court-bundle verification passes | `verify-court-bundle` returns `valid: true` and all 14 checks ok. |
+| 5 | Court-bundle verification passes | `verify-court-bundle` returns `valid: true` and all 16 checks ok. |
 | 6 | CKB-compatible projection passes | Every chunk reports `semantic_profile: "ckb-compatible"` and `ckb_projection_possible: true`. |
 | 7 | Static committee finality passes | `static_committee_finalised: true` on the inspect path; `static_committee_evidence.finalised: true` on the court-bundle path. |
 | 8 | Tendermint finality also works | `teeworlds inspect --consensus tendermint`, `teeworlds bench --consensus tendermint`, and `teeworlds court-bundle --consensus tendermint` all produce a Tendermint-mode report that verifies. The new test `teeworlds_court_bundle_tendermint_precommit_path_verifies` proves the round-trip. |

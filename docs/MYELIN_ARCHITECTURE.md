@@ -424,6 +424,121 @@ pub struct ChallengePayload {
 The court path favours single-chunk verification. Interactive bisection is a
 fallback design, not the first target.
 
+The executable Session L2 fixture is exposed through:
+
+```bash
+cargo run -p myelin-cli -- session open-fixture --out reports/session-open.json
+cargo run -p myelin-cli -- session commit-fixture --session reports/session-open.json --out reports/session-commit.json
+cargo run -p myelin-cli -- session court-bundle --commit reports/session-commit.json --chunk-index 0 --out reports/session-court-bundle.json
+cargo run -p myelin-cli -- session verify-court-bundle --bundle reports/session-court-bundle.json --out reports/session-court-verify.json
+cargo run -p myelin-cli -- session da-manifest --bundle reports/session-court-bundle.json --storage-dir reports/session-da-store --out reports/session-da-manifest.json
+cargo run -p myelin-cli -- session verify-da-manifest --manifest reports/session-da-manifest.json --bundle reports/session-court-bundle.json --storage-dir reports/session-da-store --out reports/session-da-verify.json
+cargo run -p myelin-cli -- session da-anchor-package --manifest reports/session-da-manifest.json --bundle reports/session-court-bundle.json --out reports/session-da-anchor-package.json
+cargo run -p myelin-cli -- session verify-da-anchor-package --package reports/session-da-anchor-package.json --manifest reports/session-da-manifest.json --bundle reports/session-court-bundle.json --out reports/session-da-anchor-verify.json
+cargo run -p myelin-cli -- session submit-da-anchor-package --package reports/session-da-anchor-package.json --dry-run --out reports/session-da-anchor-submit.json
+cargo run -p myelin-cli -- session verify-submission-context --submission reports/session-da-anchor-submit.json --rpc-url http://127.0.0.1:8114 --out reports/session-da-anchor-context.json
+cargo run -p myelin-cli -- session verify-submission-economics --submission reports/session-da-anchor-submit.json --rpc-url http://127.0.0.1:8114 --min-fee-shannons 1 --min-fee-rate-shannons-per-kb 1000 --max-fee-shannons 1000 --out reports/session-da-anchor-economics.json
+cargo run -p myelin-cli -- session verify-submission-inclusion --submission reports/session-da-anchor-submit.json --rpc-url http://127.0.0.1:8114 --min-status committed --out reports/session-da-anchor-inclusion.json
+cargo run -p myelin-cli -- session verify-submission-stability --inclusion reports/session-da-anchor-inclusion.json --rpc-url http://127.0.0.1:8114 --out reports/session-da-anchor-stability.json
+cargo run -p myelin-cli -- session verify-submission-finality --inclusion reports/session-da-anchor-inclusion.json --rpc-url http://127.0.0.1:8114 --min-confirmations 6 --out reports/session-da-anchor-finality.json
+cargo run -p myelin-cli -- session verify-submission-readiness --context reports/session-da-anchor-context.json --economics reports/session-da-anchor-economics.json --inclusion reports/session-da-anchor-inclusion.json --stability reports/session-da-anchor-stability.json --finality reports/session-da-anchor-finality.json --out reports/session-da-anchor-readiness.json
+cargo run -p myelin-cli -- session settlement-intent --bundle reports/session-court-bundle.json --da-manifest reports/session-da-manifest.json --kind disputed-close --current-time-ms 60000 --challenge-window-ms 60000 --out reports/session-settlement-intent.json
+cargo run -p myelin-cli -- session verify-settlement-intent --intent reports/session-settlement-intent.json --bundle reports/session-court-bundle.json --da-manifest reports/session-da-manifest.json --out reports/session-settlement-verify.json
+cargo run -p myelin-cli -- session settlement-package --intent reports/session-settlement-intent.json --bundle reports/session-court-bundle.json --da-manifest reports/session-da-manifest.json --out reports/session-settlement-package.json
+cargo run -p myelin-cli -- session verify-settlement-package --package reports/session-settlement-package.json --intent reports/session-settlement-intent.json --bundle reports/session-court-bundle.json --da-manifest reports/session-da-manifest.json --out reports/session-settlement-package-verify.json
+cargo run -p myelin-cli -- session submit-settlement-package --package reports/session-settlement-package.json --dry-run --out reports/session-settlement-submit.json
+cargo run -p myelin-cli -- session verify-submission-context --submission reports/session-settlement-submit.json --rpc-url http://127.0.0.1:8114 --out reports/session-settlement-context.json
+cargo run -p myelin-cli -- session verify-submission-economics --submission reports/session-settlement-submit.json --rpc-url http://127.0.0.1:8114 --min-fee-shannons 1 --min-fee-rate-shannons-per-kb 1000 --max-fee-shannons 1000 --out reports/session-settlement-economics.json
+cargo run -p myelin-cli -- session verify-submission-inclusion --submission reports/session-settlement-submit.json --rpc-url http://127.0.0.1:8114 --min-status committed --out reports/session-settlement-inclusion.json
+cargo run -p myelin-cli -- session verify-submission-stability --inclusion reports/session-settlement-inclusion.json --rpc-url http://127.0.0.1:8114 --out reports/session-settlement-stability.json
+cargo run -p myelin-cli -- session verify-submission-finality --inclusion reports/session-settlement-inclusion.json --rpc-url http://127.0.0.1:8114 --min-confirmations 6 --out reports/session-settlement-finality.json
+cargo run -p myelin-cli -- session verify-submission-readiness --context reports/session-settlement-context.json --economics reports/session-settlement-economics.json --inclusion reports/session-settlement-inclusion.json --stability reports/session-settlement-stability.json --finality reports/session-settlement-finality.json --out reports/session-settlement-readiness.json
+```
+
+This fixture is intentionally small, but it exercises the real spine:
+`CellPool` admission, `CellStateTree` mutation, canonical `MyelinBlock`
+finality, CKB-compatible transaction projection, and court-bundle
+recomputation. Static-closed-committee and Tendermint runs produce the same
+session id, CellTx commitments, scheduler commitment, and state roots; their
+finality evidence remains consensus-domain separated. The DA manifest step emits and verifies a Merkle
+`SegmentProof` for the exact Molecule transaction bytes needed by court replay,
+while deliberately keeping `l1_da_published = false`. With `--storage-dir`, it
+uses `SegmentWriter` / `SegmentReader` to prove sealed local DA storage. The DA anchor-package step converts that
+verified manifest into a deterministic CKB-compatible anchor CellTx package and
+verifies the embedded Molecule transaction, CellTx ids, and projection. It
+still keeps `l1_da_publication_implemented = false`; the
+submit-da-anchor-package step then builds the CKB `send_transaction` JSON-RPC
+request and can submit it to a configured HTTP CKB RPC endpoint. In the normal
+production gate this runs as a dry-run, so it proves request construction but
+not live public-chain inclusion. `verify-submission-context` queries CKB
+`get_live_cell` for the submitted transaction's inputs and cell deps, catching
+missing or spent cells before a live submit. `verify-submission-economics`
+queries live input capacity, sums output capacity, computes the implied fee, and
+requires the configured absolute fee floor, fee-rate policy, and optional
+maximum-fee policy before a live submit.
+`verify-submission-inclusion` then
+queries CKB `get_transaction` for a submission report and marks
+`live_l1_observed = true` only for committed transactions with a block hash; the
+`verify-submission-stability` step re-queries that committed transaction and
+requires the block hash and block number to remain unchanged. The
+`verify-submission-finality` step queries CKB `get_tip_header` and requires the
+committed inclusion to reach the configured confirmation depth.
+`verify-submission-readiness` aggregates those five reports and requires the
+same CKB transaction hash, same committed block identity, and all readiness
+markers before it emits `production_submission_ready = true`. The production
+gate covers context, economics, inclusion, stability, finality, and aggregate
+readiness verifiers with mock CKB RPC servers. The settlement-intent step binds the
+verified court bundle and verified DA manifest to a disputed-close decision and
+elapsed challenge window, while deliberately keeping `l1_da_published = false`
+and `l1_court_implemented = false` in the report. It is the off-chain
+settlement readiness object. The settlement-package step converts that permitted
+intent into a deterministic CKB-compatible settlement CellTx package and
+verifies the embedded Molecule transaction, CellTx ids, and CKB projection. It
+still keeps `l1_court_script_implemented = false`. The submit-settlement-package
+step builds the CKB `send_transaction` JSON-RPC request and can submit it to a
+configured HTTP CKB RPC endpoint. In the normal production gate this also runs
+as a dry-run, so it proves request construction but not deployed court-script
+semantics or live public-chain inclusion.
+
+For live local CKB evidence, `scripts/myelin_ckb_devnet_smoke.sh` starts the
+parent `../ckb` devnet, mines an always-success funding cell, deploys separate
+DA-anchor and settlement CellScript carrier verifiers, writes a 160-byte Myelin
+DA-anchor payload into a CKB carrier output guarded by the DA verifier, and binds
+the carrier type args to `ckb_data_hash(carrier_payload) ||
+carrier_identity_hash`, where the identity hash is the DA manifest hash or
+settlement intent hash. The settlement
+carrier is funded from the DA carrier's change output and uses the settlement
+verifier with its own 160-byte compact payload. It uses `data2` for both
+CellScript verifier type scripts, submits the valid carriers through
+`myelin session carrier-submission --submit --require-accepted`, mines both
+carrier transactions until `get_transaction` reports `committed`, then feeds
+both live carrier submissions through Myelin's context, economics, inclusion,
+stability, finality, and readiness verifiers. It then submits a tampered
+compact-payload carrier under the settlement verifier and requires CKB script
+verification to reject it. The resulting
+`myelin-ckb-devnet-smoke-v1` report proves devnet CKB acceptance, deployed
+compact-payload type-script execution, verifier readiness for both carriers, and
+live rejection of mismatched carrier data. For carrier submissions, the
+inclusion verifier only marks live inclusion as observed when CKB
+`outputs_data[0]` matches the declared carrier payload and
+`outputs[0].type.args` matches the expected data-hash-plus-identity layout,
+while keeping final DA/court script semantics out of scope.
+
+The local CellScript tests
+`v0_18_myelin_package_commitment_has_typed_cell_metadata_and_ckb_vm_rejects_tamper`
+and
+`v0_18_generic_package_commitment_binds_data_hash_to_type_args_in_ckb_vm` keep
+the package-commitment boundary covered. The
+`v0_18_myelin_da_and_settlement_carriers_bind_compact_payloads_to_type_args_in_ckb_vm`
+regression adds typed-cell `DaAnchorCarrier` and `SettlementCarrier` resources
+and executes their 160-byte compact-payload verifier shapes as CKB type scripts
+through `ckb-testtool`. Matching carrier output data plus identity-bound type
+args pass; tampered output data or mismatched identity args fail. The parent
+`../ckb` devnet smoke now deploys the compact carrier
+verifiers into the throw-away chain and confirms a tampered carrier is rejected
+by live CKB script verification; the remaining production hardening is final
+DA-anchor/court scripts rather than the compact carrier verifiers.
+
 ## Teeworlds Pressure Workload
 
 The cloned Teeworlds repository provides a concrete CKB verification shape:
@@ -606,7 +721,8 @@ Completed in this preparation pass:
   implementors must declare an explicit payload codec.
 - `myelin-exec` now serialises `SecureEnvelope` as a Molecule-compatible table
   and routes `serialize_with_integrity` / `deserialize_with_integrity` through
-  the versioned Molecule-compatible envelope utilities.
+  the versioned Molecule-compatible envelope utilities. `SecureEnvelope`
+  deserialisation no longer accepts the old legacy byte layout.
 - Typed-cell metadata (`TypedCellDecl`) now has an explicit Molecule-compatible
   metadata codec. Core CKB-style transaction structs and typed-cell metadata now
   use explicit codecs. The old legacy CellScript scheduler-witness decode path
@@ -645,13 +761,15 @@ Completed in this preparation pass:
   per-chunk CKB-style projection reports, benchmarks ingestion, and finalises a
   static-committee benchmark block.
 - `myelin-cli teeworlds court-bundle` has been run against that generated mock
-  transaction for chunk `0`; it emits `court_verifiable = true`,
+  transaction for chunk `0`; it emits `vm_profile = "ckb-strict-basic"`,
+  `ckb_spawn_ipc_required = false`, `court_verifiable = true`,
   `semantic_profile = "ckb-compatible"`, no projection blockers, a CKB Molecule
   transaction hash, embedded chunk payload bytes, embedded Molecule transaction
   bytes, deterministic challenge payload hash, and two static-committee
   signatures. `l1_court_implemented = false` remains explicit.
 - `myelin-cli teeworlds verify-court-bundle` has been run against that bundle;
-  it reports `valid = true` with 14 passing checks, including payload hash,
+  it reports `valid = true` with 16 passing checks, including VM profile,
+  spawn/IPC requirement, payload hash,
   Molecule transaction hash, projection hashes, challenge payload hash,
   signature hashes, signer ids, committee certificate, and quorum weight.
 - `myelin-cli teeworlds vm-probe` successfully executes the real stripped
@@ -666,11 +784,12 @@ Completed in this preparation pass:
   court-bundle verification, then asserts the JSON outputs are
   `ckb-compatible`, projection-possible, CKB-strict, court-verifiable, and
   static-committee finalised.
-- `scripts/myelin_protocol_gate.sh` is the top-level local protocol gate. It
-  runs the inherited-semantics scan, proves the native dependency graph has no
-  removed serializer package, runs formatting, workspace check, focused
-  protocol tests, simple CellTx execution-report emission, selected static
-  closed-committee finality, and the Teeworlds acceptance gate.
+- `scripts/myelin_production_gate.sh` is the top-level local release gate. It
+  runs formatting, workspace checks, focused protocol tests, runtime smoke,
+  Session L2 open/commit/court/DA/settlement/package checks for both consensus
+  modes, dependency and stale-surface scans, and the Teeworlds acceptance gate.
+  `scripts/myelin_protocol_gate.sh` remains only as a compatibility wrapper
+  that delegates to the production gate.
 - A local live-client Teeworlds session was attempted against the cloned fork,
   but the current launch paths did not produce a connected client or
   end-of-match sequencer dump. This keeps the present evidence boundary honest:
@@ -690,7 +809,7 @@ Completed in this preparation pass:
   - `cargo run -p myelin-cli -- teeworlds verify-court-bundle --bundle /tmp/myelin-teeworlds-scripted-court-bundle.json --out /tmp/myelin-teeworlds-scripted-court-bundle-verify.json`
   - `cargo run -p myelin-cli -- teeworlds vm-probe --replayer /Users/arthur/RustroverProjects/teeworlds/ckb/build/replayer_stripped --tape /tmp/myelin-teeworlds-scripted-tape.bin --map /Users/arthur/RustroverProjects/teeworlds/build/data/maps/dm1.map --config /Users/arthur/RustroverProjects/teeworlds/build/myelin_replay_40265.cfg --out /tmp/myelin-teeworlds-scripted-vm-probe.json`
   - `scripts/myelin_teeworlds_acceptance.sh`
-  - `scripts/myelin_protocol_gate.sh`
+  - `scripts/myelin_production_gate.sh`
 
 Next stronger evidence:
 

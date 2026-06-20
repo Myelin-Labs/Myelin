@@ -192,10 +192,10 @@ impl CellStateTree {
 
     /// Insert a cell into the tree while preserving the original outpoint.
     pub fn insert_with_outpoint(&mut self, outpoint_hash: Hash, outpoint: OutPoint, entry: CellEntry) {
-        if let Some(previous_outpoint) = self.outpoints_by_hash.insert(outpoint_hash, outpoint.clone()) {
+        if let Some(previous_outpoint) = self.outpoints_by_hash.insert(outpoint_hash, outpoint) {
             self.outpoint_hashes.remove(&previous_outpoint);
         }
-        if let Some(previous_hash) = self.outpoint_hashes.insert(outpoint.clone(), outpoint_hash) {
+        if let Some(previous_hash) = self.outpoint_hashes.insert(outpoint, outpoint_hash) {
             if previous_hash != outpoint_hash {
                 self.cells.remove(&previous_hash);
                 self.outpoints_by_hash.remove(&previous_hash);
@@ -257,8 +257,8 @@ impl CellStateTree {
         let cell_hash = entry.hash();
         let mut hasher = MerkleBranchHash::new();
         hasher.update(b"myelin-cell/leaf");
-        hasher.update(&outpoint_hash.as_bytes());
-        hasher.update(&cell_hash.as_bytes());
+        hasher.update(outpoint_hash.as_bytes());
+        hasher.update(cell_hash.as_bytes());
         hasher.finalize()
     }
 
@@ -308,11 +308,11 @@ impl CellStateTree {
         let iter: Box<dyn Iterator<Item = (&'a OutPoint, &'a Hash, &'a CellEntry)> + 'a> =
             match from_outpoint {
                 Some(from_outpoint) if skip_first => {
-                    Box::new(self.outpoint_hashes.range((Excluded(from_outpoint.clone()), Unbounded)).filter_map(
+                    Box::new(self.outpoint_hashes.range((Excluded(*from_outpoint), Unbounded)).filter_map(
                         |(outpoint, outpoint_hash)| self.cells.get(outpoint_hash).map(|entry| (outpoint, outpoint_hash, entry)),
                     ))
                 }
-                Some(from_outpoint) => Box::new(self.outpoint_hashes.range((Included(from_outpoint.clone()), Unbounded)).filter_map(
+                Some(from_outpoint) => Box::new(self.outpoint_hashes.range((Included(*from_outpoint), Unbounded)).filter_map(
                     |(outpoint, outpoint_hash)| self.cells.get(outpoint_hash).map(|entry| (outpoint, outpoint_hash, entry)),
                 )),
                 None => Box::new(self.iter_by_outpoint()),

@@ -87,7 +87,7 @@ impl ScriptIndex {
         };
 
         // Add new OutPoint
-        out_points.insert(out_point.clone());
+        out_points.insert(*out_point);
 
         // Serialize and store
         let value = self.serialize_outpoints(&out_points)?;

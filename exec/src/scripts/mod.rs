@@ -114,11 +114,11 @@ pub fn timelock_relative_code_hash() -> [u8; 32] {
 /// not a real secp256k1 implementation.
 ///
 /// Script args format (105 bytes):
-/// - [0..32]:   secret_hash (blake3)
-/// - [32..64]:  recipient_pubkey (32 bytes)
-/// - [64..96]:  sender_pubkey (32 bytes)
-/// - [96]:      lock_type (0=abs block number, 1=abs timestamp, 2=rel block number, 3=rel timestamp)
-/// - [97..105]: lock_value (u64)
+/// - bytes 0..32: secret_hash (blake3)
+/// - bytes 32..64: recipient_pubkey (32 bytes)
+/// - bytes 64..96: sender_pubkey (32 bytes)
+/// - byte 96: lock_type (0=abs block number, 1=abs timestamp, 2=rel block number, 3=rel timestamp)
+/// - bytes 97..105: lock_value (u64)
 ///
 /// Witness format:
 /// - Recipient: <signature (64)> <secret (32)> <0x01>

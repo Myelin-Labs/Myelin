@@ -154,7 +154,7 @@ impl MerkleTreeBuilder {
         let mut level = self.leaves.clone();
 
         while level.len() > 1 {
-            let sibling_index = if current_index % 2 == 0 { current_index + 1 } else { current_index - 1 };
+            let sibling_index = if current_index.is_multiple_of(2) { current_index + 1 } else { current_index - 1 };
             if sibling_index < level.len() {
                 proof.push(level[sibling_index]);
             }
@@ -224,7 +224,7 @@ pub fn verify_merkle_proof(leaf: &[u8; 32], proof: &[[u8; 32]], root: &[u8; 32],
     let mut current_index = index;
 
     for sibling in proof {
-        current = if current_index % 2 == 0 { hash_internal(&current, sibling) } else { hash_internal(sibling, &current) };
+        current = if current_index.is_multiple_of(2) { hash_internal(&current, sibling) } else { hash_internal(sibling, &current) };
         current_index /= 2;
     }
 

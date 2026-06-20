@@ -28,6 +28,12 @@ struct WaitRuntime {
     message_box: Arc<std::sync::Mutex<Vec<Message>>>,
 }
 
+impl Default for Wait {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Wait {
     pub fn new() -> Self {
         Self { runtime: None }

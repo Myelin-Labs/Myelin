@@ -40,6 +40,13 @@ pub const MYELIN_VM_VERSION: u32 = 0x0001_0000; // 1.0.0
 /// VM ISA support
 pub const MYELIN_VM_ISA: u8 = 0x07; // IMC + B + MOP
 
+/// Whether this build installs CKB VM v2 spawn/IPC syscalls in the verifier.
+///
+/// The feature is explicit because spawn/IPC is a larger execution surface than
+/// the basic CKB court path. CellScript advanced profiles may require it, while
+/// Teeworlds court fixtures do not.
+pub const CKB_SPAWN_IPC_SYSCALLS_ENABLED: bool = cfg!(feature = "vm-ipc");
+
 //
 // Default VM Limits (CKB-compatible)
 //

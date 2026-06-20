@@ -224,7 +224,7 @@ mod tests {
         let actual = serialize_to_bytes(&output).unwrap().len();
 
         // Estimate should be close to actual
-        let diff = if estimated > actual { estimated - actual } else { actual - estimated };
+        let diff = estimated.abs_diff(actual);
         assert!(diff <= 10, "estimate {} should be close to actual {}", estimated, actual);
     }
 

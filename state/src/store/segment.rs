@@ -123,7 +123,7 @@ impl SegmentWriter {
                 let path = Self::segment_path_for(&base_dir, segment_id);
                 let size = std::fs::metadata(&path)?.len();
                 let chunks = Self::load_chunk_index(&base_dir, segment_id)?;
-                let file = OpenOptions::new().create(true).write(true).append(true).open(path)?;
+                let file = OpenOptions::new().create(true).append(true).open(path)?;
                 (segment_id, Some(file), size, chunks)
             } else {
                 (max_id.map(|id| id + 1).unwrap_or(0), None, 0, Vec::new())
@@ -233,7 +233,7 @@ impl SegmentWriter {
         let new_id = *self.current_segment_id.lock();
         let path = self.segment_path(new_id);
 
-        let file = OpenOptions::new().create(true).write(true).append(true).open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         let mut file_guard = self.current_file.lock();
         *file_guard = Some(file);

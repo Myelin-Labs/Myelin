@@ -28,6 +28,12 @@ use ckb_vm::{
 /// - A0: SUCCESS (0)
 pub struct Blake3Hash;
 
+impl Default for Blake3Hash {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Blake3Hash {
     pub fn new() -> Self {
         Self

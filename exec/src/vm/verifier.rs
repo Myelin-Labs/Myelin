@@ -81,10 +81,12 @@ enum GroupRunResult {
     Suspended(FullSuspendedState),
 }
 
+type SyscallFactory = dyn Fn(u64, &super::scheduler::VmRuntime) -> ScriptResult<Vec<super::scheduler::BoxedSyscall>> + Send + Sync;
+
 struct GroupRuntime {
     script_code: Vec<u8>,
     program_resolver: ProgramResolver,
-    syscall_factory: Arc<dyn Fn(u64, &super::scheduler::VmRuntime) -> ScriptResult<Vec<super::scheduler::BoxedSyscall>> + Send + Sync>,
+    syscall_factory: Arc<SyscallFactory>,
 }
 
 /// Script group: cells sharing the same script
@@ -530,7 +532,7 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
         for group in script_groups.iter().skip(state.current + 1) {
             let remain_cycles = max_cycles
                 .checked_sub(total_cycles)
-                .ok_or_else(|| ScriptError::VM(super::error::VMError::CyclesExceeded { limit: max_cycles, actual: total_cycles }))?;
+                .ok_or(ScriptError::VM(super::error::VMError::CyclesExceeded { limit: max_cycles, actual: total_cycles }))?;
             match self.verify_script_group_chunk(group, remain_cycles, None)? {
                 GroupRunResult::Completed(group_cycles) => {
                     total_cycles = total_cycles.saturating_add(group_cycles);
@@ -620,10 +622,8 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
             return Err(ScriptError::InvalidHashType(group.script.hash_type));
         }
 
-        let raw_script_code = self
-            .data_provider
-            .load_cell_data(&group.script.code_hash)
-            .ok_or_else(|| ScriptError::ScriptNotFound(group.script.code_hash))?;
+        let raw_script_code =
+            self.data_provider.load_cell_data(&group.script.code_hash).ok_or(ScriptError::ScriptNotFound(group.script.code_hash))?;
         let (script_code, artifact_abi_format) = split_vm_abi_trailer(&raw_script_code)
             .map_err(|err| ScriptError::VM(VMError::InvalidData(format!("invalid VM ABI artifact trailer: {}", err))))?;
         let script_code = script_code.to_vec();
@@ -729,36 +729,44 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
             let signing_inputs = signing_inputs.clone();
             let group_input_indices = group_input_indices.clone();
             let group_output_indices = group_output_indices.clone();
-            let tx_hash = tx_hash;
             let tx_data = tx_data.clone();
+            #[cfg(feature = "vm-ipc")]
             let program_resolver = Arc::clone(&program_resolver);
             let semantics = self.semantics;
             let abi_format = effective_abi_format;
-            move |vm_id, runtime: &super::scheduler::VmRuntime| -> ScriptResult<Vec<super::scheduler::BoxedSyscall>> {
-                let mut syscalls: Vec<super::scheduler::BoxedSyscall> = Vec::new();
-                syscalls.push(Box::new(LoadTx::new(tx_hash, tx_data.clone())));
-                syscalls.push(Box::new(
-                    LoadCell::new(Arc::clone(&tx), Arc::clone(&provider), group_input_indices.clone(), group_output_indices.clone())
+            move |_vm_id, runtime: &super::scheduler::VmRuntime| -> ScriptResult<Vec<super::scheduler::BoxedSyscall>> {
+                let mut syscalls: Vec<super::scheduler::BoxedSyscall> = vec![
+                    Box::new(LoadTx::new(tx_hash, tx_data.clone())),
+                    Box::new(
+                        LoadCell::new(
+                            Arc::clone(&tx),
+                            Arc::clone(&provider),
+                            group_input_indices.clone(),
+                            group_output_indices.clone(),
+                        )
                         .with_semantics(semantics)
                         .with_abi_format(abi_format),
-                ));
-                syscalls.push(Box::new(
-                    LoadCellData::new(
-                        Arc::clone(&tx),
-                        Arc::clone(&provider),
-                        group_input_indices.clone(),
-                        group_output_indices.clone(),
-                    )
-                    .with_semantics(semantics),
-                ));
-                syscalls.push(Box::new(
-                    LoadInput::new(Arc::clone(&tx), group_input_indices.clone()).with_abi_format(abi_format).with_semantics(semantics),
-                ));
-                syscalls.push(Box::new(
-                    LoadWitness::new(Arc::clone(&tx), group_input_indices.clone(), group_output_indices.clone())
+                    ),
+                    Box::new(
+                        LoadCellData::new(
+                            Arc::clone(&tx),
+                            Arc::clone(&provider),
+                            group_input_indices.clone(),
+                            group_output_indices.clone(),
+                        )
                         .with_semantics(semantics),
-                ));
-                syscalls.push(Box::new(LoadScript::new(Arc::clone(&script)).with_abi_format(abi_format).with_semantics(semantics)));
+                    ),
+                    Box::new(
+                        LoadInput::new(Arc::clone(&tx), group_input_indices.clone())
+                            .with_abi_format(abi_format)
+                            .with_semantics(semantics),
+                    ),
+                    Box::new(
+                        LoadWitness::new(Arc::clone(&tx), group_input_indices.clone(), group_output_indices.clone())
+                            .with_semantics(semantics),
+                    ),
+                    Box::new(LoadScript::new(Arc::clone(&script)).with_abi_format(abi_format).with_semantics(semantics)),
+                ];
                 if semantics.allow_myelin_extension_syscalls() {
                     syscalls.push(Box::new(LoadSignatureHash::new(
                         Arc::clone(&tx),
@@ -779,14 +787,18 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
                         .with_snapshot_tracking(Arc::clone(&runtime.snapshot2_context), runtime.data_source.clone())
                         .with_semantics(semantics),
                 ));
-                syscalls.push(Box::new(ProcessId::new(vm_id)));
-                syscalls.push(Box::new(Spawn::with_runtime(vm_id, runtime, Arc::clone(&program_resolver)).with_semantics(semantics)));
-                syscalls.push(Box::new(Wait::with_runtime(vm_id, runtime)));
-                syscalls.push(Box::new(Pipe::with_runtime(vm_id, runtime)));
-                syscalls.push(Box::new(Read::with_runtime(vm_id, runtime)));
-                syscalls.push(Box::new(Write::with_runtime(vm_id, runtime)));
-                syscalls.push(Box::new(InheritedFd::with_runtime(vm_id, runtime)));
-                syscalls.push(Box::new(Close::with_runtime(vm_id, runtime)));
+                #[cfg(feature = "vm-ipc")]
+                {
+                    syscalls.push(Box::new(ProcessId::new(_vm_id)));
+                    syscalls
+                        .push(Box::new(Spawn::with_runtime(_vm_id, runtime, Arc::clone(&program_resolver)).with_semantics(semantics)));
+                    syscalls.push(Box::new(Wait::with_runtime(_vm_id, runtime)));
+                    syscalls.push(Box::new(Pipe::with_runtime(_vm_id, runtime)));
+                    syscalls.push(Box::new(Read::with_runtime(_vm_id, runtime)));
+                    syscalls.push(Box::new(Write::with_runtime(_vm_id, runtime)));
+                    syscalls.push(Box::new(InheritedFd::with_runtime(_vm_id, runtime)));
+                    syscalls.push(Box::new(Close::with_runtime(_vm_id, runtime)));
+                }
                 if semantics.allow_myelin_extension_syscalls() {
                     syscalls.push(Box::new(Blake3Hash::new()));
                     syscalls.push(Box::new(Secp256k1Verify::new()));
@@ -807,6 +819,12 @@ pub struct SimpleDataProvider {
     ckb_headers: std::collections::HashMap<[u8; 32], CkbHeader>,
     cell_headers: std::collections::HashMap<([u8; 32], u32), [u8; 32]>,
     header_cells: std::collections::HashMap<[u8; 32], ResolvedCell>,
+}
+
+impl Default for SimpleDataProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SimpleDataProvider {
@@ -1027,7 +1045,7 @@ mod tests {
         let input_out_point = OutPoint::new([9u8; 32], 0);
         let tx = Arc::new(
             CellTx::new(
-                vec![CellInput::new(input_out_point.clone(), 0)],
+                vec![CellInput::new(input_out_point, 0)],
                 vec![],
                 vec![CellOutput { capacity: 1000, lock: output_lock.clone(), type_: None }],
                 vec![vec![]],
@@ -1075,7 +1093,7 @@ mod tests {
         let input_out_point = OutPoint::new([9u8; 32], 0);
         let tx = Arc::new(
             CellTx::new(
-                vec![CellInput::new(input_out_point.clone(), 0)],
+                vec![CellInput::new(input_out_point, 0)],
                 vec![],
                 vec![CellOutput { capacity: 1000, lock: Script::new([2u8; 32], 0, vec![0xBB]), type_: Some(shared_type.clone()) }],
                 vec![vec![]],

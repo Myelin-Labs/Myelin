@@ -142,11 +142,6 @@ impl SerializerValidator {
         Self { config }
     }
 
-    /// 使用默认配置创建验证器
-    pub fn default() -> Self {
-        Self::new(ValidationConfig::default())
-    }
-
     /// 验证 VersionedEnvelope 字节
     pub fn validate_envelope(&self, bytes: &[u8]) -> ValidationResult {
         let envelope = match VersionedEnvelope::<()>::from_bytes(bytes) {
@@ -234,7 +229,7 @@ impl SerializerValidator {
 
 impl Default for SerializerValidator {
     fn default() -> Self {
-        Self::default()
+        Self::new(ValidationConfig::default())
     }
 }
 

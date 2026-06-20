@@ -32,7 +32,7 @@ mod tests {
     fn test_timelock_relative_accepts_valid_delta() {
         let code_hash = timelock_relative_code_hash();
         let input_out_point = OutPoint::new([0x21; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
 
         // Use exact target delta
         let since = encode_relative_block_number_since(TARGET_DELTA);
@@ -56,7 +56,7 @@ mod tests {
     fn test_timelock_relative_accepts_larger_delta() {
         let code_hash = timelock_relative_code_hash();
         let input_out_point = OutPoint::new([0x22; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
 
         // Use a larger delta
         let since = encode_relative_block_number_since(TARGET_DELTA + 50);
@@ -80,7 +80,7 @@ mod tests {
     fn test_timelock_relative_rejects_small_delta() {
         let code_hash = timelock_relative_code_hash();
         let input_out_point = OutPoint::new([0x23; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
 
         // Use a smaller delta
         let since = encode_relative_block_number_since(TARGET_DELTA - 50);
@@ -104,10 +104,10 @@ mod tests {
     fn test_timelock_relative_rejects_absolute_lock() {
         let code_hash = timelock_relative_code_hash();
         let input_out_point = OutPoint::new([0x24; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
 
         // Use absolute lock (bit63 = 0)
-        let since = (0u64 << 63) | (0u64 << 62) | TARGET_DELTA;
+        let since = TARGET_DELTA;
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, since)],
@@ -128,7 +128,7 @@ mod tests {
     fn test_timelock_relative_rejects_timestamp_lock() {
         let code_hash = timelock_relative_code_hash();
         let input_out_point = OutPoint::new([0x25; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
 
         // Use timestamp lock instead of block number (bit62 = 1)
         let since = (1u64 << 63) | (1u64 << 62) | TARGET_DELTA;

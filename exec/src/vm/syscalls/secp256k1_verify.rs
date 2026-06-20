@@ -30,6 +30,12 @@ pub const SECP256K1_VERIFY_BASE_CYCLES: u64 = 50_000;
 /// - A0: 0 on success, 1 on verification failure
 pub struct Secp256k1Verify;
 
+impl Default for Secp256k1Verify {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Secp256k1Verify {
     pub fn new() -> Self {
         Self

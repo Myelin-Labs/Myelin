@@ -4184,6 +4184,15 @@ impl IrGenerator {
                     blocks,
                     vars,
                 ),
+                "ckb::cell_exists" if call.args.len() == 1 => self.lower_simple_runtime_call(
+                    "__ckb_cell_exists",
+                    "ckb_cell_exists",
+                    IrType::Bool,
+                    &call.args,
+                    current,
+                    blocks,
+                    vars,
+                ),
                 "ckb::cell_lock_args_hash" if call.args.len() == 1 => self.lower_simple_runtime_call(
                     "__ckb_cell_lock_args_hash",
                     "ckb_cell_lock_args_hash",

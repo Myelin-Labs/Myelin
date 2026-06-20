@@ -163,7 +163,7 @@ impl CellPool {
 
         // Update spent outputs
         for input in &tx.inputs {
-            spent.insert(input.previous_output.clone(), wtxid);
+            spent.insert(input.previous_output, wtxid);
         }
 
         // Update dependents in parent transactions
@@ -376,7 +376,7 @@ mod tests {
 
         let out_point = OutPoint::new([0x42; 32], 0);
 
-        let tx1 = create_test_tx(vec![out_point.clone()], 1000);
+        let tx1 = create_test_tx(vec![out_point], 1000);
         let tx2 = create_test_tx(vec![out_point], 2000);
 
         pool.add(tx1, 100, 1000).unwrap();
@@ -392,7 +392,7 @@ mod tests {
 
         let out_point = OutPoint::new([0x42; 32], 0);
 
-        let tx1 = create_test_tx(vec![out_point.clone()], 1000);
+        let tx1 = create_test_tx(vec![out_point], 1000);
         let tx2 = create_test_tx(vec![out_point], 2000);
 
         pool.add(tx1, 100, 1000).unwrap();
@@ -432,7 +432,7 @@ mod tests {
         let out_point = OutPoint::new([0x42; 32], 0);
 
         // Create two transactions spending the same output
-        let tx1 = create_test_tx(vec![out_point.clone()], 1000);
+        let tx1 = create_test_tx(vec![out_point], 1000);
         let tx2 = create_test_tx(vec![out_point], 2000);
 
         // Add first transaction with low fee density

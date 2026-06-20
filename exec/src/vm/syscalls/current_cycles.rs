@@ -22,6 +22,12 @@ pub struct CurrentCycles {
     base_cycles: Arc<AtomicU64>,
 }
 
+impl Default for CurrentCycles {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CurrentCycles {
     pub fn new() -> Self {
         Self { base_cycles: Arc::new(AtomicU64::new(0)) }

@@ -155,7 +155,8 @@ explicitly tagged as stale in the kept-files table.
 ### 2.2 Acceptance and protocol gate scripts
 
 ```text
-scripts/myelin_protocol_gate.sh            full Myelin protocol gate
+scripts/myelin_production_gate.sh          full Myelin production gate
+scripts/myelin_protocol_gate.sh            compatibility wrapper for production gate
 scripts/myelin_teeworlds_acceptance.sh     Teeworlds acceptance gate
 cellscript/scripts/cellscript_ckb_release_gate.sh
                                            cellscript release gate (quick/full)

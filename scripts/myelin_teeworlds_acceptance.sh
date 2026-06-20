@@ -125,11 +125,15 @@ for index, chunk in enumerate(chunks):
     require(projection["ckb_wtx_hash"], f"chunk {index} must expose CKB witness tx hash")
 
 require(vm["success"] is True, "VM probe must succeed")
+require(vm["vm_profile"] in ("ckb-strict-basic", "ckb-strict-spawn-ipc"), "VM probe must declare a CKB-strict profile")
 require(vm["ckb_strict"] is True, "VM probe must use CKB-strict semantics")
+require(isinstance(vm["ckb_spawn_ipc_enabled"], bool), "VM probe must report the spawn/IPC build flag")
 require(isinstance(vm["cycles"], int) and vm["cycles"] > 0, "VM probe must report positive cycles")
 
 require(bundle["court_verifiable"] is True, "court bundle must be verifiable")
 require(bundle["l1_court_implemented"] is False, "bundle must keep unfinished L1 court status explicit")
+require(bundle["vm_profile"] == "ckb-strict-basic", "court bundle must use the minimal CKB-strict profile")
+require(bundle["ckb_spawn_ipc_required"] is False, "court bundle must not require spawn/IPC")
 require(bundle["ckb_projection"]["semantic_profile"] == "ckb-compatible", "court bundle must use ckb-compatible profile")
 require(bundle["ckb_projection"]["ckb_projection_possible"] is True, "court bundle projection must be possible")
 require(bundle["static_committee_evidence"]["finalised"] is True, "court bundle must include finalised committee evidence")
@@ -144,8 +148,10 @@ summary = {
     "fixture_chunks": len(chunks),
     "tape_bytes": fixture["tape_bytes"],
     "average_elapsed_ns": build["benchmark"]["average_elapsed_ns"],
-    "vm_cycles": vm["cycles"],
-    "court_checks": len(checks),
+	"vm_cycles": vm["cycles"],
+	"vm_profile": vm["vm_profile"],
+	"ckb_spawn_ipc_enabled": vm["ckb_spawn_ipc_enabled"],
+	"court_checks": len(checks),
     "semantic_profile": chunks[0]["ckb_projection"]["semantic_profile"],
     "static_committee_finalised": fixture["finality"]["finalised"],
 }

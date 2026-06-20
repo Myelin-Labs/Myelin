@@ -76,7 +76,10 @@ pub mod serialization;
 #[cfg(feature = "vm")]
 pub mod vm;
 #[cfg(feature = "vm")]
-pub use vm::{ResolvedCell, ResolvedHeader, ScriptVersion, SimpleDataProvider, TransactionScriptVerifier, VmSemantics};
+pub use vm::{
+    ResolvedCell, ResolvedHeader, ScriptVersion, SimpleDataProvider, TransactionScriptVerifier, VmSemantics,
+    CKB_SPAWN_IPC_SYSCALLS_ENABLED,
+};
 
 pub use celltx::{
     compute_conflict_hash, compute_typed_data_hash, encode_ckb_dep_group_data, encode_dep_group_data, encode_dep_group_data_for_abi,
@@ -105,27 +108,6 @@ pub use serialization::vm_abi::{
 pub use serialization::utils::{
     deserialize_from_bytes, deserialize_many, estimate_serialized_size, is_valid_versioned_envelope, peek_format_version,
     peek_schema_version, serialize_many, serialize_to_bytes, SerializeResult,
-};
-
-// Re-export cache
-pub use serialization::cache::{CacheStats, SerializationCache, ThreadSafeSerializationCache};
-
-// Re-export validation
-pub use serialization::validation::{is_valid_envelope, validate_envelope, SerializerValidator, ValidationConfig, ValidationResult};
-
-// Re-export streaming
-pub use serialization::streaming::{deserialize_streaming, serialize_streaming, StreamingDeserializer, StreamingSerializer};
-
-// Re-export security
-pub use serialization::security::{
-    compute_hash, deserialize_with_integrity, serialize_with_integrity, verify_integrity, SecureEnvelope, SecurityConfig,
-    SecurityGuard,
-};
-
-// Re-export compression
-pub use serialization::compression::{
-    compress, decompress, estimate_compressed_size, select_algorithm, CompressedEnvelope, CompressionAlgorithm, CompressionConfig,
-    CompressionResult, CompressionStats,
 };
 
 // Re-export molecule compatibility layer

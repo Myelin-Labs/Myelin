@@ -116,7 +116,7 @@ impl CellDAG {
                 }
 
                 // Track conflicts (multiple consumers for same Cell)
-                conflicts.entry(input.previous_output.clone()).or_default().push(consumer_id);
+                conflicts.entry(input.previous_output).or_default().push(consumer_id);
             }
 
             // Check deps (read-only edges)
@@ -154,22 +154,19 @@ impl CellDAG {
         let mut conflict_hash_conflicts: BTreeMap<[u8; 32], Vec<ConflictEntry>> = BTreeMap::new();
 
         for (node_id, tx) in txs.iter().enumerate() {
-            for witness_result in tx.decoded_cellscript_scheduler_witnesses() {
-                if let Ok(witness) = witness_result {
-                    for access in &witness.accesses {
-                        let mode = AccessMode::from_operation(access.operation);
-                        let entry = ConflictEntry { node_id, mode };
-                        conflict_hash_conflicts.entry(access.conflict_hash).or_default().push(entry);
-                    }
+            // If decode fails, skip: the transaction has no valid scheduler
+            // metadata, so it falls back to OutPoint-level dependencies.
+            for witness in tx.decoded_cellscript_scheduler_witnesses().filter_map(Result::ok) {
+                for access in &witness.accesses {
+                    let mode = AccessMode::from_operation(access.operation);
+                    let entry = ConflictEntry { node_id, mode };
+                    conflict_hash_conflicts.entry(access.conflict_hash).or_default().push(entry);
                 }
-                // If decode fails, skip — the transaction won't have valid
-                // scheduler metadata, so it can't participate in typed-cell
-                // parallel scheduling. It still has OutPoint-level dependencies.
             }
         }
 
         // Apply conflict rules: add dependency edges where needed
-        for (_conflict_hash, entries) in &conflict_hash_conflicts {
+        for entries in conflict_hash_conflicts.values() {
             // For each pair of entries sharing the same conflict_hash,
             // add a dependency edge if at least one is a Write.
             for i in 0..entries.len() {
@@ -187,7 +184,7 @@ impl CellDAG {
                     let (from, to) = if a.node_id < b.node_id { (a.node_id, b.node_id) } else { (b.node_id, a.node_id) };
 
                     // Avoid duplicate edges
-                    let already_has_edge = dag.edges.get(&from).map_or(false, |succs| succs.iter().any(|(s, _)| *s == to));
+                    let already_has_edge = dag.edges.get(&from).is_some_and(|succs| succs.iter().any(|(s, _)| *s == to));
 
                     if !already_has_edge {
                         dag.edges.entry(from).or_default().push((to, DagEdge::Dependency));
@@ -211,12 +208,10 @@ impl CellDAG {
     /// Returns an empty vector if the transaction has no valid scheduler witness.
     pub fn extract_conflict_accesses(tx: &CellTx) -> Vec<([u8; 32], AccessMode)> {
         let mut result = Vec::new();
-        for witness_result in tx.decoded_cellscript_scheduler_witnesses() {
-            if let Ok(witness) = witness_result {
-                for access in &witness.accesses {
-                    let mode = AccessMode::from_operation(access.operation);
-                    result.push((access.conflict_hash, mode));
-                }
+        for witness in tx.decoded_cellscript_scheduler_witnesses().flatten() {
+            for access in &witness.accesses {
+                let mode = AccessMode::from_operation(access.operation);
+                result.push((access.conflict_hash, mode));
             }
         }
         result
@@ -416,8 +411,8 @@ mod tests {
         let tx0_hash = crate::celltx::sighash::compute_wtxid(&tx0);
         let out = OutPoint::new(tx0_hash, 0);
 
-        let tx1 = create_test_tx(vec![out.clone()], 1);
-        let tx2 = create_test_tx(vec![out.clone()], 1);
+        let tx1 = create_test_tx(vec![out], 1);
+        let tx2 = create_test_tx(vec![out], 1);
 
         let dag = CellDAG::build(&[tx0, tx1, tx2]).unwrap();
 

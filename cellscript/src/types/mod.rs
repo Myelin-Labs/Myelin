@@ -4454,7 +4454,7 @@ impl<'a> TypeChecker<'a> {
                             }
                             Type::Hash
                         }
-                        ("ckb", "cell_lock_args_empty" | "cell_type_args_empty") => {
+                        ("ckb", "cell_lock_args_empty" | "cell_type_args_empty" | "cell_exists") => {
                             self.validate_builtin_arity(name, 1, arg_types, call.span)?;
                             if arg_types[0] != Type::U64 {
                                 return Err(CompileError::new(

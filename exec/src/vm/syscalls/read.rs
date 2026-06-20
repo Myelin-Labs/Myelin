@@ -28,6 +28,12 @@ struct ReadRuntime {
     message_box: Arc<std::sync::Mutex<Vec<Message>>>,
 }
 
+impl Default for Read {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Read {
     pub fn new() -> Self {
         Self { runtime: None }

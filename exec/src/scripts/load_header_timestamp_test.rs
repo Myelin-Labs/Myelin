@@ -51,7 +51,7 @@ mod tests {
         let code_hash = load_header_timestamp_code_hash();
         let input_out_point = OutPoint::new([0x66; 32], 0);
         let header_hash = [0x77; 32];
-        let provider = build_provider(code_hash, input_out_point.clone(), header_hash, EXPECTED_TIMESTAMP);
+        let provider = build_provider(code_hash, input_out_point, header_hash, EXPECTED_TIMESTAMP);
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, 0)],
@@ -73,7 +73,7 @@ mod tests {
         let code_hash = load_header_timestamp_code_hash();
         let input_out_point = OutPoint::new([0x68; 32], 0);
         let header_hash = [0x79; 32];
-        let provider = build_provider(code_hash, input_out_point.clone(), header_hash, 7);
+        let provider = build_provider(code_hash, input_out_point, header_hash, 7);
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, 0)],

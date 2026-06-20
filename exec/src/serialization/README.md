@@ -135,7 +135,7 @@ serialization/
 - `VersionedEnvelope<T>` emits a Molecule-compatible table by default; `serialize_to_bytes`, `serialize_many`, streaming serialization, and serialization cache entries now use `VersionedEnvelope::to_bytes()`
 - `VersionedSerializable` has no derive-based default codec; implementors must provide an explicit payload codec
 - Core CellTx-family `VersionedSerializable` implementations use CKB Molecule payloads for `OutPoint`, `Script`, `CellInput`, `CellOutput`, `CellDep`, `DepType`, and `CellTx`
-- `SecureEnvelope` now emits a Molecule-compatible table, and integrity helpers use the versioned envelope utilities
+- `SecureEnvelope` now emits and accepts only its Molecule-compatible table; the old legacy fallback decode path has been removed
 - Typed-cell metadata has an explicit Molecule-compatible codec; core transaction and typed-cell metadata structs use explicit codecs
 - Native `myelin-exec` has no direct or transitive legacy serializer dependency,
   and no legacy serializer API usage in execution, CellTx, typed metadata,

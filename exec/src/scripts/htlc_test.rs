@@ -94,7 +94,7 @@ mod tests {
             TARGET_TIMESTAMP,
         );
 
-        let provider = build_provider(code_hash, input_out_point.clone(), args);
+        let provider = build_provider(code_hash, input_out_point, args);
 
         // Use any since value (recipient path doesn't check timelock)
         let since = 0u64;
@@ -140,7 +140,7 @@ mod tests {
             TARGET_TIMESTAMP,
         );
 
-        let provider = build_provider(code_hash, input_out_point.clone(), args);
+        let provider = build_provider(code_hash, input_out_point, args);
 
         // Use wrong secret
         let wrong_secret = [0xCDu8; 32];
@@ -184,7 +184,7 @@ mod tests {
             TARGET_TIMESTAMP,
         );
 
-        let provider = build_provider(code_hash, input_out_point.clone(), args);
+        let provider = build_provider(code_hash, input_out_point, args);
 
         // Use future timestamp (after lock time)
         let since = encode_absolute_timestamp_since(TARGET_TIMESTAMP + 86400);
@@ -228,7 +228,7 @@ mod tests {
             TARGET_TIMESTAMP,
         );
 
-        let provider = build_provider(code_hash, input_out_point.clone(), args);
+        let provider = build_provider(code_hash, input_out_point, args);
 
         // Use past timestamp (before lock time)
         let since = encode_absolute_timestamp_since(TARGET_TIMESTAMP - 86400);
@@ -270,7 +270,7 @@ mod tests {
         let wrong_signature = build_fixture_signature(sender_pubkey);
 
         let args = build_htlc_args(secret_hash, recipient_pubkey, sender_pubkey, 1, TARGET_TIMESTAMP);
-        let provider = build_provider(code_hash, input_out_point.clone(), args);
+        let provider = build_provider(code_hash, input_out_point, args);
 
         let witness = build_recipient_witness(wrong_signature, secret);
         let tx = CellTx {

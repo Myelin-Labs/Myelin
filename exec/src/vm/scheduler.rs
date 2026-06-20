@@ -163,7 +163,7 @@ impl Fd {
     }
 
     pub fn is_read(self) -> bool {
-        self.0 % 2 == 0
+        self.0.is_multiple_of(2)
     }
 
     pub fn is_write(self) -> bool {
@@ -413,7 +413,7 @@ impl VmScheduler {
         let spent_cycles = self.consume_iteration_cycles()?;
         let remaining_cycles = limit_cycles
             .checked_sub(spent_cycles)
-            .ok_or_else(|| ScriptError::VM(VMError::CyclesExceeded { limit: limit_cycles, actual: spent_cycles }))?;
+            .ok_or(ScriptError::VM(VMError::CyclesExceeded { limit: limit_cycles, actual: spent_cycles }))?;
         self.process_io()?;
         let executed_vm = iterate_result?;
         Ok((executed_vm, remaining_cycles))

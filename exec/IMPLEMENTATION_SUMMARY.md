@@ -102,17 +102,6 @@
 - `serialize_with_integrity()`: 带完整性校验的序列化
 - `deserialize_with_integrity()`: 带完整性校验的反序列化
 
-#### `compression.rs` - 序列化压缩
-提供序列化数据的压缩支持：
-- `CompressionAlgorithm`: 压缩算法枚举（None/LZ4/Zstd）
-- `CompressionConfig`: 压缩配置（默认/高速/最佳/自动）
-- `CompressedEnvelope`: 带压缩的信封
-- `CompressionStats`: 压缩统计
-- `compress()`: 压缩数据
-- `decompress()`: 解压数据
-- `estimate_compressed_size()`: 估计压缩后大小
-- `select_algorithm()`: 自动选择算法
-
 ---
 
 ### 2. 类型实现

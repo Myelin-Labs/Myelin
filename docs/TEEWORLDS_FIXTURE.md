@@ -24,13 +24,13 @@ cd /Users/arthur/RustroverProjects/Myelin
 scripts/myelin_teeworlds_acceptance.sh
 ```
 
-For the full Myelin protocol audit, including the stale-semantics scan,
-dependency check, focused Rust tests, CellTx execution report, and static
-closed-committee consensus selection, run:
+For the full Myelin release audit, including the stale-semantics scan,
+dependency check, focused Rust tests, runtime smoke, Session L2 checks, and
+both consensus modes, run:
 
 ```bash
 cd /Users/arthur/RustroverProjects/Myelin
-scripts/myelin_protocol_gate.sh
+scripts/myelin_production_gate.sh
 ```
 
 By default it uses:

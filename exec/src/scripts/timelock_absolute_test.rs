@@ -32,7 +32,7 @@ mod tests {
     fn test_timelock_absolute_accepts_valid_timestamp() {
         let code_hash = timelock_absolute_code_hash();
         let input_out_point = OutPoint::new([0x11; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
 
         // Use exact target timestamp
         let since = encode_absolute_timestamp_since(TARGET_TIMESTAMP);
@@ -56,7 +56,7 @@ mod tests {
     fn test_timelock_absolute_accepts_future_timestamp() {
         let code_hash = timelock_absolute_code_hash();
         let input_out_point = OutPoint::new([0x12; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
 
         // Use a future timestamp (target + 1 day)
         let since = encode_absolute_timestamp_since(TARGET_TIMESTAMP + 86400);
@@ -80,7 +80,7 @@ mod tests {
     fn test_timelock_absolute_rejects_past_timestamp() {
         let code_hash = timelock_absolute_code_hash();
         let input_out_point = OutPoint::new([0x13; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
 
         // Use a past timestamp (target - 1 day)
         let since = encode_absolute_timestamp_since(TARGET_TIMESTAMP - 86400);
@@ -104,7 +104,7 @@ mod tests {
     fn test_timelock_absolute_rejects_relative_lock() {
         let code_hash = timelock_absolute_code_hash();
         let input_out_point = OutPoint::new([0x14; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
 
         // Use relative lock (bit63 = 1)
         let since = (1u64 << 63) | (1u64 << 62) | TARGET_TIMESTAMP;
@@ -128,10 +128,10 @@ mod tests {
     fn test_timelock_absolute_rejects_block_number_lock() {
         let code_hash = timelock_absolute_code_hash();
         let input_out_point = OutPoint::new([0x15; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
 
         // Use block number lock instead of timestamp (bit62 = 0)
-        let since = (0u64 << 63) | (0u64 << 62) | TARGET_TIMESTAMP;
+        let since = TARGET_TIMESTAMP;
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, since)],

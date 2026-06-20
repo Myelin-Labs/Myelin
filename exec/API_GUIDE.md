@@ -95,20 +95,19 @@ let restored = ResolvedHeader::from_vm_bytes(&bytes)?;
 assert_eq!(header.hash, restored.hash);
 ```
 
-## Cache, Streaming, Integrity, and Compression
+## Cache, Streaming, and Integrity
 
 These helpers all sit above the same explicit serialization model:
 
 - `SerializationCache` stores `serialize_to_bytes` results.
 - `StreamingSerializer` writes `VersionedEnvelope::to_bytes()` frames.
-- `SecureEnvelope::to_bytes()` uses its own Molecule-compatible envelope.
-- `CompressedEnvelope` compresses caller-provided bytes and does not define a
-  consensus codec.
+- `SecureEnvelope::to_bytes()` uses its own Molecule-compatible envelope, and
+  `SecureEnvelope::from_bytes()` accepts only that Molecule-compatible table.
 
 ## Format Policy
 
 - `0x80..=0xFF`: Molecule-compatible public/default envelope formats.
-- `0x00..=0x7F`: explicit legacy compatibility only.
+- `0x00..=0x7F`: rejected on native execution paths.
 
 New protocol evidence should use Molecule-compatible bytes and should be
 reported with its semantic profile and CKB projection status.

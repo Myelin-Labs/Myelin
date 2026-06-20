@@ -81,7 +81,7 @@ pub fn serialized_script_size(script: &Script) -> usize {
 /// 计算序列化 CellOutput 的大小
 pub fn serialized_cell_output_size(output: &CellOutput) -> usize {
     let lock_size = serialized_script_size(&output.lock);
-    let type_size = output.type_.as_ref().map(|t| serialized_script_size(t)).unwrap_or(0);
+    let type_size = output.type_.as_ref().map(serialized_script_size).unwrap_or(0);
     8 + 4 + lock_size + 1 + if output.type_.is_some() { 4 + type_size } else { 0 }
 }
 

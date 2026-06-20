@@ -130,6 +130,12 @@ sha256_hasher! {
     struct SchnorrSigningHash => b"SchnorrSigningHash",
 }
 
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,10 +157,4 @@ mod tests {
         run_test_vector(&input_data, CellTxId::new);
         run_test_vector(&input_data, BlockHash::new);
     }
-}
-
-pub fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
 }

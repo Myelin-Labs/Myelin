@@ -3,21 +3,34 @@
 //
 // Myelin protocol CLI.
 
+#![recursion_limit = "256"]
+
 use clap::{Args, Parser, Subcommand};
 use myelin_consensus::{
     CommitteeCertificate, CommitteeSignature, CommitteeValidator, ConsensusConfig, ConsensusEngine, ConsensusKind, MyelinBlock,
     SelectedConsensus, StaticClosedCommittee, StaticCommitteeConfig, Tendermint, TendermintConfig,
 };
 use myelin_exec::{
-    build_cell_tx_execution_report, celltx::compute_wtxid, deserialize_transaction_molecule, project_cell_tx_to_ckb,
-    serialize_transaction_molecule, CellInput, CellOutput, CellTx, CkbProjectionReport, OutPoint, ResolvedCell, Script, ScriptVersion,
-    SemanticProfile, SimpleDataProvider, TransactionScriptVerifier, VmSemantics,
+    build_cell_tx_execution_report, celltx::compute_wtxid, ckb_cell_data_hash, deserialize_transaction_molecule,
+    project_cell_tx_to_ckb, serialize_transaction_molecule, CellDep, CellInput, CellOutput, CellTx, CkbProjectionReport, DepType,
+    OutPoint, ResolvedCell, Script, ScriptVersion, SemanticProfile, SimpleDataProvider, TransactionScriptVerifier, VmSemantics,
+    CKB_SPAWN_IPC_SYSCALLS_ENABLED,
 };
 use myelin_mempool::CellPool;
-use myelin_state::CellStateTree;
+use myelin_state::{CellStateTree, MerkleTreeBuilder, SegmentProof, SegmentReader, SegmentWriter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{fs, path::PathBuf, process::Command, sync::Arc, time::Instant};
+use std::{
+    fs,
+    io::{Read, Write},
+    net::TcpStream,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+const CKB_SHANNONS_PER_BYTE: u64 = 100_000_000;
 
 #[derive(Debug, Parser)]
 #[command(name = "myelin")]
@@ -44,6 +57,8 @@ enum Commands {
     /// L2 simulation; they are a single-shot integration smoke
     /// for the off-chain kernel surface.
     Runtime(RuntimeArgs),
+    /// Finite Cell session L2 fixture commands.
+    Session(SessionArgs),
 }
 
 #[derive(Debug, Args)]
@@ -263,7 +278,515 @@ struct RuntimeSmokeArgs {
 }
 
 #[derive(Debug, Args)]
+struct SessionArgs {
+    #[command(subcommand)]
+    command: SessionCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    /// Open a finite Cell session from CLI-supplied participants and escrow cells.
+    Open(SessionOpenArgs),
+    /// Open a deterministic finite Cell session fixture.
+    OpenFixture(SessionOpenFixtureArgs),
+    /// Commit one deterministic chunk for a previously opened session.
+    Commit(SessionCommitArgs),
+    /// Commit one deterministic chunk for a previously opened session fixture.
+    CommitFixture(SessionCommitFixtureArgs),
+    /// Materialise a self-contained disputed-chunk court bundle.
+    CourtBundle(SessionCourtBundleArgs),
+    /// Verify a session court bundle by recomputing commitments and finality.
+    VerifyCourtBundle(SessionVerifyCourtBundleArgs),
+    /// Emit a DA manifest for a verified session court bundle.
+    DaManifest(SessionDaManifestArgs),
+    /// Verify a DA manifest against its session court bundle.
+    VerifyDaManifest(SessionVerifyDaManifestArgs),
+    /// Emit a CKB-compatible DA anchor transaction package.
+    DaAnchorPackage(SessionDaAnchorPackageArgs),
+    /// Verify a DA anchor transaction package.
+    VerifyDaAnchorPackage(SessionVerifyDaAnchorPackageArgs),
+    /// Submit, or dry-run, a DA anchor package through CKB JSON-RPC.
+    SubmitDaAnchorPackage(SessionSubmitDaAnchorPackageArgs),
+    /// Emit a settlement intent from a verified court bundle.
+    SettlementIntent(SessionSettlementIntentArgs),
+    /// Verify a settlement intent against its court bundle.
+    VerifySettlementIntent(SessionVerifySettlementIntentArgs),
+    /// Emit a CKB-compatible settlement transaction package.
+    SettlementPackage(SessionSettlementPackageArgs),
+    /// Verify a settlement transaction package.
+    VerifySettlementPackage(SessionVerifySettlementPackageArgs),
+    /// Submit, or dry-run, a settlement package through CKB JSON-RPC.
+    SubmitSettlementPackage(SessionSubmitSettlementPackageArgs),
+    /// Build a compact CKB carrier transaction submission for a DA or settlement package.
+    CarrierSubmission(Box<SessionCarrierSubmissionArgs>),
+    /// Verify submitted transaction presence/status through CKB JSON-RPC.
+    VerifySubmissionInclusion(SessionVerifySubmissionInclusionArgs),
+    /// Verify committed submission has enough CKB confirmation depth.
+    VerifySubmissionFinality(SessionVerifySubmissionFinalityArgs),
+    /// Re-check a committed submission stayed on the same CKB block identity.
+    VerifySubmissionStability(SessionVerifySubmissionStabilityArgs),
+    /// Verify submitted transaction inputs and cell deps exist on CKB.
+    VerifySubmissionContext(SessionVerifySubmissionContextArgs),
+    /// Verify submitted transaction capacity balance and fee through CKB JSON-RPC.
+    VerifySubmissionEconomics(SessionVerifySubmissionEconomicsArgs),
+    /// Aggregate submission context, economics, inclusion, stability, and finality into one readiness decision.
+    VerifySubmissionReadiness(SessionVerifySubmissionReadinessArgs),
+}
+
+#[derive(Debug, Args)]
+struct SessionOpenArgs {
+    /// Application/session kind identifier.
+    #[arg(long, default_value = "myelin-session-v1")]
+    app_id: String,
+    /// Participant id. Repeat for multi-party sessions.
+    #[arg(long = "participant", required = true)]
+    participants: Vec<String>,
+    /// Escrow-like input cell as tx_hash_hex:index:capacity:lock_hash_hex. Repeatable.
+    #[arg(long = "escrow-cell", required = true)]
+    escrow_cells: Vec<String>,
+    /// Session timeout in milliseconds.
+    #[arg(long, default_value_t = 60_000)]
+    timeout_ms: u64,
+    /// Consensus engine: "static-closed-committee" (default) or "tendermint".
+    #[arg(long, default_value = "static-closed-committee")]
+    consensus: String,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionOpenFixtureArgs {
+    /// Consensus engine: "static-closed-committee" (default) or "tendermint".
+    #[arg(long, default_value = "static-closed-committee")]
+    consensus: String,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionCommitArgs {
+    /// JSON report emitted by `session open`.
+    #[arg(long)]
+    session: PathBuf,
+    /// Zero-based chunk index to commit.
+    #[arg(long, default_value_t = 0)]
+    chunk_index: u64,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionCommitFixtureArgs {
+    /// JSON report emitted by `session open-fixture`.
+    #[arg(long)]
+    session: PathBuf,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionCourtBundleArgs {
+    /// JSON report emitted by `session commit-fixture`.
+    #[arg(long)]
+    commit: PathBuf,
+    /// Zero-based disputed chunk index.
+    #[arg(long, default_value_t = 0)]
+    chunk_index: u64,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionVerifyCourtBundleArgs {
+    /// JSON bundle emitted by `session court-bundle`.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionDaManifestArgs {
+    /// JSON bundle emitted by `session court-bundle`.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// Optional local DA storage directory. When supplied, the payload is
+    /// appended to a sealed SegmentWriter segment and the proof is rebuilt from
+    /// SegmentReader.
+    #[arg(long)]
+    storage_dir: Option<PathBuf>,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionVerifyDaManifestArgs {
+    /// JSON manifest emitted by `session da-manifest`.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// JSON bundle emitted by `session court-bundle`.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// Optional local DA storage directory used to verify durable segment
+    /// publication.
+    #[arg(long)]
+    storage_dir: Option<PathBuf>,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionDaAnchorPackageArgs {
+    /// JSON manifest emitted by `session da-manifest`.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// JSON bundle emitted by `session court-bundle`.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionVerifyDaAnchorPackageArgs {
+    /// JSON package emitted by `session da-anchor-package`.
+    #[arg(long)]
+    package: PathBuf,
+    /// JSON manifest emitted by `session da-manifest`.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// JSON bundle emitted by `session court-bundle`.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionSubmitDaAnchorPackageArgs {
+    /// JSON package emitted by `session da-anchor-package`.
+    #[arg(long)]
+    package: PathBuf,
+    /// CKB JSON-RPC URL, for example http://127.0.0.1:8114.
+    #[arg(long)]
+    rpc_url: Option<String>,
+    /// Build and verify the JSON-RPC request without sending it.
+    #[arg(long)]
+    dry_run: bool,
+    /// CKB outputs validator argument for send_transaction.
+    #[arg(long, default_value = "passthrough")]
+    outputs_validator: String,
+    /// Fail the command unless the RPC response accepts the transaction.
+    #[arg(long)]
+    require_accepted: bool,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionSettlementIntentArgs {
+    /// JSON bundle emitted by `session court-bundle`.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// JSON manifest emitted by `session da-manifest`.
+    #[arg(long)]
+    da_manifest: PathBuf,
+    /// Settlement kind. Currently supported: "disputed-close".
+    #[arg(long, default_value = "disputed-close")]
+    kind: String,
+    /// Current session/court time in milliseconds.
+    #[arg(long)]
+    current_time_ms: u64,
+    /// Challenge window in milliseconds.
+    #[arg(long, default_value_t = 60_000)]
+    challenge_window_ms: u64,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionVerifySettlementIntentArgs {
+    /// JSON intent emitted by `session settlement-intent`.
+    #[arg(long)]
+    intent: PathBuf,
+    /// JSON bundle emitted by `session court-bundle`.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// JSON manifest emitted by `session da-manifest`.
+    #[arg(long)]
+    da_manifest: PathBuf,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionSettlementPackageArgs {
+    /// JSON intent emitted by `session settlement-intent`.
+    #[arg(long)]
+    intent: PathBuf,
+    /// JSON bundle emitted by `session court-bundle`.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// JSON manifest emitted by `session da-manifest`.
+    #[arg(long)]
+    da_manifest: PathBuf,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionVerifySettlementPackageArgs {
+    /// JSON package emitted by `session settlement-package`.
+    #[arg(long)]
+    package: PathBuf,
+    /// JSON intent emitted by `session settlement-intent`.
+    #[arg(long)]
+    intent: PathBuf,
+    /// JSON bundle emitted by `session court-bundle`.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// JSON manifest emitted by `session da-manifest`.
+    #[arg(long)]
+    da_manifest: PathBuf,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct OutputArgs {
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionSubmitSettlementPackageArgs {
+    /// JSON package emitted by `session settlement-package`.
+    #[arg(long)]
+    package: PathBuf,
+    /// CKB JSON-RPC URL, for example http://127.0.0.1:8114.
+    #[arg(long)]
+    rpc_url: Option<String>,
+    /// Build and verify the JSON-RPC request without sending it.
+    #[arg(long)]
+    dry_run: bool,
+    /// CKB outputs validator argument for send_transaction.
+    #[arg(long, default_value = "passthrough")]
+    outputs_validator: String,
+    /// Fail the command unless the RPC response accepts the transaction.
+    #[arg(long)]
+    require_accepted: bool,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionCarrierSubmissionArgs {
+    /// JSON DA-anchor or settlement package containing a compact carrier payload.
+    #[arg(long)]
+    package: PathBuf,
+    /// Funding input transaction hash.
+    #[arg(long)]
+    input_tx_hash: String,
+    /// Funding input output index as a CKB hex quantity, for example 0x0.
+    #[arg(long)]
+    input_index: String,
+    /// Funding input capacity in shannons.
+    #[arg(long)]
+    input_capacity_shannons: u64,
+    /// Optional read-only evidence CellDep transaction hash. When supplied, index and capacity must also be supplied.
+    #[arg(long, alias = "evidence-input-tx-hash")]
+    evidence_cell_dep_tx_hash: Option<String>,
+    /// Optional read-only evidence CellDep output index as a CKB hex quantity.
+    #[arg(long, alias = "evidence-input-index")]
+    evidence_cell_dep_index: Option<String>,
+    /// Optional read-only evidence CellDep capacity in shannons.
+    #[arg(long, alias = "evidence-input-capacity-shannons")]
+    evidence_cell_dep_capacity_shannons: Option<u64>,
+    /// Optional consumed settlement authority input transaction hash. Used by final L1 settlement submissions.
+    #[arg(long)]
+    authority_input_tx_hash: Option<String>,
+    /// Optional consumed settlement authority input output index as a CKB hex quantity.
+    #[arg(long)]
+    authority_input_index: Option<String>,
+    /// Optional consumed settlement authority input capacity in shannons.
+    #[arg(long)]
+    authority_input_capacity_shannons: Option<u64>,
+    /// Carrier output capacity in shannons.
+    #[arg(long)]
+    carrier_capacity_shannons: u64,
+    /// Transaction fee in shannons.
+    #[arg(long)]
+    fee_shannons: u64,
+    /// Funding and change lock script code hash.
+    #[arg(long)]
+    lock_code_hash: String,
+    /// Funding and change lock script hash type.
+    #[arg(long, default_value = "data")]
+    lock_hash_type: String,
+    /// Funding and change lock script args.
+    #[arg(long, default_value = "0x")]
+    lock_args: String,
+    /// Funding lock script code dep tx hash.
+    #[arg(long)]
+    lock_code_dep_tx_hash: String,
+    /// Funding lock script code dep output index as a CKB hex quantity.
+    #[arg(long)]
+    lock_code_dep_index: String,
+    /// Deployed CellScript verifier code hash.
+    #[arg(long)]
+    verifier_code_hash: String,
+    /// Deployed CellScript verifier code dep tx hash.
+    #[arg(long)]
+    verifier_code_dep_tx_hash: String,
+    /// Deployed CellScript verifier code dep output index as a CKB hex quantity.
+    #[arg(long)]
+    verifier_code_dep_index: String,
+    /// Verifier CellScript source path. Live submission requires this to be readable.
+    #[arg(long)]
+    verifier_source: String,
+    /// Semantic role of the deployed verifier: carrier or final-l1-script.
+    #[arg(long, default_value = "carrier")]
+    verifier_role: String,
+    /// Entry witness hex for the verifier.
+    #[arg(long)]
+    witness: String,
+    /// CKB outputs validator argument for send_transaction.
+    #[arg(long, default_value = "passthrough")]
+    outputs_validator: String,
+    /// Optional RPC URL recorded when the accepted tx hash came from a live RPC endpoint.
+    #[arg(long)]
+    rpc_url: Option<String>,
+    /// Submit the generated carrier send_transaction request to --rpc-url.
+    #[arg(long)]
+    submit: bool,
+    /// Fail the command unless a live --submit RPC submission is accepted.
+    #[arg(long)]
+    require_accepted: bool,
+    /// Externally recorded CKB tx hash returned by send_transaction. This is not live RPC acceptance.
+    #[arg(long)]
+    accepted_tx_hash: Option<String>,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionVerifySubmissionInclusionArgs {
+    /// JSON report emitted by a session submit-* command.
+    #[arg(long)]
+    submission: PathBuf,
+    /// CKB JSON-RPC URL, for example http://127.0.0.1:8114.
+    #[arg(long)]
+    rpc_url: String,
+    /// Minimum accepted CKB transaction status: pending, proposed, or committed.
+    #[arg(long, default_value = "committed")]
+    min_status: String,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionVerifySubmissionFinalityArgs {
+    /// JSON report emitted by `session verify-submission-inclusion`.
+    #[arg(long)]
+    inclusion: PathBuf,
+    /// CKB JSON-RPC URL, for example http://127.0.0.1:8114.
+    #[arg(long)]
+    rpc_url: String,
+    /// Minimum confirmation depth required before treating the inclusion as final.
+    #[arg(long, default_value_t = 6)]
+    min_confirmations: u64,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionVerifySubmissionStabilityArgs {
+    /// JSON report emitted by `session verify-submission-inclusion`.
+    #[arg(long)]
+    inclusion: PathBuf,
+    /// CKB JSON-RPC URL, for example http://127.0.0.1:8114.
+    #[arg(long)]
+    rpc_url: String,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionVerifySubmissionContextArgs {
+    /// JSON report emitted by a session submit-* command.
+    #[arg(long)]
+    submission: PathBuf,
+    /// CKB JSON-RPC URL, for example http://127.0.0.1:8114.
+    #[arg(long)]
+    rpc_url: String,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionVerifySubmissionEconomicsArgs {
+    /// JSON report emitted by a session submit-* command.
+    #[arg(long)]
+    submission: PathBuf,
+    /// CKB JSON-RPC URL, for example http://127.0.0.1:8114.
+    #[arg(long)]
+    rpc_url: String,
+    /// Minimum fee, in shannons, required by the local production policy.
+    #[arg(long, default_value_t = 0)]
+    min_fee_shannons: u64,
+    /// Minimum fee rate, in shannons per 1000-byte CKB transaction JSON preflight size.
+    #[arg(long, default_value_t = 0)]
+    min_fee_rate_shannons_per_kb: u64,
+    /// Maximum fee, in shannons, allowed by the local production policy.
+    #[arg(long)]
+    max_fee_shannons: Option<u64>,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionVerifySubmissionReadinessArgs {
+    /// JSON report emitted by `session verify-submission-context`.
+    #[arg(long)]
+    context: PathBuf,
+    /// JSON report emitted by `session verify-submission-economics`.
+    #[arg(long)]
+    economics: PathBuf,
+    /// JSON report emitted by `session verify-submission-inclusion`.
+    #[arg(long)]
+    inclusion: PathBuf,
+    /// JSON report emitted by `session verify-submission-stability`.
+    #[arg(long)]
+    stability: PathBuf,
+    /// JSON report emitted by `session verify-submission-finality`.
+    #[arg(long)]
+    finality: PathBuf,
+    /// Require the original submission report to prove live RPC acceptance, not only dry-run projection.
+    #[arg(long)]
+    require_live_submission: bool,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -336,6 +859,133 @@ fn run() -> Result<()> {
         Commands::Runtime(args) => match args.command {
             RuntimeCommand::Smoke(args) => {
                 let report = runtime_smoke(&args.consensus)?;
+                write_json(args.out, &report)
+            }
+        },
+        Commands::Session(args) => match args.command {
+            SessionCommand::Open(args) => {
+                let out = args.out.clone();
+                let report = session_open(args)?;
+                write_json(out, &report)
+            }
+            SessionCommand::OpenFixture(args) => {
+                let report = session_open_fixture(&args.consensus)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::Commit(args) => {
+                let report = session_commit_from_open(args.session, args.chunk_index)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::CommitFixture(args) => {
+                let report = session_commit_fixture(args.session)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::CourtBundle(args) => {
+                let report = session_court_bundle(args.commit, args.chunk_index)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::VerifyCourtBundle(args) => {
+                let report = verify_session_court_bundle(args.bundle)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::DaManifest(args) => {
+                let report = session_da_manifest(args.bundle, args.storage_dir)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::VerifyDaManifest(args) => {
+                let report = verify_session_da_manifest(args.manifest, args.bundle, args.storage_dir)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::DaAnchorPackage(args) => {
+                let report = session_da_anchor_package(args.manifest, args.bundle)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::VerifyDaAnchorPackage(args) => {
+                let report = verify_session_da_anchor_package(args.package, args.manifest, args.bundle)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::SubmitDaAnchorPackage(args) => {
+                let report = session_submit_da_anchor_package(
+                    args.package,
+                    args.rpc_url,
+                    args.dry_run,
+                    &args.outputs_validator,
+                    args.require_accepted,
+                )?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::SettlementIntent(args) => {
+                let report = session_settlement_intent(
+                    args.bundle,
+                    args.da_manifest,
+                    &args.kind,
+                    args.current_time_ms,
+                    args.challenge_window_ms,
+                )?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::VerifySettlementIntent(args) => {
+                let report = verify_session_settlement_intent(args.intent, args.bundle, args.da_manifest)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::SettlementPackage(args) => {
+                let report = session_settlement_package(args.intent, args.bundle, args.da_manifest)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::VerifySettlementPackage(args) => {
+                let report = verify_session_settlement_package(args.package, args.intent, args.bundle, args.da_manifest)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::SubmitSettlementPackage(args) => {
+                let report = session_submit_settlement_package(
+                    args.package,
+                    args.rpc_url,
+                    args.dry_run,
+                    &args.outputs_validator,
+                    args.require_accepted,
+                )?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::CarrierSubmission(args) => {
+                let out = args.out.clone();
+                let report = session_carrier_submission(*args)?;
+                write_json(out, &report)
+            }
+            SessionCommand::VerifySubmissionInclusion(args) => {
+                let report = verify_session_submission_inclusion(args.submission, &args.rpc_url, &args.min_status)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::VerifySubmissionFinality(args) => {
+                let report = verify_session_submission_finality(args.inclusion, &args.rpc_url, args.min_confirmations)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::VerifySubmissionStability(args) => {
+                let report = verify_session_submission_stability(args.inclusion, &args.rpc_url)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::VerifySubmissionContext(args) => {
+                let report = verify_session_submission_context(args.submission, &args.rpc_url)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::VerifySubmissionEconomics(args) => {
+                let report = verify_session_submission_economics(
+                    args.submission,
+                    &args.rpc_url,
+                    args.min_fee_shannons,
+                    args.min_fee_rate_shannons_per_kb,
+                    args.max_fee_shannons,
+                )?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::VerifySubmissionReadiness(args) => {
+                let report = verify_session_submission_readiness(
+                    args.context,
+                    args.economics,
+                    args.inclusion,
+                    args.stability,
+                    args.finality,
+                    args.require_live_submission,
+                )?;
                 write_json(args.out, &report)
             }
         },
@@ -497,7 +1147,7 @@ struct TeeworldsChunkReport {
     ckb_projection: TeeworldsChunkProjectionReport,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct TeeworldsChunkProjectionReport {
     semantic_profile: String,
     ckb_projection_possible: bool,
@@ -544,7 +1194,9 @@ struct TeeworldsVmProbeReport {
     map_bytes: usize,
     config_bytes: usize,
     max_cycles: u64,
+    vm_profile: &'static str,
     ckb_strict: bool,
+    ckb_spawn_ipc_enabled: bool,
     success: bool,
     cycles: Option<u64>,
     error: Option<String>,
@@ -634,6 +1286,8 @@ struct TeeworldsCourtBundleReport {
     molecule_transaction_hex: String,
     molecule_transaction_hash: String,
     challenge_payload_hash: String,
+    vm_profile: &'static str,
+    ckb_spawn_ipc_required: bool,
     ckb_projection: TeeworldsChunkProjectionReport,
     /// Selectable finality evidence: static closed committee OR Tendermint
     /// weighted precommit certificate. The same `signatures` field carries
@@ -671,6 +1325,8 @@ struct TeeworldsCourtBundleInput {
     molecule_transaction_hex: String,
     molecule_transaction_hash: String,
     challenge_payload_hash: String,
+    vm_profile: String,
+    ckb_spawn_ipc_required: bool,
     old_state_root: String,
     new_state_root: String,
     scheduler_report_hash: String,
@@ -1001,7 +1657,9 @@ fn teeworlds_vm_probe(args: &TeeworldsVmProbeArgs) -> Result<TeeworldsVmProbeRep
         map_bytes: map.len(),
         config_bytes: config.len(),
         max_cycles: args.max_cycles,
+        vm_profile: ckb_vm_profile_label(CKB_SPAWN_IPC_SYSCALLS_ENABLED),
         ckb_strict: true,
+        ckb_spawn_ipc_enabled: CKB_SPAWN_IPC_SYSCALLS_ENABLED,
         success,
         cycles,
         error,
@@ -1214,6 +1872,8 @@ fn teeworlds_court_bundle(
         molecule_transaction_hex: hex::encode(&molecule_transaction),
         molecule_transaction_hash: hex::encode(molecule_transaction_hash),
         challenge_payload_hash: hex::encode(challenge_payload_hash),
+        vm_profile: "ckb-strict-basic",
+        ckb_spawn_ipc_required: false,
         ckb_projection,
         static_committee_evidence: static_evidence,
         tendermint_evidence,
@@ -1544,6 +2204,22 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
         Some("ckb-compatible + projection possible".to_owned()),
         Some(format!("{} + {}", bundle.ckb_projection.semantic_profile, bundle.ckb_projection.ckb_projection_possible)),
         "bundle is projectable into the CKB-compatible profile",
+    );
+    push_check(
+        &mut checks,
+        "vm-profile",
+        bundle.vm_profile == "ckb-strict-basic",
+        Some("ckb-strict-basic".to_owned()),
+        Some(bundle.vm_profile.clone()),
+        "Teeworlds court bundles use the minimal CKB-strict VM profile",
+    );
+    push_check(
+        &mut checks,
+        "ckb-spawn-ipc-not-required",
+        !bundle.ckb_spawn_ipc_required,
+        Some("false".to_owned()),
+        Some(bundle.ckb_spawn_ipc_required.to_string()),
+        "Teeworlds court replay must not require the advanced spawn/IPC profile",
     );
 
     let valid = checks.iter().all(|check| check.ok);
@@ -1917,6 +2593,353 @@ fn parse_hex_32(value: &str) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
+fn carrier_payload_hex(fields: &[[u8; 32]; 5]) -> String {
+    let mut bytes = Vec::with_capacity(160);
+    for field in fields {
+        bytes.extend_from_slice(field);
+    }
+    format!("0x{}", hex::encode(bytes))
+}
+
+fn carrier_payload_data_hash_hex(payload_hex: &str) -> Result<String> {
+    let payload =
+        decode_hex_bytes(payload_hex).ok_or_else(|| CliError::InvalidFixture("carrier payload is not valid hex".to_owned()))?;
+    if payload.len() != 160 {
+        return Err(CliError::InvalidFixture(format!("carrier payload must be 160 bytes, got {} bytes", payload.len())));
+    }
+    Ok(format!("0x{}", hex::encode(ckb_cell_data_hash(&payload))))
+}
+
+fn settlement_authority_requirement(
+    intent_hash: [u8; 32],
+    session_id: [u8; 32],
+    participant_set_hash: [u8; 32],
+    escrow_input_cells_hash: [u8; 32],
+    session_lineage_commitment: [u8; 32],
+) -> SessionSettlementAuthorityRequirement {
+    let session_authority_commitment = blake3_chunks(
+        b"myelin:session-settlement-authority-lineage:v2",
+        &[&intent_hash, &session_id, &participant_set_hash, &escrow_input_cells_hash, &session_lineage_commitment],
+    );
+    let authority_data = settlement_authority_cell_data(
+        intent_hash,
+        session_id,
+        participant_set_hash,
+        escrow_input_cells_hash,
+        session_lineage_commitment,
+        session_authority_commitment,
+    );
+    SessionSettlementAuthorityRequirement {
+        schema: "myelin-session-settlement-authority-v1".to_owned(),
+        data: format!("0x{}", hex::encode(&authority_data)),
+        data_hash: format!("0x{}", hex::encode(ckb_cell_data_hash(&authority_data))),
+        data_semantics: "settlement-authority-lineage-v1".to_owned(),
+        session_id: hex::encode(session_id),
+        participant_set_hash: hex::encode(participant_set_hash),
+        escrow_input_cells_hash: hex::encode(escrow_input_cells_hash),
+        session_lineage_commitment: hex::encode(session_lineage_commitment),
+        session_binding: "session-id-and-lineage-commit-participants-and-escrow".to_owned(),
+        session_authority_commitment_algorithm:
+            "blake3(myelin:session-settlement-authority-lineage:v2,intent_hash,session_id,participant_set_hash,escrow_input_cells_hash,session_lineage_commitment)"
+                .to_owned(),
+        session_authority_commitment: hex::encode(session_authority_commitment),
+        consumed_input_index: 1,
+        required_lock_binding: "final-da-publication-lock-hash".to_owned(),
+    }
+}
+
+fn settlement_authority_cell_data(
+    intent_hash: [u8; 32],
+    session_id: [u8; 32],
+    participant_set_hash: [u8; 32],
+    escrow_input_cells_hash: [u8; 32],
+    session_lineage_commitment: [u8; 32],
+    session_authority_commitment: [u8; 32],
+) -> Vec<u8> {
+    let mut data = Vec::with_capacity(32 * 6);
+    data.extend_from_slice(&intent_hash);
+    data.extend_from_slice(&session_id);
+    data.extend_from_slice(&participant_set_hash);
+    data.extend_from_slice(&escrow_input_cells_hash);
+    data.extend_from_slice(&session_lineage_commitment);
+    data.extend_from_slice(&session_authority_commitment);
+    data
+}
+
+fn settlement_final_type_args_hex(payload: &[u8], authority: &SessionSettlementAuthorityRequirement) -> Result<String> {
+    let session_id = parse_hex_32(&authority.session_id)
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority.session_id must be 32-byte hex".to_owned()))?;
+    let settlement_identity = ckb_cell_data_hash(payload);
+    Ok(format!("0x{}{}", hex::encode(session_id), hex::encode(settlement_identity)))
+}
+
+fn validate_settlement_authority_requirement(package_json: &Value) -> Result<SessionSettlementAuthorityRequirement> {
+    let authority = package_json
+        .get("settlement_authority")
+        .ok_or_else(|| CliError::InvalidFixture("settlement package is missing settlement_authority".to_owned()))?;
+    let schema = authority
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority is missing schema".to_owned()))?;
+    if schema != "myelin-session-settlement-authority-v1" {
+        return Err(CliError::InvalidFixture(format!("unsupported settlement_authority schema: {schema}")));
+    }
+    let intent_hash = package_json
+        .get("intent_hash")
+        .and_then(Value::as_str)
+        .and_then(parse_hex_32)
+        .ok_or_else(|| CliError::InvalidFixture("settlement package intent_hash must be 32-byte hex".to_owned()))?;
+    let session_id = package_json
+        .get("session_id")
+        .and_then(Value::as_str)
+        .and_then(parse_hex_32)
+        .ok_or_else(|| CliError::InvalidFixture("settlement package session_id must be 32-byte hex".to_owned()))?;
+    let participant_set_hash = package_json
+        .get("participant_set_hash")
+        .and_then(Value::as_str)
+        .and_then(parse_hex_32)
+        .ok_or_else(|| CliError::InvalidFixture("settlement package participant_set_hash must be 32-byte hex".to_owned()))?;
+    let escrow_input_cells_hash = package_json
+        .get("escrow_input_cells_hash")
+        .and_then(Value::as_str)
+        .and_then(parse_hex_32)
+        .ok_or_else(|| CliError::InvalidFixture("settlement package escrow_input_cells_hash must be 32-byte hex".to_owned()))?;
+    let session_lineage_commitment = package_json
+        .get("session_lineage_commitment")
+        .and_then(Value::as_str)
+        .and_then(parse_hex_32)
+        .ok_or_else(|| CliError::InvalidFixture("settlement package session_lineage_commitment must be 32-byte hex".to_owned()))?;
+    let expected = settlement_authority_requirement(
+        intent_hash,
+        session_id,
+        participant_set_hash,
+        escrow_input_cells_hash,
+        session_lineage_commitment,
+    );
+    let data = authority
+        .get("data")
+        .and_then(Value::as_str)
+        .and_then(|data| decode_hex_bytes(data).map(|bytes| format!("0x{}", hex::encode(bytes))))
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority.data must be 192-byte hex".to_owned()))?;
+    if data != expected.data {
+        return Err(CliError::InvalidFixture(
+            "settlement_authority.data must equal the settlement authority lineage payload".to_owned(),
+        ));
+    }
+    let data_hash = authority
+        .get("data_hash")
+        .and_then(Value::as_str)
+        .and_then(normalize_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority.data_hash must be a 32-byte CKB hash".to_owned()))?;
+    if data_hash != expected.data_hash {
+        return Err(CliError::InvalidFixture(
+            "settlement_authority.data_hash must equal the CKB data hash of settlement_authority.data".to_owned(),
+        ));
+    }
+    let data_semantics = authority
+        .get("data_semantics")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority.data_semantics is missing".to_owned()))?;
+    if data_semantics != expected.data_semantics {
+        return Err(CliError::InvalidFixture(
+            "settlement_authority.data_semantics must be settlement-authority-lineage-v1".to_owned(),
+        ));
+    }
+    let authority_session_id = authority
+        .get("session_id")
+        .and_then(Value::as_str)
+        .and_then(parse_hex_32)
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority.session_id must be 32-byte hex".to_owned()))?;
+    if authority_session_id != session_id {
+        return Err(CliError::InvalidFixture(
+            "settlement_authority.session_id must equal the settlement package session_id".to_owned(),
+        ));
+    }
+    let authority_participant_set_hash = authority
+        .get("participant_set_hash")
+        .and_then(Value::as_str)
+        .and_then(parse_hex_32)
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority.participant_set_hash must be 32-byte hex".to_owned()))?;
+    if authority_participant_set_hash != participant_set_hash {
+        return Err(CliError::InvalidFixture(
+            "settlement_authority.participant_set_hash must equal the settlement package participant_set_hash".to_owned(),
+        ));
+    }
+    let authority_escrow_input_cells_hash = authority
+        .get("escrow_input_cells_hash")
+        .and_then(Value::as_str)
+        .and_then(parse_hex_32)
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority.escrow_input_cells_hash must be 32-byte hex".to_owned()))?;
+    if authority_escrow_input_cells_hash != escrow_input_cells_hash {
+        return Err(CliError::InvalidFixture(
+            "settlement_authority.escrow_input_cells_hash must equal the settlement package escrow_input_cells_hash".to_owned(),
+        ));
+    }
+    let authority_session_lineage_commitment =
+        authority.get("session_lineage_commitment").and_then(Value::as_str).and_then(parse_hex_32).ok_or_else(|| {
+            CliError::InvalidFixture("settlement_authority.session_lineage_commitment must be 32-byte hex".to_owned())
+        })?;
+    if authority_session_lineage_commitment != session_lineage_commitment {
+        return Err(CliError::InvalidFixture(
+            "settlement_authority.session_lineage_commitment must equal the settlement package session_lineage_commitment".to_owned(),
+        ));
+    }
+    let session_binding = authority
+        .get("session_binding")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority.session_binding is missing".to_owned()))?;
+    if session_binding != expected.session_binding {
+        return Err(CliError::InvalidFixture(
+            "settlement_authority.session_binding must state session lineage participant/escrow binding".to_owned(),
+        ));
+    }
+    let commitment_algorithm = authority.get("session_authority_commitment_algorithm").and_then(Value::as_str).ok_or_else(|| {
+        CliError::InvalidFixture("settlement_authority.session_authority_commitment_algorithm is missing".to_owned())
+    })?;
+    if commitment_algorithm != expected.session_authority_commitment_algorithm {
+        return Err(CliError::InvalidFixture("settlement_authority.session_authority_commitment_algorithm is unsupported".to_owned()));
+    }
+    let commitment =
+        authority.get("session_authority_commitment").and_then(Value::as_str).and_then(parse_hex_32).ok_or_else(|| {
+            CliError::InvalidFixture("settlement_authority.session_authority_commitment must be 32-byte hex".to_owned())
+        })?;
+    let expected_commitment =
+        parse_hex_32(&expected.session_authority_commitment).expect("settlement authority commitment is internally 32-byte hex");
+    if commitment != expected_commitment {
+        return Err(CliError::InvalidFixture(
+            "settlement_authority.session_authority_commitment must bind the intent, session id, participants, and escrow lineage"
+                .to_owned(),
+        ));
+    }
+    let consumed_input_index = authority
+        .get("consumed_input_index")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority.consumed_input_index must be a number".to_owned()))?;
+    if consumed_input_index != u64::from(expected.consumed_input_index) {
+        return Err(CliError::InvalidFixture("settlement_authority.consumed_input_index must be 1".to_owned()));
+    }
+    let required_lock_binding = authority
+        .get("required_lock_binding")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority.required_lock_binding is missing".to_owned()))?;
+    if required_lock_binding != expected.required_lock_binding {
+        return Err(CliError::InvalidFixture(
+            "settlement_authority.required_lock_binding must be final-da-publication-lock-hash".to_owned(),
+        ));
+    }
+    Ok(expected)
+}
+
+fn carrier_payload_type_args_hex(payload_kind: Option<&str>, payload: &[u8]) -> String {
+    let data_hash_hex = hex::encode(ckb_cell_data_hash(payload));
+    match payload_kind {
+        Some("myelin-session-da-anchor-carrier-v1" | "myelin-session-settlement-carrier-v1") if payload.len() >= 32 => {
+            format!("0x{}{}", data_hash_hex, hex::encode(&payload[..32]))
+        }
+        _ => format!("0x{data_hash_hex}"),
+    }
+}
+
+fn package_hash_field_bytes(package: &Value, field: &str) -> Result<[u8; 32]> {
+    let value = package
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture(format!("carrier package is missing {field}")))?;
+    let normalized = normalize_ckb_tx_hash(value)
+        .ok_or_else(|| CliError::InvalidFixture(format!("carrier package {field} must be 32-byte hex")))?;
+    let bytes = decode_hex_bytes(&normalized)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| CliError::InvalidFixture(format!("carrier package {field} must be 32-byte hex")))?;
+    if bytes == [0u8; 32] {
+        return Err(CliError::InvalidFixture(format!("carrier package {field} must not be the zero hash")));
+    }
+    Ok(bytes)
+}
+
+fn validate_carrier_payload_field(package: &Value, payload: &[u8], offset: usize, field: &str) -> Result<()> {
+    let expected = package_hash_field_bytes(package, field)?;
+    let actual: [u8; 32] = payload
+        .get(offset..offset + 32)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| CliError::InvalidFixture("carrier payload field offset is out of bounds".to_owned()))?;
+    if actual != expected {
+        return Err(CliError::InvalidFixture(format!("carrier payload field {field} does not match package {field}")));
+    }
+    Ok(())
+}
+
+fn validate_carrier_package_payload_binding(
+    package: &Value,
+    package_kind: &str,
+    carrier_payload_kind: &str,
+    payload: &[u8],
+) -> Result<()> {
+    match package_kind {
+        "myelin-session-da-anchor-package-v1" => {
+            if carrier_payload_kind != "myelin-session-da-anchor-carrier-v1" {
+                return Err(CliError::InvalidFixture(
+                    "DA-anchor package must use myelin-session-da-anchor-carrier-v1 carrier payload kind".to_owned(),
+                ));
+            }
+            validate_carrier_payload_field(package, payload, 0, "da_manifest_hash")?;
+            validate_carrier_payload_field(package, payload, 32, "court_bundle_hash")?;
+            validate_carrier_payload_field(package, payload, 64, "challenge_payload_hash")?;
+            validate_carrier_payload_field(package, payload, 96, "segment_root")?;
+            validate_carrier_payload_field(package, payload, 128, "molecule_transaction_hash")?;
+        }
+        "myelin-session-settlement-package-v1" => {
+            if carrier_payload_kind != "myelin-session-settlement-carrier-v1" {
+                return Err(CliError::InvalidFixture(
+                    "settlement package must use myelin-session-settlement-carrier-v1 carrier payload kind".to_owned(),
+                ));
+            }
+            validate_carrier_payload_field(package, payload, 0, "intent_hash")?;
+            validate_carrier_payload_field(package, payload, 32, "court_bundle_hash")?;
+            validate_carrier_payload_field(package, payload, 64, "da_manifest_hash")?;
+            validate_carrier_payload_field(package, payload, 96, "challenge_payload_hash")?;
+            validate_carrier_payload_field(package, payload, 128, "final_state_root")?;
+        }
+        other => return Err(CliError::InvalidFixture(format!("unsupported carrier package schema: {other}"))),
+    }
+    Ok(())
+}
+
+fn checked_usize_add(left: usize, right: usize, field: &str) -> Result<usize> {
+    left.checked_add(right).ok_or_else(|| CliError::InvalidFixture(format!("{field} occupied-byte calculation overflow")))
+}
+
+fn ckb_script_occupied_bytes(args_len: usize) -> Result<usize> {
+    let table_header = 4usize + 3 * 4;
+    let fixed_fields = 32usize + 1 + 4;
+    checked_usize_add(table_header, fixed_fields, "script").and_then(|base| checked_usize_add(base, args_len, "script"))
+}
+
+fn ckb_output_min_capacity_shannons(lock_args_len: usize, type_args_len: Option<usize>, data_len: usize) -> Result<u64> {
+    let lock_bytes = ckb_script_occupied_bytes(lock_args_len)?;
+    let type_bytes = match type_args_len {
+        Some(args_len) => ckb_script_occupied_bytes(args_len)?,
+        None => 0,
+    };
+    let cell_output_table_header = 4usize + 3 * 4;
+    let output_bytes = checked_usize_add(cell_output_table_header, 8, "cell output")
+        .and_then(|bytes| checked_usize_add(bytes, lock_bytes, "cell output"))
+        .and_then(|bytes| checked_usize_add(bytes, type_bytes, "cell output"))
+        .and_then(|bytes| checked_usize_add(bytes, data_len, "cell output"))?;
+    let output_bytes =
+        u64::try_from(output_bytes).map_err(|_| CliError::InvalidFixture("occupied-byte count does not fit in u64".to_owned()))?;
+    output_bytes
+        .checked_mul(CKB_SHANNONS_PER_BYTE)
+        .ok_or_else(|| CliError::InvalidFixture("occupied capacity calculation overflow".to_owned()))
+}
+
+fn parse_package_hash_field(value: &str, field: &str) -> Result<[u8; 32]> {
+    let parsed = parse_hex_32(value).ok_or_else(|| CliError::InvalidFixture(format!("{field} must be 32-byte hex")))?;
+    if parsed == [0u8; 32] {
+        return Err(CliError::InvalidFixture(format!("{field} must not be the zero hash")));
+    }
+    Ok(parsed)
+}
+
 fn parse_hex_64(value: &str) -> Option<[u8; 64]> {
     let bytes = hex::decode(value).ok()?;
     bytes.try_into().ok()
@@ -1948,12 +2971,5410 @@ fn semantic_profile_label(profile: SemanticProfile) -> &'static str {
     }
 }
 
+fn ckb_vm_profile_label(spawn_ipc_enabled: bool) -> &'static str {
+    if spawn_ipc_enabled {
+        "ckb-strict-spawn-ipc"
+    } else {
+        "ckb-strict-basic"
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SessionEscrowCellReport {
+    outpoint_tx_hash: String,
+    outpoint_index: u32,
+    capacity: u64,
+    lock_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SessionOpenReport {
+    schema: &'static str,
+    session_id: String,
+    app_id: String,
+    vm_profile: &'static str,
+    ckb_spawn_ipc_required: bool,
+    consensus_kind: &'static str,
+    participants: Vec<String>,
+    escrow_input_cells: Vec<SessionEscrowCellReport>,
+    participant_set_hash: String,
+    escrow_input_cells_hash: String,
+    session_lineage_commitment: String,
+    timeout_ms: u64,
+    initial_state_root: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionOpenInput {
+    session_id: String,
+    app_id: String,
+    vm_profile: String,
+    ckb_spawn_ipc_required: bool,
+    consensus_kind: String,
+    participants: Vec<String>,
+    escrow_input_cells: Vec<SessionEscrowCellInput>,
+    participant_set_hash: String,
+    escrow_input_cells_hash: String,
+    session_lineage_commitment: String,
+    timeout_ms: u64,
+    initial_state_root: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionEscrowCellInput {
+    outpoint_tx_hash: String,
+    outpoint_index: u32,
+    capacity: u64,
+    lock_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SessionCommitReport {
+    schema: &'static str,
+    session_id: String,
+    chunk_index: u64,
+    consensus_kind: &'static str,
+    vm_profile: &'static str,
+    ckb_spawn_ipc_required: bool,
+    participant_set_hash: String,
+    escrow_input_cells_hash: String,
+    session_lineage_commitment: String,
+    cell_tx_id: String,
+    cell_wtxid: String,
+    pool_size_before: usize,
+    pool_size_after: usize,
+    state_root_before: String,
+    state_root_after: String,
+    ordered_cell_tx_commitments: Vec<String>,
+    data_commitments: Vec<String>,
+    scheduler_commitment: String,
+    block: TeeworldsBundleBlock,
+    molecule_transaction_hex: String,
+    molecule_transaction_hash: String,
+    static_committee_evidence: StaticCommitteeEvidenceReport,
+    tendermint_evidence: Option<TendermintEvidenceReport>,
+    finalised: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionCommitInput {
+    session_id: String,
+    chunk_index: u64,
+    consensus_kind: String,
+    vm_profile: String,
+    ckb_spawn_ipc_required: bool,
+    participant_set_hash: String,
+    escrow_input_cells_hash: String,
+    session_lineage_commitment: String,
+    cell_wtxid: String,
+    state_root_before: String,
+    state_root_after: String,
+    ordered_cell_tx_commitments: Vec<String>,
+    data_commitments: Vec<String>,
+    scheduler_commitment: String,
+    block: TeeworldsBundleBlock,
+    molecule_transaction_hex: String,
+    molecule_transaction_hash: String,
+    static_committee_evidence: StaticCommitteeEvidenceInput,
+    tendermint_evidence: Option<TendermintEvidenceInput>,
+    finalised: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SessionCourtBundleReport {
+    schema: &'static str,
+    session_id: String,
+    chunk_index: u64,
+    consensus_kind: &'static str,
+    vm_profile: &'static str,
+    ckb_spawn_ipc_required: bool,
+    participant_set_hash: String,
+    escrow_input_cells_hash: String,
+    session_lineage_commitment: String,
+    state_root_before: String,
+    state_root_after: String,
+    ordered_cell_tx_commitments: Vec<String>,
+    data_commitments: Vec<String>,
+    scheduler_commitment: String,
+    block: TeeworldsBundleBlock,
+    molecule_transaction_hex: String,
+    molecule_transaction_hash: String,
+    challenge_payload_hash: String,
+    ckb_projection: TeeworldsChunkProjectionReport,
+    static_committee_evidence: StaticCommitteeEvidenceReport,
+    tendermint_evidence: Option<TendermintEvidenceReport>,
+    court_verifiable: bool,
+    l1_court_implemented: bool,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionCourtBundleInput {
+    schema: String,
+    session_id: String,
+    chunk_index: u64,
+    consensus_kind: String,
+    vm_profile: String,
+    ckb_spawn_ipc_required: bool,
+    participant_set_hash: String,
+    escrow_input_cells_hash: String,
+    session_lineage_commitment: String,
+    state_root_before: String,
+    state_root_after: String,
+    ordered_cell_tx_commitments: Vec<String>,
+    data_commitments: Vec<String>,
+    scheduler_commitment: String,
+    block: TeeworldsBundleBlock,
+    molecule_transaction_hex: String,
+    molecule_transaction_hash: String,
+    challenge_payload_hash: String,
+    ckb_projection: TeeworldsChunkProjectionInput,
+    static_committee_evidence: StaticCommitteeEvidenceInput,
+    tendermint_evidence: Option<TendermintEvidenceInput>,
+    court_verifiable: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionCourtBundleVerificationReport {
+    bundle: String,
+    valid: bool,
+    checks: Vec<CourtBundleCheck>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionDaManifestReport {
+    schema: String,
+    session_id: String,
+    chunk_index: u64,
+    consensus_kind: String,
+    vm_profile: String,
+    da_profile: String,
+    payload_kind: String,
+    court_bundle_hash: String,
+    molecule_transaction_hash: String,
+    challenge_payload_hash: String,
+    segment_id: u32,
+    leaf_index: u32,
+    chunk_offset: u64,
+    chunk_length: u32,
+    segment_root: String,
+    segment_sealed: bool,
+    proof_molecule_hex: String,
+    proof_valid: bool,
+    local_da_published: bool,
+    da_storage_path: Option<String>,
+    l1_da_published: bool,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionDaManifestVerificationReport {
+    manifest: String,
+    bundle: String,
+    valid: bool,
+    checks: Vec<CourtBundleCheck>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionDaAnchorPackageReport {
+    schema: String,
+    session_id: String,
+    chunk_index: u64,
+    consensus_kind: String,
+    vm_profile: String,
+    da_manifest_hash: String,
+    court_bundle_hash: String,
+    court_molecule_transaction_hash: String,
+    challenge_payload_hash: String,
+    segment_root: String,
+    carrier_payload_kind: String,
+    carrier_payload: String,
+    carrier_payload_data_hash: String,
+    da_anchor_cell_tx_id: String,
+    da_anchor_cell_wtxid: String,
+    molecule_transaction_hex: String,
+    molecule_transaction_hash: String,
+    ckb_projection: TeeworldsChunkProjectionReport,
+    da_anchor_projectable: bool,
+    l1_da_publication_implemented: bool,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionDaAnchorPackageVerificationReport {
+    package: String,
+    manifest: String,
+    bundle: String,
+    valid: bool,
+    checks: Vec<CourtBundleCheck>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionDaAnchorSubmissionReport {
+    schema: String,
+    package: String,
+    dry_run: bool,
+    rpc_url: Option<String>,
+    outputs_validator: String,
+    request_method: String,
+    request_json_hash: String,
+    da_anchor_cell_tx_id: String,
+    da_anchor_cell_wtxid: String,
+    molecule_transaction_hash: String,
+    ckb_raw_tx_hash: Option<String>,
+    ckb_wtx_hash: Option<String>,
+    ckb_transaction_json: Value,
+    pre_submit: SessionLiveSubmissionPreflight,
+    submitted_to_rpc: bool,
+    accepted_by_rpc: bool,
+    l1_da_published: bool,
+    rpc_result: Option<Value>,
+    rpc_error: Option<Value>,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSettlementIntentReport {
+    schema: String,
+    kind: String,
+    session_id: String,
+    chunk_index: u64,
+    consensus_kind: String,
+    vm_profile: String,
+    participant_set_hash: String,
+    escrow_input_cells_hash: String,
+    session_lineage_commitment: String,
+    state_root_before: String,
+    final_state_root: String,
+    court_bundle_hash: String,
+    da_manifest_hash: String,
+    da_profile: String,
+    da_segment_root: String,
+    challenge_payload_hash: String,
+    challenge_window_ms: u64,
+    challenge_deadline_ms: u64,
+    current_time_ms: u64,
+    settlement_permitted: bool,
+    l1_da_published: bool,
+    l1_court_implemented: bool,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionSettlementIntentVerificationReport {
+    intent: String,
+    bundle: String,
+    valid: bool,
+    checks: Vec<CourtBundleCheck>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSettlementPackageReport {
+    schema: String,
+    session_id: String,
+    chunk_index: u64,
+    consensus_kind: String,
+    vm_profile: String,
+    intent_hash: String,
+    participant_set_hash: String,
+    escrow_input_cells_hash: String,
+    session_lineage_commitment: String,
+    court_bundle_hash: String,
+    da_manifest_hash: String,
+    challenge_payload_hash: String,
+    final_state_root: String,
+    settlement_authority: SessionSettlementAuthorityRequirement,
+    carrier_payload_kind: String,
+    carrier_payload: String,
+    carrier_payload_data_hash: String,
+    settlement_cell_tx_id: String,
+    settlement_cell_wtxid: String,
+    molecule_transaction_hex: String,
+    molecule_transaction_hash: String,
+    ckb_projection: TeeworldsChunkProjectionReport,
+    settlement_projectable: bool,
+    l1_court_script_implemented: bool,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSettlementAuthorityRequirement {
+    schema: String,
+    data: String,
+    data_hash: String,
+    data_semantics: String,
+    session_id: String,
+    participant_set_hash: String,
+    escrow_input_cells_hash: String,
+    session_lineage_commitment: String,
+    session_binding: String,
+    session_authority_commitment_algorithm: String,
+    session_authority_commitment: String,
+    consumed_input_index: u32,
+    required_lock_binding: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionSettlementPackageVerificationReport {
+    package: String,
+    intent: String,
+    bundle: String,
+    da_manifest: String,
+    valid: bool,
+    checks: Vec<CourtBundleCheck>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSettlementSubmissionReport {
+    schema: String,
+    package: String,
+    dry_run: bool,
+    rpc_url: Option<String>,
+    outputs_validator: String,
+    request_method: String,
+    request_json_hash: String,
+    settlement_cell_tx_id: String,
+    settlement_cell_wtxid: String,
+    molecule_transaction_hash: String,
+    ckb_raw_tx_hash: Option<String>,
+    ckb_wtx_hash: Option<String>,
+    ckb_transaction_json: Value,
+    pre_submit: SessionLiveSubmissionPreflight,
+    submitted_to_rpc: bool,
+    accepted_by_rpc: bool,
+    l1_court_submitted: bool,
+    rpc_result: Option<Value>,
+    rpc_error: Option<Value>,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionLiveSubmissionPreflight {
+    checked: bool,
+    input_count: usize,
+    cell_dep_count: usize,
+    all_inputs_live: Option<bool>,
+    all_cell_deps_live: Option<bool>,
+    input_capacity_shannons: Option<u64>,
+    output_capacity_shannons: Option<u64>,
+    capacity_balanced: Option<bool>,
+    implied_fee_shannons: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSubmissionInclusionReport {
+    schema: String,
+    submission: String,
+    submission_schema: String,
+    rpc_url: String,
+    expected_ckb_tx_hash: String,
+    min_status: String,
+    request_method: String,
+    request_json_hash: String,
+    found: bool,
+    status: Option<String>,
+    block_hash: Option<String>,
+    block_number: Option<String>,
+    met_min_status: bool,
+    committed: bool,
+    live_l1_observed: bool,
+    carrier_package_commitment: Option<String>,
+    carrier_payload_kind: Option<String>,
+    carrier_payload: Option<String>,
+    carrier_output_data: Option<String>,
+    carrier_output_data_matches_carrier_payload: Option<bool>,
+    carrier_output_data_matches_package_commitment: Option<bool>,
+    carrier_type_script_code_hash: Option<String>,
+    carrier_type_script_hash_type: Option<String>,
+    carrier_type_script_args: Option<String>,
+    carrier_expected_type_script_code_hash: Option<String>,
+    carrier_expected_type_script_hash_type: Option<String>,
+    carrier_expected_type_script_args: Option<String>,
+    carrier_type_script_identity_matches_submission: Option<bool>,
+    carrier_type_script_args_match_carrier_data_hash: Option<bool>,
+    carrier_type_script_args_match_package_data_hash: Option<bool>,
+    rpc_result: Option<Value>,
+    rpc_error: Option<Value>,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSubmissionFinalityReport {
+    schema: String,
+    inclusion: String,
+    rpc_url: String,
+    expected_ckb_tx_hash: String,
+    committed_block_hash: Option<String>,
+    committed_block_number: Option<String>,
+    tip_block_number: Option<String>,
+    confirmations: Option<u64>,
+    min_confirmations: u64,
+    finality_confirmed: bool,
+    reorg_risk_bounded: bool,
+    request_method: String,
+    request_json_hash: String,
+    rpc_result: Option<Value>,
+    rpc_error: Option<Value>,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSubmissionStabilityReport {
+    schema: String,
+    inclusion: String,
+    rpc_url: String,
+    expected_ckb_tx_hash: String,
+    expected_status: Option<String>,
+    expected_block_hash: Option<String>,
+    expected_block_number: Option<String>,
+    observed_status: Option<String>,
+    observed_block_hash: Option<String>,
+    observed_block_number: Option<String>,
+    request_method: String,
+    request_json_hash: String,
+    stable_block_identity: bool,
+    reorg_detected: bool,
+    missing_or_uncommitted: bool,
+    rpc_result: Option<Value>,
+    rpc_error: Option<Value>,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSubmissionContextReport {
+    schema: String,
+    submission: String,
+    submission_schema: String,
+    rpc_url: String,
+    expected_ckb_tx_hash: String,
+    request_method: String,
+    input_count: usize,
+    cell_dep_count: usize,
+    live_input_count: usize,
+    live_cell_dep_count: usize,
+    all_inputs_live: bool,
+    all_cell_deps_live: bool,
+    carrier_verifier_code_hash: Option<String>,
+    carrier_verifier_code_dep_key: Option<String>,
+    carrier_verifier_code_dep_data_hash: Option<String>,
+    carrier_verifier_code_dep_data_hash_matches: Option<bool>,
+    ready_for_ckb_submission: bool,
+    checks: Vec<SessionSubmissionContextCheck>,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSubmissionContextCheck {
+    role: String,
+    index: usize,
+    out_point: Value,
+    out_point_key: String,
+    request_json_hash: String,
+    status: Option<String>,
+    live: bool,
+    cell_present: bool,
+    data_hash: Option<String>,
+    rpc_error: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSubmissionEconomicsReport {
+    schema: String,
+    submission: String,
+    submission_schema: String,
+    rpc_url: String,
+    expected_ckb_tx_hash: String,
+    request_method: String,
+    input_count: usize,
+    output_count: usize,
+    outputs_data_count: usize,
+    live_input_count: usize,
+    total_input_capacity: Option<u64>,
+    total_output_capacity: Option<u64>,
+    fee_shannons: Option<u64>,
+    min_fee_shannons: u64,
+    transaction_size_bytes: usize,
+    min_fee_rate_shannons_per_kb: u64,
+    required_fee_shannons: u64,
+    max_fee_shannons: Option<u64>,
+    data_bearing_output_count: usize,
+    empty_data_output_count: usize,
+    explicit_change_output_count: usize,
+    explicit_change_capacity: u64,
+    explicit_change_observed: bool,
+    all_inputs_live: bool,
+    outputs_data_count_matches: bool,
+    capacity_balanced: bool,
+    fee_sufficient: bool,
+    fee_rate_sufficient: bool,
+    fee_not_excessive: bool,
+    economically_ready: bool,
+    checks: Vec<SessionSubmissionEconomicsInputCheck>,
+    outputs: Vec<SessionSubmissionEconomicsOutputCheck>,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSubmissionEconomicsInputCheck {
+    index: usize,
+    out_point: Value,
+    out_point_key: String,
+    request_json_hash: String,
+    status: Option<String>,
+    live: bool,
+    capacity: Option<u64>,
+    rpc_error: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSubmissionEconomicsOutputCheck {
+    index: usize,
+    capacity: u64,
+    data_bytes: usize,
+    has_type_script: bool,
+    classification: String,
+    explicit_change_like: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSubmissionReadinessReport {
+    schema: String,
+    context: String,
+    economics: String,
+    inclusion: String,
+    stability: String,
+    finality: String,
+    expected_ckb_tx_hash: String,
+    report_hashes_match: bool,
+    submission_report_valid: bool,
+    submission_report_live_accepted: bool,
+    submission_report_carrier_live_accepted: bool,
+    submission_report_final_l1_script_live_accepted: bool,
+    live_submission_required: bool,
+    submission_lineage_matches: bool,
+    inclusion_lineage_matches: bool,
+    block_identity_matches: bool,
+    context_ready: bool,
+    economically_ready: bool,
+    inclusion_observed: bool,
+    stable_block_identity: bool,
+    finality_confirmed: bool,
+    reorg_risk_bounded: bool,
+    production_submission_ready: bool,
+    strict_production_submission_ready: bool,
+    live_carrier_submission_ready: bool,
+    final_l1_script_submission_ready: bool,
+    readiness_evidence_mode: String,
+    settlement_uniqueness_checked: bool,
+    settlement_identity_hash: Option<String>,
+    session_id_hash: Option<String>,
+    duplicate_settlement_detected: bool,
+    replay_protection_mode: Option<String>,
+    checks: Vec<SessionSubmissionReadinessCheck>,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionSubmissionReadinessCheck {
+    name: String,
+    ok: bool,
+    detail: String,
+}
+
+fn session_open_fixture(consensus: &str) -> Result<SessionOpenReport> {
+    let participants = vec!["alice".to_owned(), "bob".to_owned()];
+    let escrow_input_cells = vec![
+        SessionEscrowCellReport {
+            outpoint_tx_hash: hex::encode(blake3_32(b"myelin:session-fixture-escrow:v1", b"alice")),
+            outpoint_index: 0,
+            capacity: 1_000,
+            lock_hash: hex::encode(blake3_32(b"myelin:session-fixture-lock:v1", b"alice")),
+        },
+        SessionEscrowCellReport {
+            outpoint_tx_hash: hex::encode(blake3_32(b"myelin:session-fixture-escrow:v1", b"bob")),
+            outpoint_index: 0,
+            capacity: 1_000,
+            lock_hash: hex::encode(blake3_32(b"myelin:session-fixture-lock:v1", b"bob")),
+        },
+    ];
+    session_open_report(consensus, "myelin-session-fixture-v1", participants, escrow_input_cells, 60_000)
+}
+
+fn session_open(args: SessionOpenArgs) -> Result<SessionOpenReport> {
+    let escrow_input_cells = args.escrow_cells.iter().map(|value| parse_session_escrow_cell(value)).collect::<Result<Vec<_>>>()?;
+    session_open_report(&args.consensus, &args.app_id, args.participants, escrow_input_cells, args.timeout_ms)
+}
+
+fn session_open_report(
+    consensus: &str,
+    app_id: &str,
+    participants: Vec<String>,
+    escrow_input_cells: Vec<SessionEscrowCellReport>,
+    timeout_ms: u64,
+) -> Result<SessionOpenReport> {
+    let consensus_kind = parse_session_consensus(consensus)?;
+    if app_id.trim().is_empty() {
+        return Err(CliError::InvalidFixture("session app-id must be non-empty".to_owned()));
+    }
+    if participants.is_empty() {
+        return Err(CliError::InvalidFixture("session must have at least one participant".to_owned()));
+    }
+    if participants.iter().any(|participant| participant.trim().is_empty()) {
+        return Err(CliError::InvalidFixture("session participant ids must be non-empty".to_owned()));
+    }
+    if escrow_input_cells.is_empty() {
+        return Err(CliError::InvalidFixture("session must have at least one escrow cell".to_owned()));
+    }
+    if timeout_ms == 0 {
+        return Err(CliError::InvalidFixture("session timeout-ms must be non-zero".to_owned()));
+    }
+
+    let mut tree = CellStateTree::new();
+    let initial_state_root = *tree.root().as_ref();
+    let vm_profile = "ckb-strict-basic";
+    let session_id = session_id_from_parts(app_id, vm_profile, &participants, &escrow_input_cells, initial_state_root);
+    let lineage = session_lineage_commitments(app_id, vm_profile, &participants, &escrow_input_cells, initial_state_root);
+
+    Ok(SessionOpenReport {
+        schema: "myelin-session-open-v1",
+        session_id: hex::encode(session_id),
+        app_id: app_id.to_owned(),
+        vm_profile,
+        ckb_spawn_ipc_required: false,
+        consensus_kind: consensus_kind.as_str(),
+        participants,
+        escrow_input_cells,
+        participant_set_hash: hex::encode(lineage.participant_set_hash),
+        escrow_input_cells_hash: hex::encode(lineage.escrow_input_cells_hash),
+        session_lineage_commitment: hex::encode(lineage.session_lineage_commitment),
+        timeout_ms,
+        initial_state_root: hex::encode(initial_state_root),
+    })
+}
+
+fn session_commit_fixture(path: PathBuf) -> Result<SessionCommitReport> {
+    session_commit_from_open(path, 0)
+}
+
+fn session_commit_from_open(path: PathBuf, chunk_index: u64) -> Result<SessionCommitReport> {
+    let bytes = fs::read(path)?;
+    let session = serde_json::from_slice::<SessionOpenInput>(&bytes)?;
+    if session.timeout_ms == 0 {
+        return Err(CliError::InvalidFixture("session timeout_ms must be non-zero".to_owned()));
+    }
+    if session.vm_profile != "ckb-strict-basic" {
+        return Err(CliError::InvalidFixture(format!("session vm_profile must be ckb-strict-basic, got {}", session.vm_profile)));
+    }
+    if session.ckb_spawn_ipc_required {
+        return Err(CliError::InvalidFixture("session fixture must not require spawn/IPC".to_owned()));
+    }
+    let consensus_kind = parse_session_consensus(&session.consensus_kind)?;
+    let initial_state_root = parse_hex_32(&session.initial_state_root)
+        .ok_or_else(|| CliError::InvalidFixture("initial_state_root must be 32-byte hex".to_owned()))?;
+    let escrow_reports = session
+        .escrow_input_cells
+        .iter()
+        .map(|cell| SessionEscrowCellReport {
+            outpoint_tx_hash: cell.outpoint_tx_hash.clone(),
+            outpoint_index: cell.outpoint_index,
+            capacity: cell.capacity,
+            lock_hash: cell.lock_hash.clone(),
+        })
+        .collect::<Vec<_>>();
+    let expected_session_id =
+        session_id_from_parts(&session.app_id, &session.vm_profile, &session.participants, &escrow_reports, initial_state_root);
+    let expected_lineage =
+        session_lineage_commitments(&session.app_id, &session.vm_profile, &session.participants, &escrow_reports, initial_state_root);
+    let session_id =
+        parse_hex_32(&session.session_id).ok_or_else(|| CliError::InvalidFixture("session_id must be 32-byte hex".to_owned()))?;
+    if expected_session_id != session_id {
+        return Err(CliError::InvalidFixture("session_id does not match session open fields".to_owned()));
+    }
+    if parse_hex_32(&session.participant_set_hash) != Some(expected_lineage.participant_set_hash) {
+        return Err(CliError::InvalidFixture("session participant_set_hash does not match session open fields".to_owned()));
+    }
+    if parse_hex_32(&session.escrow_input_cells_hash) != Some(expected_lineage.escrow_input_cells_hash) {
+        return Err(CliError::InvalidFixture("session escrow_input_cells_hash does not match session open fields".to_owned()));
+    }
+    if parse_hex_32(&session.session_lineage_commitment) != Some(expected_lineage.session_lineage_commitment) {
+        return Err(CliError::InvalidFixture("session_lineage_commitment does not match session open fields".to_owned()));
+    }
+
+    let tx = session_fixture_cell_tx(session_id, chunk_index).map_err(|error| CliError::InvalidFixture(error.to_owned()))?;
+    let txid = tx.id();
+    let wtxid = compute_wtxid(&tx);
+    let molecule_transaction = serialize_transaction_molecule(&tx).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let molecule_transaction_hash = blake3_32(b"myelin:session-molecule-transaction:v1", &molecule_transaction);
+
+    let pool = CellPool::new(64);
+    let pool_size_before = pool.stats().total_txs;
+    let returned_wtxid =
+        pool.add(tx.clone(), 1_000, 50_000).map_err(|error| CliError::InvalidFixture(format!("mempool add: {error}")))?;
+    if returned_wtxid != wtxid {
+        return Err(CliError::InvalidFixture("mempool returned unexpected wtxid".to_owned()));
+    }
+    let pool_size_after = pool.stats().total_txs;
+
+    let mut tree = CellStateTree::new();
+    let state_root_before = *tree.root().as_ref();
+    if state_root_before != initial_state_root {
+        return Err(CliError::InvalidFixture("session initial state root does not match empty fixture state".to_owned()));
+    }
+    let outpoint_hash = blake3_chunks(b"myelin:session-fixture-outpoint-hash:v1", &[&session_id, &wtxid]);
+    let output_data = tx.outputs_data.first().cloned().unwrap_or_default();
+    let entry = myelin_state::CellEntry {
+        capacity: tx.outputs.first().map(|output| output.capacity).unwrap_or_default(),
+        data_bytes: output_data.len() as u64,
+        lock_hash: myelin_hashes::Hash::from(blake3_32(b"myelin:session-fixture-lock-hash:v1", &session_id)),
+        type_hash: Some(myelin_hashes::Hash::from(blake3_32(b"myelin:session-fixture-type-hash:v1", &session_id))),
+        data_hash: myelin_hashes::Hash::from(blake3_32(b"myelin:session-fixture-output-data:v1", &output_data)),
+        created_block_number: 1,
+        is_cellbase: false,
+        lock_script: tx.outputs.first().map(|output| output.lock.clone()),
+        type_script: tx.outputs.first().and_then(|output| output.type_.clone()),
+        data: Some(output_data),
+    };
+    tree.insert_with_outpoint(myelin_hashes::Hash::from(outpoint_hash), OutPoint::new(wtxid, 0), entry);
+    let state_root_after = *tree.root().as_ref();
+
+    let index_bytes = chunk_index.to_le_bytes();
+    let data_commitment = blake3_chunks(b"myelin:session-fixture-data-commitment:v1", &[&session_id, &index_bytes, &wtxid]);
+    let scheduler_commitment = blake3_chunks(b"myelin:session-fixture-scheduler:v1", &[&session_id, &index_bytes, &wtxid]);
+    let block = MyelinBlock {
+        version: 1,
+        parent_hash: [0; 32],
+        number: 1,
+        timestamp_ms: 0,
+        consensus_kind,
+        state_root_before,
+        state_root_after,
+        ordered_cell_tx_commitments: vec![wtxid],
+        data_commitments: vec![data_commitment],
+        scheduler_commitment,
+    };
+    let block_hash = block.hash();
+    let (static_committee_evidence, tendermint_evidence) = finality_evidence_for_block(&block)?;
+    let bundle_block = block_report_from_myelin_block(&block, block_hash);
+
+    Ok(SessionCommitReport {
+        schema: "myelin-session-commit-v1",
+        session_id: hex::encode(session_id),
+        chunk_index,
+        consensus_kind: consensus_kind.as_str(),
+        vm_profile: "ckb-strict-basic",
+        ckb_spawn_ipc_required: false,
+        participant_set_hash: session.participant_set_hash,
+        escrow_input_cells_hash: session.escrow_input_cells_hash,
+        session_lineage_commitment: session.session_lineage_commitment,
+        cell_tx_id: hex::encode(txid),
+        cell_wtxid: hex::encode(wtxid),
+        pool_size_before,
+        pool_size_after,
+        state_root_before: hex::encode(state_root_before),
+        state_root_after: hex::encode(state_root_after),
+        ordered_cell_tx_commitments: vec![hex::encode(wtxid)],
+        data_commitments: vec![hex::encode(data_commitment)],
+        scheduler_commitment: hex::encode(scheduler_commitment),
+        block: bundle_block,
+        molecule_transaction_hex: hex::encode(molecule_transaction),
+        molecule_transaction_hash: hex::encode(molecule_transaction_hash),
+        static_committee_evidence,
+        tendermint_evidence,
+        finalised: true,
+    })
+}
+
+fn session_court_bundle(path: PathBuf, chunk_index: u64) -> Result<SessionCourtBundleReport> {
+    let bytes = fs::read(path)?;
+    let commit = serde_json::from_slice::<SessionCommitInput>(&bytes)?;
+    if chunk_index != commit.chunk_index {
+        return Err(CliError::InvalidFixture(format!(
+            "requested chunk_index {chunk_index} does not match commit chunk_index {}",
+            commit.chunk_index
+        )));
+    }
+    if commit.vm_profile != "ckb-strict-basic" || commit.ckb_spawn_ipc_required {
+        return Err(CliError::InvalidFixture("session commit is not a minimal CKB-strict court profile".to_owned()));
+    }
+    if !commit.finalised {
+        return Err(CliError::InvalidFixture("session commit must be finalised before court bundling".to_owned()));
+    }
+    let consensus_kind = parse_session_consensus(&commit.consensus_kind)?;
+    let molecule_transaction = decode_hex_field(&commit.molecule_transaction_hex, "molecule_transaction_hex")?;
+    let expected_molecule_transaction_hash = hex::encode(blake3_32(b"myelin:session-molecule-transaction:v1", &molecule_transaction));
+    if expected_molecule_transaction_hash != commit.molecule_transaction_hash {
+        return Err(CliError::InvalidFixture("session commit molecule_transaction_hash mismatch".to_owned()));
+    }
+    let tx = deserialize_transaction_molecule(&molecule_transaction).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let tx_wtxid = compute_wtxid(&tx);
+    if hex::encode(tx_wtxid) != commit.cell_wtxid {
+        return Err(CliError::InvalidFixture("session commit cell_wtxid does not match embedded transaction".to_owned()));
+    }
+    let ckb_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
+    let block = commit.block.to_myelin_block().map_err(|error| CliError::InvalidFixture(format!("session commit block: {error}")))?;
+    let block_hash = block.hash();
+    let supplied_block_hash = parse_hex_32(&commit.block.block_hash)
+        .ok_or_else(|| CliError::InvalidFixture("commit block_hash must be 32-byte hex".to_owned()))?;
+    if block_hash != supplied_block_hash {
+        return Err(CliError::InvalidFixture("session commit block_hash does not recompute".to_owned()));
+    }
+    let session_id =
+        parse_hex_32(&commit.session_id).ok_or_else(|| CliError::InvalidFixture("session_id must be 32-byte hex".to_owned()))?;
+    let state_root_before = parse_hex_32(&commit.state_root_before)
+        .ok_or_else(|| CliError::InvalidFixture("state_root_before must be 32-byte hex".to_owned()))?;
+    let state_root_after = parse_hex_32(&commit.state_root_after)
+        .ok_or_else(|| CliError::InvalidFixture("state_root_after must be 32-byte hex".to_owned()))?;
+    let scheduler_commitment = parse_hex_32(&commit.scheduler_commitment)
+        .ok_or_else(|| CliError::InvalidFixture("scheduler_commitment must be 32-byte hex".to_owned()))?;
+    let participant_set_hash = parse_hex_32(&commit.participant_set_hash)
+        .ok_or_else(|| CliError::InvalidFixture("participant_set_hash must be 32-byte hex".to_owned()))?;
+    let escrow_input_cells_hash = parse_hex_32(&commit.escrow_input_cells_hash)
+        .ok_or_else(|| CliError::InvalidFixture("escrow_input_cells_hash must be 32-byte hex".to_owned()))?;
+    let session_lineage_commitment = parse_hex_32(&commit.session_lineage_commitment)
+        .ok_or_else(|| CliError::InvalidFixture("session_lineage_commitment must be 32-byte hex".to_owned()))?;
+    let data_commitment = commit
+        .data_commitments
+        .first()
+        .and_then(|value| parse_hex_32(value))
+        .ok_or_else(|| CliError::InvalidFixture("first data commitment must be 32-byte hex".to_owned()))?;
+    let challenge_payload_hash = blake3_chunks(
+        b"myelin:session-court-challenge-payload:v1",
+        &[
+            &session_id,
+            &chunk_index.to_le_bytes(),
+            &state_root_before,
+            &data_commitment,
+            &state_root_after,
+            &scheduler_commitment,
+            &block_hash,
+            &participant_set_hash,
+            &escrow_input_cells_hash,
+            &session_lineage_commitment,
+        ],
+    );
+    let court_verifiable = ckb_projection.ckb_projection_possible && ckb_projection.semantic_profile == "ckb-compatible";
+
+    Ok(SessionCourtBundleReport {
+        schema: "myelin-session-court-bundle-v1",
+        session_id: commit.session_id,
+        chunk_index,
+        consensus_kind: consensus_kind.as_str(),
+        vm_profile: "ckb-strict-basic",
+        ckb_spawn_ipc_required: false,
+        participant_set_hash: commit.participant_set_hash,
+        escrow_input_cells_hash: commit.escrow_input_cells_hash,
+        session_lineage_commitment: commit.session_lineage_commitment,
+        state_root_before: commit.state_root_before,
+        state_root_after: commit.state_root_after,
+        ordered_cell_tx_commitments: commit.ordered_cell_tx_commitments,
+        data_commitments: commit.data_commitments,
+        scheduler_commitment: commit.scheduler_commitment,
+        block: commit.block,
+        molecule_transaction_hex: commit.molecule_transaction_hex,
+        molecule_transaction_hash: commit.molecule_transaction_hash,
+        challenge_payload_hash: hex::encode(challenge_payload_hash),
+        ckb_projection,
+        static_committee_evidence: static_evidence_report_from_input(commit.static_committee_evidence),
+        tendermint_evidence: commit.tendermint_evidence.map(tendermint_evidence_report_from_input),
+        court_verifiable,
+        l1_court_implemented: false,
+        notes: vec![
+            "This is a deterministic Session L2 disputed-chunk court bundle.".to_owned(),
+            "It proves the chunk can be replayed as a CKB-compatible CellTx; it is not yet an on-chain CKB court script.".to_owned(),
+        ],
+    })
+}
+
+fn verify_session_court_bundle(path: PathBuf) -> Result<SessionCourtBundleVerificationReport> {
+    let bytes = fs::read(&path)?;
+    let bundle = serde_json::from_slice::<SessionCourtBundleInput>(&bytes)?;
+    let mut checks = Vec::new();
+
+    push_check(
+        &mut checks,
+        "schema",
+        bundle.schema == "myelin-session-court-bundle-v1",
+        Some("myelin-session-court-bundle-v1".to_owned()),
+        Some(bundle.schema.clone()),
+        "session court bundle schema is recognised",
+    );
+    let consensus_kind = parse_session_consensus(&bundle.consensus_kind)?;
+    push_check(
+        &mut checks,
+        "vm-profile",
+        bundle.vm_profile == "ckb-strict-basic",
+        Some("ckb-strict-basic".to_owned()),
+        Some(bundle.vm_profile.clone()),
+        "session court bundles use the minimal CKB-strict VM profile",
+    );
+    push_check(
+        &mut checks,
+        "ckb-spawn-ipc-not-required",
+        !bundle.ckb_spawn_ipc_required,
+        Some("false".to_owned()),
+        Some(bundle.ckb_spawn_ipc_required.to_string()),
+        "session court replay must not require the advanced spawn/IPC profile",
+    );
+
+    let molecule_transaction = decode_hex_field(&bundle.molecule_transaction_hex, "molecule_transaction_hex")?;
+    let expected_molecule_hash = hex::encode(blake3_32(b"myelin:session-molecule-transaction:v1", &molecule_transaction));
+    push_check(
+        &mut checks,
+        "molecule-transaction-hash",
+        expected_molecule_hash == bundle.molecule_transaction_hash,
+        Some(expected_molecule_hash),
+        Some(bundle.molecule_transaction_hash.clone()),
+        "Molecule transaction hash matches embedded transaction bytes",
+    );
+    let tx = deserialize_transaction_molecule(&molecule_transaction).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let tx_wtxid = compute_wtxid(&tx);
+    push_check(
+        &mut checks,
+        "ordered-celltx-commitment",
+        bundle.ordered_cell_tx_commitments.first().map(String::as_str) == Some(hex::encode(tx_wtxid).as_str()),
+        Some(hex::encode(tx_wtxid)),
+        bundle.ordered_cell_tx_commitments.first().cloned(),
+        "block ordered CellTx commitment matches embedded transaction wtxid",
+    );
+    let recomputed_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
+    push_check(
+        &mut checks,
+        "projection-possible",
+        bundle.ckb_projection.ckb_projection_possible == recomputed_projection.ckb_projection_possible,
+        Some(recomputed_projection.ckb_projection_possible.to_string()),
+        Some(bundle.ckb_projection.ckb_projection_possible.to_string()),
+        "projection possibility recomputes from embedded Molecule transaction",
+    );
+    push_check(
+        &mut checks,
+        "projection-profile",
+        bundle.ckb_projection.semantic_profile == recomputed_projection.semantic_profile,
+        Some(recomputed_projection.semantic_profile),
+        Some(bundle.ckb_projection.semantic_profile.clone()),
+        "semantic profile recomputes from embedded Molecule transaction",
+    );
+
+    let block = bundle.block.to_myelin_block().map_err(|error| CliError::InvalidFixture(format!("session block: {error}")))?;
+    let block_hash = block.hash();
+    let supplied_block_hash = parse_hex_32(&bundle.block.block_hash)
+        .ok_or_else(|| CliError::InvalidFixture("bundle block_hash must be 32-byte hex".to_owned()))?;
+    push_check(
+        &mut checks,
+        "block-hash-recomputes",
+        block_hash == supplied_block_hash,
+        Some(hex::encode(block_hash)),
+        Some(hex::encode(supplied_block_hash)),
+        "bundle.block fields rehash to bundle.block.block_hash",
+    );
+    push_check(
+        &mut checks,
+        "block-consensus-kind-matches",
+        block.consensus_kind == consensus_kind,
+        Some(consensus_kind.as_str().to_owned()),
+        Some(block.consensus_kind.as_str().to_owned()),
+        "bundle.block.consensus_kind matches bundle.consensus_kind",
+    );
+    let state_root_before = parse_hex_32(&bundle.state_root_before)
+        .ok_or_else(|| CliError::InvalidFixture("state_root_before must be 32-byte hex".to_owned()))?;
+    let state_root_after = parse_hex_32(&bundle.state_root_after)
+        .ok_or_else(|| CliError::InvalidFixture("state_root_after must be 32-byte hex".to_owned()))?;
+    let scheduler_commitment = parse_hex_32(&bundle.scheduler_commitment)
+        .ok_or_else(|| CliError::InvalidFixture("scheduler_commitment must be 32-byte hex".to_owned()))?;
+    let participant_set_hash = parse_hex_32(&bundle.participant_set_hash)
+        .ok_or_else(|| CliError::InvalidFixture("participant_set_hash must be 32-byte hex".to_owned()))?;
+    let escrow_input_cells_hash = parse_hex_32(&bundle.escrow_input_cells_hash)
+        .ok_or_else(|| CliError::InvalidFixture("escrow_input_cells_hash must be 32-byte hex".to_owned()))?;
+    let session_lineage_commitment = parse_hex_32(&bundle.session_lineage_commitment)
+        .ok_or_else(|| CliError::InvalidFixture("session_lineage_commitment must be 32-byte hex".to_owned()))?;
+    push_check(
+        &mut checks,
+        "block-state-root-before-matches",
+        block.state_root_before == state_root_before,
+        Some(hex::encode(block.state_root_before)),
+        Some(hex::encode(state_root_before)),
+        "bundle.block.state_root_before == bundle.state_root_before",
+    );
+    push_check(
+        &mut checks,
+        "block-state-root-after-matches",
+        block.state_root_after == state_root_after,
+        Some(hex::encode(block.state_root_after)),
+        Some(hex::encode(state_root_after)),
+        "bundle.block.state_root_after == bundle.state_root_after",
+    );
+    push_check(
+        &mut checks,
+        "block-scheduler-commitment-matches",
+        block.scheduler_commitment == scheduler_commitment,
+        Some(hex::encode(block.scheduler_commitment)),
+        Some(hex::encode(scheduler_commitment)),
+        "bundle.block.scheduler_commitment == bundle.scheduler_commitment",
+    );
+    push_check(
+        &mut checks,
+        "participant-set-hash",
+        bundle.participant_set_hash == hex::encode(participant_set_hash),
+        Some(hex::encode(participant_set_hash)),
+        Some(bundle.participant_set_hash.clone()),
+        "bundle carries the participant-set digest inherited from session open",
+    );
+    push_check(
+        &mut checks,
+        "escrow-input-cells-hash",
+        bundle.escrow_input_cells_hash == hex::encode(escrow_input_cells_hash),
+        Some(hex::encode(escrow_input_cells_hash)),
+        Some(bundle.escrow_input_cells_hash.clone()),
+        "bundle carries the escrow input-cell digest inherited from session open",
+    );
+    push_check(
+        &mut checks,
+        "session-lineage-commitment",
+        bundle.session_lineage_commitment == hex::encode(session_lineage_commitment),
+        Some(hex::encode(session_lineage_commitment)),
+        Some(bundle.session_lineage_commitment.clone()),
+        "bundle carries the combined session lineage commitment",
+    );
+    let data_commitment = bundle
+        .data_commitments
+        .first()
+        .and_then(|value| parse_hex_32(value))
+        .ok_or_else(|| CliError::InvalidFixture("first data commitment must be 32-byte hex".to_owned()))?;
+    push_check(
+        &mut checks,
+        "block-data-commitment-matches",
+        block.data_commitments.first().copied() == Some(data_commitment),
+        Some(hex::encode(block.data_commitments.first().copied().unwrap_or([0; 32]))),
+        Some(hex::encode(data_commitment)),
+        "bundle.block.data_commitments[0] == bundle.data_commitments[0]",
+    );
+    let session_id =
+        parse_hex_32(&bundle.session_id).ok_or_else(|| CliError::InvalidFixture("session_id must be 32-byte hex".to_owned()))?;
+    let expected_challenge_payload_hash = hex::encode(blake3_chunks(
+        b"myelin:session-court-challenge-payload:v1",
+        &[
+            &session_id,
+            &bundle.chunk_index.to_le_bytes(),
+            &state_root_before,
+            &data_commitment,
+            &state_root_after,
+            &scheduler_commitment,
+            &block_hash,
+            &participant_set_hash,
+            &escrow_input_cells_hash,
+            &session_lineage_commitment,
+        ],
+    ));
+    push_check(
+        &mut checks,
+        "challenge-payload-hash",
+        expected_challenge_payload_hash == bundle.challenge_payload_hash,
+        Some(expected_challenge_payload_hash),
+        Some(bundle.challenge_payload_hash.clone()),
+        "challenge payload hash recomputes from bundle fields",
+    );
+
+    let evidence_block_hash = match &bundle.tendermint_evidence {
+        Some(tm) => parse_hex_32(&tm.block_hash)
+            .ok_or_else(|| CliError::InvalidFixture("tendermint block_hash must be 32-byte hex".to_owned()))?,
+        None => parse_hex_32(&bundle.static_committee_evidence.block_hash)
+            .ok_or_else(|| CliError::InvalidFixture("static committee block_hash must be 32-byte hex".to_owned()))?,
+    };
+    push_check(
+        &mut checks,
+        "evidence-block-hash-matches-canonical-block",
+        evidence_block_hash == block_hash,
+        Some(hex::encode(block_hash)),
+        Some(hex::encode(evidence_block_hash)),
+        "finality evidence block_hash matches the data-bound canonical block hash",
+    );
+    verify_session_finality_checks(&mut checks, block_hash, &bundle)?;
+    push_check(
+        &mut checks,
+        "court-verifiable-profile",
+        bundle.court_verifiable
+            && bundle.ckb_projection.ckb_projection_possible
+            && bundle.ckb_projection.semantic_profile == "ckb-compatible",
+        Some("court_verifiable + ckb-compatible + projection possible".to_owned()),
+        Some(format!(
+            "{} + {} + {}",
+            bundle.court_verifiable, bundle.ckb_projection.semantic_profile, bundle.ckb_projection.ckb_projection_possible
+        )),
+        "bundle is projectable into the CKB-compatible profile",
+    );
+
+    let valid = checks.iter().all(|check| check.ok);
+    Ok(SessionCourtBundleVerificationReport { bundle: path.display().to_string(), valid, checks })
+}
+
+fn session_da_manifest(bundle_path: PathBuf, storage_dir: Option<PathBuf>) -> Result<SessionDaManifestReport> {
+    let bundle_bytes = fs::read(&bundle_path)?;
+    let bundle = serde_json::from_slice::<SessionCourtBundleInput>(&bundle_bytes)?;
+    let verification = verify_session_court_bundle(bundle_path)?;
+    if !verification.valid {
+        return Err(CliError::InvalidFixture("cannot emit DA manifest for an invalid session court bundle".to_owned()));
+    }
+    if !bundle.court_verifiable {
+        return Err(CliError::InvalidFixture("cannot emit DA manifest for a non-court-verifiable bundle".to_owned()));
+    }
+
+    let molecule_transaction = decode_hex_field(&bundle.molecule_transaction_hex, "molecule_transaction_hex")?;
+    let (proof, segment_sealed, local_da_published, da_storage_path) = if let Some(storage_dir) = storage_dir {
+        let writer =
+            SegmentWriter::new(&storage_dir).map_err(|error| CliError::InvalidFixture(format!("DA segment writer error: {error}")))?;
+        let (segment_id, offset, length) = writer
+            .append(&molecule_transaction)
+            .map_err(|error| CliError::InvalidFixture(format!("DA segment append error: {error}")))?;
+        let meta = writer.seal().map_err(|error| CliError::InvalidFixture(format!("DA segment seal error: {error}")))?;
+        if meta.segment_id != segment_id {
+            return Err(CliError::InvalidFixture("DA segment seal returned unexpected segment id".to_owned()));
+        }
+        let reader =
+            SegmentReader::new(&storage_dir).map_err(|error| CliError::InvalidFixture(format!("DA segment reader error: {error}")))?;
+        let leaf_index = reader
+            .find_leaf_index(&myelin_state::SegmentInfo { segment_id, offset, length })
+            .map_err(|error| CliError::InvalidFixture(format!("DA segment leaf lookup error: {error}")))?;
+        let proof = reader
+            .build_proof(segment_id, leaf_index)
+            .map_err(|error| CliError::InvalidFixture(format!("DA segment proof error: {error}")))?;
+        if proof.segment_root != meta.merkle_root || !meta.sealed {
+            return Err(CliError::InvalidFixture("DA segment proof does not match sealed metadata".to_owned()));
+        }
+        (proof, true, true, Some(storage_dir.display().to_string()))
+    } else {
+        let chunk_length = u32::try_from(molecule_transaction.len())
+            .map_err(|_| CliError::InvalidFixture("molecule transaction is too large for one DA proof chunk".to_owned()))?;
+        let mut builder = MerkleTreeBuilder::new();
+        builder.add_leaf(&molecule_transaction);
+        let segment_root = builder.build();
+        let proof = SegmentProof {
+            segment_id: 0,
+            leaf_index: 0,
+            chunk_data: molecule_transaction,
+            chunk_offset: 0,
+            chunk_length,
+            merkle_path: builder.get_proof(0),
+            segment_root,
+        };
+        (proof, false, false, None)
+    };
+    let proof_valid = proof.verify().map_err(|error| CliError::InvalidFixture(format!("DA proof verification error: {error}")))?;
+    let proof_molecule_hex = hex::encode(proof.to_molecule_bytes());
+    let court_bundle_hash = blake3_32(b"myelin:session-court-bundle-json:v1", &bundle_bytes);
+
+    Ok(SessionDaManifestReport {
+        schema: "myelin-session-da-manifest-v1".to_owned(),
+        session_id: bundle.session_id,
+        chunk_index: bundle.chunk_index,
+        consensus_kind: bundle.consensus_kind,
+        vm_profile: bundle.vm_profile,
+        da_profile: "single-segment-merkle-v1".to_owned(),
+        payload_kind: "session-court-molecule-transaction".to_owned(),
+        court_bundle_hash: hex::encode(court_bundle_hash),
+        molecule_transaction_hash: bundle.molecule_transaction_hash,
+        challenge_payload_hash: bundle.challenge_payload_hash,
+        segment_id: proof.segment_id,
+        leaf_index: proof.leaf_index,
+        chunk_offset: proof.chunk_offset,
+        chunk_length: proof.chunk_length,
+        segment_root: hex::encode(proof.segment_root),
+        segment_sealed,
+        proof_molecule_hex,
+        proof_valid,
+        local_da_published,
+        da_storage_path,
+        l1_da_published: false,
+        reason: if local_da_published {
+            "court replay payload is durably written to a sealed local DA segment; external L1 DA publication is not implemented yet"
+                .to_owned()
+        } else {
+            "court replay payload is locally provable against an in-memory Merkle DA segment; durable/L1 DA publication is not implemented for this manifest"
+                .to_owned()
+        },
+    })
+}
+
+fn verify_session_da_manifest(
+    manifest_path: PathBuf,
+    bundle_path: PathBuf,
+    storage_dir: Option<PathBuf>,
+) -> Result<SessionDaManifestVerificationReport> {
+    let manifest_bytes = fs::read(&manifest_path)?;
+    let manifest = serde_json::from_slice::<SessionDaManifestReport>(&manifest_bytes)?;
+    let bundle_bytes = fs::read(&bundle_path)?;
+    let bundle = serde_json::from_slice::<SessionCourtBundleInput>(&bundle_bytes)?;
+    let mut checks = Vec::new();
+
+    let court_verification = verify_session_court_bundle(bundle_path.clone())?;
+    push_check(
+        &mut checks,
+        "court-bundle-valid",
+        court_verification.valid,
+        Some("true".to_owned()),
+        Some(court_verification.valid.to_string()),
+        "DA manifest is based on a valid court bundle",
+    );
+    push_check(
+        &mut checks,
+        "schema",
+        manifest.schema == "myelin-session-da-manifest-v1",
+        Some("myelin-session-da-manifest-v1".to_owned()),
+        Some(manifest.schema.clone()),
+        "DA manifest schema is recognised",
+    );
+    push_check(
+        &mut checks,
+        "da-profile",
+        manifest.da_profile == "single-segment-merkle-v1",
+        Some("single-segment-merkle-v1".to_owned()),
+        Some(manifest.da_profile.clone()),
+        "current DA verifier supports the single-segment Merkle profile",
+    );
+    push_check(
+        &mut checks,
+        "payload-kind",
+        manifest.payload_kind == "session-court-molecule-transaction",
+        Some("session-court-molecule-transaction".to_owned()),
+        Some(manifest.payload_kind.clone()),
+        "manifest payload kind is the session court replay transaction",
+    );
+    push_check(
+        &mut checks,
+        "session-id",
+        manifest.session_id == bundle.session_id,
+        Some(bundle.session_id.clone()),
+        Some(manifest.session_id.clone()),
+        "DA manifest session id matches court bundle",
+    );
+    push_check(
+        &mut checks,
+        "chunk-index",
+        manifest.chunk_index == bundle.chunk_index,
+        Some(bundle.chunk_index.to_string()),
+        Some(manifest.chunk_index.to_string()),
+        "DA manifest chunk index matches court bundle",
+    );
+    push_check(
+        &mut checks,
+        "consensus-kind",
+        manifest.consensus_kind == bundle.consensus_kind,
+        Some(bundle.consensus_kind.clone()),
+        Some(manifest.consensus_kind.clone()),
+        "DA manifest consensus kind matches court bundle",
+    );
+    push_check(
+        &mut checks,
+        "vm-profile",
+        manifest.vm_profile == bundle.vm_profile,
+        Some(bundle.vm_profile.clone()),
+        Some(manifest.vm_profile.clone()),
+        "DA manifest VM profile matches court bundle",
+    );
+    let expected_bundle_hash = hex::encode(blake3_32(b"myelin:session-court-bundle-json:v1", &bundle_bytes));
+    push_check(
+        &mut checks,
+        "court-bundle-hash",
+        manifest.court_bundle_hash == expected_bundle_hash,
+        Some(expected_bundle_hash),
+        Some(manifest.court_bundle_hash.clone()),
+        "DA manifest binds to the exact court bundle JSON bytes",
+    );
+
+    let molecule_transaction = decode_hex_field(&bundle.molecule_transaction_hex, "molecule_transaction_hex")?;
+    let expected_molecule_hash = hex::encode(blake3_32(b"myelin:session-molecule-transaction:v1", &molecule_transaction));
+    push_check(
+        &mut checks,
+        "molecule-transaction-hash",
+        manifest.molecule_transaction_hash == bundle.molecule_transaction_hash
+            && bundle.molecule_transaction_hash == expected_molecule_hash,
+        Some(expected_molecule_hash),
+        Some(manifest.molecule_transaction_hash.clone()),
+        "DA manifest binds to the court replay Molecule transaction hash",
+    );
+    push_check(
+        &mut checks,
+        "challenge-payload-hash",
+        manifest.challenge_payload_hash == bundle.challenge_payload_hash,
+        Some(bundle.challenge_payload_hash.clone()),
+        Some(manifest.challenge_payload_hash.clone()),
+        "DA manifest challenge hash matches court bundle",
+    );
+
+    let proof_bytes = decode_hex_field(&manifest.proof_molecule_hex, "proof_molecule_hex")?;
+    let proof = SegmentProof::from_molecule_bytes(&proof_bytes)
+        .map_err(|error| CliError::InvalidFixture(format!("DA proof decode error: {error}")))?;
+    let proof_verifies = proof.verify().map_err(|error| CliError::InvalidFixture(format!("DA proof verification error: {error}")))?;
+    push_check(
+        &mut checks,
+        "proof-verifies",
+        proof_verifies && manifest.proof_valid,
+        Some("true".to_owned()),
+        Some(format!("proof {}, manifest {}", proof_verifies, manifest.proof_valid)),
+        "encoded SegmentProof verifies against its segment root",
+    );
+    push_check(
+        &mut checks,
+        "proof-payload",
+        proof.chunk_data == molecule_transaction,
+        Some(hex::encode(&molecule_transaction)),
+        Some(hex::encode(&proof.chunk_data)),
+        "DA proof chunk data is the exact court replay transaction",
+    );
+    push_check(
+        &mut checks,
+        "segment-id",
+        manifest.segment_id == proof.segment_id,
+        Some(proof.segment_id.to_string()),
+        Some(manifest.segment_id.to_string()),
+        "manifest segment id matches encoded proof",
+    );
+    push_check(
+        &mut checks,
+        "leaf-index",
+        manifest.leaf_index == proof.leaf_index,
+        Some(proof.leaf_index.to_string()),
+        Some(manifest.leaf_index.to_string()),
+        "manifest leaf index matches encoded proof",
+    );
+    push_check(
+        &mut checks,
+        "chunk-offset",
+        manifest.chunk_offset == proof.chunk_offset,
+        Some(proof.chunk_offset.to_string()),
+        Some(manifest.chunk_offset.to_string()),
+        "manifest chunk offset matches encoded proof",
+    );
+    push_check(
+        &mut checks,
+        "chunk-length",
+        manifest.chunk_length == proof.chunk_length && proof.chunk_length as usize == molecule_transaction.len(),
+        Some(molecule_transaction.len().to_string()),
+        Some(manifest.chunk_length.to_string()),
+        "manifest chunk length matches proof and payload",
+    );
+    push_check(
+        &mut checks,
+        "segment-root",
+        manifest.segment_root == hex::encode(proof.segment_root),
+        Some(hex::encode(proof.segment_root)),
+        Some(manifest.segment_root.clone()),
+        "manifest segment root matches encoded proof",
+    );
+    push_check(
+        &mut checks,
+        "local-da-publication-fields",
+        manifest.local_da_published == manifest.segment_sealed,
+        Some("local_da_published == segment_sealed".to_owned()),
+        Some(format!("{} == {}", manifest.local_da_published, manifest.segment_sealed)),
+        "durable local DA publication requires a sealed segment",
+    );
+    let storage_path = storage_dir.or_else(|| manifest.da_storage_path.as_ref().map(PathBuf::from));
+    if manifest.local_da_published {
+        match storage_path {
+            Some(path) => {
+                let storage_check = (|| -> Result<(bool, bool, String)> {
+                    let reader = SegmentReader::new(&path)
+                        .map_err(|error| CliError::InvalidFixture(format!("DA segment reader error: {error}")))?;
+                    let persisted_proof = reader
+                        .build_proof(manifest.segment_id, manifest.leaf_index)
+                        .map_err(|error| CliError::InvalidFixture(format!("DA segment proof error: {error}")))?;
+                    let payload_matches = persisted_proof.chunk_data == proof.chunk_data
+                        && persisted_proof.chunk_offset == manifest.chunk_offset
+                        && persisted_proof.chunk_length == manifest.chunk_length
+                        && hex::encode(persisted_proof.segment_root) == manifest.segment_root;
+                    let proof_matches = persisted_proof.to_molecule_bytes() == proof_bytes;
+                    Ok((payload_matches, proof_matches, path.display().to_string()))
+                })();
+                match storage_check {
+                    Ok((payload_matches, proof_matches, path_display)) => {
+                        push_check(
+                            &mut checks,
+                            "local-da-storage-payload",
+                            payload_matches,
+                            Some("persisted proof payload and root match manifest".to_owned()),
+                            Some(path_display.clone()),
+                            "sealed DA segment stores the exact court replay payload",
+                        );
+                        push_check(
+                            &mut checks,
+                            "local-da-storage-proof",
+                            proof_matches,
+                            Some("persisted proof bytes match manifest proof".to_owned()),
+                            Some(path_display),
+                            "sealed DA segment reproduces the manifest proof",
+                        );
+                    }
+                    Err(error) => {
+                        push_check(
+                            &mut checks,
+                            "local-da-storage-payload",
+                            false,
+                            Some("readable sealed DA segment".to_owned()),
+                            Some(error.to_string()),
+                            "sealed DA segment stores the exact court replay payload",
+                        );
+                        push_check(
+                            &mut checks,
+                            "local-da-storage-proof",
+                            false,
+                            Some("reproducible persisted proof".to_owned()),
+                            Some(error.to_string()),
+                            "sealed DA segment reproduces the manifest proof",
+                        );
+                    }
+                }
+            }
+            None => {
+                push_check(
+                    &mut checks,
+                    "local-da-storage-payload",
+                    false,
+                    Some("storage-dir or manifest da_storage_path".to_owned()),
+                    None,
+                    "sealed DA segment stores the exact court replay payload",
+                );
+                push_check(
+                    &mut checks,
+                    "local-da-storage-proof",
+                    false,
+                    Some("storage-dir or manifest da_storage_path".to_owned()),
+                    None,
+                    "sealed DA segment reproduces the manifest proof",
+                );
+            }
+        }
+    } else {
+        push_check(
+            &mut checks,
+            "local-da-not-published",
+            manifest.da_storage_path.is_none(),
+            Some("no local DA storage path".to_owned()),
+            manifest.da_storage_path.clone(),
+            "in-memory DA manifests must not claim durable local storage",
+        );
+    }
+    push_check(
+        &mut checks,
+        "l1-da-marker",
+        !manifest.l1_da_published,
+        Some("false".to_owned()),
+        Some(manifest.l1_da_published.to_string()),
+        "manifest remains explicit that external L1 DA publication is not implemented yet",
+    );
+
+    let valid = checks.iter().all(|check| check.ok);
+    Ok(SessionDaManifestVerificationReport {
+        manifest: manifest_path.display().to_string(),
+        bundle: bundle_path.display().to_string(),
+        valid,
+        checks,
+    })
+}
+
+fn session_da_anchor_package(manifest_path: PathBuf, bundle_path: PathBuf) -> Result<SessionDaAnchorPackageReport> {
+    let manifest_bytes = fs::read(&manifest_path)?;
+    let manifest = serde_json::from_slice::<SessionDaManifestReport>(&manifest_bytes)?;
+    let verification = verify_session_da_manifest(manifest_path, bundle_path, None)?;
+    if !verification.valid {
+        return Err(CliError::InvalidFixture("cannot package an invalid session DA manifest".to_owned()));
+    }
+    if !manifest.proof_valid {
+        return Err(CliError::InvalidFixture("cannot package a DA manifest with an invalid proof".to_owned()));
+    }
+
+    let manifest_hash = blake3_32(b"myelin:session-da-manifest-json:v1", &manifest_bytes);
+    let tx = session_da_anchor_cell_tx(&manifest, manifest_hash)?;
+    let txid = tx.id();
+    let wtxid = compute_wtxid(&tx);
+    let molecule_transaction = serialize_transaction_molecule(&tx).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let molecule_transaction_hash = blake3_32(b"myelin:session-da-anchor-molecule-transaction:v1", &molecule_transaction);
+    let ckb_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
+    let da_anchor_projectable = ckb_projection.ckb_projection_possible && ckb_projection.semantic_profile == "ckb-compatible";
+    let carrier_payload = carrier_payload_hex(&[
+        manifest_hash,
+        parse_package_hash_field(&manifest.court_bundle_hash, "manifest court_bundle_hash")?,
+        parse_package_hash_field(&manifest.challenge_payload_hash, "manifest challenge_payload_hash")?,
+        parse_package_hash_field(&manifest.segment_root, "manifest segment_root")?,
+        molecule_transaction_hash,
+    ]);
+    let carrier_payload_data_hash = carrier_payload_data_hash_hex(&carrier_payload)?;
+
+    Ok(SessionDaAnchorPackageReport {
+        schema: "myelin-session-da-anchor-package-v1".to_owned(),
+        session_id: manifest.session_id,
+        chunk_index: manifest.chunk_index,
+        consensus_kind: manifest.consensus_kind,
+        vm_profile: manifest.vm_profile,
+        da_manifest_hash: hex::encode(manifest_hash),
+        court_bundle_hash: manifest.court_bundle_hash,
+        court_molecule_transaction_hash: manifest.molecule_transaction_hash,
+        challenge_payload_hash: manifest.challenge_payload_hash,
+        segment_root: manifest.segment_root,
+        carrier_payload_kind: "myelin-session-da-anchor-carrier-v1".to_owned(),
+        carrier_payload,
+        carrier_payload_data_hash,
+        da_anchor_cell_tx_id: hex::encode(txid),
+        da_anchor_cell_wtxid: hex::encode(wtxid),
+        molecule_transaction_hex: hex::encode(molecule_transaction),
+        molecule_transaction_hash: hex::encode(molecule_transaction_hash),
+        ckb_projection,
+        da_anchor_projectable,
+        l1_da_publication_implemented: false,
+        notes: vec![
+            "This package is a deterministic CKB-compatible DA anchor CellTx projection.".to_owned(),
+            "It binds the verified DA manifest, court bundle hash, DA segment root, and proof commitment; it is not yet a submitted L1 DA transaction."
+                .to_owned(),
+        ],
+    })
+}
+
+fn verify_session_da_anchor_package(
+    package_path: PathBuf,
+    manifest_path: PathBuf,
+    bundle_path: PathBuf,
+) -> Result<SessionDaAnchorPackageVerificationReport> {
+    let package_bytes = fs::read(&package_path)?;
+    let package = serde_json::from_slice::<SessionDaAnchorPackageReport>(&package_bytes)?;
+    let manifest_bytes = fs::read(&manifest_path)?;
+    let manifest = serde_json::from_slice::<SessionDaManifestReport>(&manifest_bytes)?;
+    let mut checks = Vec::new();
+
+    let manifest_verification = verify_session_da_manifest(manifest_path.clone(), bundle_path.clone(), None)?;
+    push_check(
+        &mut checks,
+        "da-manifest-valid",
+        manifest_verification.valid,
+        Some("true".to_owned()),
+        Some(manifest_verification.valid.to_string()),
+        "DA anchor package is based on a valid DA manifest",
+    );
+    push_check(
+        &mut checks,
+        "schema",
+        package.schema == "myelin-session-da-anchor-package-v1",
+        Some("myelin-session-da-anchor-package-v1".to_owned()),
+        Some(package.schema.clone()),
+        "DA anchor package schema is recognised",
+    );
+    push_check(
+        &mut checks,
+        "session-id",
+        package.session_id == manifest.session_id,
+        Some(manifest.session_id.clone()),
+        Some(package.session_id.clone()),
+        "DA anchor package session id matches manifest",
+    );
+    push_check(
+        &mut checks,
+        "chunk-index",
+        package.chunk_index == manifest.chunk_index,
+        Some(manifest.chunk_index.to_string()),
+        Some(package.chunk_index.to_string()),
+        "DA anchor package chunk index matches manifest",
+    );
+    push_check(
+        &mut checks,
+        "consensus-kind",
+        package.consensus_kind == manifest.consensus_kind,
+        Some(manifest.consensus_kind.clone()),
+        Some(package.consensus_kind.clone()),
+        "DA anchor package consensus kind matches manifest",
+    );
+    push_check(
+        &mut checks,
+        "vm-profile",
+        package.vm_profile == manifest.vm_profile,
+        Some(manifest.vm_profile.clone()),
+        Some(package.vm_profile.clone()),
+        "DA anchor package VM profile matches manifest",
+    );
+    let expected_manifest_hash = hex::encode(blake3_32(b"myelin:session-da-manifest-json:v1", &manifest_bytes));
+    push_check(
+        &mut checks,
+        "da-manifest-hash",
+        package.da_manifest_hash == expected_manifest_hash,
+        Some(expected_manifest_hash.clone()),
+        Some(package.da_manifest_hash.clone()),
+        "DA anchor package binds to the exact DA manifest JSON bytes",
+    );
+    push_check(
+        &mut checks,
+        "court-bundle-hash",
+        package.court_bundle_hash == manifest.court_bundle_hash,
+        Some(manifest.court_bundle_hash.clone()),
+        Some(package.court_bundle_hash.clone()),
+        "DA anchor package court bundle hash matches manifest",
+    );
+    push_check(
+        &mut checks,
+        "court-molecule-transaction-hash",
+        package.court_molecule_transaction_hash == manifest.molecule_transaction_hash,
+        Some(manifest.molecule_transaction_hash.clone()),
+        Some(package.court_molecule_transaction_hash.clone()),
+        "DA anchor package court replay transaction hash matches manifest",
+    );
+    push_check(
+        &mut checks,
+        "challenge-payload-hash",
+        package.challenge_payload_hash == manifest.challenge_payload_hash,
+        Some(manifest.challenge_payload_hash.clone()),
+        Some(package.challenge_payload_hash.clone()),
+        "DA anchor package challenge payload hash matches manifest",
+    );
+    push_check(
+        &mut checks,
+        "segment-root",
+        package.segment_root == manifest.segment_root,
+        Some(manifest.segment_root.clone()),
+        Some(package.segment_root.clone()),
+        "DA anchor package segment root matches manifest",
+    );
+
+    let molecule_transaction = decode_hex_field(&package.molecule_transaction_hex, "molecule_transaction_hex")?;
+    let expected_molecule_hash = hex::encode(blake3_32(b"myelin:session-da-anchor-molecule-transaction:v1", &molecule_transaction));
+    push_check(
+        &mut checks,
+        "molecule-transaction-hash",
+        package.molecule_transaction_hash == expected_molecule_hash,
+        Some(expected_molecule_hash.clone()),
+        Some(package.molecule_transaction_hash.clone()),
+        "DA anchor package Molecule transaction hash matches embedded bytes",
+    );
+    let expected_carrier_payload = carrier_payload_hex(&[
+        parse_package_hash_field(&expected_manifest_hash, "expected da_manifest_hash")?,
+        parse_package_hash_field(&manifest.court_bundle_hash, "manifest court_bundle_hash")?,
+        parse_package_hash_field(&manifest.challenge_payload_hash, "manifest challenge_payload_hash")?,
+        parse_package_hash_field(&manifest.segment_root, "manifest segment_root")?,
+        parse_package_hash_field(&expected_molecule_hash, "expected molecule_transaction_hash")?,
+    ]);
+    let expected_carrier_payload_data_hash = carrier_payload_data_hash_hex(&expected_carrier_payload)?;
+    push_check(
+        &mut checks,
+        "carrier-payload-kind",
+        package.carrier_payload_kind == "myelin-session-da-anchor-carrier-v1",
+        Some("myelin-session-da-anchor-carrier-v1".to_owned()),
+        Some(package.carrier_payload_kind.clone()),
+        "DA anchor package declares the DA-anchor carrier payload type",
+    );
+    push_check(
+        &mut checks,
+        "carrier-payload",
+        package.carrier_payload == expected_carrier_payload,
+        Some(expected_carrier_payload.clone()),
+        Some(package.carrier_payload.clone()),
+        "DA anchor package exposes the exact compact carrier payload used by the live CKB type script",
+    );
+    push_check(
+        &mut checks,
+        "carrier-payload-data-hash",
+        package.carrier_payload_data_hash == expected_carrier_payload_data_hash,
+        Some(expected_carrier_payload_data_hash),
+        Some(package.carrier_payload_data_hash.clone()),
+        "DA anchor package exposes the CKB data hash required in carrier type args",
+    );
+    let tx = deserialize_transaction_molecule(&molecule_transaction).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let expected_txid = hex::encode(tx.id());
+    let expected_wtxid = hex::encode(compute_wtxid(&tx));
+    push_check(
+        &mut checks,
+        "da-anchor-cell-txid",
+        package.da_anchor_cell_tx_id == expected_txid,
+        Some(expected_txid),
+        Some(package.da_anchor_cell_tx_id.clone()),
+        "DA anchor package CellTx id matches embedded transaction",
+    );
+    push_check(
+        &mut checks,
+        "da-anchor-cell-wtxid",
+        package.da_anchor_cell_wtxid == expected_wtxid,
+        Some(expected_wtxid),
+        Some(package.da_anchor_cell_wtxid.clone()),
+        "DA anchor package CellTx witness id matches embedded transaction",
+    );
+    let expected_manifest_hash_bytes = parse_hex_32(&expected_manifest_hash)
+        .ok_or_else(|| CliError::InvalidFixture("da_manifest_hash must be 32-byte hex".to_owned()))?;
+    let expected_tx = session_da_anchor_cell_tx(&manifest, expected_manifest_hash_bytes)?;
+    push_check(
+        &mut checks,
+        "da-anchor-celltx-recomputes",
+        serialize_transaction_molecule(&expected_tx).map_err(|error| CliError::InvalidFixture(error.to_string()))?
+            == molecule_transaction,
+        Some("deterministic DA anchor CellTx".to_owned()),
+        Some("embedded DA anchor CellTx".to_owned()),
+        "embedded DA anchor CellTx recomputes from manifest fields",
+    );
+    let recomputed_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
+    push_check(
+        &mut checks,
+        "projection-possible",
+        package.ckb_projection.ckb_projection_possible == recomputed_projection.ckb_projection_possible
+            && package.da_anchor_projectable,
+        Some(recomputed_projection.ckb_projection_possible.to_string()),
+        Some(package.ckb_projection.ckb_projection_possible.to_string()),
+        "DA anchor package projection possibility recomputes from embedded transaction",
+    );
+    push_check(
+        &mut checks,
+        "projection-profile",
+        package.ckb_projection.semantic_profile == recomputed_projection.semantic_profile
+            && package.ckb_projection.semantic_profile == "ckb-compatible",
+        Some(recomputed_projection.semantic_profile),
+        Some(package.ckb_projection.semantic_profile.clone()),
+        "DA anchor package remains in the CKB-compatible profile",
+    );
+    push_check(
+        &mut checks,
+        "l1-da-publication-marker",
+        !package.l1_da_publication_implemented,
+        Some("false".to_owned()),
+        Some(package.l1_da_publication_implemented.to_string()),
+        "package remains explicit that the L1 DA submission path is not implemented yet",
+    );
+
+    let valid = checks.iter().all(|check| check.ok);
+    Ok(SessionDaAnchorPackageVerificationReport {
+        package: package_path.display().to_string(),
+        manifest: manifest_path.display().to_string(),
+        bundle: bundle_path.display().to_string(),
+        valid,
+        checks,
+    })
+}
+
+fn session_submit_da_anchor_package(
+    package_path: PathBuf,
+    rpc_url: Option<String>,
+    dry_run: bool,
+    outputs_validator: &str,
+    require_accepted: bool,
+) -> Result<SessionDaAnchorSubmissionReport> {
+    if outputs_validator.trim().is_empty() {
+        return Err(CliError::InvalidFixture("outputs-validator must be non-empty".to_owned()));
+    }
+    if !dry_run && rpc_url.is_none() {
+        return Err(CliError::InvalidFixture("submit-da-anchor-package requires --rpc-url unless --dry-run is set".to_owned()));
+    }
+
+    let package_bytes = fs::read(&package_path)?;
+    let package = serde_json::from_slice::<SessionDaAnchorPackageReport>(&package_bytes)?;
+    if package.schema != "myelin-session-da-anchor-package-v1" {
+        return Err(CliError::InvalidFixture("DA anchor package schema is not recognised".to_owned()));
+    }
+    if !package.da_anchor_projectable
+        || !package.ckb_projection.ckb_projection_possible
+        || package.ckb_projection.semantic_profile != "ckb-compatible"
+    {
+        return Err(CliError::InvalidFixture("DA anchor package is not CKB-projectable".to_owned()));
+    }
+    if package.l1_da_publication_implemented {
+        return Err(CliError::InvalidFixture("DA anchor package already claims an implemented L1 DA publication path".to_owned()));
+    }
+
+    let molecule_transaction = decode_hex_field(&package.molecule_transaction_hex, "molecule_transaction_hex")?;
+    let molecule_transaction_hash = hex::encode(blake3_32(b"myelin:session-da-anchor-molecule-transaction:v1", &molecule_transaction));
+    if molecule_transaction_hash != package.molecule_transaction_hash {
+        return Err(CliError::InvalidFixture("DA anchor package Molecule transaction hash mismatch".to_owned()));
+    }
+    let tx = deserialize_transaction_molecule(&molecule_transaction).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let txid = hex::encode(tx.id());
+    if txid != package.da_anchor_cell_tx_id {
+        return Err(CliError::InvalidFixture("DA anchor package CellTx id mismatch".to_owned()));
+    }
+    let wtxid = hex::encode(compute_wtxid(&tx));
+    if wtxid != package.da_anchor_cell_wtxid {
+        return Err(CliError::InvalidFixture("DA anchor package CellTx witness id mismatch".to_owned()));
+    }
+    let projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
+    if !projection.ckb_projection_possible || projection.semantic_profile != "ckb-compatible" {
+        return Err(CliError::InvalidFixture("embedded DA anchor transaction no longer projects to CKB".to_owned()));
+    }
+    if projection.ckb_raw_tx_hash != package.ckb_projection.ckb_raw_tx_hash
+        || projection.ckb_wtx_hash != package.ckb_projection.ckb_wtx_hash
+    {
+        return Err(CliError::InvalidFixture("DA anchor package projection hash mismatch".to_owned()));
+    }
+
+    let ckb_transaction_json = ckb_json_transaction(&tx)?;
+    let request = serde_json::json!({
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "send_transaction",
+        "params": [ckb_transaction_json.clone(), outputs_validator],
+    });
+    let request_bytes = serde_json::to_vec(&request)?;
+    let request_json_hash = hex::encode(blake3_32(b"myelin:session-da-anchor-rpc-request-json:v1", &request_bytes));
+
+    let mut pre_submit = disabled_live_submission_preflight(&ckb_transaction_json)?;
+    let mut submitted_to_rpc = false;
+    let mut accepted_by_rpc = false;
+    let mut rpc_result = None;
+    let mut rpc_error = None;
+    if !dry_run {
+        submitted_to_rpc = true;
+        let url = rpc_url.as_deref().ok_or_else(|| {
+            CliError::InvalidFixture("submit-da-anchor-package requires --rpc-url unless --dry-run is set".to_owned())
+        })?;
+        pre_submit = preflight_live_ckb_submission(url, &ckb_transaction_json, "DA anchor submission")?;
+        let response = post_json_rpc(url, &request)?;
+        rpc_result = response.get("result").cloned();
+        rpc_error = response.get("error").cloned();
+        let expected_tx_hash = projection.ckb_raw_tx_hash.as_deref().and_then(normalize_ckb_tx_hash);
+        accepted_by_rpc = rpc_error.is_none()
+            && rpc_result.as_ref().and_then(Value::as_str).and_then(normalize_ckb_tx_hash).as_deref() == expected_tx_hash.as_deref();
+    }
+
+    if require_accepted && !accepted_by_rpc {
+        return Err(CliError::InvalidFixture("DA anchor transaction was not accepted by CKB RPC".to_owned()));
+    }
+
+    let notes = if dry_run {
+        vec![
+            "Dry-run only: the CKB send_transaction request was constructed and hashed, but not submitted.".to_owned(),
+            "l1_da_published remains false because final L1 DA publication script semantics are not implemented yet.".to_owned(),
+        ]
+    } else if accepted_by_rpc {
+        vec![
+            "CKB RPC accepted the projected DA anchor package transaction.".to_owned(),
+            "l1_da_published remains false because this is not the final L1 DA publication script path.".to_owned(),
+        ]
+    } else if rpc_error.is_none() && rpc_result.is_some() {
+        vec!["CKB RPC returned a tx hash that did not match the projected DA anchor raw transaction hash.".to_owned()]
+    } else {
+        vec!["CKB RPC returned an error or no result; l1_da_published remains false.".to_owned()]
+    };
+
+    Ok(SessionDaAnchorSubmissionReport {
+        schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+        package: package_path.display().to_string(),
+        dry_run,
+        rpc_url,
+        outputs_validator: outputs_validator.to_owned(),
+        request_method: "send_transaction".to_owned(),
+        request_json_hash,
+        da_anchor_cell_tx_id: package.da_anchor_cell_tx_id,
+        da_anchor_cell_wtxid: package.da_anchor_cell_wtxid,
+        molecule_transaction_hash: package.molecule_transaction_hash,
+        ckb_raw_tx_hash: projection.ckb_raw_tx_hash,
+        ckb_wtx_hash: projection.ckb_wtx_hash,
+        ckb_transaction_json,
+        pre_submit,
+        submitted_to_rpc,
+        accepted_by_rpc,
+        l1_da_published: false,
+        rpc_result,
+        rpc_error,
+        notes,
+    })
+}
+
+fn session_settlement_intent(
+    bundle_path: PathBuf,
+    da_manifest_path: PathBuf,
+    kind: &str,
+    current_time_ms: u64,
+    challenge_window_ms: u64,
+) -> Result<SessionSettlementIntentReport> {
+    if kind != "disputed-close" {
+        return Err(CliError::InvalidFixture(format!("unsupported settlement intent kind: {kind}")));
+    }
+    if challenge_window_ms == 0 {
+        return Err(CliError::InvalidFixture("challenge-window-ms must be non-zero".to_owned()));
+    }
+
+    let bundle_bytes = fs::read(&bundle_path)?;
+    let bundle = serde_json::from_slice::<SessionCourtBundleInput>(&bundle_bytes)?;
+    let court_verification = verify_session_court_bundle(bundle_path.clone())?;
+    if !court_verification.valid {
+        return Err(CliError::InvalidFixture("cannot settle from an invalid session court bundle".to_owned()));
+    }
+    if !bundle.court_verifiable {
+        return Err(CliError::InvalidFixture("cannot settle from a non-court-verifiable bundle".to_owned()));
+    }
+    let da_bytes = fs::read(&da_manifest_path)?;
+    let da_manifest = serde_json::from_slice::<SessionDaManifestReport>(&da_bytes)?;
+    let da_verification = verify_session_da_manifest(da_manifest_path.clone(), bundle_path.clone(), None)?;
+    if !da_verification.valid {
+        return Err(CliError::InvalidFixture("cannot settle from an invalid session DA manifest".to_owned()));
+    }
+
+    let block = bundle.block.to_myelin_block().map_err(|error| CliError::InvalidFixture(format!("session block: {error}")))?;
+    let challenge_deadline_ms = block
+        .timestamp_ms
+        .checked_add(challenge_window_ms)
+        .ok_or_else(|| CliError::InvalidFixture("challenge deadline overflow".to_owned()))?;
+    let settlement_permitted = current_time_ms >= challenge_deadline_ms;
+    let reason = if settlement_permitted {
+        "challenge window elapsed and DA proof verifies; disputed close is locally settleable".to_owned()
+    } else {
+        "challenge window is still open; disputed close is not yet locally settleable even though DA proof verifies".to_owned()
+    };
+    let court_bundle_hash = blake3_32(b"myelin:session-court-bundle-json:v1", &bundle_bytes);
+    let da_manifest_hash = blake3_32(b"myelin:session-da-manifest-json:v1", &da_bytes);
+
+    Ok(SessionSettlementIntentReport {
+        schema: "myelin-session-settlement-intent-v1".to_owned(),
+        kind: kind.to_owned(),
+        session_id: bundle.session_id,
+        chunk_index: bundle.chunk_index,
+        consensus_kind: bundle.consensus_kind,
+        vm_profile: bundle.vm_profile,
+        participant_set_hash: bundle.participant_set_hash,
+        escrow_input_cells_hash: bundle.escrow_input_cells_hash,
+        session_lineage_commitment: bundle.session_lineage_commitment,
+        state_root_before: bundle.state_root_before,
+        final_state_root: bundle.state_root_after,
+        court_bundle_hash: hex::encode(court_bundle_hash),
+        da_manifest_hash: hex::encode(da_manifest_hash),
+        da_profile: da_manifest.da_profile,
+        da_segment_root: da_manifest.segment_root,
+        challenge_payload_hash: bundle.challenge_payload_hash,
+        challenge_window_ms,
+        challenge_deadline_ms,
+        current_time_ms,
+        settlement_permitted,
+        l1_da_published: da_manifest.l1_da_published,
+        l1_court_implemented: false,
+        reason,
+    })
+}
+
+fn verify_session_settlement_intent(
+    intent_path: PathBuf,
+    bundle_path: PathBuf,
+    da_manifest_path: PathBuf,
+) -> Result<SessionSettlementIntentVerificationReport> {
+    let intent_bytes = fs::read(&intent_path)?;
+    let intent = serde_json::from_slice::<SessionSettlementIntentReport>(&intent_bytes)?;
+    let bundle_bytes = fs::read(&bundle_path)?;
+    let bundle = serde_json::from_slice::<SessionCourtBundleInput>(&bundle_bytes)?;
+    let da_manifest_bytes = fs::read(&da_manifest_path)?;
+    let da_manifest = serde_json::from_slice::<SessionDaManifestReport>(&da_manifest_bytes)?;
+    let mut checks = Vec::new();
+
+    let court_verification = verify_session_court_bundle(bundle_path.clone())?;
+    push_check(
+        &mut checks,
+        "court-bundle-valid",
+        court_verification.valid,
+        Some("true".to_owned()),
+        Some(court_verification.valid.to_string()),
+        "settlement intent is based on a valid court bundle",
+    );
+    let da_verification = verify_session_da_manifest(da_manifest_path.clone(), bundle_path.clone(), None)?;
+    push_check(
+        &mut checks,
+        "da-manifest-valid",
+        da_verification.valid,
+        Some("true".to_owned()),
+        Some(da_verification.valid.to_string()),
+        "settlement intent is based on a valid DA manifest",
+    );
+    push_check(
+        &mut checks,
+        "schema",
+        intent.schema == "myelin-session-settlement-intent-v1",
+        Some("myelin-session-settlement-intent-v1".to_owned()),
+        Some(intent.schema.clone()),
+        "settlement intent schema is recognised",
+    );
+    push_check(
+        &mut checks,
+        "kind",
+        intent.kind == "disputed-close",
+        Some("disputed-close".to_owned()),
+        Some(intent.kind.clone()),
+        "current settlement verifier supports disputed-close intents",
+    );
+    push_check(
+        &mut checks,
+        "session-id",
+        intent.session_id == bundle.session_id,
+        Some(bundle.session_id.clone()),
+        Some(intent.session_id.clone()),
+        "settlement intent session id matches court bundle",
+    );
+    push_check(
+        &mut checks,
+        "chunk-index",
+        intent.chunk_index == bundle.chunk_index,
+        Some(bundle.chunk_index.to_string()),
+        Some(intent.chunk_index.to_string()),
+        "settlement intent chunk index matches court bundle",
+    );
+    push_check(
+        &mut checks,
+        "consensus-kind",
+        intent.consensus_kind == bundle.consensus_kind,
+        Some(bundle.consensus_kind.clone()),
+        Some(intent.consensus_kind.clone()),
+        "settlement intent consensus kind matches court bundle",
+    );
+    push_check(
+        &mut checks,
+        "vm-profile",
+        intent.vm_profile == bundle.vm_profile,
+        Some(bundle.vm_profile.clone()),
+        Some(intent.vm_profile.clone()),
+        "settlement intent VM profile matches court bundle",
+    );
+    push_check(
+        &mut checks,
+        "participant-set-hash",
+        intent.participant_set_hash == bundle.participant_set_hash,
+        Some(bundle.participant_set_hash.clone()),
+        Some(intent.participant_set_hash.clone()),
+        "settlement intent participant-set digest matches court bundle",
+    );
+    push_check(
+        &mut checks,
+        "escrow-input-cells-hash",
+        intent.escrow_input_cells_hash == bundle.escrow_input_cells_hash,
+        Some(bundle.escrow_input_cells_hash.clone()),
+        Some(intent.escrow_input_cells_hash.clone()),
+        "settlement intent escrow input-cell digest matches court bundle",
+    );
+    push_check(
+        &mut checks,
+        "session-lineage-commitment",
+        intent.session_lineage_commitment == bundle.session_lineage_commitment,
+        Some(bundle.session_lineage_commitment.clone()),
+        Some(intent.session_lineage_commitment.clone()),
+        "settlement intent carries the session lineage commitment used by settlement authority",
+    );
+    push_check(
+        &mut checks,
+        "state-root-before",
+        intent.state_root_before == bundle.state_root_before,
+        Some(bundle.state_root_before.clone()),
+        Some(intent.state_root_before.clone()),
+        "settlement initial state root matches court bundle state_root_before",
+    );
+    push_check(
+        &mut checks,
+        "final-state-root",
+        intent.final_state_root == bundle.state_root_after,
+        Some(bundle.state_root_after.clone()),
+        Some(intent.final_state_root.clone()),
+        "settlement final state root matches court bundle state_root_after",
+    );
+    let expected_bundle_hash = hex::encode(blake3_32(b"myelin:session-court-bundle-json:v1", &bundle_bytes));
+    push_check(
+        &mut checks,
+        "court-bundle-hash",
+        intent.court_bundle_hash == expected_bundle_hash,
+        Some(expected_bundle_hash),
+        Some(intent.court_bundle_hash.clone()),
+        "settlement intent binds to the exact court bundle JSON bytes",
+    );
+    let expected_da_manifest_hash = hex::encode(blake3_32(b"myelin:session-da-manifest-json:v1", &da_manifest_bytes));
+    push_check(
+        &mut checks,
+        "da-manifest-hash",
+        intent.da_manifest_hash == expected_da_manifest_hash,
+        Some(expected_da_manifest_hash),
+        Some(intent.da_manifest_hash.clone()),
+        "settlement intent binds to the exact DA manifest JSON bytes",
+    );
+    push_check(
+        &mut checks,
+        "da-profile",
+        intent.da_profile == da_manifest.da_profile,
+        Some(da_manifest.da_profile.clone()),
+        Some(intent.da_profile.clone()),
+        "settlement intent DA profile matches DA manifest",
+    );
+    push_check(
+        &mut checks,
+        "da-segment-root",
+        intent.da_segment_root == da_manifest.segment_root,
+        Some(da_manifest.segment_root.clone()),
+        Some(intent.da_segment_root.clone()),
+        "settlement intent DA segment root matches DA manifest",
+    );
+    push_check(
+        &mut checks,
+        "challenge-payload-hash",
+        intent.challenge_payload_hash == bundle.challenge_payload_hash
+            && intent.challenge_payload_hash == da_manifest.challenge_payload_hash,
+        Some(bundle.challenge_payload_hash.clone()),
+        Some(intent.challenge_payload_hash.clone()),
+        "settlement intent challenge hash matches court bundle and DA manifest",
+    );
+
+    let block = bundle.block.to_myelin_block().map_err(|error| CliError::InvalidFixture(format!("session block: {error}")))?;
+    let expected_deadline = block
+        .timestamp_ms
+        .checked_add(intent.challenge_window_ms)
+        .ok_or_else(|| CliError::InvalidFixture("challenge deadline overflow".to_owned()))?;
+    push_check(
+        &mut checks,
+        "challenge-window-nonzero",
+        intent.challenge_window_ms > 0,
+        Some("non-zero".to_owned()),
+        Some(intent.challenge_window_ms.to_string()),
+        "settlement challenge window must be non-zero",
+    );
+    push_check(
+        &mut checks,
+        "challenge-deadline",
+        intent.challenge_deadline_ms == expected_deadline,
+        Some(expected_deadline.to_string()),
+        Some(intent.challenge_deadline_ms.to_string()),
+        "settlement challenge deadline is block timestamp plus challenge window",
+    );
+    let expected_permitted = intent.current_time_ms >= expected_deadline;
+    push_check(
+        &mut checks,
+        "settlement-permitted",
+        intent.settlement_permitted == expected_permitted,
+        Some(expected_permitted.to_string()),
+        Some(intent.settlement_permitted.to_string()),
+        "settlement permission matches challenge-window timing",
+    );
+    push_check(
+        &mut checks,
+        "l1-da-marker",
+        intent.l1_da_published == da_manifest.l1_da_published && !intent.l1_da_published,
+        Some("false".to_owned()),
+        Some(intent.l1_da_published.to_string()),
+        "intent remains explicit that external L1 DA publication is not implemented yet",
+    );
+    push_check(
+        &mut checks,
+        "l1-court-marker",
+        !intent.l1_court_implemented,
+        Some("false".to_owned()),
+        Some(intent.l1_court_implemented.to_string()),
+        "intent remains explicit that the on-chain court script is not implemented yet",
+    );
+
+    let valid = checks.iter().all(|check| check.ok);
+    Ok(SessionSettlementIntentVerificationReport {
+        intent: intent_path.display().to_string(),
+        bundle: bundle_path.display().to_string(),
+        valid,
+        checks,
+    })
+}
+
+fn session_settlement_package(
+    intent_path: PathBuf,
+    bundle_path: PathBuf,
+    da_manifest_path: PathBuf,
+) -> Result<SessionSettlementPackageReport> {
+    let intent_bytes = fs::read(&intent_path)?;
+    let intent = serde_json::from_slice::<SessionSettlementIntentReport>(&intent_bytes)?;
+    let verification = verify_session_settlement_intent(intent_path, bundle_path, da_manifest_path)?;
+    if !verification.valid {
+        return Err(CliError::InvalidFixture("cannot package an invalid session settlement intent".to_owned()));
+    }
+    if !intent.settlement_permitted {
+        return Err(CliError::InvalidFixture("cannot package a settlement before the challenge window elapses".to_owned()));
+    }
+
+    let intent_hash = blake3_32(b"myelin:session-settlement-intent-json:v1", &intent_bytes);
+    let tx = session_settlement_cell_tx(&intent, intent_hash)?;
+    let txid = tx.id();
+    let wtxid = compute_wtxid(&tx);
+    let molecule_transaction = serialize_transaction_molecule(&tx).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let molecule_transaction_hash = blake3_32(b"myelin:session-settlement-molecule-transaction:v1", &molecule_transaction);
+    let ckb_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
+    let settlement_projectable = ckb_projection.ckb_projection_possible && ckb_projection.semantic_profile == "ckb-compatible";
+    let carrier_payload = carrier_payload_hex(&[
+        intent_hash,
+        parse_package_hash_field(&intent.court_bundle_hash, "intent court_bundle_hash")?,
+        parse_package_hash_field(&intent.da_manifest_hash, "intent da_manifest_hash")?,
+        parse_package_hash_field(&intent.challenge_payload_hash, "intent challenge_payload_hash")?,
+        parse_package_hash_field(&intent.final_state_root, "intent final_state_root")?,
+    ]);
+    let carrier_payload_data_hash = carrier_payload_data_hash_hex(&carrier_payload)?;
+    let session_id_bytes = parse_hex_32(&intent.session_id)
+        .ok_or_else(|| CliError::InvalidFixture("settlement intent session_id must be 32-byte hex".to_owned()))?;
+    let participant_set_hash = parse_package_hash_field(&intent.participant_set_hash, "settlement intent participant_set_hash")?;
+    let escrow_input_cells_hash =
+        parse_package_hash_field(&intent.escrow_input_cells_hash, "settlement intent escrow_input_cells_hash")?;
+    let session_lineage_commitment =
+        parse_package_hash_field(&intent.session_lineage_commitment, "settlement intent session_lineage_commitment")?;
+
+    Ok(SessionSettlementPackageReport {
+        schema: "myelin-session-settlement-package-v1".to_owned(),
+        session_id: intent.session_id,
+        chunk_index: intent.chunk_index,
+        consensus_kind: intent.consensus_kind,
+        vm_profile: intent.vm_profile,
+        intent_hash: hex::encode(intent_hash),
+        participant_set_hash: intent.participant_set_hash,
+        escrow_input_cells_hash: intent.escrow_input_cells_hash,
+        session_lineage_commitment: intent.session_lineage_commitment,
+        court_bundle_hash: intent.court_bundle_hash,
+        da_manifest_hash: intent.da_manifest_hash,
+        challenge_payload_hash: intent.challenge_payload_hash,
+        final_state_root: intent.final_state_root,
+        settlement_authority: settlement_authority_requirement(
+            intent_hash,
+            session_id_bytes,
+            participant_set_hash,
+            escrow_input_cells_hash,
+            session_lineage_commitment,
+        ),
+        carrier_payload_kind: "myelin-session-settlement-carrier-v1".to_owned(),
+        carrier_payload,
+        carrier_payload_data_hash,
+        settlement_cell_tx_id: hex::encode(txid),
+        settlement_cell_wtxid: hex::encode(wtxid),
+        molecule_transaction_hex: hex::encode(molecule_transaction),
+        molecule_transaction_hash: hex::encode(molecule_transaction_hash),
+        ckb_projection,
+        settlement_projectable,
+        l1_court_script_implemented: false,
+        notes: vec![
+            "This package is a deterministic CKB-compatible settlement CellTx projection.".to_owned(),
+            "It binds the verified court bundle, sealed DA manifest, and settlement intent; it is not yet the deployed CKB court script."
+                .to_owned(),
+        ],
+    })
+}
+
+fn verify_session_settlement_package(
+    package_path: PathBuf,
+    intent_path: PathBuf,
+    bundle_path: PathBuf,
+    da_manifest_path: PathBuf,
+) -> Result<SessionSettlementPackageVerificationReport> {
+    let package_bytes = fs::read(&package_path)?;
+    let package = serde_json::from_slice::<SessionSettlementPackageReport>(&package_bytes)?;
+    let intent_bytes = fs::read(&intent_path)?;
+    let intent = serde_json::from_slice::<SessionSettlementIntentReport>(&intent_bytes)?;
+    let mut checks = Vec::new();
+
+    let intent_verification = verify_session_settlement_intent(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())?;
+    push_check(
+        &mut checks,
+        "settlement-intent-valid",
+        intent_verification.valid,
+        Some("true".to_owned()),
+        Some(intent_verification.valid.to_string()),
+        "settlement package is based on a valid settlement intent",
+    );
+    push_check(
+        &mut checks,
+        "schema",
+        package.schema == "myelin-session-settlement-package-v1",
+        Some("myelin-session-settlement-package-v1".to_owned()),
+        Some(package.schema.clone()),
+        "settlement package schema is recognised",
+    );
+    push_check(
+        &mut checks,
+        "settlement-permitted",
+        intent.settlement_permitted,
+        Some("true".to_owned()),
+        Some(intent.settlement_permitted.to_string()),
+        "settlement package can only be emitted after challenge expiry",
+    );
+    push_check(
+        &mut checks,
+        "session-id",
+        package.session_id == intent.session_id,
+        Some(intent.session_id.clone()),
+        Some(package.session_id.clone()),
+        "settlement package session id matches intent",
+    );
+    push_check(
+        &mut checks,
+        "chunk-index",
+        package.chunk_index == intent.chunk_index,
+        Some(intent.chunk_index.to_string()),
+        Some(package.chunk_index.to_string()),
+        "settlement package chunk index matches intent",
+    );
+    push_check(
+        &mut checks,
+        "consensus-kind",
+        package.consensus_kind == intent.consensus_kind,
+        Some(intent.consensus_kind.clone()),
+        Some(package.consensus_kind.clone()),
+        "settlement package consensus kind matches intent",
+    );
+    push_check(
+        &mut checks,
+        "vm-profile",
+        package.vm_profile == intent.vm_profile,
+        Some(intent.vm_profile.clone()),
+        Some(package.vm_profile.clone()),
+        "settlement package VM profile matches intent",
+    );
+    let expected_intent_hash = hex::encode(blake3_32(b"myelin:session-settlement-intent-json:v1", &intent_bytes));
+    push_check(
+        &mut checks,
+        "intent-hash",
+        package.intent_hash == expected_intent_hash,
+        Some(expected_intent_hash.clone()),
+        Some(package.intent_hash.clone()),
+        "settlement package binds to the exact settlement intent JSON bytes",
+    );
+    push_check(
+        &mut checks,
+        "participant-set-hash",
+        package.participant_set_hash == intent.participant_set_hash,
+        Some(intent.participant_set_hash.clone()),
+        Some(package.participant_set_hash.clone()),
+        "settlement package participant-set digest matches settlement intent",
+    );
+    push_check(
+        &mut checks,
+        "escrow-input-cells-hash",
+        package.escrow_input_cells_hash == intent.escrow_input_cells_hash,
+        Some(intent.escrow_input_cells_hash.clone()),
+        Some(package.escrow_input_cells_hash.clone()),
+        "settlement package escrow input-cell digest matches settlement intent",
+    );
+    push_check(
+        &mut checks,
+        "session-lineage-commitment",
+        package.session_lineage_commitment == intent.session_lineage_commitment,
+        Some(intent.session_lineage_commitment.clone()),
+        Some(package.session_lineage_commitment.clone()),
+        "settlement package carries the lineage commitment used by final settlement authority",
+    );
+    let expected_intent_hash_bytes =
+        parse_hex_32(&expected_intent_hash).ok_or_else(|| CliError::InvalidFixture("intent_hash must be 32-byte hex".to_owned()))?;
+    let expected_session_id_bytes = parse_hex_32(&intent.session_id)
+        .ok_or_else(|| CliError::InvalidFixture("intent session_id must be 32-byte hex".to_owned()))?;
+    let expected_participant_set_hash = parse_package_hash_field(&intent.participant_set_hash, "intent participant_set_hash")?;
+    let expected_escrow_input_cells_hash =
+        parse_package_hash_field(&intent.escrow_input_cells_hash, "intent escrow_input_cells_hash")?;
+    let expected_session_lineage_commitment =
+        parse_package_hash_field(&intent.session_lineage_commitment, "intent session_lineage_commitment")?;
+    let expected_authority = settlement_authority_requirement(
+        expected_intent_hash_bytes,
+        expected_session_id_bytes,
+        expected_participant_set_hash,
+        expected_escrow_input_cells_hash,
+        expected_session_lineage_commitment,
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-schema",
+        package.settlement_authority.schema == expected_authority.schema,
+        Some(expected_authority.schema.clone()),
+        Some(package.settlement_authority.schema.clone()),
+        "settlement package declares the authority requirement schema used by final L1 settlement",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-data",
+        package.settlement_authority.data == expected_authority.data,
+        Some(expected_authority.data.clone()),
+        Some(package.settlement_authority.data.clone()),
+        "settlement authority input data must equal the full settlement authority lineage payload",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-data-hash",
+        package.settlement_authority.data_hash == expected_authority.data_hash,
+        Some(expected_authority.data_hash.clone()),
+        Some(package.settlement_authority.data_hash.clone()),
+        "settlement package carries the CKB data hash expected for the authority input",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-data-semantics",
+        package.settlement_authority.data_semantics == expected_authority.data_semantics,
+        Some(expected_authority.data_semantics.clone()),
+        Some(package.settlement_authority.data_semantics.clone()),
+        "settlement authority data is explicitly the settlement authority lineage payload",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-session-id",
+        package.settlement_authority.session_id == expected_authority.session_id,
+        Some(expected_authority.session_id.clone()),
+        Some(package.settlement_authority.session_id.clone()),
+        "settlement authority is explicitly tied to the session id that commits participants and escrow cells",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-participant-set-hash",
+        package.settlement_authority.participant_set_hash == expected_authority.participant_set_hash,
+        Some(expected_authority.participant_set_hash.clone()),
+        Some(package.settlement_authority.participant_set_hash.clone()),
+        "settlement authority is explicitly tied to the participant-set digest",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-escrow-input-cells-hash",
+        package.settlement_authority.escrow_input_cells_hash == expected_authority.escrow_input_cells_hash,
+        Some(expected_authority.escrow_input_cells_hash.clone()),
+        Some(package.settlement_authority.escrow_input_cells_hash.clone()),
+        "settlement authority is explicitly tied to the escrow input-cell digest",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-session-lineage-commitment",
+        package.settlement_authority.session_lineage_commitment == expected_authority.session_lineage_commitment,
+        Some(expected_authority.session_lineage_commitment.clone()),
+        Some(package.settlement_authority.session_lineage_commitment.clone()),
+        "settlement authority carries the combined session lineage commitment",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-session-binding",
+        package.settlement_authority.session_binding == expected_authority.session_binding,
+        Some(expected_authority.session_binding.clone()),
+        Some(package.settlement_authority.session_binding.clone()),
+        "settlement authority states the session id binding semantics",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-lineage-commitment-algorithm",
+        package.settlement_authority.session_authority_commitment_algorithm
+            == expected_authority.session_authority_commitment_algorithm,
+        Some(expected_authority.session_authority_commitment_algorithm.clone()),
+        Some(package.settlement_authority.session_authority_commitment_algorithm.clone()),
+        "settlement authority lineage commitment algorithm is recognised",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-lineage-commitment",
+        package.settlement_authority.session_authority_commitment == expected_authority.session_authority_commitment,
+        Some(expected_authority.session_authority_commitment.clone()),
+        Some(package.settlement_authority.session_authority_commitment.clone()),
+        "settlement authority commitment binds the settlement intent hash to session id, participants, and escrow lineage",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-input-index",
+        package.settlement_authority.consumed_input_index == expected_authority.consumed_input_index,
+        Some(expected_authority.consumed_input_index.to_string()),
+        Some(package.settlement_authority.consumed_input_index.to_string()),
+        "final L1 settlement consumes the authority Cell at input index 1",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-lock-binding",
+        package.settlement_authority.required_lock_binding == expected_authority.required_lock_binding,
+        Some(expected_authority.required_lock_binding.clone()),
+        Some(package.settlement_authority.required_lock_binding.clone()),
+        "authority input lock must match the final DA publication lock",
+    );
+    push_check(
+        &mut checks,
+        "court-bundle-hash",
+        package.court_bundle_hash == intent.court_bundle_hash,
+        Some(intent.court_bundle_hash.clone()),
+        Some(package.court_bundle_hash.clone()),
+        "settlement package court bundle hash matches intent",
+    );
+    push_check(
+        &mut checks,
+        "da-manifest-hash",
+        package.da_manifest_hash == intent.da_manifest_hash,
+        Some(intent.da_manifest_hash.clone()),
+        Some(package.da_manifest_hash.clone()),
+        "settlement package DA manifest hash matches intent",
+    );
+    push_check(
+        &mut checks,
+        "challenge-payload-hash",
+        package.challenge_payload_hash == intent.challenge_payload_hash,
+        Some(intent.challenge_payload_hash.clone()),
+        Some(package.challenge_payload_hash.clone()),
+        "settlement package challenge payload hash matches intent",
+    );
+    push_check(
+        &mut checks,
+        "final-state-root",
+        package.final_state_root == intent.final_state_root,
+        Some(intent.final_state_root.clone()),
+        Some(package.final_state_root.clone()),
+        "settlement package final state root matches intent",
+    );
+
+    let molecule_transaction = decode_hex_field(&package.molecule_transaction_hex, "molecule_transaction_hex")?;
+    let expected_molecule_hash = hex::encode(blake3_32(b"myelin:session-settlement-molecule-transaction:v1", &molecule_transaction));
+    push_check(
+        &mut checks,
+        "molecule-transaction-hash",
+        package.molecule_transaction_hash == expected_molecule_hash,
+        Some(expected_molecule_hash),
+        Some(package.molecule_transaction_hash.clone()),
+        "settlement package Molecule transaction hash matches embedded bytes",
+    );
+    let expected_carrier_payload = carrier_payload_hex(&[
+        parse_package_hash_field(&expected_intent_hash, "expected intent_hash")?,
+        parse_package_hash_field(&intent.court_bundle_hash, "intent court_bundle_hash")?,
+        parse_package_hash_field(&intent.da_manifest_hash, "intent da_manifest_hash")?,
+        parse_package_hash_field(&intent.challenge_payload_hash, "intent challenge_payload_hash")?,
+        parse_package_hash_field(&intent.final_state_root, "intent final_state_root")?,
+    ]);
+    let expected_carrier_payload_data_hash = carrier_payload_data_hash_hex(&expected_carrier_payload)?;
+    push_check(
+        &mut checks,
+        "carrier-payload-kind",
+        package.carrier_payload_kind == "myelin-session-settlement-carrier-v1",
+        Some("myelin-session-settlement-carrier-v1".to_owned()),
+        Some(package.carrier_payload_kind.clone()),
+        "settlement package declares the settlement carrier payload type",
+    );
+    push_check(
+        &mut checks,
+        "carrier-payload",
+        package.carrier_payload == expected_carrier_payload,
+        Some(expected_carrier_payload.clone()),
+        Some(package.carrier_payload.clone()),
+        "settlement package exposes the exact compact carrier payload used by the live CKB type script",
+    );
+    push_check(
+        &mut checks,
+        "carrier-payload-data-hash",
+        package.carrier_payload_data_hash == expected_carrier_payload_data_hash,
+        Some(expected_carrier_payload_data_hash),
+        Some(package.carrier_payload_data_hash.clone()),
+        "settlement package exposes the CKB data hash required in carrier type args",
+    );
+    let tx = deserialize_transaction_molecule(&molecule_transaction).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let expected_txid = hex::encode(tx.id());
+    let expected_wtxid = hex::encode(compute_wtxid(&tx));
+    push_check(
+        &mut checks,
+        "settlement-cell-txid",
+        package.settlement_cell_tx_id == expected_txid,
+        Some(expected_txid),
+        Some(package.settlement_cell_tx_id.clone()),
+        "settlement package CellTx id matches embedded transaction",
+    );
+    push_check(
+        &mut checks,
+        "settlement-cell-wtxid",
+        package.settlement_cell_wtxid == expected_wtxid,
+        Some(expected_wtxid),
+        Some(package.settlement_cell_wtxid.clone()),
+        "settlement package CellTx witness id matches embedded transaction",
+    );
+    let expected_tx = session_settlement_cell_tx(&intent, expected_intent_hash_bytes)?;
+    push_check(
+        &mut checks,
+        "settlement-celltx-recomputes",
+        serialize_transaction_molecule(&expected_tx).map_err(|error| CliError::InvalidFixture(error.to_string()))?
+            == molecule_transaction,
+        Some("deterministic settlement CellTx".to_owned()),
+        Some("embedded settlement CellTx".to_owned()),
+        "embedded settlement CellTx recomputes from the intent fields",
+    );
+    let recomputed_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
+    push_check(
+        &mut checks,
+        "projection-possible",
+        package.ckb_projection.ckb_projection_possible == recomputed_projection.ckb_projection_possible
+            && package.settlement_projectable,
+        Some(recomputed_projection.ckb_projection_possible.to_string()),
+        Some(package.ckb_projection.ckb_projection_possible.to_string()),
+        "settlement package projection possibility recomputes from embedded transaction",
+    );
+    push_check(
+        &mut checks,
+        "projection-profile",
+        package.ckb_projection.semantic_profile == recomputed_projection.semantic_profile
+            && package.ckb_projection.semantic_profile == "ckb-compatible",
+        Some(recomputed_projection.semantic_profile),
+        Some(package.ckb_projection.semantic_profile.clone()),
+        "settlement package remains in the CKB-compatible profile",
+    );
+    push_check(
+        &mut checks,
+        "l1-court-script-marker",
+        !package.l1_court_script_implemented,
+        Some("false".to_owned()),
+        Some(package.l1_court_script_implemented.to_string()),
+        "package remains explicit that the deployed CKB court script is not implemented yet",
+    );
+
+    let valid = checks.iter().all(|check| check.ok);
+    Ok(SessionSettlementPackageVerificationReport {
+        package: package_path.display().to_string(),
+        intent: intent_path.display().to_string(),
+        bundle: bundle_path.display().to_string(),
+        da_manifest: da_manifest_path.display().to_string(),
+        valid,
+        checks,
+    })
+}
+
+fn session_submit_settlement_package(
+    package_path: PathBuf,
+    rpc_url: Option<String>,
+    dry_run: bool,
+    outputs_validator: &str,
+    require_accepted: bool,
+) -> Result<SessionSettlementSubmissionReport> {
+    if outputs_validator.trim().is_empty() {
+        return Err(CliError::InvalidFixture("outputs-validator must be non-empty".to_owned()));
+    }
+    if !dry_run && rpc_url.is_none() {
+        return Err(CliError::InvalidFixture("submit-settlement-package requires --rpc-url unless --dry-run is set".to_owned()));
+    }
+
+    let package_bytes = fs::read(&package_path)?;
+    let package = serde_json::from_slice::<SessionSettlementPackageReport>(&package_bytes)?;
+    if package.schema != "myelin-session-settlement-package-v1" {
+        return Err(CliError::InvalidFixture("settlement package schema is not recognised".to_owned()));
+    }
+    if !package.settlement_projectable
+        || !package.ckb_projection.ckb_projection_possible
+        || package.ckb_projection.semantic_profile != "ckb-compatible"
+    {
+        return Err(CliError::InvalidFixture("settlement package is not CKB-projectable".to_owned()));
+    }
+    if package.l1_court_script_implemented {
+        return Err(CliError::InvalidFixture("settlement package already claims an implemented L1 court script".to_owned()));
+    }
+
+    let molecule_transaction = decode_hex_field(&package.molecule_transaction_hex, "molecule_transaction_hex")?;
+    let molecule_transaction_hash =
+        hex::encode(blake3_32(b"myelin:session-settlement-molecule-transaction:v1", &molecule_transaction));
+    if molecule_transaction_hash != package.molecule_transaction_hash {
+        return Err(CliError::InvalidFixture("settlement package Molecule transaction hash mismatch".to_owned()));
+    }
+    let tx = deserialize_transaction_molecule(&molecule_transaction).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let txid = hex::encode(tx.id());
+    if txid != package.settlement_cell_tx_id {
+        return Err(CliError::InvalidFixture("settlement package CellTx id mismatch".to_owned()));
+    }
+    let wtxid = hex::encode(compute_wtxid(&tx));
+    if wtxid != package.settlement_cell_wtxid {
+        return Err(CliError::InvalidFixture("settlement package CellTx witness id mismatch".to_owned()));
+    }
+    let projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
+    if !projection.ckb_projection_possible || projection.semantic_profile != "ckb-compatible" {
+        return Err(CliError::InvalidFixture("embedded settlement transaction no longer projects to CKB".to_owned()));
+    }
+    if projection.ckb_raw_tx_hash != package.ckb_projection.ckb_raw_tx_hash
+        || projection.ckb_wtx_hash != package.ckb_projection.ckb_wtx_hash
+    {
+        return Err(CliError::InvalidFixture("settlement package projection hash mismatch".to_owned()));
+    }
+
+    let ckb_transaction_json = ckb_json_transaction(&tx)?;
+    let request = serde_json::json!({
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "send_transaction",
+        "params": [ckb_transaction_json.clone(), outputs_validator],
+    });
+    let request_bytes = serde_json::to_vec(&request)?;
+    let request_json_hash = hex::encode(blake3_32(b"myelin:session-settlement-rpc-request-json:v1", &request_bytes));
+
+    let mut pre_submit = disabled_live_submission_preflight(&ckb_transaction_json)?;
+    let mut submitted_to_rpc = false;
+    let mut accepted_by_rpc = false;
+    let mut rpc_result = None;
+    let mut rpc_error = None;
+    if !dry_run {
+        submitted_to_rpc = true;
+        let url = rpc_url.as_deref().ok_or_else(|| {
+            CliError::InvalidFixture("submit-settlement-package requires --rpc-url unless --dry-run is set".to_owned())
+        })?;
+        pre_submit = preflight_live_ckb_submission(url, &ckb_transaction_json, "settlement submission")?;
+        let response = post_json_rpc(url, &request)?;
+        rpc_result = response.get("result").cloned();
+        rpc_error = response.get("error").cloned();
+        let expected_tx_hash = projection.ckb_raw_tx_hash.as_deref().and_then(normalize_ckb_tx_hash);
+        accepted_by_rpc = rpc_error.is_none()
+            && rpc_result.as_ref().and_then(Value::as_str).and_then(normalize_ckb_tx_hash).as_deref() == expected_tx_hash.as_deref();
+    }
+
+    if require_accepted && !accepted_by_rpc {
+        return Err(CliError::InvalidFixture("settlement transaction was not accepted by CKB RPC".to_owned()));
+    }
+
+    let notes = if dry_run {
+        vec![
+            "Dry-run only: the CKB send_transaction request was constructed and hashed, but not submitted.".to_owned(),
+            "l1_court_submitted remains false because final L1 court script semantics are not implemented yet.".to_owned(),
+        ]
+    } else if accepted_by_rpc {
+        vec![
+            "CKB RPC accepted the projected settlement package transaction.".to_owned(),
+            "l1_court_submitted remains false because this is not the final L1 court script path.".to_owned(),
+        ]
+    } else if rpc_error.is_none() && rpc_result.is_some() {
+        vec!["CKB RPC returned a tx hash that did not match the projected settlement raw transaction hash.".to_owned()]
+    } else {
+        vec!["CKB RPC returned an error or no result; l1_court_submitted remains false.".to_owned()]
+    };
+
+    Ok(SessionSettlementSubmissionReport {
+        schema: "myelin-session-settlement-submission-v1".to_owned(),
+        package: package_path.display().to_string(),
+        dry_run,
+        rpc_url,
+        outputs_validator: outputs_validator.to_owned(),
+        request_method: "send_transaction".to_owned(),
+        request_json_hash,
+        settlement_cell_tx_id: package.settlement_cell_tx_id,
+        settlement_cell_wtxid: package.settlement_cell_wtxid,
+        molecule_transaction_hash: package.molecule_transaction_hash,
+        ckb_raw_tx_hash: projection.ckb_raw_tx_hash,
+        ckb_wtx_hash: projection.ckb_wtx_hash,
+        ckb_transaction_json,
+        pre_submit,
+        submitted_to_rpc,
+        accepted_by_rpc,
+        l1_court_submitted: false,
+        rpc_result,
+        rpc_error,
+        notes,
+    })
+}
+
+fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Value> {
+    let verifier_role = match args.verifier_role.as_str() {
+        "carrier" | "final-l1-script" => args.verifier_role.as_str(),
+        other => {
+            return Err(CliError::InvalidFixture(format!("unsupported verifier-role: {other}; expected carrier or final-l1-script")))
+        }
+    };
+    let final_l1_script_role = verifier_role == "final-l1-script";
+    let submission_schema = if final_l1_script_role {
+        "myelin-session-ckb-final-script-submission-v1"
+    } else {
+        "myelin-session-ckb-carrier-submission-v1"
+    };
+    if args.outputs_validator.trim().is_empty() {
+        return Err(CliError::InvalidFixture("outputs-validator must be non-empty".to_owned()));
+    }
+    if args.submit && args.rpc_url.is_none() {
+        return Err(CliError::InvalidFixture("carrier-submission requires --rpc-url when --submit is set".to_owned()));
+    }
+    if args.submit && args.accepted_tx_hash.is_some() {
+        return Err(CliError::InvalidFixture(
+            "carrier-submission cannot combine --submit with --accepted-tx-hash; use the RPC result from --submit".to_owned(),
+        ));
+    }
+    let input_tx_hash = normalize_ckb_tx_hash(&args.input_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("input-tx-hash must be 32-byte hex".to_owned()))?;
+    let lock_code_hash = normalize_ckb_tx_hash(&args.lock_code_hash)
+        .ok_or_else(|| CliError::InvalidFixture("lock-code-hash must be 32-byte hex".to_owned()))?;
+    let lock_dep_tx_hash = normalize_ckb_tx_hash(&args.lock_code_dep_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("lock-code-dep-tx-hash must be 32-byte hex".to_owned()))?;
+    let verifier_code_hash = normalize_ckb_tx_hash(&args.verifier_code_hash)
+        .ok_or_else(|| CliError::InvalidFixture("verifier-code-hash must be 32-byte hex".to_owned()))?;
+    let verifier_dep_tx_hash = normalize_ckb_tx_hash(&args.verifier_code_dep_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("verifier-code-dep-tx-hash must be 32-byte hex".to_owned()))?;
+    let accepted_tx_hash = match args.accepted_tx_hash.as_deref() {
+        Some(hash) => Some(
+            normalize_ckb_tx_hash(hash)
+                .ok_or_else(|| CliError::InvalidFixture("accepted-tx-hash must be 32-byte hex when supplied".to_owned()))?,
+        ),
+        None => None,
+    };
+    let evidence_cell_dep_supplied = [
+        args.evidence_cell_dep_tx_hash.is_some(),
+        args.evidence_cell_dep_index.is_some(),
+        args.evidence_cell_dep_capacity_shannons.is_some(),
+    ];
+    if evidence_cell_dep_supplied.iter().any(|present| *present) && !evidence_cell_dep_supplied.iter().all(|present| *present) {
+        return Err(CliError::InvalidFixture(
+            "evidence CellDep requires --evidence-cell-dep-tx-hash, --evidence-cell-dep-index, and --evidence-cell-dep-capacity-shannons"
+                .to_owned(),
+        ));
+    }
+    let evidence_cell_dep = match (
+        args.evidence_cell_dep_tx_hash.as_deref(),
+        args.evidence_cell_dep_index.as_deref(),
+        args.evidence_cell_dep_capacity_shannons,
+    ) {
+        (Some(tx_hash), Some(index), Some(capacity)) => {
+            let tx_hash = normalize_ckb_tx_hash(tx_hash)
+                .ok_or_else(|| CliError::InvalidFixture("evidence-cell-dep-tx-hash must be 32-byte hex".to_owned()))?;
+            let index = ckb_quantity_arg(index, "evidence-cell-dep-index")?;
+            let index_u32 = ckb_quantity_index_arg(&index, "evidence-cell-dep-index")?;
+            let tx_hash_bytes = ckb_byte32_arg(&tx_hash, "evidence-cell-dep-tx-hash")?;
+            Some((tx_hash, index, tx_hash_bytes, index_u32, capacity))
+        }
+        _ => None,
+    };
+    let authority_input_supplied = [
+        args.authority_input_tx_hash.is_some(),
+        args.authority_input_index.is_some(),
+        args.authority_input_capacity_shannons.is_some(),
+    ];
+    if authority_input_supplied.iter().any(|present| *present) && !authority_input_supplied.iter().all(|present| *present) {
+        return Err(CliError::InvalidFixture(
+            "authority input requires --authority-input-tx-hash, --authority-input-index, and --authority-input-capacity-shannons"
+                .to_owned(),
+        ));
+    }
+    let authority_input =
+        match (args.authority_input_tx_hash.as_deref(), args.authority_input_index.as_deref(), args.authority_input_capacity_shannons)
+        {
+            (Some(tx_hash), Some(index), Some(capacity)) => {
+                let tx_hash = normalize_ckb_tx_hash(tx_hash)
+                    .ok_or_else(|| CliError::InvalidFixture("authority-input-tx-hash must be 32-byte hex".to_owned()))?;
+                let index = ckb_quantity_arg(index, "authority-input-index")?;
+                let index_u32 = ckb_quantity_index_arg(&index, "authority-input-index")?;
+                let tx_hash_bytes = ckb_byte32_arg(&tx_hash, "authority-input-tx-hash")?;
+                Some((tx_hash, index, tx_hash_bytes, index_u32, capacity))
+            }
+            _ => None,
+        };
+    let input_index = ckb_quantity_arg(&args.input_index, "input-index")?;
+    let lock_dep_index = ckb_quantity_arg(&args.lock_code_dep_index, "lock-code-dep-index")?;
+    let verifier_dep_index = ckb_quantity_arg(&args.verifier_code_dep_index, "verifier-code-dep-index")?;
+    let input_index_u32 = ckb_quantity_index_arg(&input_index, "input-index")?;
+    let lock_dep_index_u32 = ckb_quantity_index_arg(&lock_dep_index, "lock-code-dep-index")?;
+    let verifier_dep_index_u32 = ckb_quantity_index_arg(&verifier_dep_index, "verifier-code-dep-index")?;
+    let input_tx_hash_bytes = ckb_byte32_arg(&input_tx_hash, "input-tx-hash")?;
+    let lock_code_hash_bytes = ckb_byte32_arg(&lock_code_hash, "lock-code-hash")?;
+    let lock_dep_tx_hash_bytes = ckb_byte32_arg(&lock_dep_tx_hash, "lock-code-dep-tx-hash")?;
+    let verifier_code_hash_bytes = ckb_byte32_arg(&verifier_code_hash, "verifier-code-hash")?;
+    let verifier_dep_tx_hash_bytes = ckb_byte32_arg(&verifier_dep_tx_hash, "verifier-code-dep-tx-hash")?;
+    let lock_hash_type = ckb_script_hash_type_arg(&args.lock_hash_type, "lock-hash-type")?;
+    let lock_args = normalize_hex_arg(&args.lock_args, "lock-args")?;
+    let witness = normalize_hex_arg(&args.witness, "witness")?;
+    let authority_input_capacity = authority_input.as_ref().map(|(_, _, _, _, capacity)| *capacity).unwrap_or(0);
+    let total_input_capacity = args
+        .input_capacity_shannons
+        .checked_add(authority_input_capacity)
+        .ok_or_else(|| CliError::InvalidFixture("input capacity overflow".to_owned()))?;
+    if total_input_capacity <= args.carrier_capacity_shannons {
+        return Err(CliError::InvalidFixture("input capacity must exceed carrier capacity and fee".to_owned()));
+    }
+    let change_capacity = total_input_capacity
+        .checked_sub(args.carrier_capacity_shannons)
+        .and_then(|capacity| capacity.checked_sub(args.fee_shannons))
+        .ok_or_else(|| {
+            CliError::InvalidFixture("input capacity is too small for carrier output, change output, and fee".to_owned())
+        })?;
+    if change_capacity == 0 {
+        return Err(CliError::InvalidFixture("carrier submission requires a non-zero explicit change output".to_owned()));
+    }
+
+    let package_bytes = fs::read(&args.package)?;
+    let package_json = serde_json::from_slice::<Value>(&package_bytes)?;
+    let package_kind = package_json
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("carrier package is missing schema".to_owned()))?;
+    let identity_field = match package_kind {
+        "myelin-session-da-anchor-package-v1" => "da_manifest_hash",
+        "myelin-session-settlement-package-v1" => "intent_hash",
+        other => return Err(CliError::InvalidFixture(format!("unsupported carrier package schema: {other}"))),
+    };
+    if authority_input.is_some() && !(final_l1_script_role && package_kind == "myelin-session-settlement-package-v1") {
+        return Err(CliError::InvalidFixture(
+            "authority input is only supported for final-l1-script settlement submissions".to_owned(),
+        ));
+    }
+    let carrier_payload_kind = package_json
+        .get("carrier_payload_kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("carrier package is missing carrier_payload_kind".to_owned()))?;
+    let carrier_payload = package_json
+        .get("carrier_payload")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("carrier package is missing carrier_payload".to_owned()))?;
+    let carrier_payload_bytes =
+        decode_hex_bytes(carrier_payload).ok_or_else(|| CliError::InvalidFixture("carrier payload is not valid hex".to_owned()))?;
+    if carrier_payload_bytes.len() != 160 {
+        return Err(CliError::InvalidFixture(format!("carrier payload must be 160 bytes, got {} bytes", carrier_payload_bytes.len())));
+    }
+    let carrier_payload = format!("0x{}", hex::encode(&carrier_payload_bytes));
+    let carrier_payload_data_hash = carrier_payload_data_hash_hex(&carrier_payload)?;
+    if package_json.get("carrier_payload_data_hash").and_then(Value::as_str).and_then(normalize_ckb_tx_hash).as_deref()
+        != Some(carrier_payload_data_hash.as_str())
+    {
+        return Err(CliError::InvalidFixture("carrier package data hash does not match carrier payload".to_owned()));
+    }
+    let carrier_identity = format!("0x{}", hex::encode(&carrier_payload_bytes[..32]));
+    let expected_identity = package_json
+        .get(identity_field)
+        .and_then(Value::as_str)
+        .and_then(normalize_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture(format!("carrier package is missing {identity_field}")))?;
+    if carrier_identity != expected_identity {
+        return Err(CliError::InvalidFixture(format!("carrier payload identity does not match package {identity_field}")));
+    }
+    validate_carrier_package_payload_binding(&package_json, package_kind, carrier_payload_kind, &carrier_payload_bytes)?;
+    let expected_settlement_authority = if final_l1_script_role && package_kind == "myelin-session-settlement-package-v1" {
+        Some(validate_settlement_authority_requirement(&package_json)?)
+    } else {
+        None
+    };
+    if expected_settlement_authority.is_some() && authority_input.is_none() {
+        return Err(CliError::InvalidFixture(
+            "final L1 settlement submission requires the package-declared settlement authority input".to_owned(),
+        ));
+    }
+    if expected_settlement_authority.is_some() && evidence_cell_dep.is_none() {
+        return Err(CliError::InvalidFixture(
+            "final L1 settlement submission requires the final DA publication evidence CellDep".to_owned(),
+        ));
+    }
+    let carrier_type_args = if let Some(authority) = expected_settlement_authority.as_ref() {
+        settlement_final_type_args_hex(&carrier_payload_bytes, authority)?
+    } else {
+        carrier_payload_type_args_hex(Some(carrier_payload_kind), &carrier_payload_bytes)
+    };
+    let lock_args_bytes =
+        decode_hex_bytes(&lock_args).ok_or_else(|| CliError::InvalidFixture("lock args are not valid hex".to_owned()))?;
+    let carrier_type_args_bytes = decode_hex_bytes(&carrier_type_args)
+        .ok_or_else(|| CliError::InvalidFixture("carrier type args are not valid hex".to_owned()))?;
+    let witness_bytes = decode_hex_bytes(&witness).ok_or_else(|| CliError::InvalidFixture("witness is not valid hex".to_owned()))?;
+    let carrier_min_capacity_shannons =
+        ckb_output_min_capacity_shannons(lock_args_bytes.len(), Some(carrier_type_args_bytes.len()), carrier_payload_bytes.len())?;
+    let change_min_capacity_shannons = ckb_output_min_capacity_shannons(lock_args_bytes.len(), None, 0)?;
+    if args.carrier_capacity_shannons < carrier_min_capacity_shannons {
+        return Err(CliError::InvalidFixture(format!(
+            "carrier output capacity {} is below CKB occupied-capacity minimum {}",
+            args.carrier_capacity_shannons, carrier_min_capacity_shannons
+        )));
+    }
+    if change_capacity < change_min_capacity_shannons {
+        return Err(CliError::InvalidFixture(format!(
+            "change output capacity {change_capacity} is below CKB occupied-capacity minimum {change_min_capacity_shannons}"
+        )));
+    }
+    let package_commitment = format!("0x{}", hex::encode(myelin_hashes::sha256(&package_bytes)));
+    let carrier_verifier_source_hash =
+        fs::read(&args.verifier_source).ok().map(|source_bytes| format!("0x{}", hex::encode(myelin_hashes::sha256(&source_bytes))));
+    if (args.submit || accepted_tx_hash.is_some()) && carrier_verifier_source_hash.is_none() {
+        return Err(CliError::InvalidFixture(format!(
+            "live {verifier_role} submission requires --verifier-source to point to a readable CellScript source file"
+        )));
+    }
+    let lock_script = Script::new(lock_code_hash_bytes, lock_hash_type, lock_args_bytes.clone());
+    let carrier_type_script = Script::new(verifier_code_hash_bytes, 4, carrier_type_args_bytes);
+    let mut inputs = vec![CellInput::new(OutPoint::new(input_tx_hash_bytes, input_index_u32), 0)];
+    if let Some((_, _, authority_tx_hash_bytes, authority_index_u32, _)) = &authority_input {
+        inputs.push(CellInput::new(OutPoint::new(*authority_tx_hash_bytes, *authority_index_u32), 0));
+    }
+    let mut cell_deps = Vec::new();
+    if let Some((_, _, evidence_tx_hash_bytes, evidence_index_u32, _)) = &evidence_cell_dep {
+        cell_deps.push(CellDep { out_point: OutPoint::new(*evidence_tx_hash_bytes, *evidence_index_u32), dep_type: DepType::Code });
+    }
+    cell_deps.extend([
+        CellDep { out_point: OutPoint::new(lock_dep_tx_hash_bytes, lock_dep_index_u32), dep_type: DepType::Code },
+        CellDep { out_point: OutPoint::new(verifier_dep_tx_hash_bytes, verifier_dep_index_u32), dep_type: DepType::Code },
+    ]);
+    let mut tx = CellTx::new(
+        inputs,
+        cell_deps,
+        vec![
+            CellOutput { capacity: args.carrier_capacity_shannons, lock: lock_script.clone(), type_: Some(carrier_type_script) },
+            CellOutput { capacity: change_capacity, lock: lock_script, type_: None },
+        ],
+        vec![carrier_payload_bytes.clone(), vec![]],
+        vec![witness_bytes],
+    )
+    .map_err(|error| CliError::InvalidFixture(format!("carrier transaction construction failed: {error}")))?;
+    tx.version = 0;
+    let projection = project_cell_tx_to_ckb(&tx);
+    let expected_ckb_raw_tx_hash = projection
+        .ckb_raw_tx_hash
+        .map(|hash| byte32_hex(&hash))
+        .ok_or_else(|| CliError::InvalidFixture("carrier transaction CKB raw hash projection failed".to_owned()))?;
+    let expected_ckb_wtx_hash = projection.ckb_wtx_hash.map(|hash| byte32_hex(&hash));
+    let tx_json = ckb_json_transaction(&tx)?;
+    let request = serde_json::json!({
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "send_transaction",
+        "params": [tx_json.clone(), args.outputs_validator]
+    });
+    let request_bytes = serde_json::to_vec(&request)?;
+    let request_hash_domain = if final_l1_script_role {
+        b"myelin:session-ckb-final-script-rpc-request-json:v1".as_slice()
+    } else {
+        b"myelin:session-ckb-carrier-rpc-request-json:v1".as_slice()
+    };
+    let request_json_hash = hex::encode(blake3_32(request_hash_domain, &request_bytes));
+
+    let recorded_accepted_tx_hash = accepted_tx_hash.clone();
+    let recorded_accepted_tx_hash_matches = recorded_accepted_tx_hash.as_deref() == Some(expected_ckb_raw_tx_hash.as_str());
+    let mut submitted_to_rpc = false;
+    let mut rpc_result = None;
+    let mut rpc_error = None;
+    let mut rpc_accepted_tx_hash = None;
+    let mut pre_submit_context_checked = false;
+    let mut pre_submit_input_live = None;
+    let mut pre_submit_input_capacity_matches = None;
+    let mut pre_submit_input_lock_matches = None;
+    let mut pre_submit_lock_code_dep_live = None;
+    let mut pre_submit_verifier_code_dep_live = None;
+    let mut pre_submit_verifier_code_dep_data_hash_matches = None;
+    let mut pre_submit_evidence_cell_dep_live = None;
+    let mut pre_submit_evidence_cell_dep_capacity_matches = None;
+    let mut pre_submit_evidence_cell_dep_lock_matches = None;
+    let mut pre_submit_authority_input_live = None;
+    let mut pre_submit_authority_input_capacity_matches = None;
+    let mut pre_submit_authority_input_data_hash_matches = None;
+    let mut pre_submit_authority_input_lock_matches = None;
+    if args.submit {
+        submitted_to_rpc = true;
+        let url = args
+            .rpc_url
+            .as_deref()
+            .ok_or_else(|| CliError::InvalidFixture("carrier-submission requires --rpc-url when --submit is set".to_owned()))?;
+        let input_out_point = tx_json
+            .pointer("/inputs/0/previous_output")
+            .ok_or_else(|| CliError::InvalidFixture("carrier transaction is missing input 0 previous_output".to_owned()))?;
+        let lock_dep_position = if evidence_cell_dep.is_some() { 1 } else { 0 };
+        let verifier_dep_position = lock_dep_position + 1;
+        let lock_dep_out_point = tx_json
+            .pointer(&format!("/cell_deps/{lock_dep_position}/out_point"))
+            .ok_or_else(|| CliError::InvalidFixture("carrier transaction is missing lock code dep out_point".to_owned()))?;
+        let verifier_dep_out_point = tx_json
+            .pointer(&format!("/cell_deps/{verifier_dep_position}/out_point"))
+            .ok_or_else(|| CliError::InvalidFixture("carrier transaction is missing verifier code dep out_point".to_owned()))?;
+
+        let input_preflight = check_live_cell_preflight(url, "carrier input", input_out_point)?;
+        pre_submit_input_live = Some(input_preflight.live);
+        if !input_preflight.live {
+            return Err(CliError::InvalidFixture("carrier input is not live; refusing to submit transaction".to_owned()));
+        }
+        let input_capacity_matches = input_preflight.capacity == Some(args.input_capacity_shannons);
+        pre_submit_input_capacity_matches = Some(input_capacity_matches);
+        if !input_capacity_matches {
+            return Err(CliError::InvalidFixture(format!(
+                "carrier input capacity mismatch: declared {} shannons but CKB returned {:?}",
+                args.input_capacity_shannons, input_preflight.capacity
+            )));
+        }
+        let input_lock_matches =
+            input_preflight.lock_code_hash.as_deref().is_some_and(|actual| actual.eq_ignore_ascii_case(&lock_code_hash))
+                && input_preflight.lock_hash_type.as_deref() == Some(args.lock_hash_type.as_str())
+                && input_preflight.lock_args.as_deref().is_some_and(|actual| actual.eq_ignore_ascii_case(&lock_args));
+        pre_submit_input_lock_matches = Some(input_lock_matches);
+        if !input_lock_matches {
+            return Err(CliError::InvalidFixture(format!(
+                "carrier input lock mismatch: declared {lock_code_hash}/{}({lock_args}) but CKB returned {:?}/{:?}({:?})",
+                args.lock_hash_type, input_preflight.lock_code_hash, input_preflight.lock_hash_type, input_preflight.lock_args
+            )));
+        }
+
+        if let Some((_, _, _, _, evidence_capacity)) = &evidence_cell_dep {
+            let evidence_cell_dep_out_point = tx_json
+                .pointer("/cell_deps/0/out_point")
+                .ok_or_else(|| CliError::InvalidFixture("carrier transaction is missing evidence cell dep out_point".to_owned()))?;
+            let evidence_preflight = check_live_cell_preflight(url, "carrier evidence cell dep", evidence_cell_dep_out_point)?;
+            pre_submit_evidence_cell_dep_live = Some(evidence_preflight.live);
+            if !evidence_preflight.live {
+                return Err(CliError::InvalidFixture(
+                    "carrier evidence cell dep is not live; refusing to submit transaction".to_owned(),
+                ));
+            }
+            let evidence_capacity_matches = evidence_preflight.capacity == Some(*evidence_capacity);
+            pre_submit_evidence_cell_dep_capacity_matches = Some(evidence_capacity_matches);
+            if !evidence_capacity_matches {
+                return Err(CliError::InvalidFixture(format!(
+                    "carrier evidence CellDep capacity mismatch: declared {evidence_capacity} shannons but CKB returned {:?}",
+                    evidence_preflight.capacity
+                )));
+            }
+            if expected_settlement_authority.is_some() {
+                let evidence_lock_matches =
+                    evidence_preflight.lock_code_hash.as_deref().is_some_and(|actual| actual.eq_ignore_ascii_case(&lock_code_hash))
+                        && evidence_preflight.lock_hash_type.as_deref() == Some(args.lock_hash_type.as_str())
+                        && evidence_preflight.lock_args.as_deref().is_some_and(|actual| actual.eq_ignore_ascii_case(&lock_args));
+                pre_submit_evidence_cell_dep_lock_matches = Some(evidence_lock_matches);
+                if !evidence_lock_matches {
+                    return Err(CliError::InvalidFixture(format!(
+                        "final DA publication CellDep lock mismatch: declared {lock_code_hash}/{}({lock_args}) but CKB returned {:?}/{:?}({:?})",
+                        args.lock_hash_type,
+                        evidence_preflight.lock_code_hash,
+                        evidence_preflight.lock_hash_type,
+                        evidence_preflight.lock_args
+                    )));
+                }
+            }
+        }
+        if let Some((_, _, _, _, authority_capacity)) = &authority_input {
+            let authority_input_out_point = tx_json.pointer("/inputs/1/previous_output").ok_or_else(|| {
+                CliError::InvalidFixture("carrier transaction is missing authority input previous_output".to_owned())
+            })?;
+            let authority_preflight = check_live_cell_preflight(url, "settlement authority input", authority_input_out_point)?;
+            pre_submit_authority_input_live = Some(authority_preflight.live);
+            if !authority_preflight.live {
+                return Err(CliError::InvalidFixture(
+                    "settlement authority input is not live; refusing to submit transaction".to_owned(),
+                ));
+            }
+            let authority_capacity_matches = authority_preflight.capacity == Some(*authority_capacity);
+            pre_submit_authority_input_capacity_matches = Some(authority_capacity_matches);
+            if !authority_capacity_matches {
+                return Err(CliError::InvalidFixture(format!(
+                    "settlement authority input capacity mismatch: declared {authority_capacity} shannons but CKB returned {:?}",
+                    authority_preflight.capacity
+                )));
+            }
+            if let Some(expected_authority) = &expected_settlement_authority {
+                let authority_data_hash_matches = authority_preflight
+                    .data_hash
+                    .as_deref()
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(&expected_authority.data_hash));
+                pre_submit_authority_input_data_hash_matches = Some(authority_data_hash_matches);
+                if !authority_data_hash_matches {
+                    return Err(CliError::InvalidFixture(format!(
+                        "settlement authority input data hash mismatch: declared {} but CKB returned {:?}",
+                        expected_authority.data_hash, authority_preflight.data_hash
+                    )));
+                }
+                let authority_lock_matches =
+                    authority_preflight.lock_code_hash.as_deref().is_some_and(|actual| actual.eq_ignore_ascii_case(&lock_code_hash))
+                        && authority_preflight.lock_hash_type.as_deref() == Some(args.lock_hash_type.as_str())
+                        && authority_preflight.lock_args.as_deref().is_some_and(|actual| actual.eq_ignore_ascii_case(&lock_args));
+                pre_submit_authority_input_lock_matches = Some(authority_lock_matches);
+                if !authority_lock_matches {
+                    return Err(CliError::InvalidFixture(format!(
+                        "settlement authority input lock mismatch: declared {lock_code_hash}/{}({lock_args}) but CKB returned {:?}/{:?}({:?})",
+                        args.lock_hash_type,
+                        authority_preflight.lock_code_hash,
+                        authority_preflight.lock_hash_type,
+                        authority_preflight.lock_args
+                    )));
+                }
+            }
+        }
+
+        let lock_dep_preflight = check_live_cell_preflight(url, "carrier lock code dep", lock_dep_out_point)?;
+        pre_submit_lock_code_dep_live = Some(lock_dep_preflight.live);
+        if !lock_dep_preflight.live {
+            return Err(CliError::InvalidFixture("carrier lock code dep is not live; refusing to submit transaction".to_owned()));
+        }
+
+        let verifier_dep_preflight = check_live_cell_preflight(url, "carrier verifier code dep", verifier_dep_out_point)?;
+        pre_submit_verifier_code_dep_live = Some(verifier_dep_preflight.live);
+        if !verifier_dep_preflight.live {
+            return Err(CliError::InvalidFixture("carrier verifier code dep is not live; refusing to submit transaction".to_owned()));
+        }
+        let verifier_data_hash_matches =
+            verifier_dep_preflight.data_hash.as_deref().is_some_and(|data_hash| data_hash.eq_ignore_ascii_case(&verifier_code_hash));
+        pre_submit_verifier_code_dep_data_hash_matches = Some(verifier_data_hash_matches);
+        if !verifier_data_hash_matches {
+            return Err(CliError::InvalidFixture(format!(
+                "carrier verifier code dep data hash mismatch: declared {verifier_code_hash} but CKB returned {:?}",
+                verifier_dep_preflight.data_hash
+            )));
+        }
+        pre_submit_context_checked = true;
+
+        let response = post_json_rpc(url, &request)?;
+        rpc_result = response.get("result").cloned();
+        rpc_error = response.get("error").cloned();
+        rpc_accepted_tx_hash = rpc_error
+            .as_ref()
+            .map(|_| None)
+            .unwrap_or_else(|| rpc_result.as_ref().and_then(Value::as_str).and_then(normalize_ckb_tx_hash));
+    }
+    let accepted_by_rpc =
+        args.submit && rpc_accepted_tx_hash.as_deref() == Some(expected_ckb_raw_tx_hash.as_str()) && rpc_error.is_none();
+    if args.require_accepted && !accepted_by_rpc {
+        return Err(CliError::InvalidFixture(
+            "carrier transaction was not accepted by live CKB RPC with the projected raw transaction hash".to_owned(),
+        ));
+    }
+    let notes = if args.submit && accepted_by_rpc && final_l1_script_role {
+        vec![
+            "Live CKB final L1 script transaction accepted by send_transaction.".to_owned(),
+            "The transaction output data carries a compact Myelin package payload enforced by the deployed final verifier artefact."
+                .to_owned(),
+        ]
+    } else if args.submit && accepted_by_rpc {
+        vec![
+            "Live CKB carrier transaction accepted by send_transaction.".to_owned(),
+            "The transaction output data carries a compact Myelin package payload enforced by the deployed CellScript carrier type script."
+                .to_owned(),
+            "This is a deployed carrier verifier, not the final DA or court script.".to_owned(),
+        ]
+    } else if args.submit && rpc_error.is_none() && rpc_accepted_tx_hash.is_some() {
+        vec!["CKB RPC returned a tx hash that did not match the projected carrier raw transaction hash.".to_owned()]
+    } else if args.submit {
+        vec!["CKB RPC returned an error or invalid result; the carrier transaction is not accepted.".to_owned()]
+    } else if recorded_accepted_tx_hash.is_some() && recorded_accepted_tx_hash_matches {
+        vec![
+            "Recorded external accepted tx hash matches the projected carrier raw transaction hash.".to_owned(),
+            "This report did not submit through CKB RPC and is not sufficient for strict live production readiness.".to_owned(),
+        ]
+    } else if recorded_accepted_tx_hash.is_some() {
+        vec!["Recorded external accepted tx hash does not match the projected carrier raw transaction hash.".to_owned()]
+    } else {
+        vec![
+            "Dry-run only: the CKB carrier send_transaction request was constructed and hashed, but not submitted.".to_owned(),
+            "Supplying --accepted-tx-hash records external evidence but does not count as live RPC acceptance.".to_owned(),
+        ]
+    };
+    let carrier_verifier = serde_json::json!({
+        "verifier_role": verifier_role,
+        "cellscript_source": args.verifier_source,
+        "cellscript_source_hash_algorithm": "sha256",
+        "cellscript_source_hash": carrier_verifier_source_hash,
+        "code_hash": verifier_code_hash,
+        "code_dep": {
+            "out_point": { "tx_hash": verifier_dep_tx_hash, "index": verifier_dep_index },
+            "dep_type": "code"
+        },
+        "type_script": {
+            "code_hash": verifier_code_hash,
+            "hash_type": "data2",
+            "args": carrier_type_args
+        }
+    });
+    let l1_da_published = final_l1_script_role && accepted_by_rpc && package_kind == "myelin-session-da-anchor-package-v1";
+    let l1_court_submitted = final_l1_script_role && accepted_by_rpc && package_kind == "myelin-session-settlement-package-v1";
+    let evidence_cell_dep_report = evidence_cell_dep.as_ref().map(|(tx_hash, index, _, _, capacity)| {
+        serde_json::json!({
+            "tx_hash": tx_hash,
+            "index": index,
+            "capacity_shannons": capacity
+        })
+    });
+    let authority_input_report = authority_input.as_ref().map(|(tx_hash, index, _, _, capacity)| {
+        serde_json::json!({
+            "tx_hash": tx_hash,
+            "index": index,
+            "capacity_shannons": capacity,
+            "input_position": 1
+        })
+    });
+    let replay_protection_mode = "authority-cell-single-use-plus-transaction-local-final-script-singleton";
+    let settlement_uniqueness = expected_settlement_authority.as_ref().map(|authority| {
+        let session_id_hash = format!("0x{}", authority.session_id);
+        let settlement_identity_hash = carrier_payload_data_hash.clone();
+        let expected_type_args = format!("{}{}", session_id_hash, settlement_identity_hash.trim_start_matches("0x"));
+        let checked = final_l1_script_role
+            && package_kind == "myelin-session-settlement-package-v1"
+            && carrier_type_args.eq_ignore_ascii_case(&expected_type_args)
+            && authority_input.is_some();
+        serde_json::json!({
+            "settlement_uniqueness_checked": checked,
+            "settlement_identity_hash": settlement_identity_hash,
+            "session_id_hash": session_id_hash,
+            "duplicate_settlement_detected": false,
+            "replay_protection_mode": replay_protection_mode
+        })
+    });
+    let mut report = serde_json::json!({
+        "schema": submission_schema,
+        "package": args.package.display().to_string(),
+        "package_kind": package_kind,
+        "package_commitment_algorithm": "sha256",
+        "package_commitment": package_commitment,
+        "carrier_payload_kind": carrier_payload_kind,
+        "carrier_payload": carrier_payload,
+        "carrier_payload_data_hash": carrier_payload_data_hash,
+        "carrier_identity": carrier_identity,
+        "carrier_type_args": carrier_type_args,
+        "settlement_uniqueness_checked": settlement_uniqueness.as_ref().and_then(|value| value.get("settlement_uniqueness_checked")).and_then(Value::as_bool).unwrap_or(false),
+        "settlement_identity_hash": settlement_uniqueness.as_ref().and_then(|value| value.get("settlement_identity_hash")).cloned(),
+        "session_id_hash": settlement_uniqueness.as_ref().and_then(|value| value.get("session_id_hash")).cloned(),
+        "duplicate_settlement_detected": settlement_uniqueness.as_ref().and_then(|value| value.get("duplicate_settlement_detected")).and_then(Value::as_bool).unwrap_or(false),
+        "replay_protection_mode": settlement_uniqueness.as_ref().and_then(|value| value.get("replay_protection_mode")).cloned(),
+        "input_capacity_shannons": args.input_capacity_shannons,
+        "total_input_capacity_shannons": total_input_capacity,
+        "evidence_cell_dep_present": evidence_cell_dep.is_some(),
+        "evidence_cell_dep": evidence_cell_dep_report,
+        "authority_input_present": authority_input.is_some(),
+        "authority_input": authority_input_report,
+        "settlement_authority_requirement": expected_settlement_authority,
+        "carrier_capacity_shannons": args.carrier_capacity_shannons,
+        "carrier_min_capacity_shannons": carrier_min_capacity_shannons,
+        "change_capacity_shannons": change_capacity,
+        "change_min_capacity_shannons": change_min_capacity_shannons,
+        "fee_shannons": args.fee_shannons,
+        "dry_run": !args.submit && recorded_accepted_tx_hash.is_none(),
+        "rpc_url": args.rpc_url,
+        "submit_mode": args.submit,
+        "outputs_validator": request["params"][1].clone(),
+        "request_method": "send_transaction",
+        "request_json_hash": request_json_hash,
+        "send_transaction_request_json": request,
+        "pre_submit_context_checked": pre_submit_context_checked,
+        "pre_submit_input_live": pre_submit_input_live,
+        "pre_submit_input_capacity_matches": pre_submit_input_capacity_matches,
+        "pre_submit_evidence_cell_dep_live": pre_submit_evidence_cell_dep_live,
+        "pre_submit_evidence_cell_dep_capacity_matches": pre_submit_evidence_cell_dep_capacity_matches,
+        "pre_submit_evidence_cell_dep_lock_matches": pre_submit_evidence_cell_dep_lock_matches,
+        "pre_submit_authority_input_live": pre_submit_authority_input_live,
+        "pre_submit_authority_input_capacity_matches": pre_submit_authority_input_capacity_matches,
+        "pre_submit_authority_input_data_hash_matches": pre_submit_authority_input_data_hash_matches,
+        "pre_submit_authority_input_lock_matches": pre_submit_authority_input_lock_matches,
+        "pre_submit_lock_code_dep_live": pre_submit_lock_code_dep_live,
+        "pre_submit_verifier_code_dep_live": pre_submit_verifier_code_dep_live,
+        "pre_submit_verifier_code_dep_data_hash_matches": pre_submit_verifier_code_dep_data_hash_matches,
+        "ckb_raw_tx_hash": expected_ckb_raw_tx_hash,
+        "ckb_wtx_hash": expected_ckb_wtx_hash,
+        "ckb_transaction_json": tx_json,
+        "submitted_to_rpc": submitted_to_rpc,
+        "accepted_by_rpc": accepted_by_rpc,
+        "rpc_result": rpc_result,
+        "rpc_error": rpc_error,
+        "carrier_verifier": carrier_verifier,
+        "notes": notes
+    });
+    report["verifier_role"] = serde_json::json!(verifier_role);
+    report["live_carrier_committed"] = serde_json::json!(accepted_by_rpc && !final_l1_script_role);
+    report["l1_da_published"] = serde_json::json!(l1_da_published);
+    report["l1_court_submitted"] = serde_json::json!(l1_court_submitted);
+    if final_l1_script_role {
+        report["final_script_verifier"] = report["carrier_verifier"].clone();
+    }
+    report["pre_submit_input_lock_matches"] = serde_json::json!(pre_submit_input_lock_matches);
+    report["recorded_accepted_tx_hash"] = serde_json::json!(recorded_accepted_tx_hash);
+    report["recorded_accepted_tx_hash_matches"] = serde_json::json!(recorded_accepted_tx_hash_matches);
+    Ok(report)
+}
+
+fn verify_session_submission_inclusion(
+    submission_path: PathBuf,
+    rpc_url: &str,
+    min_status: &str,
+) -> Result<SessionSubmissionInclusionReport> {
+    let min_rank = ckb_tx_status_rank(min_status)
+        .ok_or_else(|| CliError::InvalidFixture(format!("unsupported minimum CKB transaction status: {min_status}")))?;
+    if min_rank == 0 {
+        return Err(CliError::InvalidFixture(format!("minimum CKB transaction status is not usable for inclusion: {min_status}")));
+    }
+
+    let submission_bytes = fs::read(&submission_path)?;
+    let submission_json = serde_json::from_slice::<Value>(&submission_bytes)?;
+    let submission_schema = submission_json
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("submission report is missing schema".to_owned()))?
+        .to_owned();
+    let expected_ckb_tx_hash = expected_ckb_tx_hash_from_submission(&submission_json, &submission_schema)?;
+    validate_submission_rpc_result(&submission_json, &expected_ckb_tx_hash)?;
+    let carrier_package_commitment = carrier_package_commitment_from_submission(&submission_json, &submission_schema)?;
+    let carrier_payload_kind = carrier_payload_kind_from_submission(&submission_json, &submission_schema);
+    let carrier_payload =
+        carrier_payload_from_submission(&submission_json, &submission_schema, carrier_package_commitment.as_deref())?;
+    let carrier_expected_type_script = carrier_expected_type_script_from_submission(&submission_json, &submission_schema)?;
+    let final_settlement_authority_for_type_args = if submission_schema == "myelin-session-ckb-final-script-submission-v1"
+        && submission_json.get("package_kind").and_then(Value::as_str) == Some("myelin-session-settlement-package-v1")
+        && submission_json.get("verifier_role").and_then(Value::as_str) == Some("final-l1-script")
+    {
+        let authority = submission_json
+            .get("settlement_authority_requirement")
+            .cloned()
+            .ok_or_else(|| CliError::InvalidFixture("final settlement submission is missing authority requirement".to_owned()))?;
+        Some(serde_json::from_value::<SessionSettlementAuthorityRequirement>(authority)?)
+    } else {
+        None
+    };
+
+    let request = serde_json::json!({
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "get_transaction",
+        "params": [expected_ckb_tx_hash],
+    });
+    let request_bytes = serde_json::to_vec(&request)?;
+    let request_json_hash = hex::encode(blake3_32(b"myelin:session-submission-inclusion-rpc-request-json:v1", &request_bytes));
+    let response = post_json_rpc(rpc_url, &request)?;
+    let rpc_result = response.get("result").cloned();
+    let rpc_error = response.get("error").cloned();
+
+    let tx_status = rpc_result.as_ref().and_then(|result| result.get("tx_status"));
+    let status = tx_status.and_then(|status| status.get("status")).and_then(Value::as_str).map(ToOwned::to_owned);
+    let status_rank = status.as_deref().and_then(ckb_tx_status_rank).unwrap_or(0);
+    let found = rpc_error.is_none() && rpc_result.as_ref().is_some_and(|result| !result.is_null()) && status_rank > 0;
+    let met_min_status = found && status_rank >= min_rank;
+    let committed = status.as_deref() == Some("committed");
+    let block_hash = tx_status.and_then(|status| status.get("block_hash")).and_then(Value::as_str).map(ToOwned::to_owned);
+    let block_number = tx_status.and_then(|status| status.get("block_number")).and_then(Value::as_str).map(ToOwned::to_owned);
+    let carrier_output_data = carrier_payload.as_ref().and_then(|_| {
+        rpc_result
+            .as_ref()
+            .and_then(|result| result.pointer("/transaction/outputs_data/0"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    });
+    let carrier_output_data_matches_carrier_payload = carrier_payload
+        .as_ref()
+        .map(|payload| carrier_output_data.as_deref().is_some_and(|output_data| output_data.eq_ignore_ascii_case(payload)));
+    let carrier_payload_is_package_commitment = carrier_payload.as_deref() == carrier_package_commitment.as_deref();
+    let carrier_output_data_matches_package_commitment = carrier_payload_is_package_commitment
+        .then(|| {
+            carrier_package_commitment.as_ref().map(|commitment| {
+                carrier_output_data.as_deref().is_some_and(|output_data| output_data.eq_ignore_ascii_case(commitment))
+            })
+        })
+        .flatten();
+    let carrier_payload_observed = carrier_output_data_matches_carrier_payload.unwrap_or(true);
+    let carrier_expected_type_script_args = if let Some(payload) = carrier_payload.as_ref() {
+        match decode_hex_bytes(payload) {
+            Some(bytes) if !bytes.is_empty() => Some(if let Some(authority) = final_settlement_authority_for_type_args.as_ref() {
+                settlement_final_type_args_hex(&bytes, authority)?
+            } else {
+                carrier_payload_type_args_hex(carrier_payload_kind.as_deref(), &bytes)
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let carrier_type_script =
+        carrier_payload.as_ref().and_then(|_| rpc_result.as_ref().and_then(|result| result.pointer("/transaction/outputs/0/type")));
+    let carrier_type_script_code_hash =
+        carrier_type_script.and_then(|script| script.get("code_hash")).and_then(Value::as_str).and_then(normalize_ckb_tx_hash);
+    let carrier_type_script_hash_type =
+        carrier_type_script.and_then(|script| script.get("hash_type")).and_then(Value::as_str).map(ToOwned::to_owned);
+    let carrier_type_script_args = carrier_type_script
+        .and_then(|script| script.get("args"))
+        .and_then(Value::as_str)
+        .and_then(|args| decode_hex_bytes(args).map(|bytes| format!("0x{}", hex::encode(bytes))));
+    let carrier_expected_type_script_code_hash = carrier_expected_type_script.as_ref().map(|script| script.code_hash.clone());
+    let carrier_expected_type_script_hash_type = carrier_expected_type_script.as_ref().map(|script| script.hash_type.clone());
+    let carrier_type_script_args_match_carrier_data_hash = carrier_payload.as_ref().map(|_| {
+        carrier_type_script_args.as_deref().is_some_and(|actual| {
+            carrier_expected_type_script_args.as_deref().is_some_and(|expected| actual.eq_ignore_ascii_case(expected))
+        })
+    });
+    let carrier_type_script_args_match_package_data_hash =
+        carrier_payload_is_package_commitment.then_some(carrier_type_script_args_match_carrier_data_hash).flatten();
+    let carrier_type_script_identity_matches_submission = carrier_payload.as_ref().map(|_| {
+        carrier_expected_type_script.as_ref().is_some_and(|expected| {
+            carrier_type_script_code_hash.as_deref().is_some_and(|actual| actual.eq_ignore_ascii_case(&expected.code_hash))
+                && carrier_type_script_hash_type.as_deref() == Some(expected.hash_type.as_str())
+                && carrier_type_script_args.as_deref().is_some_and(|actual| actual.eq_ignore_ascii_case(&expected.args))
+        })
+    });
+    let carrier_type_script_observed = carrier_type_script_args_match_carrier_data_hash.unwrap_or(true)
+        && carrier_type_script_identity_matches_submission.unwrap_or(true);
+    let live_l1_observed = committed
+        && block_hash.as_deref().is_some_and(|hash| hash.starts_with("0x") && hash.len() == 66)
+        && carrier_payload_observed
+        && carrier_type_script_observed;
+
+    let mut notes = Vec::new();
+    if live_l1_observed {
+        notes.push("CKB RPC reports the transaction as committed with a block hash; live L1 inclusion is observed.".to_owned());
+    } else if met_min_status {
+        notes.push("CKB RPC reports the transaction at or above the requested status, but not committed with complete inclusion evidence yet.".to_owned());
+    } else {
+        notes.push("CKB RPC did not report the transaction at the requested minimum status.".to_owned());
+    }
+    if let Some(false) = carrier_output_data_matches_package_commitment {
+        notes.push("Carrier transaction output data does not match the expected Myelin package commitment.".to_owned());
+    }
+    if let Some(false) = carrier_output_data_matches_carrier_payload {
+        notes.push("Carrier transaction output data does not match the expected Myelin carrier payload.".to_owned());
+    }
+    if carrier_payload.is_some() && carrier_output_data.is_none() {
+        notes.push("Carrier submission expected a payload, but CKB get_transaction did not return outputs_data[0].".to_owned());
+    }
+    if let Some(false) = carrier_type_script_args_match_package_data_hash {
+        notes.push("Carrier transaction type args do not match the CKB data hash of the package commitment.".to_owned());
+    }
+    if let Some(false) = carrier_type_script_args_match_carrier_data_hash {
+        notes.push("Carrier transaction type args do not match the CKB data hash of the carrier payload.".to_owned());
+    }
+    if let Some(false) = carrier_type_script_identity_matches_submission {
+        notes.push("Carrier transaction type script does not match the verifier type script declared by the submission.".to_owned());
+    }
+    if carrier_payload.is_some() && carrier_type_script_args.is_none() {
+        notes.push(
+            "Carrier submission expected a payload-bound type script, but CKB get_transaction did not return outputs[0].type.args."
+                .to_owned(),
+        );
+    }
+    if carrier_payload.is_some() && carrier_expected_type_script.is_none() {
+        notes.push("Carrier submission expected a payload-bound type script, but the submission did not declare carrier_verifier.type_script.".to_owned());
+    }
+
+    Ok(SessionSubmissionInclusionReport {
+        schema: "myelin-session-submission-inclusion-v1".to_owned(),
+        submission: submission_path.display().to_string(),
+        submission_schema,
+        rpc_url: rpc_url.to_owned(),
+        expected_ckb_tx_hash,
+        min_status: min_status.to_owned(),
+        request_method: "get_transaction".to_owned(),
+        request_json_hash,
+        found,
+        status,
+        block_hash,
+        block_number,
+        met_min_status,
+        committed,
+        live_l1_observed,
+        carrier_package_commitment,
+        carrier_payload_kind,
+        carrier_payload,
+        carrier_output_data,
+        carrier_output_data_matches_carrier_payload,
+        carrier_output_data_matches_package_commitment,
+        carrier_type_script_code_hash,
+        carrier_type_script_hash_type,
+        carrier_type_script_args,
+        carrier_expected_type_script_code_hash,
+        carrier_expected_type_script_hash_type,
+        carrier_expected_type_script_args,
+        carrier_type_script_identity_matches_submission,
+        carrier_type_script_args_match_carrier_data_hash,
+        carrier_type_script_args_match_package_data_hash,
+        rpc_result,
+        rpc_error,
+        notes,
+    })
+}
+
+fn verify_session_submission_finality(
+    inclusion_path: PathBuf,
+    rpc_url: &str,
+    min_confirmations: u64,
+) -> Result<SessionSubmissionFinalityReport> {
+    let inclusion_bytes = fs::read(&inclusion_path)?;
+    let inclusion = serde_json::from_slice::<SessionSubmissionInclusionReport>(&inclusion_bytes)?;
+    if inclusion.schema != "myelin-session-submission-inclusion-v1" {
+        return Err(CliError::InvalidFixture(format!("unsupported inclusion schema for finality verification: {}", inclusion.schema)));
+    }
+    let expected_ckb_tx_hash = normalize_ckb_tx_hash(&inclusion.expected_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("inclusion report is missing a valid expected CKB tx hash".to_owned()))?;
+
+    let request = serde_json::json!({
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "get_tip_header",
+        "params": [],
+    });
+    let request_bytes = serde_json::to_vec(&request)?;
+    let request_json_hash = hex::encode(blake3_32(b"myelin:session-submission-finality-rpc-request-json:v1", &request_bytes));
+    let response = post_json_rpc(rpc_url, &request)?;
+    let rpc_result = response.get("result").cloned();
+    let rpc_error = response.get("error").cloned();
+
+    let committed_block_hash = inclusion.block_hash.clone();
+    let committed_block_number = inclusion.block_number.clone();
+    let tip_block_number = rpc_result.as_ref().and_then(ckb_tip_number_from_response).map(ToOwned::to_owned);
+
+    let committed_number =
+        committed_block_number.as_deref().map(|number| parse_ckb_quantity(number, "inclusion block_number")).transpose()?;
+    let tip_number = tip_block_number.as_deref().map(|number| parse_ckb_quantity(number, "tip block number")).transpose()?;
+    let confirmations = match (committed_number, tip_number) {
+        (Some(committed), Some(tip)) if tip >= committed => Some(tip - committed + 1),
+        (Some(_), Some(_)) => Some(0),
+        _ => None,
+    };
+    let committed_hash_valid = committed_block_hash.as_deref().is_some_and(|hash| hash.starts_with("0x") && hash.len() == 66);
+    let has_committed_evidence =
+        inclusion.live_l1_observed && inclusion.committed && committed_hash_valid && committed_number.is_some();
+    let finality_confirmed =
+        rpc_error.is_none() && has_committed_evidence && confirmations.is_some_and(|depth| depth >= min_confirmations);
+    let mut notes = Vec::new();
+    if finality_confirmed {
+        notes.push(format!("CKB tip is at least {min_confirmations} confirmations beyond the committed submission block."));
+    } else {
+        if !inclusion.live_l1_observed || !inclusion.committed {
+            notes.push("Inclusion report does not prove a committed CKB transaction.".to_owned());
+        }
+        if !committed_hash_valid {
+            notes.push("Inclusion report does not contain a valid committed block hash.".to_owned());
+        }
+        if committed_number.is_none() {
+            notes.push(
+                "Inclusion report does not contain a committed block number, so confirmation depth cannot be computed.".to_owned(),
+            );
+        }
+        if tip_number.is_none() {
+            notes.push("CKB get_tip_header did not return a parseable tip block number.".to_owned());
+        }
+        if let Some(depth) = confirmations {
+            if depth < min_confirmations {
+                notes.push(format!("Observed confirmation depth is {depth}, below the required {min_confirmations} confirmations."));
+            }
+        }
+        if rpc_error.is_some() {
+            notes.push("CKB RPC returned an error while querying get_tip_header.".to_owned());
+        }
+    }
+
+    Ok(SessionSubmissionFinalityReport {
+        schema: "myelin-session-submission-finality-v1".to_owned(),
+        inclusion: inclusion_path.display().to_string(),
+        rpc_url: rpc_url.to_owned(),
+        expected_ckb_tx_hash,
+        committed_block_hash,
+        committed_block_number,
+        tip_block_number,
+        confirmations,
+        min_confirmations,
+        finality_confirmed,
+        reorg_risk_bounded: finality_confirmed,
+        request_method: "get_tip_header".to_owned(),
+        request_json_hash,
+        rpc_result,
+        rpc_error,
+        notes,
+    })
+}
+
+fn verify_session_submission_stability(inclusion_path: PathBuf, rpc_url: &str) -> Result<SessionSubmissionStabilityReport> {
+    let inclusion_bytes = fs::read(&inclusion_path)?;
+    let inclusion = serde_json::from_slice::<SessionSubmissionInclusionReport>(&inclusion_bytes)?;
+    if inclusion.schema != "myelin-session-submission-inclusion-v1" {
+        return Err(CliError::InvalidFixture(format!(
+            "unsupported inclusion schema for stability verification: {}",
+            inclusion.schema
+        )));
+    }
+    let expected_ckb_tx_hash = normalize_ckb_tx_hash(&inclusion.expected_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("inclusion report is missing a valid expected CKB tx hash".to_owned()))?;
+
+    let request = serde_json::json!({
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "get_transaction",
+        "params": [expected_ckb_tx_hash],
+    });
+    let request_bytes = serde_json::to_vec(&request)?;
+    let request_json_hash = hex::encode(blake3_32(b"myelin:session-submission-stability-rpc-request-json:v1", &request_bytes));
+    let response = post_json_rpc(rpc_url, &request)?;
+    let rpc_result = response.get("result").cloned();
+    let rpc_error = response.get("error").cloned();
+    let tx_status = rpc_result.as_ref().and_then(|result| result.get("tx_status"));
+    let observed_status = tx_status.and_then(|status| status.get("status")).and_then(Value::as_str).map(ToOwned::to_owned);
+    let observed_block_hash = tx_status.and_then(|status| status.get("block_hash")).and_then(Value::as_str).map(ToOwned::to_owned);
+    let observed_block_number = tx_status.and_then(|status| status.get("block_number")).and_then(Value::as_str).map(ToOwned::to_owned);
+
+    let expected_committed = inclusion.committed && inclusion.status.as_deref() == Some("committed");
+    let observed_committed = observed_status.as_deref() == Some("committed");
+    let block_hash_stable = inclusion.block_hash == observed_block_hash;
+    let block_number_stable = inclusion.block_number == observed_block_number;
+    let stable_block_identity =
+        rpc_error.is_none() && expected_committed && observed_committed && block_hash_stable && block_number_stable;
+    let missing_or_uncommitted = rpc_error.is_some() || !observed_committed;
+    let reorg_detected =
+        rpc_error.is_none() && expected_committed && observed_committed && (!block_hash_stable || !block_number_stable);
+
+    let mut notes = Vec::new();
+    if stable_block_identity {
+        notes.push("CKB get_transaction still reports the transaction committed at the original block hash and number.".to_owned());
+    } else {
+        if !expected_committed {
+            notes.push("The source inclusion report was not a committed inclusion claim.".to_owned());
+        }
+        if missing_or_uncommitted {
+            notes.push("CKB no longer reports the transaction as committed.".to_owned());
+        }
+        if reorg_detected {
+            notes.push(
+                "CKB reports the transaction committed at a different block hash or block number than the source inclusion."
+                    .to_owned(),
+            );
+        }
+    }
+
+    Ok(SessionSubmissionStabilityReport {
+        schema: "myelin-session-submission-stability-v1".to_owned(),
+        inclusion: inclusion_path.display().to_string(),
+        rpc_url: rpc_url.to_owned(),
+        expected_ckb_tx_hash,
+        expected_status: inclusion.status,
+        expected_block_hash: inclusion.block_hash,
+        expected_block_number: inclusion.block_number,
+        observed_status,
+        observed_block_hash,
+        observed_block_number,
+        request_method: "get_transaction".to_owned(),
+        request_json_hash,
+        stable_block_identity,
+        reorg_detected,
+        missing_or_uncommitted,
+        rpc_result,
+        rpc_error,
+        notes,
+    })
+}
+
+fn verify_session_submission_context(submission_path: PathBuf, rpc_url: &str) -> Result<SessionSubmissionContextReport> {
+    let submission_bytes = fs::read(&submission_path)?;
+    let submission_json = serde_json::from_slice::<Value>(&submission_bytes)?;
+    let submission_schema = submission_json
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("submission report is missing schema".to_owned()))?
+        .to_owned();
+    let expected_ckb_tx_hash = expected_ckb_tx_hash_from_submission(&submission_json, &submission_schema)?;
+    validate_submission_rpc_result(&submission_json, &expected_ckb_tx_hash)?;
+    let carrier_expected_code_dep = carrier_expected_code_dep_from_submission(&submission_json, &submission_schema)?;
+    let tx_json = submission_json
+        .get("ckb_transaction_json")
+        .ok_or_else(|| CliError::InvalidFixture("submission report is missing ckb_transaction_json".to_owned()))?;
+    let inputs = tx_json
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::InvalidFixture("ckb_transaction_json.inputs must be an array".to_owned()))?;
+    let cell_deps = tx_json
+        .get("cell_deps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::InvalidFixture("ckb_transaction_json.cell_deps must be an array".to_owned()))?;
+
+    let mut checks = Vec::with_capacity(inputs.len() + cell_deps.len());
+    for (index, input) in inputs.iter().enumerate() {
+        let out_point =
+            input.get("previous_output").ok_or_else(|| CliError::InvalidFixture(format!("input {index} missing previous_output")))?;
+        checks.push(check_live_cell(rpc_url, "input", index, out_point)?);
+    }
+    for (index, dep) in cell_deps.iter().enumerate() {
+        let out_point = dep.get("out_point").ok_or_else(|| CliError::InvalidFixture(format!("cell_dep {index} missing out_point")))?;
+        checks.push(check_live_cell(rpc_url, "cell_dep", index, out_point)?);
+    }
+
+    let live_input_count = checks.iter().filter(|check| check.role == "input" && check.live).count();
+    let live_cell_dep_count = checks.iter().filter(|check| check.role == "cell_dep" && check.live).count();
+    let all_inputs_live = live_input_count == inputs.len();
+    let all_cell_deps_live = live_cell_dep_count == cell_deps.len();
+    let carrier_verifier_code_hash = carrier_expected_code_dep.as_ref().map(|dep| dep.code_hash.clone());
+    let carrier_verifier_code_dep_key = carrier_expected_code_dep.as_ref().map(|dep| dep.out_point_key.clone());
+    let carrier_verifier_code_dep_data_hash = carrier_expected_code_dep.as_ref().and_then(|dep| {
+        checks
+            .iter()
+            .find(|check| check.role == "cell_dep" && check.out_point_key == dep.out_point_key)
+            .and_then(|check| check.data_hash.clone())
+    });
+    let carrier_verifier_code_dep_data_hash_matches = if compact_payload_submission_schema(&submission_schema) {
+        Some(carrier_expected_code_dep.as_ref().is_some_and(|dep| {
+            carrier_verifier_code_dep_data_hash.as_deref().is_some_and(|data_hash| data_hash.eq_ignore_ascii_case(&dep.code_hash))
+        }))
+    } else {
+        None
+    };
+    let carrier_verifier_code_dep_ready = carrier_verifier_code_dep_data_hash_matches.unwrap_or(true);
+    let ready_for_ckb_submission = all_inputs_live && all_cell_deps_live && carrier_verifier_code_dep_ready;
+    let mut notes = Vec::new();
+    if all_inputs_live && all_cell_deps_live {
+        notes.push("All transaction inputs and cell deps resolved as live through CKB get_live_cell.".to_owned());
+    } else {
+        notes.push("At least one transaction input or cell dep did not resolve as live through CKB get_live_cell.".to_owned());
+    }
+    if let Some(true) = carrier_verifier_code_dep_data_hash_matches {
+        notes.push("Carrier verifier code dep data hash matches the declared verifier code hash.".to_owned());
+    } else if let Some(false) = carrier_verifier_code_dep_data_hash_matches {
+        notes.push("Carrier verifier code dep data hash does not match the declared verifier code hash.".to_owned());
+    }
+
+    Ok(SessionSubmissionContextReport {
+        schema: "myelin-session-submission-context-v1".to_owned(),
+        submission: submission_path.display().to_string(),
+        submission_schema,
+        rpc_url: rpc_url.to_owned(),
+        expected_ckb_tx_hash,
+        request_method: "get_live_cell".to_owned(),
+        input_count: inputs.len(),
+        cell_dep_count: cell_deps.len(),
+        live_input_count,
+        live_cell_dep_count,
+        all_inputs_live,
+        all_cell_deps_live,
+        carrier_verifier_code_hash,
+        carrier_verifier_code_dep_key,
+        carrier_verifier_code_dep_data_hash,
+        carrier_verifier_code_dep_data_hash_matches,
+        ready_for_ckb_submission,
+        checks,
+        notes,
+    })
+}
+
+fn check_live_cell(rpc_url: &str, role: &str, index: usize, out_point: &Value) -> Result<SessionSubmissionContextCheck> {
+    validate_ckb_out_point_json(out_point)?;
+    let request = serde_json::json!({
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "get_live_cell",
+        "params": [out_point, true],
+    });
+    let request_bytes = serde_json::to_vec(&request)?;
+    let request_json_hash = hex::encode(blake3_32(b"myelin:session-submission-context-rpc-request-json:v1", &request_bytes));
+    let response = post_json_rpc(rpc_url, &request)?;
+    let rpc_result = response.get("result");
+    let rpc_error = response.get("error").cloned();
+    let status = rpc_result.and_then(|result| result.get("status")).and_then(Value::as_str).map(ToOwned::to_owned);
+    let cell_present = rpc_result.and_then(|result| result.get("cell")).is_some_and(|cell| !cell.is_null());
+    let data_hash =
+        rpc_result.and_then(|result| result.pointer("/cell/data/hash")).and_then(Value::as_str).and_then(normalize_ckb_tx_hash);
+    let live = rpc_error.is_none() && status.as_deref() == Some("live") && cell_present;
+    Ok(SessionSubmissionContextCheck {
+        role: role.to_owned(),
+        index,
+        out_point: out_point.clone(),
+        out_point_key: ckb_out_point_key(out_point)?,
+        request_json_hash,
+        status,
+        live,
+        cell_present,
+        data_hash,
+        rpc_error,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct LiveCellPreflight {
+    live: bool,
+    capacity: Option<u64>,
+    data_hash: Option<String>,
+    lock_code_hash: Option<String>,
+    lock_hash_type: Option<String>,
+    lock_args: Option<String>,
+}
+
+fn check_live_cell_preflight(rpc_url: &str, label: &str, out_point: &Value) -> Result<LiveCellPreflight> {
+    validate_ckb_out_point_json(out_point)?;
+    let request = serde_json::json!({
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "get_live_cell",
+        "params": [out_point, true],
+    });
+    let response = post_json_rpc(rpc_url, &request)?;
+    if let Some(error) = response.get("error") {
+        return Err(CliError::InvalidFixture(format!("{label} pre-submit get_live_cell returned RPC error: {error}")));
+    }
+    let result = response
+        .get("result")
+        .ok_or_else(|| CliError::InvalidFixture(format!("{label} pre-submit get_live_cell response is missing result")))?;
+    let status = result.get("status").and_then(Value::as_str);
+    let cell = result.get("cell").filter(|cell| !cell.is_null());
+    let capacity = cell
+        .and_then(|cell| cell.pointer("/output/capacity"))
+        .and_then(Value::as_str)
+        .map(|capacity| parse_ckb_quantity(capacity, &format!("{label} capacity")))
+        .transpose()?;
+    let data_hash = cell.and_then(|cell| cell.pointer("/data/hash")).and_then(Value::as_str).and_then(normalize_ckb_tx_hash);
+    let lock = cell.and_then(|cell| cell.pointer("/output/lock"));
+    let lock_code_hash = lock.and_then(|lock| lock.get("code_hash")).and_then(Value::as_str).and_then(normalize_ckb_tx_hash);
+    let lock_hash_type = lock.and_then(|lock| lock.get("hash_type")).and_then(Value::as_str).map(ToOwned::to_owned);
+    let lock_args = lock
+        .and_then(|lock| lock.get("args"))
+        .and_then(Value::as_str)
+        .map(|args| normalize_hex_arg(args, &format!("{label} lock args")))
+        .transpose()?;
+    Ok(LiveCellPreflight {
+        live: status == Some("live") && cell.is_some(),
+        capacity,
+        data_hash,
+        lock_code_hash,
+        lock_hash_type,
+        lock_args,
+    })
+}
+
+fn disabled_live_submission_preflight(tx_json: &Value) -> Result<SessionLiveSubmissionPreflight> {
+    let inputs = tx_json
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::InvalidFixture("ckb_transaction_json.inputs must be an array".to_owned()))?;
+    let cell_deps = tx_json
+        .get("cell_deps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::InvalidFixture("ckb_transaction_json.cell_deps must be an array".to_owned()))?;
+    let output_capacity = ckb_json_output_capacity_sum(tx_json)?;
+    Ok(SessionLiveSubmissionPreflight {
+        checked: false,
+        input_count: inputs.len(),
+        cell_dep_count: cell_deps.len(),
+        all_inputs_live: None,
+        all_cell_deps_live: None,
+        input_capacity_shannons: None,
+        output_capacity_shannons: Some(output_capacity),
+        capacity_balanced: None,
+        implied_fee_shannons: None,
+    })
+}
+
+fn preflight_live_ckb_submission(rpc_url: &str, tx_json: &Value, label: &str) -> Result<SessionLiveSubmissionPreflight> {
+    let inputs = tx_json
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::InvalidFixture("ckb_transaction_json.inputs must be an array".to_owned()))?;
+    let cell_deps = tx_json
+        .get("cell_deps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::InvalidFixture("ckb_transaction_json.cell_deps must be an array".to_owned()))?;
+    let output_capacity = ckb_json_output_capacity_sum(tx_json)?;
+
+    let mut input_capacity = 0u64;
+    for (index, input) in inputs.iter().enumerate() {
+        let out_point = input
+            .get("previous_output")
+            .ok_or_else(|| CliError::InvalidFixture(format!("{label} input {index} missing previous_output")))?;
+        let check = check_live_cell_preflight(rpc_url, &format!("{label} input {index}"), out_point)?;
+        if !check.live {
+            return Err(CliError::InvalidFixture(format!("{label} input {index} is not live; refusing to submit transaction")));
+        }
+        let capacity =
+            check.capacity.ok_or_else(|| CliError::InvalidFixture(format!("{label} input {index} live cell is missing capacity")))?;
+        input_capacity = input_capacity
+            .checked_add(capacity)
+            .ok_or_else(|| CliError::InvalidFixture(format!("{label} input capacity overflow")))?;
+    }
+
+    for (index, dep) in cell_deps.iter().enumerate() {
+        let out_point =
+            dep.get("out_point").ok_or_else(|| CliError::InvalidFixture(format!("{label} cell_dep {index} missing out_point")))?;
+        let check = check_live_cell_preflight(rpc_url, &format!("{label} cell_dep {index}"), out_point)?;
+        if !check.live {
+            return Err(CliError::InvalidFixture(format!("{label} cell_dep {index} is not live; refusing to submit transaction")));
+        }
+    }
+
+    let implied_fee = input_capacity.checked_sub(output_capacity);
+    let capacity_balanced = implied_fee.is_some();
+    if !capacity_balanced {
+        return Err(CliError::InvalidFixture(format!(
+            "{label} live input capacity {input_capacity} is below output capacity {output_capacity}; refusing to submit transaction"
+        )));
+    }
+
+    Ok(SessionLiveSubmissionPreflight {
+        checked: true,
+        input_count: inputs.len(),
+        cell_dep_count: cell_deps.len(),
+        all_inputs_live: Some(true),
+        all_cell_deps_live: Some(true),
+        input_capacity_shannons: Some(input_capacity),
+        output_capacity_shannons: Some(output_capacity),
+        capacity_balanced: Some(capacity_balanced),
+        implied_fee_shannons: implied_fee,
+    })
+}
+
+fn ckb_json_output_capacity_sum(tx_json: &Value) -> Result<u64> {
+    let outputs = tx_json
+        .get("outputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::InvalidFixture("ckb_transaction_json.outputs must be an array".to_owned()))?;
+    let mut output_capacity = 0u64;
+    for (index, output) in outputs.iter().enumerate() {
+        let capacity = output
+            .get("capacity")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::InvalidFixture(format!("output {index} missing capacity")))?;
+        output_capacity = output_capacity
+            .checked_add(parse_ckb_quantity(capacity, &format!("output {index} capacity"))?)
+            .ok_or_else(|| CliError::InvalidFixture("output capacity overflow".to_owned()))?;
+    }
+    Ok(output_capacity)
+}
+
+fn verify_session_submission_economics(
+    submission_path: PathBuf,
+    rpc_url: &str,
+    min_fee_shannons: u64,
+    min_fee_rate_shannons_per_kb: u64,
+    max_fee_shannons: Option<u64>,
+) -> Result<SessionSubmissionEconomicsReport> {
+    let submission_bytes = fs::read(&submission_path)?;
+    let submission_json = serde_json::from_slice::<Value>(&submission_bytes)?;
+    let submission_schema = submission_json
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("submission report is missing schema".to_owned()))?
+        .to_owned();
+    let expected_ckb_tx_hash = expected_ckb_tx_hash_from_submission(&submission_json, &submission_schema)?;
+    validate_submission_rpc_result(&submission_json, &expected_ckb_tx_hash)?;
+    let tx_json = submission_json
+        .get("ckb_transaction_json")
+        .ok_or_else(|| CliError::InvalidFixture("submission report is missing ckb_transaction_json".to_owned()))?;
+    let transaction_size_bytes = serde_json::to_vec(tx_json)?.len();
+    let fee_rate_required = required_fee_for_rate(transaction_size_bytes, min_fee_rate_shannons_per_kb)?;
+    let required_fee_shannons = min_fee_shannons.max(fee_rate_required);
+    let inputs = tx_json
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::InvalidFixture("ckb_transaction_json.inputs must be an array".to_owned()))?;
+    let outputs = tx_json
+        .get("outputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::InvalidFixture("ckb_transaction_json.outputs must be an array".to_owned()))?;
+    let outputs_data = tx_json
+        .get("outputs_data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::InvalidFixture("ckb_transaction_json.outputs_data must be an array".to_owned()))?;
+
+    let mut checks = Vec::with_capacity(inputs.len());
+    for (index, input) in inputs.iter().enumerate() {
+        let out_point =
+            input.get("previous_output").ok_or_else(|| CliError::InvalidFixture(format!("input {index} missing previous_output")))?;
+        checks.push(check_economic_input_cell(rpc_url, index, out_point)?);
+    }
+
+    let mut total_output_capacity = 0u64;
+    let mut output_checks = Vec::with_capacity(outputs.len());
+    let mut data_bearing_output_count = 0usize;
+    let mut empty_data_output_count = 0usize;
+    let mut explicit_change_output_count = 0usize;
+    let mut explicit_change_capacity = 0u64;
+    for (index, output) in outputs.iter().enumerate() {
+        let capacity = output
+            .get("capacity")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::InvalidFixture(format!("output {index} missing capacity")))?;
+        let capacity = parse_ckb_quantity(capacity, &format!("output {index} capacity"))?;
+        total_output_capacity = total_output_capacity
+            .checked_add(capacity)
+            .ok_or_else(|| CliError::InvalidFixture("total output capacity overflow".to_owned()))?;
+        let data_hex = outputs_data.get(index).and_then(Value::as_str).unwrap_or("0x");
+        let data_bytes = decode_hex_bytes(data_hex)
+            .ok_or_else(|| CliError::InvalidFixture(format!("outputs_data {index} is not valid hex data")))?
+            .len();
+        let has_type_script = output.get("type").is_some_and(|value| !value.is_null());
+        let explicit_change_like = index > 0 && data_bytes == 0 && !has_type_script;
+        let classification = if explicit_change_like {
+            explicit_change_output_count += 1;
+            explicit_change_capacity = explicit_change_capacity
+                .checked_add(capacity)
+                .ok_or_else(|| CliError::InvalidFixture("explicit change capacity overflow".to_owned()))?;
+            "explicit-change-like"
+        } else if data_bytes == 0 {
+            empty_data_output_count += 1;
+            "empty-data"
+        } else {
+            data_bearing_output_count += 1;
+            "data-bearing"
+        };
+        output_checks.push(SessionSubmissionEconomicsOutputCheck {
+            index,
+            capacity,
+            data_bytes,
+            has_type_script,
+            classification: classification.to_owned(),
+            explicit_change_like,
+        });
+    }
+    empty_data_output_count += explicit_change_output_count;
+
+    let live_input_count = checks.iter().filter(|check| check.live).count();
+    let all_inputs_live = live_input_count == inputs.len();
+    let total_input_capacity = if checks.iter().all(|check| check.capacity.is_some()) {
+        let mut total = 0u64;
+        for check in &checks {
+            total = total
+                .checked_add(check.capacity.unwrap_or_default())
+                .ok_or_else(|| CliError::InvalidFixture("total input capacity overflow".to_owned()))?;
+        }
+        Some(total)
+    } else {
+        None
+    };
+    let total_output_capacity = Some(total_output_capacity);
+    let fee_shannons = match (total_input_capacity, total_output_capacity) {
+        (Some(input), Some(output)) if input >= output => Some(input - output),
+        _ => None,
+    };
+    let outputs_data_count_matches = outputs.len() == outputs_data.len();
+    let explicit_change_observed = explicit_change_output_count > 0;
+    let capacity_balanced = total_input_capacity.zip(total_output_capacity).is_some_and(|(input, output)| input >= output);
+    let fee_sufficient = fee_shannons.is_some_and(|fee| fee >= min_fee_shannons);
+    let fee_rate_sufficient = fee_shannons.is_some_and(|fee| fee >= fee_rate_required);
+    let fee_not_excessive = match (fee_shannons, max_fee_shannons) {
+        (Some(fee), Some(max_fee)) => fee <= max_fee,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    let economically_ready = all_inputs_live
+        && outputs_data_count_matches
+        && capacity_balanced
+        && fee_sufficient
+        && fee_rate_sufficient
+        && fee_not_excessive;
+    let mut notes = Vec::new();
+    if economically_ready {
+        notes.push(format!(
+            "All inputs are live, outputs are capacity-balanced, and the implied fee satisfies the {min_fee_shannons} shannon floor, {min_fee_rate_shannons_per_kb} shannons/kB fee-rate policy, and configured max-fee policy."
+        ));
+    } else {
+        if !all_inputs_live {
+            notes.push("At least one transaction input did not resolve as a live capacity-bearing cell.".to_owned());
+        }
+        if !outputs_data_count_matches {
+            notes.push("CKB outputs_data count does not match outputs count.".to_owned());
+        }
+        if !capacity_balanced {
+            notes.push("Output capacity exceeds live input capacity or an input capacity is unavailable.".to_owned());
+        }
+        if !fee_sufficient {
+            notes.push(format!("Implied fee does not satisfy the {min_fee_shannons} shannon minimum fee policy."));
+        }
+        if !fee_rate_sufficient {
+            notes.push(format!(
+                "Implied fee does not satisfy the {min_fee_rate_shannons_per_kb} shannons/kB fee-rate policy for {transaction_size_bytes} transaction bytes."
+            ));
+        }
+        if !fee_not_excessive {
+            if let Some(max_fee) = max_fee_shannons {
+                notes.push(format!("Implied fee exceeds the configured {max_fee} shannon maximum fee policy."));
+            }
+        }
+    }
+    if explicit_change_observed {
+        notes.push(format!(
+            "Observed {explicit_change_output_count} explicit change-like output(s) carrying {explicit_change_capacity} shannons."
+        ));
+    } else {
+        notes.push(
+            "No explicit change-like output was observed; readiness therefore depends on the configured max-fee cap.".to_owned(),
+        );
+    }
+
+    Ok(SessionSubmissionEconomicsReport {
+        schema: "myelin-session-submission-economics-v1".to_owned(),
+        submission: submission_path.display().to_string(),
+        submission_schema,
+        rpc_url: rpc_url.to_owned(),
+        expected_ckb_tx_hash,
+        request_method: "get_live_cell".to_owned(),
+        input_count: inputs.len(),
+        output_count: outputs.len(),
+        outputs_data_count: outputs_data.len(),
+        live_input_count,
+        total_input_capacity,
+        total_output_capacity,
+        fee_shannons,
+        min_fee_shannons,
+        transaction_size_bytes,
+        min_fee_rate_shannons_per_kb,
+        required_fee_shannons,
+        max_fee_shannons,
+        data_bearing_output_count,
+        empty_data_output_count,
+        explicit_change_output_count,
+        explicit_change_capacity,
+        explicit_change_observed,
+        all_inputs_live,
+        outputs_data_count_matches,
+        capacity_balanced,
+        fee_sufficient,
+        fee_rate_sufficient,
+        fee_not_excessive,
+        economically_ready,
+        checks,
+        outputs: output_checks,
+        notes,
+    })
+}
+
+fn verify_session_submission_readiness(
+    context_path: PathBuf,
+    economics_path: PathBuf,
+    inclusion_path: PathBuf,
+    stability_path: PathBuf,
+    finality_path: PathBuf,
+    require_live_submission: bool,
+) -> Result<SessionSubmissionReadinessReport> {
+    let context = read_json_report::<SessionSubmissionContextReport>(&context_path)?;
+    let economics = read_json_report::<SessionSubmissionEconomicsReport>(&economics_path)?;
+    let inclusion = read_json_report::<SessionSubmissionInclusionReport>(&inclusion_path)?;
+    let stability = read_json_report::<SessionSubmissionStabilityReport>(&stability_path)?;
+    let finality = read_json_report::<SessionSubmissionFinalityReport>(&finality_path)?;
+
+    require_report_schema(&context.schema, "myelin-session-submission-context-v1", "context")?;
+    require_report_schema(&economics.schema, "myelin-session-submission-economics-v1", "economics")?;
+    require_report_schema(&inclusion.schema, "myelin-session-submission-inclusion-v1", "inclusion")?;
+    require_report_schema(&stability.schema, "myelin-session-submission-stability-v1", "stability")?;
+    require_report_schema(&finality.schema, "myelin-session-submission-finality-v1", "finality")?;
+
+    let context_hash = normalize_ckb_tx_hash(&context.expected_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("context report has an invalid expected CKB tx hash".to_owned()))?;
+    let economics_hash = normalize_ckb_tx_hash(&economics.expected_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("economics report has an invalid expected CKB tx hash".to_owned()))?;
+    let inclusion_hash = normalize_ckb_tx_hash(&inclusion.expected_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("inclusion report has an invalid expected CKB tx hash".to_owned()))?;
+    let stability_hash = normalize_ckb_tx_hash(&stability.expected_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("stability report has an invalid expected CKB tx hash".to_owned()))?;
+    let finality_hash = normalize_ckb_tx_hash(&finality.expected_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("finality report has an invalid expected CKB tx hash".to_owned()))?;
+    let report_hashes_match = [economics_hash.as_str(), inclusion_hash.as_str(), stability_hash.as_str(), finality_hash.as_str()]
+        .iter()
+        .all(|hash| *hash == context_hash);
+    let submission_report_summary =
+        readiness_submission_report_summary(&context.submission, &context.submission_schema, context_hash.as_str());
+    let submission_report_valid = submission_report_summary.valid;
+    let submission_report_live_accepted = submission_report_summary.live_accepted;
+    let submission_report_carrier_live_accepted = submission_report_summary.carrier_live_accepted;
+    let submission_report_final_l1_script_live_accepted = submission_report_summary.final_l1_script_live_accepted;
+    let settlement_uniqueness_required = submission_report_summary.final_l1_settlement;
+    let settlement_uniqueness_checked = submission_report_summary.settlement_uniqueness_checked;
+    let duplicate_settlement_detected = submission_report_summary.duplicate_settlement_detected;
+    let replay_protection_mode = submission_report_summary.replay_protection_mode.clone();
+    let settlement_identity_hash = submission_report_summary.settlement_identity_hash.clone();
+    let session_id_hash = submission_report_summary.session_id_hash.clone();
+    let settlement_uniqueness_ready = !settlement_uniqueness_required
+        || (settlement_uniqueness_checked
+            && !duplicate_settlement_detected
+            && settlement_identity_hash.as_deref().and_then(normalize_ckb_tx_hash).is_some()
+            && session_id_hash.as_deref().and_then(normalize_ckb_tx_hash).is_some()
+            && replay_protection_mode.as_deref()
+                == Some("authority-cell-single-use-plus-transaction-local-final-script-singleton"));
+    let submission_lineage_matches = report_paths_match(&context.submission, &economics.submission)
+        && report_paths_match(&context.submission, &inclusion.submission)
+        && context.submission_schema == economics.submission_schema
+        && context.submission_schema == inclusion.submission_schema;
+    let inclusion_lineage_matches = report_path_matches_file(&stability.inclusion, &inclusion_path)
+        && report_path_matches_file(&finality.inclusion, &inclusion_path);
+
+    let block_hashes_match = inclusion.block_hash.is_some()
+        && inclusion.block_hash == stability.expected_block_hash
+        && inclusion.block_hash == stability.observed_block_hash
+        && inclusion.block_hash == finality.committed_block_hash;
+    let block_numbers_match = inclusion.block_number.is_some()
+        && inclusion.block_number == stability.expected_block_number
+        && inclusion.block_number == stability.observed_block_number
+        && inclusion.block_number == finality.committed_block_number;
+    let block_identity_matches = block_hashes_match && block_numbers_match;
+
+    let context_ready = context.ready_for_ckb_submission && context.all_inputs_live && context.all_cell_deps_live;
+    let economically_ready = economics.economically_ready
+        && economics.all_inputs_live
+        && economics.capacity_balanced
+        && economics.fee_sufficient
+        && economics.fee_rate_sufficient
+        && economics.fee_not_excessive;
+    let inclusion_observed = inclusion.live_l1_observed && inclusion.committed && inclusion.met_min_status;
+    let stable_block_identity = stability.stable_block_identity && !stability.reorg_detected && !stability.missing_or_uncommitted;
+    let finality_confirmed = finality.finality_confirmed;
+    let reorg_risk_bounded = finality.reorg_risk_bounded;
+
+    let checks = vec![
+        readiness_check(
+            "report-hashes-match",
+            report_hashes_match,
+            "all verifier reports bind to the same expected CKB transaction hash",
+        ),
+        readiness_check(
+            "submission-report-valid",
+            submission_report_valid,
+            "the derived reports point back to a readable submission report with the same schema and expected CKB transaction hash",
+        ),
+        readiness_check(
+            "submission-report-live-accepted",
+            !require_live_submission || submission_report_carrier_live_accepted || submission_report_final_l1_script_live_accepted,
+            "when required, the referenced submission report must prove non-dry-run RPC acceptance through the deployed carrier path or final L1 script path for the projected CKB transaction hash",
+        ),
+        readiness_check(
+            "submission-lineage-matches",
+            submission_lineage_matches,
+            "context, economics, and inclusion reports were derived from the same submission artefact and schema",
+        ),
+        readiness_check(
+            "inclusion-lineage-matches",
+            inclusion_lineage_matches,
+            "stability and finality reports were derived from the supplied inclusion artefact",
+        ),
+        readiness_check("context-ready", context_ready, "all transaction inputs and cell deps were live during context preflight"),
+        readiness_check(
+            "economically-ready",
+            economically_ready,
+            "requires live inputs, balanced capacity, and fee policy satisfaction",
+        ),
+        readiness_check("inclusion-observed", inclusion_observed, "CKB reported the transaction committed with live L1 evidence"),
+        readiness_check(
+            "stable-block-identity",
+            stable_block_identity,
+            "re-query observed the same committed block identity without a reorg marker",
+        ),
+        readiness_check("finality-confirmed", finality_confirmed, "confirmation depth met the configured finality policy"),
+        readiness_check(
+            "reorg-risk-bounded",
+            reorg_risk_bounded,
+            "finality report marked reorg risk bounded by the configured confirmation policy",
+        ),
+        readiness_check(
+            "block-identity-matches",
+            block_identity_matches,
+            "inclusion, stability, and finality reports agree on committed block hash and number",
+        ),
+        readiness_check(
+            "settlement-uniqueness-checked",
+            settlement_uniqueness_ready,
+            "final settlement strict readiness requires session identity, settlement identity, duplicate detection, and replay-protection mode evidence",
+        ),
+    ];
+    let base_submission_ready = report_hashes_match
+        && submission_report_valid
+        && submission_lineage_matches
+        && inclusion_lineage_matches
+        && context_ready
+        && economically_ready
+        && inclusion_observed
+        && stable_block_identity
+        && finality_confirmed
+        && reorg_risk_bounded
+        && block_identity_matches
+        && settlement_uniqueness_ready;
+    let production_submission_ready = checks.iter().all(|check| check.ok);
+    let live_carrier_submission_ready =
+        production_submission_ready && base_submission_ready && submission_report_carrier_live_accepted;
+    let final_l1_script_submission_ready =
+        production_submission_ready && base_submission_ready && submission_report_final_l1_script_live_accepted;
+    let strict_production_submission_ready = final_l1_script_submission_ready;
+    let readiness_evidence_mode = if final_l1_script_submission_ready {
+        "final-l1-script"
+    } else if live_carrier_submission_ready {
+        "live-ckb-carrier"
+    } else if production_submission_ready {
+        "coherent-offline-or-mock"
+    } else {
+        "not-ready"
+    }
+    .to_owned();
+    let notes = if final_l1_script_submission_ready {
+        vec!["All submission readiness reports agree, and the referenced submission report proves a live final L1 script submission."
+            .to_owned()]
+    } else if live_carrier_submission_ready {
+        vec![
+            "All submission readiness reports agree, and the referenced carrier submission proves live CKB RPC acceptance under the deployed carrier verifier."
+                .to_owned(),
+            "This is live carrier evidence; it is not final DA publication or final court-script evidence.".to_owned(),
+        ]
+    } else if production_submission_ready {
+        vec![
+            "All submission readiness reports agree; this transaction is operationally ready under the supplied evidence set."
+                .to_owned(),
+            "The evidence mode is offline/mock/coherent-report readiness, not strict live carrier readiness or final L1 script readiness."
+                .to_owned(),
+        ]
+    } else {
+        let failed = checks.iter().filter(|check| !check.ok).map(|check| check.name.clone()).collect::<Vec<_>>().join(", ");
+        vec![format!("Submission is not production-ready under the supplied evidence set; failed checks: {failed}.")]
+    };
+
+    Ok(SessionSubmissionReadinessReport {
+        schema: "myelin-session-submission-readiness-v1".to_owned(),
+        context: context_path.display().to_string(),
+        economics: economics_path.display().to_string(),
+        inclusion: inclusion_path.display().to_string(),
+        stability: stability_path.display().to_string(),
+        finality: finality_path.display().to_string(),
+        expected_ckb_tx_hash: context_hash,
+        report_hashes_match,
+        submission_report_valid,
+        submission_report_live_accepted,
+        submission_report_carrier_live_accepted,
+        submission_report_final_l1_script_live_accepted,
+        live_submission_required: require_live_submission,
+        submission_lineage_matches,
+        inclusion_lineage_matches,
+        block_identity_matches,
+        context_ready,
+        economically_ready,
+        inclusion_observed,
+        stable_block_identity,
+        finality_confirmed,
+        reorg_risk_bounded,
+        production_submission_ready,
+        strict_production_submission_ready,
+        live_carrier_submission_ready,
+        final_l1_script_submission_ready,
+        readiness_evidence_mode,
+        settlement_uniqueness_checked,
+        settlement_identity_hash,
+        session_id_hash,
+        duplicate_settlement_detected,
+        replay_protection_mode,
+        checks,
+        notes,
+    })
+}
+
+fn read_json_report<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+    let bytes = fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn require_report_schema(actual: &str, expected: &str, label: &str) -> Result<()> {
+    if actual != expected {
+        return Err(CliError::InvalidFixture(format!("unsupported {label} report schema: {actual}")));
+    }
+    Ok(())
+}
+
+fn readiness_check(name: &str, ok: bool, detail: &str) -> SessionSubmissionReadinessCheck {
+    SessionSubmissionReadinessCheck { name: name.to_owned(), ok, detail: detail.to_owned() }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ReadinessSubmissionReportSummary {
+    valid: bool,
+    live_accepted: bool,
+    carrier_live_accepted: bool,
+    final_l1_script_live_accepted: bool,
+    final_l1_settlement: bool,
+    settlement_uniqueness_checked: bool,
+    settlement_identity_hash: Option<String>,
+    session_id_hash: Option<String>,
+    duplicate_settlement_detected: bool,
+    replay_protection_mode: Option<String>,
+}
+
+fn readiness_submission_report_summary(
+    submission_path: &str,
+    expected_schema: &str,
+    expected_ckb_tx_hash: &str,
+) -> ReadinessSubmissionReportSummary {
+    let Ok(bytes) = fs::read(submission_path) else {
+        return ReadinessSubmissionReportSummary::default();
+    };
+    let Ok(submission) = serde_json::from_slice::<Value>(&bytes) else {
+        return ReadinessSubmissionReportSummary::default();
+    };
+    let Some(schema) = submission.get("schema").and_then(Value::as_str) else {
+        return ReadinessSubmissionReportSummary::default();
+    };
+    if schema != expected_schema {
+        return ReadinessSubmissionReportSummary::default();
+    }
+    let Ok(hash) = expected_ckb_tx_hash_from_submission(&submission, schema) else {
+        return ReadinessSubmissionReportSummary::default();
+    };
+    if hash != expected_ckb_tx_hash {
+        return ReadinessSubmissionReportSummary::default();
+    }
+    if validate_submission_rpc_result(&submission, expected_ckb_tx_hash).is_err() {
+        return ReadinessSubmissionReportSummary::default();
+    }
+    let final_l1_settlement = schema == "myelin-session-ckb-final-script-submission-v1"
+        && submission.get("package_kind").and_then(Value::as_str) == Some("myelin-session-settlement-package-v1");
+    ReadinessSubmissionReportSummary {
+        valid: true,
+        live_accepted: submission_report_live_accepted(&submission, schema, expected_ckb_tx_hash),
+        carrier_live_accepted: submission_report_carrier_live_accepted(&submission, schema, expected_ckb_tx_hash),
+        final_l1_script_live_accepted: submission_report_final_l1_script_live_accepted(&submission, schema, expected_ckb_tx_hash),
+        final_l1_settlement,
+        settlement_uniqueness_checked: submission.get("settlement_uniqueness_checked").and_then(Value::as_bool) == Some(true),
+        settlement_identity_hash: submission.get("settlement_identity_hash").and_then(Value::as_str).map(ToOwned::to_owned),
+        session_id_hash: submission.get("session_id_hash").and_then(Value::as_str).map(ToOwned::to_owned),
+        duplicate_settlement_detected: submission.get("duplicate_settlement_detected").and_then(Value::as_bool) == Some(true),
+        replay_protection_mode: submission.get("replay_protection_mode").and_then(Value::as_str).map(ToOwned::to_owned),
+    }
+}
+
+fn submission_report_live_accepted(submission: &Value, schema: &str, expected_ckb_tx_hash: &str) -> bool {
+    let submitted_to_rpc = submission.get("submitted_to_rpc").and_then(Value::as_bool) == Some(true);
+    let accepted_by_rpc = submission.get("accepted_by_rpc").and_then(Value::as_bool) == Some(true);
+    let dry_run = submission.get("dry_run").and_then(Value::as_bool) == Some(true);
+    if !submitted_to_rpc || !accepted_by_rpc || dry_run {
+        return false;
+    }
+    let rpc_url_present = submission.get("rpc_url").and_then(Value::as_str).is_some_and(|url| !url.trim().is_empty());
+    let rpc_result_matches =
+        submission.get("rpc_result").and_then(Value::as_str).and_then(normalize_ckb_tx_hash).as_deref() == Some(expected_ckb_tx_hash);
+    let rpc_error_absent = submission.get("rpc_error").is_none_or(Value::is_null);
+    if !rpc_url_present || !rpc_result_matches || !rpc_error_absent {
+        return false;
+    }
+    match schema {
+        "myelin-session-da-anchor-submission-v1" => submission.get("l1_da_published").and_then(Value::as_bool) == Some(true),
+        "myelin-session-settlement-submission-v1" => submission.get("l1_court_submitted").and_then(Value::as_bool) == Some(true),
+        "myelin-session-ckb-carrier-submission-v1" => submission.get("submit_mode").and_then(Value::as_bool) == Some(true),
+        "myelin-session-ckb-final-script-submission-v1" => {
+            submission.get("submit_mode").and_then(Value::as_bool) == Some(true)
+                && final_l1_script_preflight_ready(submission)
+                && match submission.get("package_kind").and_then(Value::as_str) {
+                    Some("myelin-session-da-anchor-package-v1") => {
+                        submission.get("l1_da_published").and_then(Value::as_bool) == Some(true)
+                    }
+                    Some("myelin-session-settlement-package-v1") => {
+                        submission.get("l1_court_submitted").and_then(Value::as_bool) == Some(true)
+                    }
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+fn json_bool_true(report: &Value, pointer: &str) -> bool {
+    report.pointer(pointer).and_then(Value::as_bool) == Some(true)
+}
+
+fn final_l1_script_preflight_ready(submission: &Value) -> bool {
+    if submission.get("verifier_role").and_then(Value::as_str) != Some("final-l1-script") {
+        return false;
+    }
+    if submission.pointer("/final_script_verifier/verifier_role").and_then(Value::as_str) != Some("final-l1-script") {
+        return false;
+    }
+    if submission
+        .pointer("/final_script_verifier/cellscript_source_hash")
+        .and_then(Value::as_str)
+        .is_none_or(|hash| normalize_ckb_tx_hash(hash).is_none())
+    {
+        return false;
+    }
+    let common_preflight_ready = json_bool_true(submission, "/pre_submit_context_checked")
+        && json_bool_true(submission, "/pre_submit_input_live")
+        && json_bool_true(submission, "/pre_submit_input_capacity_matches")
+        && json_bool_true(submission, "/pre_submit_input_lock_matches")
+        && json_bool_true(submission, "/pre_submit_lock_code_dep_live")
+        && json_bool_true(submission, "/pre_submit_verifier_code_dep_live")
+        && json_bool_true(submission, "/pre_submit_verifier_code_dep_data_hash_matches");
+    if !common_preflight_ready {
+        return false;
+    }
+    match submission.get("package_kind").and_then(Value::as_str) {
+        Some("myelin-session-da-anchor-package-v1") => {
+            submission.get("l1_da_published").and_then(Value::as_bool) == Some(true)
+                && submission.get("l1_court_submitted").and_then(Value::as_bool) == Some(false)
+                && submission.get("authority_input_present").and_then(Value::as_bool) != Some(true)
+        }
+        Some("myelin-session-settlement-package-v1") => {
+            submission.get("l1_da_published").and_then(Value::as_bool) == Some(false)
+                && submission.get("l1_court_submitted").and_then(Value::as_bool) == Some(true)
+                && submission.get("evidence_cell_dep_present").and_then(Value::as_bool) == Some(true)
+                && submission.get("authority_input_present").and_then(Value::as_bool) == Some(true)
+                && submission.get("settlement_authority_requirement").is_some_and(Value::is_object)
+                && json_bool_true(submission, "/settlement_uniqueness_checked")
+                && submission.get("duplicate_settlement_detected").and_then(Value::as_bool) == Some(false)
+                && submission.get("settlement_identity_hash").and_then(Value::as_str).and_then(normalize_ckb_tx_hash).is_some()
+                && submission.get("session_id_hash").and_then(Value::as_str).and_then(normalize_ckb_tx_hash).is_some()
+                && submission.get("replay_protection_mode").and_then(Value::as_str)
+                    == Some("authority-cell-single-use-plus-transaction-local-final-script-singleton")
+                && json_bool_true(submission, "/pre_submit_evidence_cell_dep_live")
+                && json_bool_true(submission, "/pre_submit_evidence_cell_dep_capacity_matches")
+                && json_bool_true(submission, "/pre_submit_evidence_cell_dep_lock_matches")
+                && json_bool_true(submission, "/pre_submit_authority_input_live")
+                && json_bool_true(submission, "/pre_submit_authority_input_capacity_matches")
+                && json_bool_true(submission, "/pre_submit_authority_input_data_hash_matches")
+                && json_bool_true(submission, "/pre_submit_authority_input_lock_matches")
+        }
+        _ => false,
+    }
+}
+
+fn submission_report_carrier_live_accepted(submission: &Value, schema: &str, expected_ckb_tx_hash: &str) -> bool {
+    schema == "myelin-session-ckb-carrier-submission-v1" && submission_report_live_accepted(submission, schema, expected_ckb_tx_hash)
+}
+
+fn submission_report_final_l1_script_live_accepted(submission: &Value, schema: &str, expected_ckb_tx_hash: &str) -> bool {
+    schema == "myelin-session-ckb-final-script-submission-v1"
+        && submission_report_live_accepted(submission, schema, expected_ckb_tx_hash)
+}
+
+fn report_paths_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    match (canonical_report_path(left), canonical_report_path(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn report_path_matches_file(report_path: &str, file_path: &Path) -> bool {
+    if report_path == file_path.display().to_string() {
+        return true;
+    }
+    match (canonical_report_path(report_path), file_path.canonicalize().ok()) {
+        (Some(report_path), Some(file_path)) => report_path == file_path,
+        _ => false,
+    }
+}
+
+fn canonical_report_path(path: &str) -> Option<PathBuf> {
+    Path::new(path).canonicalize().ok()
+}
+
+fn check_economic_input_cell(rpc_url: &str, index: usize, out_point: &Value) -> Result<SessionSubmissionEconomicsInputCheck> {
+    validate_ckb_out_point_json(out_point)?;
+    let request = serde_json::json!({
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "get_live_cell",
+        "params": [out_point, true],
+    });
+    let request_bytes = serde_json::to_vec(&request)?;
+    let request_json_hash = hex::encode(blake3_32(b"myelin:session-submission-economics-rpc-request-json:v1", &request_bytes));
+    let response = post_json_rpc(rpc_url, &request)?;
+    let rpc_result = response.get("result");
+    let rpc_error = response.get("error").cloned();
+    let status = rpc_result.and_then(|result| result.get("status")).and_then(Value::as_str).map(ToOwned::to_owned);
+    let capacity = rpc_result
+        .and_then(|result| result.pointer("/cell/output/capacity"))
+        .and_then(Value::as_str)
+        .map(|capacity| parse_ckb_quantity(capacity, &format!("input {index} capacity")))
+        .transpose()?;
+    let live = rpc_error.is_none() && status.as_deref() == Some("live") && capacity.is_some();
+    Ok(SessionSubmissionEconomicsInputCheck {
+        index,
+        out_point: out_point.clone(),
+        out_point_key: ckb_out_point_key(out_point)?,
+        request_json_hash,
+        status,
+        live,
+        capacity,
+        rpc_error,
+    })
+}
+
+fn expected_ckb_tx_hash_from_submission(submission: &Value, schema: &str) -> Result<String> {
+    match schema {
+        "myelin-session-da-anchor-submission-v1"
+        | "myelin-session-settlement-submission-v1"
+        | "myelin-session-ckb-final-script-submission-v1"
+        | "myelin-session-ckb-carrier-submission-v1" => submission
+            .get("ckb_raw_tx_hash")
+            .and_then(Value::as_str)
+            .and_then(normalize_ckb_tx_hash)
+            .ok_or_else(|| CliError::InvalidFixture("submission report is missing a 32-byte CKB raw tx hash".to_owned())),
+        other => Err(CliError::InvalidFixture(format!("unsupported submission schema for inclusion verification: {other}"))),
+    }
+}
+
+fn compact_payload_submission_schema(schema: &str) -> bool {
+    matches!(schema, "myelin-session-ckb-carrier-submission-v1" | "myelin-session-ckb-final-script-submission-v1")
+}
+
+fn carrier_package_commitment_from_submission(submission: &Value, schema: &str) -> Result<Option<String>> {
+    if !compact_payload_submission_schema(schema) {
+        return Ok(None);
+    }
+    submission
+        .get("package_commitment")
+        .and_then(Value::as_str)
+        .and_then(normalize_ckb_tx_hash)
+        .map(Some)
+        .ok_or_else(|| CliError::InvalidFixture("carrier submission report is missing a 32-byte package_commitment".to_owned()))
+}
+
+fn carrier_payload_kind_from_submission(submission: &Value, schema: &str) -> Option<String> {
+    if !compact_payload_submission_schema(schema) {
+        return None;
+    }
+    submission.get("carrier_payload_kind").and_then(Value::as_str).map(ToOwned::to_owned)
+}
+
+fn carrier_payload_from_submission(submission: &Value, schema: &str, package_commitment: Option<&str>) -> Result<Option<String>> {
+    if !compact_payload_submission_schema(schema) {
+        return Ok(None);
+    }
+    if let Some(payload) = submission.get("carrier_payload").and_then(Value::as_str) {
+        let bytes = decode_hex_bytes(payload)
+            .ok_or_else(|| CliError::InvalidFixture("carrier submission report has malformed carrier_payload hex".to_owned()))?;
+        if bytes.is_empty() {
+            return Err(CliError::InvalidFixture("carrier submission report has empty carrier_payload".to_owned()));
+        }
+        return Ok(Some(format!("0x{}", hex::encode(bytes))));
+    }
+    Ok(package_commitment.map(ToOwned::to_owned))
+}
+
+#[derive(Clone, Debug)]
+struct CarrierExpectedTypeScript {
+    code_hash: String,
+    hash_type: String,
+    args: String,
+}
+
+fn carrier_expected_type_script_from_submission(submission: &Value, schema: &str) -> Result<Option<CarrierExpectedTypeScript>> {
+    if !compact_payload_submission_schema(schema) {
+        return Ok(None);
+    }
+    let Some(type_script) = submission.pointer("/carrier_verifier/type_script") else {
+        return Ok(None);
+    };
+    let code_hash = type_script
+        .get("code_hash")
+        .and_then(Value::as_str)
+        .and_then(normalize_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("carrier verifier type_script is missing a 32-byte code_hash".to_owned()))?;
+    let hash_type = type_script
+        .get("hash_type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("carrier verifier type_script is missing hash_type".to_owned()))?
+        .to_owned();
+    let args = type_script
+        .get("args")
+        .and_then(Value::as_str)
+        .and_then(|args| decode_hex_bytes(args).map(|bytes| format!("0x{}", hex::encode(bytes))))
+        .ok_or_else(|| CliError::InvalidFixture("carrier verifier type_script is missing hex args".to_owned()))?;
+    Ok(Some(CarrierExpectedTypeScript { code_hash, hash_type, args }))
+}
+
+#[derive(Clone, Debug)]
+struct CarrierExpectedCodeDep {
+    code_hash: String,
+    out_point_key: String,
+}
+
+fn carrier_expected_code_dep_from_submission(submission: &Value, schema: &str) -> Result<Option<CarrierExpectedCodeDep>> {
+    if !compact_payload_submission_schema(schema) {
+        return Ok(None);
+    }
+    let Some(verifier) = submission.get("carrier_verifier") else {
+        return Ok(None);
+    };
+    let code_hash = verifier
+        .get("code_hash")
+        .and_then(Value::as_str)
+        .and_then(normalize_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("carrier_verifier is missing a 32-byte code_hash".to_owned()))?;
+    let out_point = verifier
+        .pointer("/code_dep/out_point")
+        .ok_or_else(|| CliError::InvalidFixture("carrier_verifier is missing code_dep.out_point".to_owned()))?;
+    validate_ckb_out_point_json(out_point)?;
+    Ok(Some(CarrierExpectedCodeDep { code_hash, out_point_key: ckb_out_point_key(out_point)? }))
+}
+
+fn validate_submission_rpc_result(submission: &Value, expected_ckb_tx_hash: &str) -> Result<()> {
+    if let Some(result) = submission.get("rpc_result").and_then(Value::as_str) {
+        let result = normalize_ckb_tx_hash(result)
+            .ok_or_else(|| CliError::InvalidFixture("submission rpc_result is not a 32-byte CKB tx hash".to_owned()))?;
+        if result != expected_ckb_tx_hash {
+            return Err(CliError::InvalidFixture(format!(
+                "submission rpc_result {result} does not match expected CKB tx hash {expected_ckb_tx_hash}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_ckb_tx_hash(hash: &str) -> Option<String> {
+    let stripped = hash.strip_prefix("0x").unwrap_or(hash);
+    if stripped.len() == 64 && stripped.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(format!("0x{stripped}"))
+    } else {
+        None
+    }
+}
+
+fn validate_ckb_out_point_json(out_point: &Value) -> Result<()> {
+    let tx_hash = out_point
+        .get("tx_hash")
+        .and_then(Value::as_str)
+        .and_then(normalize_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("CKB out_point.tx_hash must be a 32-byte hash".to_owned()))?;
+    let index = out_point
+        .get("index")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("CKB out_point.index must be a hex quantity string".to_owned()))?;
+    if !index.starts_with("0x") || u64::from_str_radix(&index[2..], 16).is_err() {
+        return Err(CliError::InvalidFixture("CKB out_point.index must be a valid hex quantity".to_owned()));
+    }
+    if tx_hash.len() != 66 {
+        return Err(CliError::InvalidFixture("CKB out_point.tx_hash must normalise to 32 bytes".to_owned()));
+    }
+    Ok(())
+}
+
+fn ckb_out_point_key(out_point: &Value) -> Result<String> {
+    validate_ckb_out_point_json(out_point)?;
+    let tx_hash = out_point
+        .get("tx_hash")
+        .and_then(Value::as_str)
+        .and_then(normalize_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("CKB out_point.tx_hash must be a 32-byte hash".to_owned()))?;
+    let index = out_point
+        .get("index")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("CKB out_point.index must be a hex quantity string".to_owned()))?;
+    Ok(format!("{tx_hash}:{index}"))
+}
+
+fn ckb_tx_status_rank(status: &str) -> Option<u8> {
+    match status {
+        "pending" => Some(1),
+        "proposed" => Some(2),
+        "committed" => Some(3),
+        "unknown" | "rejected" => Some(0),
+        _ => None,
+    }
+}
+
+fn parse_ckb_quantity(value: &str, field: &str) -> Result<u64> {
+    let hex = value.strip_prefix("0x").ok_or_else(|| CliError::InvalidFixture(format!("{field} must be a CKB hex quantity")))?;
+    if hex.is_empty() {
+        return Err(CliError::InvalidFixture(format!("{field} must not be an empty CKB hex quantity")));
+    }
+    u64::from_str_radix(hex, 16).map_err(|_| CliError::InvalidFixture(format!("{field} is not a valid CKB hex quantity")))
+}
+
+fn ckb_quantity_arg(value: &str, field: &str) -> Result<String> {
+    let parsed = parse_ckb_quantity(value, field)?;
+    Ok(format!("0x{parsed:x}"))
+}
+
+fn ckb_quantity_index_arg(value: &str, field: &str) -> Result<u32> {
+    let parsed = parse_ckb_quantity(value, field)?;
+    u32::try_from(parsed).map_err(|_| CliError::InvalidFixture(format!("{field} does not fit in a CKB output index")))
+}
+
+fn normalize_hex_arg(value: &str, field: &str) -> Result<String> {
+    let bytes = decode_hex_bytes(value).ok_or_else(|| CliError::InvalidFixture(format!("{field} must be hex data")))?;
+    Ok(format!("0x{}", hex::encode(bytes)))
+}
+
+fn ckb_byte32_arg(value: &str, field: &str) -> Result<[u8; 32]> {
+    let bytes = decode_hex_bytes(value).ok_or_else(|| CliError::InvalidFixture(format!("{field} must be 32-byte hex")))?;
+    bytes.try_into().map_err(|_| CliError::InvalidFixture(format!("{field} must decode to exactly 32 bytes")))
+}
+
+fn ckb_script_hash_type_arg(value: &str, field: &str) -> Result<u8> {
+    match value {
+        "data" => Ok(0),
+        "type" => Ok(1),
+        "data1" => Ok(2),
+        "data2" => Ok(4),
+        other => Err(CliError::InvalidFixture(format!("{field} has unsupported CKB script hash type: {other}"))),
+    }
+}
+
+fn required_fee_for_rate(transaction_size_bytes: usize, fee_rate_shannons_per_kb: u64) -> Result<u64> {
+    if fee_rate_shannons_per_kb == 0 || transaction_size_bytes == 0 {
+        return Ok(0);
+    }
+    let size = u64::try_from(transaction_size_bytes)
+        .map_err(|_| CliError::InvalidFixture("transaction size does not fit in u64".to_owned()))?;
+    let numerator = u128::from(size)
+        .checked_mul(u128::from(fee_rate_shannons_per_kb))
+        .ok_or_else(|| CliError::InvalidFixture("fee-rate calculation overflow".to_owned()))?;
+    let required = numerator.div_ceil(1_000);
+    u64::try_from(required).map_err(|_| CliError::InvalidFixture("required fee does not fit in u64".to_owned()))
+}
+
+fn ckb_tip_number_from_response(result: &Value) -> Option<&str> {
+    result
+        .get("number")
+        .and_then(Value::as_str)
+        .or_else(|| result.pointer("/inner/number").and_then(Value::as_str))
+        .or_else(|| result.pointer("/header/inner/number").and_then(Value::as_str))
+}
+
+fn ckb_json_transaction(tx: &CellTx) -> Result<Value> {
+    Ok(serde_json::json!({
+        "version": quantity_hex(tx.version as u64),
+        "cell_deps": tx.cell_deps.iter().map(ckb_json_cell_dep).collect::<Result<Vec<_>>>()?,
+        "header_deps": tx.header_deps.iter().map(byte32_hex).collect::<Vec<_>>(),
+        "inputs": tx.inputs.iter().map(ckb_json_cell_input).collect::<Vec<_>>(),
+        "outputs": tx.outputs.iter().map(ckb_json_cell_output).collect::<Result<Vec<_>>>()?,
+        "outputs_data": tx.outputs_data.iter().map(|data| bytes_hex(data)).collect::<Vec<_>>(),
+        "witnesses": tx.witnesses.iter().map(|witness| bytes_hex(witness)).collect::<Vec<_>>(),
+    }))
+}
+
+fn ckb_json_cell_dep(dep: &CellDep) -> Result<Value> {
+    let dep_type = match dep.dep_type {
+        DepType::Code => "code",
+        DepType::DepGroup => "dep_group",
+    };
+    Ok(serde_json::json!({
+        "out_point": ckb_json_out_point(&dep.out_point),
+        "dep_type": dep_type,
+    }))
+}
+
+fn ckb_json_cell_input(input: &CellInput) -> Value {
+    serde_json::json!({
+        "previous_output": ckb_json_out_point(&input.previous_output),
+        "since": quantity_hex(input.since),
+    })
+}
+
+fn ckb_json_cell_output(output: &CellOutput) -> Result<Value> {
+    Ok(serde_json::json!({
+        "capacity": quantity_hex(output.capacity),
+        "lock": ckb_json_script(&output.lock)?,
+        "type": match &output.type_ {
+            Some(type_script) => ckb_json_script(type_script)?,
+            None => Value::Null,
+        },
+    }))
+}
+
+fn ckb_json_script(script: &Script) -> Result<Value> {
+    let hash_type = match script.hash_type {
+        0 => "data",
+        1 => "type",
+        2 => "data1",
+        4 => "data2",
+        other => return Err(CliError::InvalidFixture(format!("unsupported CKB script hash_type: {other}"))),
+    };
+    Ok(serde_json::json!({
+        "code_hash": byte32_hex(&script.code_hash),
+        "hash_type": hash_type,
+        "args": bytes_hex(&script.args),
+    }))
+}
+
+fn ckb_json_out_point(out_point: &OutPoint) -> Value {
+    serde_json::json!({
+        "tx_hash": byte32_hex(&out_point.tx_hash),
+        "index": quantity_hex(out_point.index as u64),
+    })
+}
+
+fn quantity_hex(value: u64) -> String {
+    format!("0x{value:x}")
+}
+
+fn bytes_hex(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+fn byte32_hex(bytes: &[u8; 32]) -> String {
+    bytes_hex(bytes)
+}
+
+fn post_json_rpc(url: &str, request: &Value) -> Result<Value> {
+    let endpoint = parse_http_url(url)?;
+    let body = serde_json::to_vec(request)?;
+    let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(15)))?;
+    let http_request = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        endpoint.path,
+        endpoint.host_header(),
+        body.len()
+    );
+    stream.write_all(http_request.as_bytes())?;
+    stream.write_all(&body)?;
+    stream.flush()?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let response_text =
+        String::from_utf8(response).map_err(|error| CliError::InvalidFixture(format!("CKB RPC response is not UTF-8: {error}")))?;
+    let (head, body) = response_text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| CliError::InvalidFixture("CKB RPC response missing HTTP header/body separator".to_owned()))?;
+    let status = head.lines().next().unwrap_or_default();
+    if !status.contains(" 200 ") {
+        return Err(CliError::InvalidFixture(format!("CKB RPC HTTP request failed: {status}")));
+    }
+    serde_json::from_str(body).map_err(CliError::from)
+}
+
+#[derive(Debug)]
+struct HttpEndpoint {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+impl HttpEndpoint {
+    fn host_header(&self) -> String {
+        if self.port == 80 {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
+fn parse_http_url(url: &str) -> Result<HttpEndpoint> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| CliError::InvalidFixture("only plain http:// CKB RPC URLs are supported".to_owned()))?;
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".to_owned()),
+    };
+    if authority.is_empty() {
+        return Err(CliError::InvalidFixture("CKB RPC URL host is empty".to_owned()));
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => {
+            let port =
+                port.parse::<u16>().map_err(|error| CliError::InvalidFixture(format!("CKB RPC URL port is invalid: {error}")))?;
+            (host.to_owned(), port)
+        }
+        Some(_) => return Err(CliError::InvalidFixture("CKB RPC URL host is empty".to_owned())),
+        None => (authority.to_owned(), 80),
+    };
+    Ok(HttpEndpoint { host, port, path })
+}
+
+fn verify_session_finality_checks(
+    checks: &mut Vec<CourtBundleCheck>,
+    block_hash: [u8; 32],
+    bundle: &SessionCourtBundleInput,
+) -> Result<()> {
+    if let Some(tm) = &bundle.tendermint_evidence {
+        let tendermint_engine = tendermint_fixture_engine();
+        let signatures = tm
+            .signatures
+            .iter()
+            .map(|signature| {
+                let bytes = parse_hex_64(&signature.signature)
+                    .ok_or_else(|| CliError::InvalidFixture("tendermint signature must be 64-byte hex".to_owned()))?;
+                Ok(CommitteeSignature { validator_id: signature.validator_id.clone(), signature: bytes })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let certificate =
+            myelin_consensus::TendermintPrecommitCertificate { block_hash, height: tm.height, round: tm.round, signatures };
+        let certificate_ok = tendermint_engine.verify_precommit_certificate(block_hash, tm.height, tm.round, &certificate).is_ok();
+        push_check(
+            checks,
+            "tendermint-certificate",
+            certificate_ok,
+            Some(format!("quorum power {} height {} round {}", 2, tm.height, tm.round)),
+            Some(format!("quorum power {}, finalised {}", tm.quorum_power, tm.finalised)),
+            "Tendermint precommit certificate verifies against the fixture engine",
+        );
+        push_check(
+            checks,
+            "tendermint-quorum-power",
+            tm.quorum_power == 2,
+            Some("2".to_owned()),
+            Some(tm.quorum_power.to_string()),
+            "bundle Tendermint quorum power matches the fixture engine",
+        );
+    } else {
+        let committee_config = static_fixture_committee_config();
+        let committee = StaticClosedCommittee::new(committee_config.clone())?;
+        let signatures = bundle
+            .static_committee_evidence
+            .signatures
+            .iter()
+            .map(|signature| {
+                let bytes = parse_hex_64(&signature.signature)
+                    .ok_or_else(|| CliError::InvalidFixture("committee signature must be 64-byte hex".to_owned()))?;
+                Ok(CommitteeSignature { validator_id: signature.validator_id.clone(), signature: bytes })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let certificate = CommitteeCertificate { block_hash, signatures };
+        let certificate_ok = committee.verify_certificate(block_hash, &certificate).is_ok();
+        push_check(
+            checks,
+            "committee-certificate",
+            certificate_ok,
+            Some(format!("quorum weight {}", committee_config.quorum_weight)),
+            Some(format!(
+                "quorum weight {}, finalised {}",
+                bundle.static_committee_evidence.quorum_weight, bundle.static_committee_evidence.finalised
+            )),
+            "static committee certificate verifies against the fixture committee",
+        );
+        push_check(
+            checks,
+            "committee-quorum-weight",
+            bundle.static_committee_evidence.quorum_weight == committee_config.quorum_weight,
+            Some(committee_config.quorum_weight.to_string()),
+            Some(bundle.static_committee_evidence.quorum_weight.to_string()),
+            "bundle quorum weight matches the fixture committee",
+        );
+    }
+    Ok(())
+}
+
+fn parse_session_consensus(consensus: &str) -> Result<ConsensusKind> {
+    match consensus {
+        "static-closed-committee" | "static_closed_committee" => Ok(ConsensusKind::StaticClosedCommittee),
+        "tendermint" => Ok(ConsensusKind::Tendermint),
+        other => Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
+    }
+}
+
+fn parse_session_escrow_cell(value: &str) -> Result<SessionEscrowCellReport> {
+    let parts = value.split(':').collect::<Vec<_>>();
+    if parts.len() != 4 {
+        return Err(CliError::InvalidFixture("escrow-cell must be tx_hash_hex:index:capacity:lock_hash_hex".to_owned()));
+    }
+    let tx_hash =
+        parse_hex_32(parts[0]).ok_or_else(|| CliError::InvalidFixture("escrow-cell tx_hash must be 32-byte hex".to_owned()))?;
+    let outpoint_index =
+        parts[1].parse::<u32>().map_err(|error| CliError::InvalidFixture(format!("escrow-cell index must be u32: {error}")))?;
+    let capacity =
+        parts[2].parse::<u64>().map_err(|error| CliError::InvalidFixture(format!("escrow-cell capacity must be u64: {error}")))?;
+    if capacity == 0 {
+        return Err(CliError::InvalidFixture("escrow-cell capacity must be non-zero".to_owned()));
+    }
+    let lock_hash =
+        parse_hex_32(parts[3]).ok_or_else(|| CliError::InvalidFixture("escrow-cell lock_hash must be 32-byte hex".to_owned()))?;
+
+    Ok(SessionEscrowCellReport { outpoint_tx_hash: hex::encode(tx_hash), outpoint_index, capacity, lock_hash: hex::encode(lock_hash) })
+}
+
+fn session_id_from_parts(
+    app_id: &str,
+    vm_profile: &str,
+    participants: &[String],
+    escrow_input_cells: &[SessionEscrowCellReport],
+    initial_state_root: [u8; 32],
+) -> [u8; 32] {
+    let participant_bytes = session_participant_bytes(participants);
+    let escrow_bytes = session_escrow_input_cells_bytes(escrow_input_cells);
+    blake3_chunks(
+        b"myelin:session-id:v1",
+        &[app_id.as_bytes(), vm_profile.as_bytes(), participant_bytes.as_bytes(), escrow_bytes.as_bytes(), &initial_state_root],
+    )
+}
+
+#[derive(Clone, Copy)]
+struct SessionLineageCommitments {
+    participant_set_hash: [u8; 32],
+    escrow_input_cells_hash: [u8; 32],
+    session_lineage_commitment: [u8; 32],
+}
+
+fn session_participant_bytes(participants: &[String]) -> String {
+    participants.join("\0")
+}
+
+fn session_escrow_input_cells_bytes(escrow_input_cells: &[SessionEscrowCellReport]) -> String {
+    escrow_input_cells
+        .iter()
+        .map(|cell| format!("{}:{}:{}:{}", cell.outpoint_tx_hash, cell.outpoint_index, cell.capacity, cell.lock_hash))
+        .collect::<Vec<_>>()
+        .join("\0")
+}
+
+fn session_lineage_commitments(
+    app_id: &str,
+    vm_profile: &str,
+    participants: &[String],
+    escrow_input_cells: &[SessionEscrowCellReport],
+    initial_state_root: [u8; 32],
+) -> SessionLineageCommitments {
+    let participant_bytes = session_participant_bytes(participants);
+    let escrow_bytes = session_escrow_input_cells_bytes(escrow_input_cells);
+    let participant_set_hash = blake3_32(b"myelin:session-participant-set:v1", participant_bytes.as_bytes());
+    let escrow_input_cells_hash = blake3_32(b"myelin:session-escrow-input-cells:v1", escrow_bytes.as_bytes());
+    let session_lineage_commitment = blake3_chunks(
+        b"myelin:session-lineage:v1",
+        &[app_id.as_bytes(), vm_profile.as_bytes(), &participant_set_hash, &escrow_input_cells_hash, &initial_state_root],
+    );
+    SessionLineageCommitments { participant_set_hash, escrow_input_cells_hash, session_lineage_commitment }
+}
+
+fn session_fixture_cell_tx(session_id: [u8; 32], chunk_index: u64) -> std::result::Result<CellTx, &'static str> {
+    let index_bytes = chunk_index.to_le_bytes();
+    let input_tx_hash = blake3_chunks(b"myelin:session-fixture-input:v1", &[&session_id, &index_bytes]);
+    let type_code_hash = blake3_32(b"myelin:session-fixture-type:v1", &session_id);
+    let lock_script = Script::new([0x61; 32], 1, session_id.to_vec());
+    let mut type_args = Vec::with_capacity(40);
+    type_args.extend_from_slice(&session_id);
+    type_args.extend_from_slice(&index_bytes);
+    let type_script = Script::new(type_code_hash, 1, type_args);
+    let input = CellInput::new(OutPoint::new(input_tx_hash, 0), 0);
+    let output = CellOutput { lock: lock_script, type_: Some(type_script), capacity: 1_500 };
+    let output_data = session_fixture_output_data(session_id, chunk_index);
+    let witness = blake3_chunks(b"myelin:session-fixture-witness:v1", &[&session_id, &index_bytes]).to_vec();
+    CellTx::new(vec![input], vec![], vec![output], vec![output_data], vec![witness])
+}
+
+fn session_da_anchor_cell_tx(manifest: &SessionDaManifestReport, manifest_hash: [u8; 32]) -> Result<CellTx> {
+    let session_id = parse_hex_32(&manifest.session_id)
+        .ok_or_else(|| CliError::InvalidFixture("manifest session_id must be 32-byte hex".to_owned()))?;
+    let court_bundle_hash = parse_hex_32(&manifest.court_bundle_hash)
+        .ok_or_else(|| CliError::InvalidFixture("manifest court_bundle_hash must be 32-byte hex".to_owned()))?;
+    let molecule_transaction_hash = parse_hex_32(&manifest.molecule_transaction_hash)
+        .ok_or_else(|| CliError::InvalidFixture("manifest molecule_transaction_hash must be 32-byte hex".to_owned()))?;
+    let challenge_payload_hash = parse_hex_32(&manifest.challenge_payload_hash)
+        .ok_or_else(|| CliError::InvalidFixture("manifest challenge_payload_hash must be 32-byte hex".to_owned()))?;
+    let segment_root = parse_hex_32(&manifest.segment_root)
+        .ok_or_else(|| CliError::InvalidFixture("manifest segment_root must be 32-byte hex".to_owned()))?;
+    let proof_bytes = decode_hex_field(&manifest.proof_molecule_hex, "proof_molecule_hex")?;
+    let proof_hash = blake3_32(b"myelin:session-da-anchor-proof-molecule:v1", &proof_bytes);
+
+    let index_bytes = manifest.chunk_index.to_le_bytes();
+    let input_tx_hash =
+        blake3_chunks(b"myelin:session-da-anchor-input:v1", &[&session_id, &index_bytes, &manifest_hash, &segment_root]);
+    let input = CellInput::new(OutPoint::new(input_tx_hash, 0), 0);
+    let lock = Script::new(blake3_32(b"myelin:session-da-anchor-lock:v1", &session_id), 1, session_id.to_vec());
+    let type_args =
+        blake3_chunks(b"myelin:session-da-anchor-type-args:v1", &[&session_id, &index_bytes, &manifest_hash, &segment_root]);
+    let type_script = Script::new(blake3_32(b"myelin:session-da-anchor-type-code:v1", &session_id), 1, type_args.to_vec());
+    let output = CellOutput { lock, type_: Some(type_script), capacity: 500 };
+    let output_data = blake3_chunks(
+        b"myelin:session-da-anchor-output-data:v1",
+        &[&court_bundle_hash, &molecule_transaction_hash, &challenge_payload_hash, &segment_root, &proof_hash],
+    )
+    .to_vec();
+    let witness = blake3_chunks(b"myelin:session-da-anchor-witness:v1", &[&manifest_hash, &proof_hash, &segment_root]).to_vec();
+    CellTx::new(vec![input], vec![], vec![output], vec![output_data], vec![witness])
+        .map_err(|error| CliError::InvalidFixture(error.to_owned()))
+}
+
+fn session_settlement_cell_tx(intent: &SessionSettlementIntentReport, intent_hash: [u8; 32]) -> Result<CellTx> {
+    let session_id = parse_hex_32(&intent.session_id)
+        .ok_or_else(|| CliError::InvalidFixture("intent session_id must be 32-byte hex".to_owned()))?;
+    let final_state_root = parse_hex_32(&intent.final_state_root)
+        .ok_or_else(|| CliError::InvalidFixture("intent final_state_root must be 32-byte hex".to_owned()))?;
+    let court_bundle_hash = parse_hex_32(&intent.court_bundle_hash)
+        .ok_or_else(|| CliError::InvalidFixture("intent court_bundle_hash must be 32-byte hex".to_owned()))?;
+    let da_manifest_hash = parse_hex_32(&intent.da_manifest_hash)
+        .ok_or_else(|| CliError::InvalidFixture("intent da_manifest_hash must be 32-byte hex".to_owned()))?;
+    let challenge_payload_hash = parse_hex_32(&intent.challenge_payload_hash)
+        .ok_or_else(|| CliError::InvalidFixture("intent challenge_payload_hash must be 32-byte hex".to_owned()))?;
+    let da_segment_root = parse_hex_32(&intent.da_segment_root)
+        .ok_or_else(|| CliError::InvalidFixture("intent da_segment_root must be 32-byte hex".to_owned()))?;
+
+    let index_bytes = intent.chunk_index.to_le_bytes();
+    let input_tx_hash =
+        blake3_chunks(b"myelin:session-settlement-input:v1", &[&session_id, &index_bytes, &court_bundle_hash, &da_manifest_hash]);
+    let input = CellInput::new(OutPoint::new(input_tx_hash, 0), 0);
+    let lock = Script::new(blake3_32(b"myelin:session-settlement-lock:v1", &session_id), 1, session_id.to_vec());
+    let type_args =
+        blake3_chunks(b"myelin:session-settlement-type-args:v1", &[&session_id, &index_bytes, &intent_hash, &final_state_root]);
+    let type_script = Script::new(blake3_32(b"myelin:session-settlement-type-code:v1", &session_id), 1, type_args.to_vec());
+    let output = CellOutput { lock, type_: Some(type_script), capacity: 1_000 };
+    let output_data = blake3_chunks(
+        b"myelin:session-settlement-output-data:v1",
+        &[&session_id, &index_bytes, &final_state_root, &da_segment_root, &challenge_payload_hash],
+    )
+    .to_vec();
+    let witness = blake3_chunks(
+        b"myelin:session-settlement-witness:v1",
+        &[&intent_hash, &court_bundle_hash, &da_manifest_hash, &challenge_payload_hash],
+    )
+    .to_vec();
+    CellTx::new(vec![input], vec![], vec![output], vec![output_data], vec![witness])
+        .map_err(|error| CliError::InvalidFixture(error.to_owned()))
+}
+
+fn session_fixture_output_data(session_id: [u8; 32], chunk_index: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + 32 * 2);
+    out.extend_from_slice(&chunk_index.to_le_bytes());
+    out.extend_from_slice(&session_id);
+    out.extend_from_slice(&blake3_chunks(b"myelin:session-fixture-state-delta:v1", &[&session_id, &chunk_index.to_le_bytes()]));
+    out
+}
+
+fn finality_evidence_for_block(block: &MyelinBlock) -> Result<(StaticCommitteeEvidenceReport, Option<TendermintEvidenceReport>)> {
+    let block_hash = block.hash();
+    match block.consensus_kind {
+        ConsensusKind::StaticClosedCommittee => {
+            let committee_config = static_fixture_committee_config();
+            let committee = StaticClosedCommittee::new(committee_config.clone())?;
+            let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
+            let certificate = committee.certificate_for_fixture(block_hash, &["validator-0", "validator-1"])?;
+            committee.finalise_block(block.clone(), certificate.clone())?;
+            let signatures = certificate.signatures.iter().map(static_signature_report).collect();
+            let evidence = StaticCommitteeEvidenceReport {
+                consensus_kind: ConsensusKind::StaticClosedCommittee.as_str(),
+                block_hash: hex::encode(block_hash),
+                quorum_weight: committee_config.quorum_weight,
+                signer_ids,
+                signatures,
+                finalised: true,
+            };
+            Ok((evidence, None))
+        }
+        ConsensusKind::Tendermint => {
+            let tendermint_engine = tendermint_fixture_engine();
+            let round = 0u32;
+            let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
+            let certificate = tendermint_engine.precommit_certificate_for_fixture(
+                block_hash,
+                block.number,
+                round,
+                &["validator-0", "validator-1"],
+            )?;
+            tendermint_engine.finalise_block_with_precommit(block.clone(), round, certificate.clone())?;
+            let signatures = certificate.signatures.iter().map(tendermint_signature_report).collect();
+            let tendermint_evidence = TendermintEvidenceReport {
+                consensus_kind: ConsensusKind::Tendermint.as_str(),
+                block_hash: hex::encode(block_hash),
+                quorum_power: 2,
+                height: block.number,
+                round,
+                signer_ids,
+                signatures,
+                certificate_step: "precommit",
+                finalised: true,
+            };
+            let committee_config = static_fixture_committee_config();
+            let static_evidence = StaticCommitteeEvidenceReport {
+                consensus_kind: ConsensusKind::StaticClosedCommittee.as_str(),
+                block_hash: hex::encode(block_hash),
+                quorum_weight: committee_config.quorum_weight,
+                signer_ids: vec![],
+                signatures: vec![],
+                finalised: false,
+            };
+            Ok((static_evidence, Some(tendermint_evidence)))
+        }
+    }
+}
+
+fn static_signature_report(signature: &CommitteeSignature) -> CommitteeSignatureEvidenceReport {
+    CommitteeSignatureEvidenceReport {
+        validator_id: signature.validator_id.clone(),
+        signature: hex::encode(signature.signature),
+        signature_hash: hex::encode(blake3_32(b"myelin:static-committee-signature-hash:v1", &signature.signature)),
+    }
+}
+
+fn tendermint_signature_report(signature: &CommitteeSignature) -> CommitteeSignatureEvidenceReport {
+    CommitteeSignatureEvidenceReport {
+        validator_id: signature.validator_id.clone(),
+        signature: hex::encode(signature.signature),
+        signature_hash: hex::encode(blake3_32(b"myelin:tendermint-precommit-signature-hash:v1", &signature.signature)),
+    }
+}
+
+fn block_report_from_myelin_block(block: &MyelinBlock, block_hash: [u8; 32]) -> TeeworldsBundleBlock {
+    TeeworldsBundleBlock {
+        version: block.version,
+        parent_hash: hex::encode(block.parent_hash),
+        number: block.number,
+        timestamp_ms: block.timestamp_ms,
+        consensus_kind: block.consensus_kind.as_str().to_string(),
+        state_root_before: hex::encode(block.state_root_before),
+        state_root_after: hex::encode(block.state_root_after),
+        ordered_cell_tx_commitments: block.ordered_cell_tx_commitments.iter().map(hex::encode).collect(),
+        data_commitments: block.data_commitments.iter().map(hex::encode).collect(),
+        scheduler_commitment: hex::encode(block.scheduler_commitment),
+        block_hash: hex::encode(block_hash),
+    }
+}
+
+fn static_evidence_report_from_input(input: StaticCommitteeEvidenceInput) -> StaticCommitteeEvidenceReport {
+    StaticCommitteeEvidenceReport {
+        consensus_kind: ConsensusKind::StaticClosedCommittee.as_str(),
+        block_hash: input.block_hash,
+        quorum_weight: input.quorum_weight,
+        signer_ids: input.signer_ids,
+        signatures: input
+            .signatures
+            .into_iter()
+            .map(|signature| CommitteeSignatureEvidenceReport {
+                validator_id: signature.validator_id,
+                signature: signature.signature,
+                signature_hash: signature.signature_hash,
+            })
+            .collect(),
+        finalised: input.finalised,
+    }
+}
+
+fn tendermint_evidence_report_from_input(input: TendermintEvidenceInput) -> TendermintEvidenceReport {
+    TendermintEvidenceReport {
+        consensus_kind: ConsensusKind::Tendermint.as_str(),
+        block_hash: input.block_hash,
+        quorum_power: input.quorum_power,
+        height: input.height,
+        round: input.round,
+        signer_ids: input.signer_ids,
+        signatures: input
+            .signatures
+            .into_iter()
+            .map(|signature| CommitteeSignatureEvidenceReport {
+                validator_id: signature.validator_id,
+                signature: signature.signature,
+                signature_hash: signature.signature_hash,
+            })
+            .collect(),
+        certificate_step: "precommit",
+        finalised: input.finalised,
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct RuntimeSmokeReport {
     /// Schema tag for downstream consumers.
     schema: &'static str,
     /// Consensus engine used for the smoke finality.
     consensus_kind: &'static str,
+    /// VM profile label for this smoke. The runtime smoke does not execute VM
+    /// bytecode, but it still records the build's spawn/IPC surface.
+    vm_profile: &'static str,
+    /// Whether this binary was built with CKB VM v2 spawn/IPC syscalls.
+    ckb_spawn_ipc_enabled: bool,
     /// CellTx id (Myelin txid, blake3 domain-separated).
     cell_tx_id: String,
     /// CellTx witness txid (the key the mempool indexes by).
@@ -2069,6 +8490,8 @@ fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
     Ok(RuntimeSmokeReport {
         schema: "myelin-runtime-smoke-v1",
         consensus_kind: consensus_kind.as_str(),
+        vm_profile: "no-vm-runtime-smoke",
+        ckb_spawn_ipc_enabled: CKB_SPAWN_IPC_SYSCALLS_ENABLED,
         cell_tx_id: hex::encode(txid),
         cell_wtxid: hex::encode(wtxid),
         pool_size_before,
@@ -2083,6 +8506,883 @@ fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    fn spawn_get_transaction_mock(
+        expected_hash: String,
+        status: String,
+        block_hash: Option<String>,
+        block_number: Option<String>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        spawn_get_transaction_mock_with_outputs_data(expected_hash, status, block_hash, block_number, None, None)
+    }
+
+    fn spawn_get_transaction_mock_with_outputs_data(
+        expected_hash: String,
+        status: String,
+        block_hash: Option<String>,
+        block_number: Option<String>,
+        outputs_data: Option<Vec<String>>,
+        output_type_args: Option<String>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock rpc");
+        let addr = listener.local_addr().expect("mock rpc addr");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept mock rpc");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).expect("read mock rpc request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let request_text = String::from_utf8_lossy(&request);
+                    if let Some(content_length_line) =
+                        request_text.lines().find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+                    {
+                        let content_length = content_length_line
+                            .split_once(':')
+                            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                            .expect("content length");
+                        let header_end = request.windows(4).position(|window| window == b"\r\n\r\n").expect("header end") + 4;
+                        if request.len() >= header_end + content_length {
+                            break;
+                        }
+                    }
+                }
+            }
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.contains("\"method\":\"get_transaction\""));
+            assert!(request_text.contains(&expected_hash));
+            let block_hash = block_hash.map(Value::String).unwrap_or(Value::Null);
+            let block_number = block_number.map(Value::String).unwrap_or(Value::Null);
+            let outputs_data = outputs_data.unwrap_or_default();
+            let output_type = output_type_args
+                .map(|args| {
+                    serde_json::json!({
+                        "code_hash": format!("0x{}", "44".repeat(32)),
+                        "hash_type": "data2",
+                        "args": args
+                    })
+                })
+                .unwrap_or(Value::Null);
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "transaction": {
+                        "outputs": [
+                            {
+                                "capacity": "0x4a817c800",
+                                "lock": {"code_hash": format!("0x{}", "00".repeat(32)), "hash_type": "data", "args": "0x"},
+                                "type": output_type
+                            }
+                        ],
+                        "outputs_data": outputs_data
+                    },
+                    "tx_status": {
+                        "status": status,
+                        "block_hash": block_hash,
+                        "block_number": block_number
+                    }
+                }
+            })
+            .to_string();
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(response.as_bytes()).expect("write mock rpc response");
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    fn read_mock_rpc_request(stream: &mut std::net::TcpStream, label: &str) -> Value {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).unwrap_or_else(|error| panic!("read {label} request: {error}"));
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let request_text = String::from_utf8_lossy(&request);
+                if let Some(content_length_line) =
+                    request_text.lines().find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+                {
+                    let content_length = content_length_line
+                        .split_once(':')
+                        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                        .expect("content length");
+                    let header_end = request.windows(4).position(|window| window == b"\r\n\r\n").expect("header end") + 4;
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+            }
+        }
+        let body_start = request.windows(4).position(|window| window == b"\r\n\r\n").expect("header end") + 4;
+        serde_json::from_slice(&request[body_start..]).unwrap_or_else(|error| panic!("parse {label} request json: {error}"))
+    }
+
+    #[derive(Clone, Debug)]
+    struct MockCarrierLiveCell {
+        capacity: String,
+        data_hash: String,
+        lock_code_hash: String,
+        lock_hash_type: String,
+        lock_args: String,
+    }
+
+    fn mock_carrier_live_cell(capacity: String, data_hash: String, lock_code_hash: String) -> MockCarrierLiveCell {
+        MockCarrierLiveCell { capacity, data_hash, lock_code_hash, lock_hash_type: "data".to_owned(), lock_args: "0x".to_owned() }
+    }
+
+    fn spawn_carrier_submission_rpc_mock(
+        cells: std::collections::BTreeMap<String, MockCarrierLiveCell>,
+        accepted_hash: Option<String>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let request_count = if accepted_hash.is_some() { 4 } else { 3 };
+        spawn_carrier_submission_rpc_mock_with_request_count(cells, accepted_hash, request_count)
+    }
+
+    fn spawn_carrier_submission_rpc_mock_with_request_count(
+        cells: std::collections::BTreeMap<String, MockCarrierLiveCell>,
+        accepted_hash: Option<String>,
+        request_count: usize,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind carrier-submission rpc");
+        let addr = listener.local_addr().expect("carrier-submission rpc addr");
+        let handle = std::thread::spawn(move || {
+            let mut send_seen = false;
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().expect("accept carrier-submission rpc");
+                let request_json = read_mock_rpc_request(&mut stream, "carrier-submission rpc");
+                let method = request_json["method"].as_str().expect("rpc method");
+                let body = match method {
+                    "get_live_cell" => {
+                        let out_point = request_json["params"][0].clone();
+                        let key = ckb_out_point_key(&out_point).expect("out point key");
+                        let result = if let Some(cell) = cells.get(&key) {
+                            serde_json::json!({
+                                "cell": {
+                                    "output": {
+                                        "capacity": cell.capacity,
+                                        "lock": {
+                                            "code_hash": cell.lock_code_hash,
+                                            "hash_type": cell.lock_hash_type,
+                                            "args": cell.lock_args
+                                        },
+                                        "type": null
+                                    },
+                                    "data": {
+                                        "content": "0x",
+                                        "hash": cell.data_hash
+                                    }
+                                },
+                                "status": "live"
+                            })
+                        } else {
+                            serde_json::json!({
+                                "cell": null,
+                                "status": "unknown"
+                            })
+                        };
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_json["id"].clone(),
+                            "result": result
+                        })
+                    }
+                    "send_transaction" => {
+                        let accepted_hash =
+                            accepted_hash.as_ref().expect("send_transaction should not be called for rejected preflight");
+                        send_seen = true;
+                        assert!(request_json["params"][0]["outputs"].is_array());
+                        assert_eq!(request_json["params"][1], "passthrough");
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_json["id"].clone(),
+                            "result": accepted_hash
+                        })
+                    }
+                    other => panic!("unexpected carrier-submission rpc method: {other}"),
+                }
+                .to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).expect("write carrier-submission response");
+            }
+            if accepted_hash.is_some() {
+                assert!(send_seen, "carrier submission should broadcast after passing preflight");
+            }
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    fn spawn_direct_submission_rpc_mock(
+        input_live: bool,
+        input_capacity: String,
+        accepted_hash: Option<String>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind direct-submission rpc");
+        let addr = listener.local_addr().expect("direct-submission rpc addr");
+        let handle = std::thread::spawn(move || {
+            let request_count = if accepted_hash.is_some() { 2 } else { 1 };
+            let mut send_seen = false;
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().expect("accept direct-submission rpc");
+                let request_json = read_mock_rpc_request(&mut stream, "direct-submission rpc");
+                let method = request_json["method"].as_str().expect("rpc method");
+                let body = match method {
+                    "get_live_cell" => {
+                        let result = if input_live {
+                            serde_json::json!({
+                                "cell": {
+                                    "output": {
+                                        "capacity": input_capacity,
+                                        "lock": {
+                                            "code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                            "hash_type": "type",
+                                            "args": "0x"
+                                        },
+                                        "type": null
+                                    },
+                                    "data": {
+                                        "content": "0x",
+                                        "hash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+                                    }
+                                },
+                                "status": "live"
+                            })
+                        } else {
+                            serde_json::json!({
+                                "cell": null,
+                                "status": "unknown"
+                            })
+                        };
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_json["id"].clone(),
+                            "result": result
+                        })
+                    }
+                    "send_transaction" => {
+                        let accepted_hash =
+                            accepted_hash.as_ref().expect("send_transaction should not be called for rejected preflight");
+                        send_seen = true;
+                        assert!(request_json["params"][0]["outputs"].is_array());
+                        assert_eq!(request_json["params"][1], "passthrough");
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_json["id"].clone(),
+                            "result": accepted_hash
+                        })
+                    }
+                    other => panic!("unexpected direct-submission rpc method: {other}"),
+                }
+                .to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).expect("write direct-submission response");
+            }
+            if accepted_hash.is_some() {
+                assert!(send_seen, "direct submission should broadcast after passing preflight");
+            }
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    fn spawn_get_tip_header_mock(tip_number: String) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock tip rpc");
+        let addr = listener.local_addr().expect("mock tip rpc addr");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept mock tip rpc");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).expect("read mock tip request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let request_text = String::from_utf8_lossy(&request);
+                    if let Some(content_length_line) =
+                        request_text.lines().find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+                    {
+                        let content_length = content_length_line
+                            .split_once(':')
+                            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                            .expect("content length");
+                        let header_end = request.windows(4).position(|window| window == b"\r\n\r\n").expect("header end") + 4;
+                        if request.len() >= header_end + content_length {
+                            break;
+                        }
+                    }
+                }
+            }
+            let body_start = request.windows(4).position(|window| window == b"\r\n\r\n").expect("header end") + 4;
+            let request_json: Value = serde_json::from_slice(&request[body_start..]).expect("request json");
+            assert_eq!(request_json["method"], "get_tip_header");
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_json["id"].clone(),
+                "result": {
+                    "number": tip_number
+                }
+            })
+            .to_string();
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(response.as_bytes()).expect("write mock tip response");
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    fn spawn_get_live_cell_mock(live_keys: Vec<String>) -> (String, std::thread::JoinHandle<()>) {
+        spawn_get_live_cell_mock_with_data_hashes(live_keys, std::collections::BTreeMap::new())
+    }
+
+    fn spawn_get_live_cell_mock_with_data_hashes(
+        live_keys: Vec<String>,
+        data_hashes: std::collections::BTreeMap<String, String>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let live_keys = live_keys.into_iter().collect::<std::collections::BTreeSet<_>>();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock live-cell rpc");
+        let addr = listener.local_addr().expect("mock live-cell rpc addr");
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept mock live-cell rpc");
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let read = stream.read(&mut buffer).expect("read mock live-cell request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let request_text = String::from_utf8_lossy(&request);
+                        if let Some(content_length_line) =
+                            request_text.lines().find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+                        {
+                            let content_length = content_length_line
+                                .split_once(':')
+                                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                                .expect("content length");
+                            let header_end = request.windows(4).position(|window| window == b"\r\n\r\n").expect("header end") + 4;
+                            if request.len() >= header_end + content_length {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let body_start = request.windows(4).position(|window| window == b"\r\n\r\n").expect("header end") + 4;
+                let request_json: Value = serde_json::from_slice(&request[body_start..]).expect("request json");
+                assert_eq!(request_json["method"], "get_live_cell");
+                let out_point = request_json["params"][0].clone();
+                let key = ckb_out_point_key(&out_point).expect("out point key");
+                let data_hash = data_hashes
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned());
+                let result = if live_keys.contains(&key) {
+                    serde_json::json!({
+                        "cell": {
+                            "output": {
+                                "capacity": "0x3e8",
+                                "lock": {
+                                    "code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                    "hash_type": "type",
+                                    "args": "0x"
+                                },
+                                "type": null
+                            },
+                            "data": {
+                                "content": "0x",
+                                "hash": data_hash
+                            }
+                        },
+                        "status": "live"
+                    })
+                } else {
+                    serde_json::json!({
+                        "cell": null,
+                        "status": "unknown"
+                    })
+                };
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request_json["id"].clone(),
+                    "result": result
+                })
+                .to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).expect("write mock live-cell response");
+            }
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    fn spawn_get_live_cell_capacity_mock(
+        live_keys: Vec<String>,
+        capacity: String,
+        request_count: usize,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let live_keys = live_keys.into_iter().collect::<std::collections::BTreeSet<_>>();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock economics rpc");
+        let addr = listener.local_addr().expect("mock economics rpc addr");
+        let handle = std::thread::spawn(move || {
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().expect("accept mock economics rpc");
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let read = stream.read(&mut buffer).expect("read mock economics request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let request_text = String::from_utf8_lossy(&request);
+                        if let Some(content_length_line) =
+                            request_text.lines().find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+                        {
+                            let content_length = content_length_line
+                                .split_once(':')
+                                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                                .expect("content length");
+                            let header_end = request.windows(4).position(|window| window == b"\r\n\r\n").expect("header end") + 4;
+                            if request.len() >= header_end + content_length {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let body_start = request.windows(4).position(|window| window == b"\r\n\r\n").expect("header end") + 4;
+                let request_json: Value = serde_json::from_slice(&request[body_start..]).expect("request json");
+                assert_eq!(request_json["method"], "get_live_cell");
+                let out_point = request_json["params"][0].clone();
+                let key = ckb_out_point_key(&out_point).expect("out point key");
+                let result = if live_keys.contains(&key) {
+                    serde_json::json!({
+                        "cell": {
+                            "output": {
+                                "capacity": capacity,
+                                "lock": {
+                                    "code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                                    "hash_type": "type",
+                                    "args": "0x"
+                                },
+                                "type": null
+                            },
+                            "data": {
+                                "content": "0x",
+                                "hash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+                            }
+                        },
+                        "status": "live"
+                    })
+                } else {
+                    serde_json::json!({
+                        "cell": null,
+                        "status": "unknown"
+                    })
+                };
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request_json["id"].clone(),
+                    "result": result
+                })
+                .to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).expect("write mock economics response");
+            }
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    fn write_temp_json<T: Serialize>(label: &str, value: &T) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("myelin-{label}-{}.json", std::process::id()));
+        std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+        path
+    }
+
+    fn da_anchor_package_from_carrier_payload(payload: &str) -> Value {
+        let payload_bytes = decode_hex_bytes(payload).expect("carrier payload bytes");
+        assert_eq!(payload_bytes.len(), 160);
+        serde_json::json!({
+            "schema": "myelin-session-da-anchor-package-v1",
+            "da_manifest_hash": format!("0x{}", hex::encode(&payload_bytes[0..32])),
+            "court_bundle_hash": format!("0x{}", hex::encode(&payload_bytes[32..64])),
+            "challenge_payload_hash": format!("0x{}", hex::encode(&payload_bytes[64..96])),
+            "segment_root": format!("0x{}", hex::encode(&payload_bytes[96..128])),
+            "molecule_transaction_hash": format!("0x{}", hex::encode(&payload_bytes[128..160])),
+            "carrier_payload_kind": "myelin-session-da-anchor-carrier-v1",
+            "carrier_payload": payload,
+            "carrier_payload_data_hash": carrier_payload_data_hash_hex(payload).expect("carrier payload data hash")
+        })
+    }
+
+    fn settlement_package_from_carrier_payload(payload: &str) -> Value {
+        let payload_bytes = decode_hex_bytes(payload).expect("carrier payload bytes");
+        assert_eq!(payload_bytes.len(), 160);
+        let intent_hash: [u8; 32] = payload_bytes[0..32].try_into().expect("intent hash");
+        let session_id = [0x5a; 32];
+        let participant_set_hash = [0x6b; 32];
+        let escrow_input_cells_hash = [0x7c; 32];
+        let session_lineage_commitment = [0x8d; 32];
+        let authority = settlement_authority_requirement(
+            intent_hash,
+            session_id,
+            participant_set_hash,
+            escrow_input_cells_hash,
+            session_lineage_commitment,
+        );
+        serde_json::json!({
+            "schema": "myelin-session-settlement-package-v1",
+            "session_id": hex::encode(session_id),
+            "participant_set_hash": hex::encode(participant_set_hash),
+            "escrow_input_cells_hash": hex::encode(escrow_input_cells_hash),
+            "session_lineage_commitment": hex::encode(session_lineage_commitment),
+            "intent_hash": hex::encode(&payload_bytes[0..32]),
+            "court_bundle_hash": format!("0x{}", hex::encode(&payload_bytes[32..64])),
+            "da_manifest_hash": format!("0x{}", hex::encode(&payload_bytes[64..96])),
+            "challenge_payload_hash": format!("0x{}", hex::encode(&payload_bytes[96..128])),
+            "final_state_root": format!("0x{}", hex::encode(&payload_bytes[128..160])),
+            "settlement_authority": authority,
+            "carrier_payload_kind": "myelin-session-settlement-carrier-v1",
+            "carrier_payload": payload,
+            "carrier_payload_data_hash": carrier_payload_data_hash_hex(payload).expect("carrier payload data hash")
+        })
+    }
+
+    fn readiness_fixture_reports(
+        expected_hash: String,
+        block_hash: String,
+    ) -> (
+        SessionSubmissionContextReport,
+        SessionSubmissionEconomicsReport,
+        SessionSubmissionInclusionReport,
+        SessionSubmissionStabilityReport,
+        SessionSubmissionFinalityReport,
+    ) {
+        let context = SessionSubmissionContextReport {
+            schema: "myelin-session-submission-context-v1".to_owned(),
+            submission: "session-submit.json".to_owned(),
+            submission_schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+            rpc_url: "http://127.0.0.1:8114".to_owned(),
+            expected_ckb_tx_hash: expected_hash.clone(),
+            request_method: "get_live_cell".to_owned(),
+            input_count: 1,
+            cell_dep_count: 1,
+            live_input_count: 1,
+            live_cell_dep_count: 1,
+            all_inputs_live: true,
+            all_cell_deps_live: true,
+            carrier_verifier_code_hash: None,
+            carrier_verifier_code_dep_key: None,
+            carrier_verifier_code_dep_data_hash: None,
+            carrier_verifier_code_dep_data_hash_matches: None,
+            ready_for_ckb_submission: true,
+            checks: Vec::new(),
+            notes: Vec::new(),
+        };
+        let economics = SessionSubmissionEconomicsReport {
+            schema: "myelin-session-submission-economics-v1".to_owned(),
+            submission: "session-submit.json".to_owned(),
+            submission_schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+            rpc_url: "http://127.0.0.1:8114".to_owned(),
+            expected_ckb_tx_hash: expected_hash.clone(),
+            request_method: "get_live_cell".to_owned(),
+            input_count: 1,
+            output_count: 1,
+            outputs_data_count: 1,
+            live_input_count: 1,
+            total_input_capacity: Some(1_764),
+            total_output_capacity: Some(1_000),
+            fee_shannons: Some(764),
+            min_fee_shannons: 1,
+            transaction_size_bytes: 764,
+            min_fee_rate_shannons_per_kb: 1_000,
+            required_fee_shannons: 764,
+            max_fee_shannons: Some(764),
+            data_bearing_output_count: 0,
+            empty_data_output_count: 1,
+            explicit_change_output_count: 0,
+            explicit_change_capacity: 0,
+            explicit_change_observed: false,
+            all_inputs_live: true,
+            outputs_data_count_matches: true,
+            capacity_balanced: true,
+            fee_sufficient: true,
+            fee_rate_sufficient: true,
+            fee_not_excessive: true,
+            economically_ready: true,
+            checks: Vec::new(),
+            outputs: Vec::new(),
+            notes: Vec::new(),
+        };
+        let inclusion = SessionSubmissionInclusionReport {
+            schema: "myelin-session-submission-inclusion-v1".to_owned(),
+            submission: "session-submit.json".to_owned(),
+            submission_schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+            rpc_url: "http://127.0.0.1:8114".to_owned(),
+            expected_ckb_tx_hash: expected_hash.clone(),
+            min_status: "committed".to_owned(),
+            request_method: "get_transaction".to_owned(),
+            request_json_hash: "00".repeat(32),
+            found: true,
+            status: Some("committed".to_owned()),
+            block_hash: Some(block_hash.clone()),
+            block_number: Some("0x64".to_owned()),
+            met_min_status: true,
+            committed: true,
+            live_l1_observed: true,
+            carrier_package_commitment: None,
+            carrier_payload_kind: None,
+            carrier_payload: None,
+            carrier_output_data: None,
+            carrier_output_data_matches_carrier_payload: None,
+            carrier_output_data_matches_package_commitment: None,
+            carrier_type_script_code_hash: None,
+            carrier_type_script_hash_type: None,
+            carrier_type_script_args: None,
+            carrier_expected_type_script_code_hash: None,
+            carrier_expected_type_script_hash_type: None,
+            carrier_expected_type_script_args: None,
+            carrier_type_script_identity_matches_submission: None,
+            carrier_type_script_args_match_carrier_data_hash: None,
+            carrier_type_script_args_match_package_data_hash: None,
+            rpc_result: None,
+            rpc_error: None,
+            notes: Vec::new(),
+        };
+        let stability = SessionSubmissionStabilityReport {
+            schema: "myelin-session-submission-stability-v1".to_owned(),
+            inclusion: "session-inclusion.json".to_owned(),
+            rpc_url: "http://127.0.0.1:8114".to_owned(),
+            expected_ckb_tx_hash: expected_hash.clone(),
+            expected_status: Some("committed".to_owned()),
+            expected_block_hash: Some(block_hash.clone()),
+            expected_block_number: Some("0x64".to_owned()),
+            observed_status: Some("committed".to_owned()),
+            observed_block_hash: Some(block_hash.clone()),
+            observed_block_number: Some("0x64".to_owned()),
+            request_method: "get_transaction".to_owned(),
+            request_json_hash: "11".repeat(32),
+            stable_block_identity: true,
+            reorg_detected: false,
+            missing_or_uncommitted: false,
+            rpc_result: None,
+            rpc_error: None,
+            notes: Vec::new(),
+        };
+        let finality = SessionSubmissionFinalityReport {
+            schema: "myelin-session-submission-finality-v1".to_owned(),
+            inclusion: "session-inclusion.json".to_owned(),
+            rpc_url: "http://127.0.0.1:8114".to_owned(),
+            expected_ckb_tx_hash: expected_hash,
+            committed_block_hash: Some(block_hash),
+            committed_block_number: Some("0x64".to_owned()),
+            tip_block_number: Some("0x6a".to_owned()),
+            confirmations: Some(7),
+            min_confirmations: 6,
+            finality_confirmed: true,
+            reorg_risk_bounded: true,
+            request_method: "get_tip_header".to_owned(),
+            request_json_hash: "22".repeat(32),
+            rpc_result: None,
+            rpc_error: None,
+            notes: Vec::new(),
+        };
+        (context, economics, inclusion, stability, finality)
+    }
+
+    fn write_readiness_submission(expected_hash: &str) -> PathBuf {
+        let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
+        let label_hash = &label_hash[..label_hash.len().min(8)];
+        write_temp_json(
+            &format!("readiness-submission-{label_hash}"),
+            &serde_json::json!({
+                "schema": "myelin-session-da-anchor-submission-v1",
+                "ckb_raw_tx_hash": expected_hash,
+                "rpc_result": expected_hash
+            }),
+        )
+    }
+
+    fn write_readiness_live_da_submission(expected_hash: &str, include_rpc_result: bool) -> PathBuf {
+        let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
+        let label_hash = &label_hash[..label_hash.len().min(8)];
+        let mut submission = serde_json::json!({
+            "schema": "myelin-session-da-anchor-submission-v1",
+            "ckb_raw_tx_hash": expected_hash,
+            "rpc_url": "http://127.0.0.1:8114",
+            "dry_run": false,
+            "submitted_to_rpc": true,
+            "accepted_by_rpc": true,
+            "l1_da_published": true,
+            "rpc_error": null
+        });
+        if include_rpc_result {
+            submission["rpc_result"] = Value::String(expected_hash.to_owned());
+        }
+        write_temp_json(&format!("readiness-live-da-submission-{label_hash}-{include_rpc_result}"), &submission)
+    }
+
+    fn write_readiness_live_carrier_submission(expected_hash: &str, include_rpc_result: bool) -> PathBuf {
+        let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
+        let label_hash = &label_hash[..label_hash.len().min(8)];
+        let mut submission = serde_json::json!({
+            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "ckb_raw_tx_hash": expected_hash,
+            "rpc_url": "http://127.0.0.1:8114",
+            "dry_run": false,
+            "submitted_to_rpc": true,
+            "accepted_by_rpc": true,
+            "submit_mode": true,
+            "rpc_error": null
+        });
+        if include_rpc_result {
+            submission["rpc_result"] = Value::String(expected_hash.to_owned());
+        }
+        write_temp_json(&format!("readiness-live-carrier-submission-{label_hash}-{include_rpc_result}"), &submission)
+    }
+
+    fn write_readiness_live_final_script_submission(expected_hash: &str, include_rpc_result: bool) -> PathBuf {
+        let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
+        let label_hash = &label_hash[..label_hash.len().min(8)];
+        let mut submission = serde_json::json!({
+            "schema": "myelin-session-ckb-final-script-submission-v1",
+            "package_kind": "myelin-session-da-anchor-package-v1",
+            "verifier_role": "final-l1-script",
+            "ckb_raw_tx_hash": expected_hash,
+            "rpc_url": "http://127.0.0.1:8114",
+            "dry_run": false,
+            "submitted_to_rpc": true,
+            "accepted_by_rpc": true,
+            "submit_mode": true,
+            "l1_da_published": true,
+            "l1_court_submitted": false,
+            "authority_input_present": false,
+            "pre_submit_context_checked": true,
+            "pre_submit_input_live": true,
+            "pre_submit_input_capacity_matches": true,
+            "pre_submit_input_lock_matches": true,
+            "pre_submit_lock_code_dep_live": true,
+            "pre_submit_verifier_code_dep_live": true,
+            "pre_submit_verifier_code_dep_data_hash_matches": true,
+            "final_script_verifier": {
+                "verifier_role": "final-l1-script",
+                "cellscript_source_hash": format!("0x{}", "42".repeat(32))
+            },
+            "rpc_error": null
+        });
+        if include_rpc_result {
+            submission["rpc_result"] = Value::String(expected_hash.to_owned());
+        }
+        write_temp_json(&format!("readiness-live-final-script-submission-{label_hash}-{include_rpc_result}"), &submission)
+    }
+
+    fn write_readiness_live_final_script_submission_without_preflight(expected_hash: &str) -> PathBuf {
+        let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
+        let label_hash = &label_hash[..label_hash.len().min(8)];
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-final-script-submission-v1",
+            "package_kind": "myelin-session-da-anchor-package-v1",
+            "verifier_role": "final-l1-script",
+            "ckb_raw_tx_hash": expected_hash,
+            "rpc_url": "http://127.0.0.1:8114",
+            "dry_run": false,
+            "submitted_to_rpc": true,
+            "accepted_by_rpc": true,
+            "submit_mode": true,
+            "l1_da_published": true,
+            "l1_court_submitted": false,
+            "rpc_result": expected_hash,
+            "rpc_error": null
+        });
+        write_temp_json(&format!("readiness-live-final-script-submission-no-preflight-{label_hash}"), &submission)
+    }
+
+    fn write_readiness_live_final_settlement_submission(expected_hash: &str, authority_lock_matches: bool) -> PathBuf {
+        let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
+        let label_hash = &label_hash[..label_hash.len().min(8)];
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-final-script-submission-v1",
+            "package_kind": "myelin-session-settlement-package-v1",
+            "verifier_role": "final-l1-script",
+            "ckb_raw_tx_hash": expected_hash,
+            "rpc_url": "http://127.0.0.1:8114",
+            "dry_run": false,
+            "submitted_to_rpc": true,
+            "accepted_by_rpc": true,
+            "submit_mode": true,
+            "l1_da_published": false,
+            "l1_court_submitted": true,
+            "evidence_cell_dep_present": true,
+            "authority_input_present": true,
+            "settlement_authority_requirement": {
+                "schema": "myelin-session-settlement-authority-v1",
+                "data": format!("0x{}", "11".repeat(32)),
+                "data_hash": format!("0x{}", "22".repeat(32)),
+                "data_semantics": "settlement-authority-lineage-v1",
+                "consumed_input_index": 1,
+                "required_lock_binding": "final-da-publication-lock-hash"
+            },
+            "pre_submit_context_checked": true,
+            "pre_submit_input_live": true,
+            "pre_submit_input_capacity_matches": true,
+            "pre_submit_input_lock_matches": true,
+            "pre_submit_lock_code_dep_live": true,
+            "pre_submit_verifier_code_dep_live": true,
+            "pre_submit_verifier_code_dep_data_hash_matches": true,
+            "pre_submit_evidence_cell_dep_live": true,
+            "pre_submit_evidence_cell_dep_capacity_matches": true,
+            "pre_submit_evidence_cell_dep_lock_matches": true,
+            "pre_submit_authority_input_live": true,
+            "pre_submit_authority_input_capacity_matches": true,
+            "pre_submit_authority_input_data_hash_matches": true,
+            "pre_submit_authority_input_lock_matches": authority_lock_matches,
+            "final_script_verifier": {
+                "verifier_role": "final-l1-script",
+                "cellscript_source_hash": format!("0x{}", "43".repeat(32))
+            },
+            "rpc_result": expected_hash,
+            "rpc_error": null
+        });
+        write_temp_json(&format!("readiness-live-final-settlement-submission-{label_hash}-{authority_lock_matches}"), &submission)
+    }
+
+    fn write_readiness_recorded_carrier_submission(expected_hash: &str) -> PathBuf {
+        let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
+        let label_hash = &label_hash[..label_hash.len().min(8)];
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "ckb_raw_tx_hash": expected_hash,
+            "rpc_url": "http://127.0.0.1:8114",
+            "dry_run": false,
+            "submitted_to_rpc": false,
+            "accepted_by_rpc": false,
+            "submit_mode": false,
+            "recorded_accepted_tx_hash": expected_hash,
+            "recorded_accepted_tx_hash_matches": true,
+            "rpc_result": null,
+            "rpc_error": null
+        });
+        write_temp_json(&format!("readiness-recorded-carrier-submission-{label_hash}"), &submission)
+    }
+
+    fn bind_readiness_submission(
+        submission_path: &Path,
+        context: &mut SessionSubmissionContextReport,
+        economics: &mut SessionSubmissionEconomicsReport,
+        inclusion: &mut SessionSubmissionInclusionReport,
+    ) {
+        let submission = submission_path.display().to_string();
+        context.submission = submission.clone();
+        economics.submission = submission.clone();
+        inclusion.submission = submission;
+    }
 
     #[test]
     fn decodes_nested_mock_transaction_witnesses() {
@@ -2137,6 +9437,8 @@ mod tests {
 
         assert!(report.court_verifiable);
         assert!(!report.l1_court_implemented);
+        assert_eq!(report.vm_profile, "ckb-strict-basic");
+        assert!(!report.ckb_spawn_ipc_required);
         assert_eq!(report.chunk_index, 0);
         assert_eq!(report.chunk_bytes, 4);
         assert_eq!(report.ckb_projection.semantic_profile, "ckb-compatible");
@@ -2153,6 +9455,8 @@ mod tests {
         assert!(verification.valid);
         assert!(verification.checks.iter().all(|check| check.ok));
         assert!(verification.checks.iter().any(|check| check.name == "committee-certificate"));
+        assert!(verification.checks.iter().any(|check| check.name == "vm-profile"));
+        assert!(verification.checks.iter().any(|check| check.name == "ckb-spawn-ipc-not-required"));
         // The data-binding checks must all pass on a fresh, well-formed bundle.
         assert!(verification.checks.iter().any(|check| check.name == "block-hash-recomputes"));
         assert!(verification.checks.iter().any(|check| check.name == "block-state-root-before-matches"));
@@ -2195,6 +9499,8 @@ mod tests {
 
         assert!(report.court_verifiable);
         assert!(!report.l1_court_implemented);
+        assert_eq!(report.vm_profile, "ckb-strict-basic");
+        assert!(!report.ckb_spawn_ipc_required);
         assert_eq!(report.chunk_index, 0);
         assert_eq!(report.chunk_bytes, 4);
         assert_eq!(report.ckb_projection.semantic_profile, "ckb-compatible");
@@ -2246,10 +9552,3310 @@ mod tests {
     }
 
     #[test]
+    fn session_fixture_static_commit_court_bundle_verifies() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        assert_eq!(open.schema, "myelin-session-open-v1");
+        assert_eq!(open.vm_profile, "ckb-strict-basic");
+        assert!(!open.ckb_spawn_ipc_required);
+        assert_eq!(open.participants, vec!["alice".to_owned(), "bob".to_owned()]);
+
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-static-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_fixture(open_path.clone()).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+
+        assert_eq!(commit.schema, "myelin-session-commit-v1");
+        assert_eq!(commit.consensus_kind, "static-closed-committee");
+        assert_eq!(commit.vm_profile, "ckb-strict-basic");
+        assert!(!commit.ckb_spawn_ipc_required);
+        assert_eq!(commit.pool_size_before, 0);
+        assert_eq!(commit.pool_size_after, 1);
+        assert_ne!(commit.state_root_before, commit.state_root_after);
+        assert!(commit.static_committee_evidence.finalised);
+        assert!(commit.tendermint_evidence.is_none());
+        assert!(commit.finalised);
+
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-static-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+
+        assert_eq!(bundle.schema, "myelin-session-court-bundle-v1");
+        assert_eq!(bundle.vm_profile, "ckb-strict-basic");
+        assert!(bundle.court_verifiable);
+        assert!(!bundle.l1_court_implemented);
+        assert_eq!(bundle.ckb_projection.semantic_profile, "ckb-compatible");
+
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-static-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let verification = verify_session_court_bundle(bundle_path.clone()).expect("verify session court bundle");
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "committee-certificate"));
+        assert!(verification.checks.iter().any(|check| check.name == "block-hash-recomputes"));
+        assert!(verification.checks.iter().any(|check| check.name == "challenge-payload-hash"));
+        assert!(verification.checks.iter().any(|check| check.name == "vm-profile"));
+        assert!(verification.checks.iter().any(|check| check.name == "ckb-spawn-ipc-not-required"));
+    }
+
+    #[test]
+    fn session_open_accepts_user_supplied_descriptor_and_commits_nonzero_chunk() {
+        let alice_tx = hex::encode([0xA1; 32]);
+        let bob_tx = hex::encode([0xB2; 32]);
+        let alice_lock = hex::encode([0x11; 32]);
+        let bob_lock = hex::encode([0x22; 32]);
+        let open = session_open(SessionOpenArgs {
+            app_id: "myelin-custom-game-session-v1".to_owned(),
+            participants: vec!["alice".to_owned(), "bob".to_owned(), "carol".to_owned()],
+            escrow_cells: vec![format!("{alice_tx}:0:1200:{alice_lock}"), format!("{bob_tx}:2:2400:{bob_lock}")],
+            timeout_ms: 90_000,
+            consensus: "tendermint".to_owned(),
+            out: None,
+        })
+        .expect("open configurable session");
+
+        assert_eq!(open.app_id, "myelin-custom-game-session-v1");
+        assert_eq!(open.consensus_kind, "tendermint");
+        assert_eq!(open.participants.len(), 3);
+        assert_eq!(open.escrow_input_cells.len(), 2);
+        assert_eq!(open.timeout_ms, 90_000);
+        assert_eq!(open.vm_profile, "ckb-strict-basic");
+        assert!(!open.ckb_spawn_ipc_required);
+
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-custom-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 7).expect("commit configurable session");
+        let _ = std::fs::remove_file(open_path);
+
+        assert_eq!(commit.chunk_index, 7);
+        assert_eq!(commit.consensus_kind, "tendermint");
+        assert!(commit.tendermint_evidence.is_some());
+        assert_ne!(commit.state_root_before, commit.state_root_after);
+
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-custom-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 7).expect("custom court bundle");
+        let _ = std::fs::remove_file(commit_path);
+
+        assert_eq!(bundle.chunk_index, 7);
+        assert!(bundle.court_verifiable);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-custom-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let verification = verify_session_court_bundle(bundle_path.clone()).expect("verify custom court bundle");
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "tendermint-certificate"));
+    }
+
+    #[test]
+    fn session_da_manifest_binds_to_verified_court_bundle_payload() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        assert_eq!(manifest.schema, "myelin-session-da-manifest-v1");
+        assert_eq!(manifest.da_profile, "single-segment-merkle-v1");
+        assert_eq!(manifest.payload_kind, "session-court-molecule-transaction");
+        assert_eq!(manifest.session_id, bundle.session_id);
+        assert_eq!(manifest.chunk_index, bundle.chunk_index);
+        assert_eq!(manifest.molecule_transaction_hash, bundle.molecule_transaction_hash);
+        assert_eq!(manifest.challenge_payload_hash, bundle.challenge_payload_hash);
+        assert!(manifest.proof_valid);
+        assert!(!manifest.l1_da_published);
+
+        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-manifest-{}.json", std::process::id()));
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let verification = verify_session_da_manifest(manifest_path.clone(), bundle_path.clone(), None).expect("verify DA manifest");
+        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "proof-verifies"));
+        assert!(verification.checks.iter().any(|check| check.name == "proof-payload"));
+        assert!(verification.checks.iter().any(|check| check.name == "l1-da-marker"));
+    }
+
+    #[test]
+    fn session_da_manifest_can_be_backed_by_sealed_segment_storage() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-store-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-store-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-store-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&storage_dir);
+
+        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone())).expect("durable DA manifest");
+        assert!(manifest.local_da_published);
+        assert!(manifest.segment_sealed);
+        let storage_display = storage_dir.display().to_string();
+        assert_eq!(manifest.da_storage_path.as_deref(), Some(storage_display.as_str()));
+        assert!(storage_dir.join("segment_00000000.dat").exists());
+        assert!(storage_dir.join("segment_00000000.meta").exists());
+        assert!(storage_dir.join("segment_00000000.idx").exists());
+
+        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-manifest-store-{}.json", std::process::id()));
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let verification = verify_session_da_manifest(manifest_path.clone(), bundle_path.clone(), Some(storage_dir.clone()))
+            .expect("verify durable DA");
+        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+        let _ = std::fs::remove_dir_all(storage_dir);
+
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "local-da-storage-payload"));
+        assert!(verification.checks.iter().any(|check| check.name == "local-da-storage-proof"));
+    }
+
+    #[test]
+    fn session_da_manifest_rejects_tampered_segment_root() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-tamper-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-tamper-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-tamper-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+
+        let mut manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        manifest.segment_root = "11".repeat(32);
+
+        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-manifest-tamper-{}.json", std::process::id()));
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let verification =
+            verify_session_da_manifest(manifest_path.clone(), bundle_path.clone(), None).expect("verify tampered DA manifest");
+        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(!verification.valid);
+        assert!(verification.checks.iter().any(|check| check.name == "segment-root" && !check.ok));
+    }
+
+    #[test]
+    fn session_da_anchor_package_binds_verified_manifest_into_ckb_projectable_celltx() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-anchor-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-anchor-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-anchor-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-anchor-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&storage_dir);
+        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone())).expect("DA manifest");
+        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-anchor-{}.json", std::process::id()));
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
+        assert_eq!(package.schema, "myelin-session-da-anchor-package-v1");
+        assert_eq!(package.session_id, manifest.session_id);
+        assert_eq!(package.chunk_index, manifest.chunk_index);
+        assert_eq!(package.court_bundle_hash, manifest.court_bundle_hash);
+        assert_eq!(package.court_molecule_transaction_hash, manifest.molecule_transaction_hash);
+        assert_eq!(package.challenge_payload_hash, manifest.challenge_payload_hash);
+        assert_eq!(package.segment_root, manifest.segment_root);
+        assert_eq!(package.da_manifest_hash.len(), 64);
+        assert_eq!(package.carrier_payload_kind, "myelin-session-da-anchor-carrier-v1");
+        assert_eq!(decode_hex_bytes(&package.carrier_payload).expect("carrier payload").len(), 160);
+        assert_eq!(
+            package.carrier_payload_data_hash,
+            carrier_payload_data_hash_hex(&package.carrier_payload).expect("carrier payload data hash")
+        );
+        assert_eq!(package.da_anchor_cell_tx_id.len(), 64);
+        assert_eq!(package.da_anchor_cell_wtxid.len(), 64);
+        assert_eq!(package.molecule_transaction_hash.len(), 64);
+        assert!(package.da_anchor_projectable);
+        assert_eq!(package.ckb_projection.semantic_profile, "ckb-compatible");
+        assert!(!package.l1_da_publication_implemented);
+
+        let package_path = std::env::temp_dir().join(format!("myelin-session-da-anchor-package-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+        let verification = verify_session_da_anchor_package(package_path.clone(), manifest_path.clone(), bundle_path.clone())
+            .expect("verify DA anchor package");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+        let _ = std::fs::remove_dir_all(storage_dir);
+
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "da-manifest-valid"));
+        assert!(verification.checks.iter().any(|check| check.name == "carrier-payload"));
+        assert!(verification.checks.iter().any(|check| check.name == "carrier-payload-data-hash"));
+        assert!(verification.checks.iter().any(|check| check.name == "da-anchor-celltx-recomputes"));
+        assert!(verification.checks.iter().any(|check| check.name == "projection-profile"));
+        assert!(verification.checks.iter().any(|check| check.name == "l1-da-publication-marker"));
+    }
+
+    #[test]
+    fn session_da_anchor_submission_dry_run_builds_ckb_rpc_request_without_publication_claim() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-submit-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-submit-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-submit-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-submit-{}.json", std::process::id()));
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
+        let package_path = std::env::temp_dir().join(format!("myelin-session-da-submit-package-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+
+        let submission = session_submit_da_anchor_package(package_path.clone(), None, true, "passthrough", false)
+            .expect("dry-run DA anchor submission");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert_eq!(submission.schema, "myelin-session-da-anchor-submission-v1");
+        assert!(submission.dry_run);
+        assert!(!submission.submitted_to_rpc);
+        assert!(!submission.accepted_by_rpc);
+        assert!(!submission.l1_da_published);
+        assert_eq!(submission.request_method, "send_transaction");
+        assert_eq!(submission.outputs_validator, "passthrough");
+        assert_eq!(submission.request_json_hash.len(), 64);
+        assert_eq!(submission.da_anchor_cell_tx_id, package.da_anchor_cell_tx_id);
+        assert_eq!(submission.da_anchor_cell_wtxid, package.da_anchor_cell_wtxid);
+        assert_eq!(submission.molecule_transaction_hash, package.molecule_transaction_hash);
+        assert!(submission.ckb_raw_tx_hash.is_some());
+        assert!(submission.ckb_wtx_hash.is_some());
+        assert_eq!(submission.ckb_transaction_json["version"], "0xc001");
+        assert!(!submission.pre_submit.checked);
+        assert_eq!(submission.pre_submit.input_count, 1);
+        assert_eq!(submission.pre_submit.cell_dep_count, 0);
+        assert_eq!(submission.pre_submit.output_capacity_shannons, Some(500));
+        assert_eq!(submission.pre_submit.capacity_balanced, None);
+        assert!(submission.rpc_result.is_none());
+        assert!(submission.rpc_error.is_none());
+    }
+
+    #[test]
+    fn session_da_anchor_submission_records_rpc_acceptance() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-rpc-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-rpc-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-rpc-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-rpc-{}.json", std::process::id()));
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
+        let package_path = std::env::temp_dir().join(format!("myelin-session-da-rpc-package-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+
+        let accepted_hash = package.ckb_projection.ckb_raw_tx_hash.clone().expect("projected DA anchor raw tx hash");
+        let (url, handle) = spawn_direct_submission_rpc_mock(true, "0x3e8".to_owned(), Some(accepted_hash));
+
+        let submission = session_submit_da_anchor_package(package_path.clone(), Some(url), false, "passthrough", true)
+            .expect("accepted DA anchor submission");
+        handle.join().expect("mock rpc thread");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(!submission.dry_run);
+        assert!(submission.submitted_to_rpc);
+        assert!(submission.accepted_by_rpc);
+        assert!(!submission.l1_da_published);
+        assert!(submission.pre_submit.checked);
+        assert_eq!(submission.pre_submit.all_inputs_live, Some(true));
+        assert_eq!(submission.pre_submit.all_cell_deps_live, Some(true));
+        assert_eq!(submission.pre_submit.input_capacity_shannons, Some(1_000));
+        assert_eq!(submission.pre_submit.output_capacity_shannons, Some(500));
+        assert_eq!(submission.pre_submit.capacity_balanced, Some(true));
+        assert_eq!(submission.pre_submit.implied_fee_shannons, Some(500));
+        assert!(submission.rpc_result.is_some());
+        assert!(submission.rpc_error.is_none());
+    }
+
+    #[test]
+    fn session_da_anchor_submission_rejects_missing_live_input_before_broadcast() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-stale-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-stale-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-stale-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-stale-{}.json", std::process::id()));
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
+        let package_path = std::env::temp_dir().join(format!("myelin-session-da-stale-package-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+        let (url, handle) = spawn_direct_submission_rpc_mock(false, "0x3e8".to_owned(), None);
+
+        let error = session_submit_da_anchor_package(package_path.clone(), Some(url), false, "passthrough", true)
+            .expect_err("DA anchor submission should reject stale input before broadcast");
+        handle.join().expect("mock stale input rpc thread");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(error.to_string().contains("DA anchor submission input 0 is not live"), "{error}");
+    }
+
+    #[test]
+    fn session_da_anchor_submission_rejects_rpc_hash_mismatch() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-rpc-mismatch-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-rpc-mismatch-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-rpc-mismatch-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-rpc-mismatch-{}.json", std::process::id()));
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
+        let package_path = std::env::temp_dir().join(format!("myelin-session-da-rpc-mismatch-package-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+        let wrong_hash = format!("0x{}", "ab".repeat(32));
+        assert_ne!(Some(wrong_hash.clone()), package.ckb_projection.ckb_raw_tx_hash);
+        let (url, handle) = spawn_direct_submission_rpc_mock(true, "0x3e8".to_owned(), Some(wrong_hash));
+
+        let error = session_submit_da_anchor_package(package_path.clone(), Some(url), false, "passthrough", true)
+            .expect_err("DA anchor submission should reject mismatched RPC tx hash");
+        handle.join().expect("mock DA hash mismatch rpc thread");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(error.to_string().contains("DA anchor transaction was not accepted by CKB RPC"), "{error}");
+    }
+
+    #[test]
+    fn session_da_anchor_package_rejects_tampered_manifest_hash() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-anchor-tamper-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-anchor-tamper-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-anchor-tamper-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-anchor-tamper-{}.json", std::process::id()));
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let mut package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
+        package.da_manifest_hash = "11".repeat(32);
+        let package_path = std::env::temp_dir().join(format!("myelin-session-da-anchor-package-tamper-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+        let verification = verify_session_da_anchor_package(package_path.clone(), manifest_path.clone(), bundle_path.clone())
+            .expect("verify tampered DA anchor package");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(!verification.valid);
+        assert!(verification.checks.iter().any(|check| check.name == "da-manifest-hash" && !check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "da-anchor-celltx-recomputes" && check.ok));
+    }
+
+    #[test]
+    fn session_settlement_intent_binds_to_verified_court_bundle_and_challenge_window() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-settle-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-settle-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-{}.json", std::process::id()));
+        std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
+
+        let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
+            .expect("settlement intent");
+        assert_eq!(intent.schema, "myelin-session-settlement-intent-v1");
+        assert_eq!(intent.kind, "disputed-close");
+        assert_eq!(intent.session_id, bundle.session_id);
+        assert_eq!(intent.final_state_root, bundle.state_root_after);
+        assert_eq!(intent.da_profile, da_manifest.da_profile);
+        assert_eq!(intent.da_segment_root, da_manifest.segment_root);
+        assert_eq!(intent.challenge_deadline_ms, 60_000);
+        assert!(intent.settlement_permitted);
+        assert!(!intent.l1_da_published);
+        assert!(!intent.l1_court_implemented);
+
+        let intent_path = std::env::temp_dir().join(format!("myelin-session-intent-settle-{}.json", std::process::id()));
+        std::fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        let verification = verify_session_settlement_intent(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+            .expect("verify settlement intent");
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "court-bundle-valid"));
+        assert!(verification.checks.iter().any(|check| check.name == "da-manifest-valid"));
+        assert!(verification.checks.iter().any(|check| check.name == "da-manifest-hash"));
+        assert!(verification.checks.iter().any(|check| check.name == "state-root-before"));
+        assert!(verification.checks.iter().any(|check| check.name == "vm-profile"));
+        assert!(verification.checks.iter().any(|check| check.name == "challenge-window-nonzero"));
+        assert!(verification.checks.iter().any(|check| check.name == "l1-da-marker"));
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-permitted"));
+    }
+
+    #[test]
+    fn session_settlement_package_binds_verified_intent_into_ckb_projectable_celltx() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-package-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-package-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-package-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-package-{}.json", std::process::id()));
+        std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
+        let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
+            .expect("settlement intent");
+        let intent_path = std::env::temp_dir().join(format!("myelin-session-intent-package-{}.json", std::process::id()));
+        std::fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+
+        let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+            .expect("settlement package");
+        assert_eq!(package.schema, "myelin-session-settlement-package-v1");
+        assert_eq!(package.session_id, intent.session_id);
+        assert_eq!(package.chunk_index, intent.chunk_index);
+        assert_eq!(package.court_bundle_hash, intent.court_bundle_hash);
+        assert_eq!(package.da_manifest_hash, intent.da_manifest_hash);
+        assert_eq!(package.challenge_payload_hash, intent.challenge_payload_hash);
+        assert_eq!(package.final_state_root, intent.final_state_root);
+        assert_eq!(package.intent_hash.len(), 64);
+        assert_eq!(package.participant_set_hash, intent.participant_set_hash);
+        assert_eq!(package.escrow_input_cells_hash, intent.escrow_input_cells_hash);
+        assert_eq!(package.session_lineage_commitment, intent.session_lineage_commitment);
+        let intent_hash_bytes = parse_hex_32(&package.intent_hash).expect("package intent hash bytes");
+        let session_id_bytes = parse_hex_32(&package.session_id).expect("package session id");
+        let participant_set_hash = parse_hex_32(&package.participant_set_hash).expect("participant set hash");
+        let escrow_input_cells_hash = parse_hex_32(&package.escrow_input_cells_hash).expect("escrow input cells hash");
+        let session_lineage_commitment = parse_hex_32(&package.session_lineage_commitment).expect("session lineage commitment");
+        let expected_authority = settlement_authority_requirement(
+            intent_hash_bytes,
+            session_id_bytes,
+            participant_set_hash,
+            escrow_input_cells_hash,
+            session_lineage_commitment,
+        );
+        assert_eq!(package.settlement_authority.schema, expected_authority.schema);
+        assert_eq!(package.settlement_authority.data, expected_authority.data);
+        assert_eq!(package.settlement_authority.data_hash, expected_authority.data_hash);
+        assert_eq!(package.settlement_authority.data_semantics, "settlement-authority-lineage-v1");
+        let authority_data = decode_hex_bytes(&package.settlement_authority.data).expect("authority data bytes");
+        assert_eq!(authority_data.len(), 32 * 6);
+        assert_eq!(&authority_data[0..32], intent_hash_bytes.as_slice());
+        assert_eq!(&authority_data[32..64], session_id_bytes.as_slice());
+        assert_eq!(&authority_data[64..96], participant_set_hash.as_slice());
+        assert_eq!(&authority_data[96..128], escrow_input_cells_hash.as_slice());
+        assert_eq!(&authority_data[128..160], session_lineage_commitment.as_slice());
+        assert_eq!(package.settlement_authority.session_id, expected_authority.session_id);
+        assert_eq!(package.settlement_authority.participant_set_hash, expected_authority.participant_set_hash);
+        assert_eq!(package.settlement_authority.escrow_input_cells_hash, expected_authority.escrow_input_cells_hash);
+        assert_eq!(package.settlement_authority.session_lineage_commitment, expected_authority.session_lineage_commitment);
+        assert_eq!(package.settlement_authority.session_binding, "session-id-and-lineage-commit-participants-and-escrow");
+        assert_eq!(package.settlement_authority.session_authority_commitment, expected_authority.session_authority_commitment);
+        assert_eq!(package.settlement_authority.consumed_input_index, 1);
+        assert_eq!(package.settlement_authority.required_lock_binding, "final-da-publication-lock-hash");
+        assert_eq!(package.carrier_payload_kind, "myelin-session-settlement-carrier-v1");
+        assert_eq!(decode_hex_bytes(&package.carrier_payload).expect("carrier payload").len(), 160);
+        assert_eq!(
+            package.carrier_payload_data_hash,
+            carrier_payload_data_hash_hex(&package.carrier_payload).expect("carrier payload data hash")
+        );
+        assert_eq!(package.settlement_cell_tx_id.len(), 64);
+        assert_eq!(package.settlement_cell_wtxid.len(), 64);
+        assert_eq!(package.molecule_transaction_hash.len(), 64);
+        assert!(package.settlement_projectable);
+        assert_eq!(package.ckb_projection.semantic_profile, "ckb-compatible");
+        assert!(!package.l1_court_script_implemented);
+
+        let package_path = std::env::temp_dir().join(format!("myelin-session-package-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+        let verification = verify_session_settlement_package(
+            package_path.clone(),
+            intent_path.clone(),
+            bundle_path.clone(),
+            da_manifest_path.clone(),
+        )
+        .expect("verify settlement package");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-data-hash"));
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-session-id"));
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-lineage-commitment"));
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-intent-valid"));
+        assert!(verification.checks.iter().any(|check| check.name == "carrier-payload"));
+        assert!(verification.checks.iter().any(|check| check.name == "carrier-payload-data-hash"));
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-celltx-recomputes"));
+        assert!(verification.checks.iter().any(|check| check.name == "projection-profile"));
+        assert!(verification.checks.iter().any(|check| check.name == "l1-court-script-marker"));
+    }
+
+    #[test]
+    fn session_settlement_submission_dry_run_builds_ckb_rpc_request_without_court_claim() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-settle-submit-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-settle-submit-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-submit-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-submit-{}.json", std::process::id()));
+        std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
+        let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
+            .expect("settlement intent");
+        let intent_path = std::env::temp_dir().join(format!("myelin-session-intent-settle-submit-{}.json", std::process::id()));
+        std::fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+            .expect("settlement package");
+        let package_path = std::env::temp_dir().join(format!("myelin-session-package-submit-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+
+        let submission = session_submit_settlement_package(package_path.clone(), None, true, "passthrough", false)
+            .expect("dry-run settlement submission");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert_eq!(submission.schema, "myelin-session-settlement-submission-v1");
+        assert!(submission.dry_run);
+        assert!(!submission.submitted_to_rpc);
+        assert!(!submission.accepted_by_rpc);
+        assert!(!submission.l1_court_submitted);
+        assert_eq!(submission.request_method, "send_transaction");
+        assert_eq!(submission.outputs_validator, "passthrough");
+        assert_eq!(submission.request_json_hash.len(), 64);
+        assert_eq!(submission.settlement_cell_tx_id, package.settlement_cell_tx_id);
+        assert_eq!(submission.settlement_cell_wtxid, package.settlement_cell_wtxid);
+        assert_eq!(submission.molecule_transaction_hash, package.molecule_transaction_hash);
+        assert!(submission.ckb_raw_tx_hash.is_some());
+        assert!(submission.ckb_wtx_hash.is_some());
+        assert_eq!(submission.ckb_transaction_json["version"], "0xc001");
+        assert!(!submission.pre_submit.checked);
+        assert_eq!(submission.pre_submit.input_count, 1);
+        assert_eq!(submission.pre_submit.cell_dep_count, 0);
+        assert_eq!(submission.pre_submit.output_capacity_shannons, Some(1_000));
+        assert_eq!(submission.pre_submit.capacity_balanced, None);
+        assert!(submission.rpc_result.is_none());
+        assert!(submission.rpc_error.is_none());
+    }
+
+    #[test]
+    fn session_settlement_submission_records_rpc_acceptance() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-settle-rpc-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-settle-rpc-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-rpc-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-rpc-{}.json", std::process::id()));
+        std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
+        let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
+            .expect("settlement intent");
+        let intent_path = std::env::temp_dir().join(format!("myelin-session-intent-settle-rpc-{}.json", std::process::id()));
+        std::fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+            .expect("settlement package");
+        let package_path = std::env::temp_dir().join(format!("myelin-session-package-rpc-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+
+        let accepted_hash = package.ckb_projection.ckb_raw_tx_hash.clone().expect("projected settlement raw tx hash");
+        let (url, handle) = spawn_direct_submission_rpc_mock(true, "0x5dc".to_owned(), Some(accepted_hash));
+
+        let submission = session_submit_settlement_package(package_path.clone(), Some(url), false, "passthrough", true)
+            .expect("accepted settlement submission");
+        handle.join().expect("mock rpc thread");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(!submission.dry_run);
+        assert!(submission.submitted_to_rpc);
+        assert!(submission.accepted_by_rpc);
+        assert!(!submission.l1_court_submitted);
+        assert!(submission.pre_submit.checked);
+        assert_eq!(submission.pre_submit.all_inputs_live, Some(true));
+        assert_eq!(submission.pre_submit.all_cell_deps_live, Some(true));
+        assert_eq!(submission.pre_submit.input_capacity_shannons, Some(1_500));
+        assert_eq!(submission.pre_submit.output_capacity_shannons, Some(1_000));
+        assert_eq!(submission.pre_submit.capacity_balanced, Some(true));
+        assert_eq!(submission.pre_submit.implied_fee_shannons, Some(500));
+        assert!(submission.rpc_result.is_some());
+        assert!(submission.rpc_error.is_none());
+    }
+
+    #[test]
+    fn session_settlement_submission_rejects_rpc_hash_mismatch() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-settle-rpc-mismatch-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-settle-rpc-mismatch-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-rpc-mismatch-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-rpc-mismatch-{}.json", std::process::id()));
+        std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
+        let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
+            .expect("settlement intent");
+        let intent_path = std::env::temp_dir().join(format!("myelin-session-intent-settle-rpc-mismatch-{}.json", std::process::id()));
+        std::fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+            .expect("settlement package");
+        let package_path = std::env::temp_dir().join(format!("myelin-session-package-rpc-mismatch-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+        let wrong_hash = format!("0x{}", "bc".repeat(32));
+        assert_ne!(Some(wrong_hash.clone()), package.ckb_projection.ckb_raw_tx_hash);
+        let (url, handle) = spawn_direct_submission_rpc_mock(true, "0x5dc".to_owned(), Some(wrong_hash));
+
+        let error = session_submit_settlement_package(package_path.clone(), Some(url), false, "passthrough", true)
+            .expect_err("settlement submission should reject mismatched RPC tx hash");
+        handle.join().expect("mock settlement hash mismatch rpc thread");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(error.to_string().contains("settlement transaction was not accepted by CKB RPC"), "{error}");
+    }
+
+    #[test]
+    fn session_submission_inclusion_observes_committed_da_anchor() {
+        let raw_hash = "aa".repeat(32);
+        let expected_hash = format!("0x{raw_hash}");
+        let submission = serde_json::json!({
+            "schema": "myelin-session-da-anchor-submission-v1",
+            "ckb_raw_tx_hash": raw_hash,
+            "rpc_result": expected_hash,
+        });
+        let submission_path = std::env::temp_dir().join(format!("myelin-session-da-inclusion-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let block_hash = format!("0x{}", "bb".repeat(32));
+        let (url, handle) = spawn_get_transaction_mock(
+            expected_hash.clone(),
+            "committed".to_owned(),
+            Some(block_hash.clone()),
+            Some("0x64".to_owned()),
+        );
+
+        let report =
+            verify_session_submission_inclusion(submission_path.clone(), &url, "committed").expect("verify committed inclusion");
+        handle.join().expect("mock rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.schema, "myelin-session-submission-inclusion-v1");
+        assert_eq!(report.submission_schema, "myelin-session-da-anchor-submission-v1");
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert_eq!(report.status.as_deref(), Some("committed"));
+        assert_eq!(report.block_hash.as_deref(), Some(block_hash.as_str()));
+        assert_eq!(report.block_number.as_deref(), Some("0x64"));
+        assert!(report.found);
+        assert!(report.met_min_status);
+        assert!(report.committed);
+        assert!(report.live_l1_observed);
+        assert_eq!(report.carrier_package_commitment, None);
+        assert_eq!(report.carrier_output_data, None);
+        assert_eq!(report.carrier_output_data_matches_package_commitment, None);
+        assert_eq!(report.carrier_type_script_args, None);
+        assert_eq!(report.carrier_expected_type_script_args, None);
+        assert_eq!(report.carrier_type_script_args_match_package_data_hash, None);
+        assert_eq!(report.request_method, "get_transaction");
+        assert_eq!(report.request_json_hash.len(), 64);
+    }
+
+    #[test]
+    fn session_submission_inclusion_verifies_carrier_package_commitment() {
+        let raw_hash = "ab".repeat(32);
+        let expected_hash = format!("0x{raw_hash}");
+        let package_commitment = format!("0x{}", "66".repeat(32));
+        let package_data_hash = format!("0x{}", hex::encode(ckb_cell_data_hash(&decode_hex_bytes(&package_commitment).unwrap())));
+        let verifier_code_hash = format!("0x{}", "44".repeat(32));
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "ckb_raw_tx_hash": raw_hash,
+            "rpc_result": expected_hash,
+            "package_commitment": package_commitment,
+            "carrier_verifier": {
+                "type_script": { "code_hash": verifier_code_hash.clone(), "hash_type": "data2", "args": package_data_hash.clone() }
+            },
+        });
+        let submission_path = std::env::temp_dir().join(format!("myelin-session-carrier-inclusion-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let block_hash = format!("0x{}", "bc".repeat(32));
+        let (url, handle) = spawn_get_transaction_mock_with_outputs_data(
+            expected_hash.clone(),
+            "committed".to_owned(),
+            Some(block_hash),
+            Some("0x64".to_owned()),
+            Some(vec![package_commitment.clone()]),
+            Some(package_data_hash.clone()),
+        );
+
+        let report = verify_session_submission_inclusion(submission_path.clone(), &url, "committed")
+            .expect("verify committed carrier inclusion");
+        handle.join().expect("mock carrier inclusion rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v1");
+        assert!(report.committed);
+        assert!(report.live_l1_observed);
+        assert_eq!(report.carrier_package_commitment.as_deref(), Some(package_commitment.as_str()));
+        assert_eq!(report.carrier_payload.as_deref(), Some(package_commitment.as_str()));
+        assert_eq!(report.carrier_output_data.as_deref(), Some(package_commitment.as_str()));
+        assert_eq!(report.carrier_output_data_matches_carrier_payload, Some(true));
+        assert_eq!(report.carrier_output_data_matches_package_commitment, Some(true));
+        assert_eq!(report.carrier_type_script_code_hash.as_deref(), Some(verifier_code_hash.as_str()));
+        assert_eq!(report.carrier_type_script_hash_type.as_deref(), Some("data2"));
+        assert_eq!(report.carrier_type_script_args.as_deref(), Some(package_data_hash.as_str()));
+        assert_eq!(report.carrier_expected_type_script_code_hash.as_deref(), Some(verifier_code_hash.as_str()));
+        assert_eq!(report.carrier_expected_type_script_hash_type.as_deref(), Some("data2"));
+        assert_eq!(report.carrier_expected_type_script_args.as_deref(), Some(package_data_hash.as_str()));
+        assert_eq!(report.carrier_type_script_identity_matches_submission, Some(true));
+        assert_eq!(report.carrier_type_script_args_match_carrier_data_hash, Some(true));
+        assert_eq!(report.carrier_type_script_args_match_package_data_hash, Some(true));
+    }
+
+    #[test]
+    fn session_submission_inclusion_verifies_compact_carrier_payload() {
+        let raw_hash = "ae".repeat(32);
+        let expected_hash = format!("0x{raw_hash}");
+        let package_commitment = format!("0x{}", "70".repeat(32));
+        let payload = format!("0x{}", ["11", "22", "33", "44", "55"].map(|byte| byte.repeat(32)).join(""));
+        let payload_bytes = decode_hex_bytes(&payload).unwrap();
+        let payload_type_args = carrier_payload_type_args_hex(Some("myelin-session-da-anchor-carrier-v1"), &payload_bytes);
+        let verifier_code_hash = format!("0x{}", "44".repeat(32));
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "ckb_raw_tx_hash": raw_hash,
+            "rpc_result": expected_hash,
+            "package_commitment": package_commitment,
+            "carrier_payload_kind": "myelin-session-da-anchor-carrier-v1",
+            "carrier_payload": payload,
+            "carrier_verifier": {
+                "type_script": { "code_hash": verifier_code_hash.clone(), "hash_type": "data2", "args": payload_type_args.clone() }
+            },
+        });
+        let submission_path =
+            std::env::temp_dir().join(format!("myelin-session-carrier-payload-inclusion-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let block_hash = format!("0x{}", "bf".repeat(32));
+        let (url, handle) = spawn_get_transaction_mock_with_outputs_data(
+            expected_hash.clone(),
+            "committed".to_owned(),
+            Some(block_hash),
+            Some("0x64".to_owned()),
+            Some(vec![payload.clone()]),
+            Some(payload_type_args.clone()),
+        );
+
+        let report = verify_session_submission_inclusion(submission_path.clone(), &url, "committed")
+            .expect("verify committed compact carrier payload inclusion");
+        handle.join().expect("mock carrier payload inclusion rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v1");
+        assert!(report.committed);
+        assert!(report.live_l1_observed);
+        assert_eq!(report.carrier_payload_kind.as_deref(), Some("myelin-session-da-anchor-carrier-v1"));
+        assert_eq!(report.carrier_package_commitment.as_deref(), Some(package_commitment.as_str()));
+        assert_eq!(report.carrier_payload.as_deref(), Some(payload.as_str()));
+        assert_eq!(report.carrier_output_data.as_deref(), Some(payload.as_str()));
+        assert_eq!(report.carrier_output_data_matches_carrier_payload, Some(true));
+        assert_eq!(report.carrier_output_data_matches_package_commitment, None);
+        assert_eq!(report.carrier_type_script_code_hash.as_deref(), Some(verifier_code_hash.as_str()));
+        assert_eq!(report.carrier_type_script_hash_type.as_deref(), Some("data2"));
+        assert_eq!(report.carrier_type_script_args.as_deref(), Some(payload_type_args.as_str()));
+        assert_eq!(report.carrier_expected_type_script_code_hash.as_deref(), Some(verifier_code_hash.as_str()));
+        assert_eq!(report.carrier_expected_type_script_hash_type.as_deref(), Some("data2"));
+        assert_eq!(report.carrier_expected_type_script_args.as_deref(), Some(payload_type_args.as_str()));
+        assert_eq!(report.carrier_type_script_identity_matches_submission, Some(true));
+        assert_eq!(report.carrier_type_script_args_match_carrier_data_hash, Some(true));
+        assert_eq!(report.carrier_type_script_args_match_package_data_hash, None);
+    }
+
+    #[test]
+    fn session_submission_inclusion_rejects_carrier_commitment_mismatch() {
+        let raw_hash = "ac".repeat(32);
+        let expected_hash = format!("0x{raw_hash}");
+        let package_commitment = format!("0x{}", "67".repeat(32));
+        let wrong_commitment = format!("0x{}", "68".repeat(32));
+        let expected_type_args = format!("0x{}", hex::encode(ckb_cell_data_hash(&decode_hex_bytes(&package_commitment).unwrap())));
+        let verifier_code_hash = format!("0x{}", "44".repeat(32));
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "ckb_raw_tx_hash": raw_hash,
+            "rpc_result": expected_hash,
+            "package_commitment": package_commitment,
+            "carrier_verifier": {
+                "type_script": { "code_hash": verifier_code_hash, "hash_type": "data2", "args": expected_type_args.clone() }
+            },
+        });
+        let submission_path =
+            std::env::temp_dir().join(format!("myelin-session-carrier-inclusion-mismatch-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let block_hash = format!("0x{}", "bd".repeat(32));
+        let (url, handle) = spawn_get_transaction_mock_with_outputs_data(
+            expected_hash.clone(),
+            "committed".to_owned(),
+            Some(block_hash),
+            Some("0x64".to_owned()),
+            Some(vec![wrong_commitment.clone()]),
+            Some(format!("0x{}", "99".repeat(32))),
+        );
+
+        let report = verify_session_submission_inclusion(submission_path.clone(), &url, "committed")
+            .expect("verify mismatched carrier inclusion");
+        handle.join().expect("mock carrier inclusion rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert!(report.found);
+        assert!(report.met_min_status);
+        assert!(report.committed);
+        assert!(!report.live_l1_observed);
+        assert_eq!(report.carrier_package_commitment.as_deref(), Some(package_commitment.as_str()));
+        assert_eq!(report.carrier_output_data.as_deref(), Some(wrong_commitment.as_str()));
+        assert_eq!(report.carrier_output_data_matches_package_commitment, Some(false));
+        assert_eq!(report.carrier_type_script_args_match_package_data_hash, Some(false));
+        assert!(report.notes.iter().any(|note| note.contains("does not match")));
+    }
+
+    #[test]
+    fn session_submission_inclusion_rejects_carrier_type_args_mismatch() {
+        let raw_hash = "ad".repeat(32);
+        let expected_hash = format!("0x{raw_hash}");
+        let package_commitment = format!("0x{}", "69".repeat(32));
+        let wrong_type_args = format!("0x{}", "6a".repeat(32));
+        let expected_type_args = format!("0x{}", hex::encode(ckb_cell_data_hash(&decode_hex_bytes(&package_commitment).unwrap())));
+        let verifier_code_hash = format!("0x{}", "44".repeat(32));
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "ckb_raw_tx_hash": raw_hash,
+            "rpc_result": expected_hash,
+            "package_commitment": package_commitment,
+            "carrier_verifier": {
+                "type_script": { "code_hash": verifier_code_hash, "hash_type": "data2", "args": expected_type_args.clone() }
+            },
+        });
+        let submission_path =
+            std::env::temp_dir().join(format!("myelin-session-carrier-type-args-mismatch-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let block_hash = format!("0x{}", "be".repeat(32));
+        let (url, handle) = spawn_get_transaction_mock_with_outputs_data(
+            expected_hash.clone(),
+            "committed".to_owned(),
+            Some(block_hash),
+            Some("0x64".to_owned()),
+            Some(vec![package_commitment.clone()]),
+            Some(wrong_type_args.clone()),
+        );
+
+        let report = verify_session_submission_inclusion(submission_path.clone(), &url, "committed")
+            .expect("verify carrier inclusion with mismatched type args");
+        handle.join().expect("mock carrier inclusion rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert!(report.found);
+        assert!(report.met_min_status);
+        assert!(report.committed);
+        assert!(!report.live_l1_observed);
+        assert_eq!(report.carrier_output_data_matches_package_commitment, Some(true));
+        assert_eq!(report.carrier_type_script_args.as_deref(), Some(wrong_type_args.as_str()));
+        assert_eq!(report.carrier_type_script_args_match_package_data_hash, Some(false));
+        assert!(report.notes.iter().any(|note| note.contains("type args do not match")));
+    }
+
+    #[test]
+    fn session_submission_inclusion_rejects_carrier_type_code_hash_mismatch() {
+        let raw_hash = "af".repeat(32);
+        let expected_hash = format!("0x{raw_hash}");
+        let package_commitment = format!("0x{}", "6b".repeat(32));
+        let package_data_hash = format!("0x{}", hex::encode(ckb_cell_data_hash(&decode_hex_bytes(&package_commitment).unwrap())));
+        let wrong_expected_code_hash = format!("0x{}", "45".repeat(32));
+        let observed_code_hash = format!("0x{}", "44".repeat(32));
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "ckb_raw_tx_hash": raw_hash,
+            "rpc_result": expected_hash,
+            "package_commitment": package_commitment,
+            "carrier_verifier": {
+                "type_script": {
+                    "code_hash": wrong_expected_code_hash.clone(),
+                    "hash_type": "data2",
+                    "args": package_data_hash.clone()
+                }
+            },
+        });
+        let submission_path =
+            std::env::temp_dir().join(format!("myelin-session-carrier-type-code-hash-mismatch-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let block_hash = format!("0x{}", "c1".repeat(32));
+        let (url, handle) = spawn_get_transaction_mock_with_outputs_data(
+            expected_hash.clone(),
+            "committed".to_owned(),
+            Some(block_hash),
+            Some("0x64".to_owned()),
+            Some(vec![package_commitment.clone()]),
+            Some(package_data_hash.clone()),
+        );
+
+        let report = verify_session_submission_inclusion(submission_path.clone(), &url, "committed")
+            .expect("verify carrier inclusion with mismatched type code hash");
+        handle.join().expect("mock carrier code-hash mismatch rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert!(report.found);
+        assert!(report.met_min_status);
+        assert!(report.committed);
+        assert!(!report.live_l1_observed);
+        assert_eq!(report.carrier_output_data_matches_package_commitment, Some(true));
+        assert_eq!(report.carrier_type_script_args_match_package_data_hash, Some(true));
+        assert_eq!(report.carrier_type_script_code_hash.as_deref(), Some(observed_code_hash.as_str()));
+        assert_eq!(report.carrier_expected_type_script_code_hash.as_deref(), Some(wrong_expected_code_hash.as_str()));
+        assert_eq!(report.carrier_type_script_identity_matches_submission, Some(false));
+        assert!(report.notes.iter().any(|note| note.contains("type script does not match")));
+    }
+
+    #[test]
+    fn session_submission_inclusion_keeps_pending_settlement_below_committed() {
+        let raw_hash = "cc".repeat(32);
+        let expected_hash = format!("0x{raw_hash}");
+        let submission = serde_json::json!({
+            "schema": "myelin-session-settlement-submission-v1",
+            "ckb_raw_tx_hash": raw_hash,
+            "rpc_result": null,
+        });
+        let submission_path = std::env::temp_dir().join(format!("myelin-session-settlement-inclusion-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let (url, handle) = spawn_get_transaction_mock(expected_hash.clone(), "pending".to_owned(), None, None);
+
+        let report =
+            verify_session_submission_inclusion(submission_path.clone(), &url, "committed").expect("verify pending settlement status");
+        handle.join().expect("mock rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.submission_schema, "myelin-session-settlement-submission-v1");
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert_eq!(report.status.as_deref(), Some("pending"));
+        assert!(report.found);
+        assert!(!report.met_min_status);
+        assert!(!report.committed);
+        assert!(!report.live_l1_observed);
+    }
+
+    #[test]
+    fn session_submission_finality_confirms_after_required_depth() {
+        let expected_hash = format!("0x{}", "aa".repeat(32));
+        let block_hash = format!("0x{}", "bb".repeat(32));
+        let inclusion = SessionSubmissionInclusionReport {
+            schema: "myelin-session-submission-inclusion-v1".to_owned(),
+            submission: "session-da-anchor-submit.json".to_owned(),
+            submission_schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+            rpc_url: "http://127.0.0.1:8114".to_owned(),
+            expected_ckb_tx_hash: expected_hash.clone(),
+            min_status: "committed".to_owned(),
+            request_method: "get_transaction".to_owned(),
+            request_json_hash: "00".repeat(32),
+            found: true,
+            status: Some("committed".to_owned()),
+            block_hash: Some(block_hash.clone()),
+            block_number: Some("0x64".to_owned()),
+            met_min_status: true,
+            committed: true,
+            live_l1_observed: true,
+            carrier_package_commitment: None,
+            carrier_payload_kind: None,
+            carrier_payload: None,
+            carrier_output_data: None,
+            carrier_output_data_matches_carrier_payload: None,
+            carrier_output_data_matches_package_commitment: None,
+            carrier_type_script_code_hash: None,
+            carrier_type_script_hash_type: None,
+            carrier_type_script_args: None,
+            carrier_expected_type_script_code_hash: None,
+            carrier_expected_type_script_hash_type: None,
+            carrier_expected_type_script_args: None,
+            carrier_type_script_identity_matches_submission: None,
+            carrier_type_script_args_match_carrier_data_hash: None,
+            carrier_type_script_args_match_package_data_hash: None,
+            rpc_result: None,
+            rpc_error: None,
+            notes: Vec::new(),
+        };
+        let inclusion_path = std::env::temp_dir().join(format!("myelin-session-finality-ok-{}.json", std::process::id()));
+        std::fs::write(&inclusion_path, serde_json::to_vec(&inclusion).unwrap()).unwrap();
+        let (url, handle) = spawn_get_tip_header_mock("0x6a".to_owned());
+
+        let report = verify_session_submission_finality(inclusion_path.clone(), &url, 6).expect("verify confirmed finality");
+        handle.join().expect("mock tip rpc thread");
+        let _ = std::fs::remove_file(inclusion_path);
+
+        assert_eq!(report.schema, "myelin-session-submission-finality-v1");
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert_eq!(report.committed_block_hash.as_deref(), Some(block_hash.as_str()));
+        assert_eq!(report.committed_block_number.as_deref(), Some("0x64"));
+        assert_eq!(report.tip_block_number.as_deref(), Some("0x6a"));
+        assert_eq!(report.confirmations, Some(7));
+        assert_eq!(report.min_confirmations, 6);
+        assert!(report.finality_confirmed);
+        assert!(report.reorg_risk_bounded);
+        assert_eq!(report.request_method, "get_tip_header");
+        assert_eq!(report.request_json_hash.len(), 64);
+    }
+
+    #[test]
+    fn session_submission_finality_rejects_shallow_confirmation_depth() {
+        let expected_hash = format!("0x{}", "dd".repeat(32));
+        let inclusion = SessionSubmissionInclusionReport {
+            schema: "myelin-session-submission-inclusion-v1".to_owned(),
+            submission: "session-settlement-submit.json".to_owned(),
+            submission_schema: "myelin-session-settlement-submission-v1".to_owned(),
+            rpc_url: "http://127.0.0.1:8114".to_owned(),
+            expected_ckb_tx_hash: expected_hash.clone(),
+            min_status: "committed".to_owned(),
+            request_method: "get_transaction".to_owned(),
+            request_json_hash: "11".repeat(32),
+            found: true,
+            status: Some("committed".to_owned()),
+            block_hash: Some(format!("0x{}", "ee".repeat(32))),
+            block_number: Some("0x64".to_owned()),
+            met_min_status: true,
+            committed: true,
+            live_l1_observed: true,
+            carrier_package_commitment: None,
+            carrier_payload_kind: None,
+            carrier_payload: None,
+            carrier_output_data: None,
+            carrier_output_data_matches_carrier_payload: None,
+            carrier_output_data_matches_package_commitment: None,
+            carrier_type_script_code_hash: None,
+            carrier_type_script_hash_type: None,
+            carrier_type_script_args: None,
+            carrier_expected_type_script_code_hash: None,
+            carrier_expected_type_script_hash_type: None,
+            carrier_expected_type_script_args: None,
+            carrier_type_script_identity_matches_submission: None,
+            carrier_type_script_args_match_carrier_data_hash: None,
+            carrier_type_script_args_match_package_data_hash: None,
+            rpc_result: None,
+            rpc_error: None,
+            notes: Vec::new(),
+        };
+        let inclusion_path = std::env::temp_dir().join(format!("myelin-session-finality-shallow-{}.json", std::process::id()));
+        std::fs::write(&inclusion_path, serde_json::to_vec(&inclusion).unwrap()).unwrap();
+        let (url, handle) = spawn_get_tip_header_mock("0x65".to_owned());
+
+        let report = verify_session_submission_finality(inclusion_path.clone(), &url, 6).expect("verify shallow finality");
+        handle.join().expect("mock tip rpc thread");
+        let _ = std::fs::remove_file(inclusion_path);
+
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert_eq!(report.confirmations, Some(2));
+        assert_eq!(report.min_confirmations, 6);
+        assert!(!report.finality_confirmed);
+        assert!(!report.reorg_risk_bounded);
+        assert!(report.notes.iter().any(|note| note.contains("below the required 6 confirmations")));
+    }
+
+    #[test]
+    fn session_submission_stability_accepts_same_committed_block() {
+        let expected_hash = format!("0x{}", "99".repeat(32));
+        let block_hash = format!("0x{}", "aa".repeat(32));
+        let inclusion = SessionSubmissionInclusionReport {
+            schema: "myelin-session-submission-inclusion-v1".to_owned(),
+            submission: "session-da-anchor-submit.json".to_owned(),
+            submission_schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+            rpc_url: "http://127.0.0.1:8114".to_owned(),
+            expected_ckb_tx_hash: expected_hash.clone(),
+            min_status: "committed".to_owned(),
+            request_method: "get_transaction".to_owned(),
+            request_json_hash: "22".repeat(32),
+            found: true,
+            status: Some("committed".to_owned()),
+            block_hash: Some(block_hash.clone()),
+            block_number: Some("0x64".to_owned()),
+            met_min_status: true,
+            committed: true,
+            live_l1_observed: true,
+            carrier_package_commitment: None,
+            carrier_payload_kind: None,
+            carrier_payload: None,
+            carrier_output_data: None,
+            carrier_output_data_matches_carrier_payload: None,
+            carrier_output_data_matches_package_commitment: None,
+            carrier_type_script_code_hash: None,
+            carrier_type_script_hash_type: None,
+            carrier_type_script_args: None,
+            carrier_expected_type_script_code_hash: None,
+            carrier_expected_type_script_hash_type: None,
+            carrier_expected_type_script_args: None,
+            carrier_type_script_identity_matches_submission: None,
+            carrier_type_script_args_match_carrier_data_hash: None,
+            carrier_type_script_args_match_package_data_hash: None,
+            rpc_result: None,
+            rpc_error: None,
+            notes: Vec::new(),
+        };
+        let inclusion_path = std::env::temp_dir().join(format!("myelin-session-stability-ok-{}.json", std::process::id()));
+        std::fs::write(&inclusion_path, serde_json::to_vec(&inclusion).unwrap()).unwrap();
+        let (url, handle) = spawn_get_transaction_mock(
+            expected_hash.clone(),
+            "committed".to_owned(),
+            Some(block_hash.clone()),
+            Some("0x64".to_owned()),
+        );
+
+        let report = verify_session_submission_stability(inclusion_path.clone(), &url).expect("verify stable inclusion");
+        handle.join().expect("mock stability rpc thread");
+        let _ = std::fs::remove_file(inclusion_path);
+
+        assert_eq!(report.schema, "myelin-session-submission-stability-v1");
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert_eq!(report.expected_block_hash.as_deref(), Some(block_hash.as_str()));
+        assert_eq!(report.observed_block_hash.as_deref(), Some(block_hash.as_str()));
+        assert_eq!(report.expected_block_number.as_deref(), Some("0x64"));
+        assert_eq!(report.observed_block_number.as_deref(), Some("0x64"));
+        assert!(report.stable_block_identity);
+        assert!(!report.reorg_detected);
+        assert!(!report.missing_or_uncommitted);
+    }
+
+    #[test]
+    fn session_submission_stability_detects_reorged_block_identity() {
+        let expected_hash = format!("0x{}", "ab".repeat(32));
+        let original_block_hash = format!("0x{}", "bc".repeat(32));
+        let moved_block_hash = format!("0x{}", "cd".repeat(32));
+        let inclusion = SessionSubmissionInclusionReport {
+            schema: "myelin-session-submission-inclusion-v1".to_owned(),
+            submission: "session-settlement-submit.json".to_owned(),
+            submission_schema: "myelin-session-settlement-submission-v1".to_owned(),
+            rpc_url: "http://127.0.0.1:8114".to_owned(),
+            expected_ckb_tx_hash: expected_hash.clone(),
+            min_status: "committed".to_owned(),
+            request_method: "get_transaction".to_owned(),
+            request_json_hash: "33".repeat(32),
+            found: true,
+            status: Some("committed".to_owned()),
+            block_hash: Some(original_block_hash.clone()),
+            block_number: Some("0x64".to_owned()),
+            met_min_status: true,
+            committed: true,
+            live_l1_observed: true,
+            carrier_package_commitment: None,
+            carrier_payload_kind: None,
+            carrier_payload: None,
+            carrier_output_data: None,
+            carrier_output_data_matches_carrier_payload: None,
+            carrier_output_data_matches_package_commitment: None,
+            carrier_type_script_code_hash: None,
+            carrier_type_script_hash_type: None,
+            carrier_type_script_args: None,
+            carrier_expected_type_script_code_hash: None,
+            carrier_expected_type_script_hash_type: None,
+            carrier_expected_type_script_args: None,
+            carrier_type_script_identity_matches_submission: None,
+            carrier_type_script_args_match_carrier_data_hash: None,
+            carrier_type_script_args_match_package_data_hash: None,
+            rpc_result: None,
+            rpc_error: None,
+            notes: Vec::new(),
+        };
+        let inclusion_path = std::env::temp_dir().join(format!("myelin-session-stability-reorg-{}.json", std::process::id()));
+        std::fs::write(&inclusion_path, serde_json::to_vec(&inclusion).unwrap()).unwrap();
+        let (url, handle) = spawn_get_transaction_mock(
+            expected_hash.clone(),
+            "committed".to_owned(),
+            Some(moved_block_hash.clone()),
+            Some("0x65".to_owned()),
+        );
+
+        let report = verify_session_submission_stability(inclusion_path.clone(), &url).expect("verify reorged inclusion");
+        handle.join().expect("mock stability rpc thread");
+        let _ = std::fs::remove_file(inclusion_path);
+
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert_eq!(report.expected_block_hash.as_deref(), Some(original_block_hash.as_str()));
+        assert_eq!(report.observed_block_hash.as_deref(), Some(moved_block_hash.as_str()));
+        assert_eq!(report.expected_block_number.as_deref(), Some("0x64"));
+        assert_eq!(report.observed_block_number.as_deref(), Some("0x65"));
+        assert!(!report.stable_block_identity);
+        assert!(report.reorg_detected);
+        assert!(!report.missing_or_uncommitted);
+    }
+
+    #[test]
+    fn session_submission_context_marks_live_inputs_and_deps_ready() {
+        let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "11".repeat(32)), "index": "0x0"});
+        let dep_out_point = serde_json::json!({"tx_hash": format!("0x{}", "22".repeat(32)), "index": "0x1"});
+        let submission = serde_json::json!({
+            "schema": "myelin-session-da-anchor-submission-v1",
+            "ckb_raw_tx_hash": "aa".repeat(32),
+            "rpc_result": null,
+            "ckb_transaction_json": {
+                "inputs": [{"previous_output": input_out_point.clone(), "since": "0x0"}],
+                "cell_deps": [{"out_point": dep_out_point.clone(), "dep_type": "code"}],
+                "outputs": [],
+                "outputs_data": [],
+                "witnesses": []
+            }
+        });
+        let submission_path = std::env::temp_dir().join(format!("myelin-session-context-live-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let live_keys = vec![ckb_out_point_key(&input_out_point).unwrap(), ckb_out_point_key(&dep_out_point).unwrap()];
+        let (url, handle) = spawn_get_live_cell_mock(live_keys);
+
+        let report = verify_session_submission_context(submission_path.clone(), &url).expect("verify live CKB context");
+        handle.join().expect("mock live-cell rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.schema, "myelin-session-submission-context-v1");
+        assert_eq!(report.submission_schema, "myelin-session-da-anchor-submission-v1");
+        assert_eq!(report.request_method, "get_live_cell");
+        assert_eq!(report.input_count, 1);
+        assert_eq!(report.cell_dep_count, 1);
+        assert_eq!(report.live_input_count, 1);
+        assert_eq!(report.live_cell_dep_count, 1);
+        assert!(report.all_inputs_live);
+        assert!(report.all_cell_deps_live);
+        assert!(report.ready_for_ckb_submission);
+        assert!(report.checks.iter().all(|check| check.live && check.cell_present));
+    }
+
+    #[test]
+    fn session_submission_context_accepts_live_ckb_carrier_submission_schema() {
+        let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "12".repeat(32)), "index": "0x0"});
+        let dep_out_point = serde_json::json!({"tx_hash": format!("0x{}", "13".repeat(32)), "index": "0x5"});
+        let verifier_code_hash = format!("0x{}", "14".repeat(32));
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "ckb_raw_tx_hash": "ab".repeat(32),
+            "rpc_result": "ab".repeat(32),
+            "carrier_verifier": {
+                "code_hash": verifier_code_hash.clone(),
+                "code_dep": {
+                    "out_point": dep_out_point.clone(),
+                    "dep_type": "code"
+                }
+            },
+            "ckb_transaction_json": {
+                "inputs": [{"previous_output": input_out_point.clone(), "since": "0x0"}],
+                "cell_deps": [{"out_point": dep_out_point.clone(), "dep_type": "code"}],
+                "outputs": [{
+                    "capacity": "0x3e8",
+                    "lock": {"code_hash": format!("0x{}", "00".repeat(32)), "hash_type": "data", "args": "0x"},
+                    "type": null
+                }],
+                "outputs_data": ["0x"]
+            }
+        });
+        let submission_path = std::env::temp_dir().join(format!("myelin-session-context-carrier-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let live_keys = vec![ckb_out_point_key(&input_out_point).unwrap(), ckb_out_point_key(&dep_out_point).unwrap()];
+        let mut data_hashes = std::collections::BTreeMap::new();
+        data_hashes.insert(ckb_out_point_key(&dep_out_point).unwrap(), verifier_code_hash.clone());
+        let (url, handle) = spawn_get_live_cell_mock_with_data_hashes(live_keys, data_hashes);
+
+        let report = verify_session_submission_context(submission_path.clone(), &url).expect("verify live CKB carrier context");
+        handle.join().expect("mock live-cell rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v1");
+        assert_eq!(report.expected_ckb_tx_hash, format!("0x{}", "ab".repeat(32)));
+        assert_eq!(report.carrier_verifier_code_hash.as_deref(), Some(verifier_code_hash.as_str()));
+        assert_eq!(report.carrier_verifier_code_dep_key.as_deref(), Some(ckb_out_point_key(&dep_out_point).unwrap().as_str()));
+        assert_eq!(report.carrier_verifier_code_dep_data_hash.as_deref(), Some(verifier_code_hash.as_str()));
+        assert_eq!(report.carrier_verifier_code_dep_data_hash_matches, Some(true));
+        assert!(report.ready_for_ckb_submission);
+    }
+
+    #[test]
+    fn session_submission_context_rejects_carrier_verifier_code_dep_hash_mismatch() {
+        let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "15".repeat(32)), "index": "0x0"});
+        let dep_out_point = serde_json::json!({"tx_hash": format!("0x{}", "16".repeat(32)), "index": "0x5"});
+        let verifier_code_hash = format!("0x{}", "17".repeat(32));
+        let wrong_data_hash = format!("0x{}", "18".repeat(32));
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "ckb_raw_tx_hash": "ad".repeat(32),
+            "rpc_result": "ad".repeat(32),
+            "carrier_verifier": {
+                "code_hash": verifier_code_hash.clone(),
+                "code_dep": {
+                    "out_point": dep_out_point.clone(),
+                    "dep_type": "code"
+                }
+            },
+            "ckb_transaction_json": {
+                "inputs": [{"previous_output": input_out_point.clone(), "since": "0x0"}],
+                "cell_deps": [{"out_point": dep_out_point.clone(), "dep_type": "code"}],
+                "outputs": [],
+                "outputs_data": [],
+                "witnesses": []
+            }
+        });
+        let submission_path =
+            std::env::temp_dir().join(format!("myelin-session-context-carrier-code-hash-mismatch-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let live_keys = vec![ckb_out_point_key(&input_out_point).unwrap(), ckb_out_point_key(&dep_out_point).unwrap()];
+        let mut data_hashes = std::collections::BTreeMap::new();
+        data_hashes.insert(ckb_out_point_key(&dep_out_point).unwrap(), wrong_data_hash.clone());
+        let (url, handle) = spawn_get_live_cell_mock_with_data_hashes(live_keys, data_hashes);
+
+        let report = verify_session_submission_context(submission_path.clone(), &url).expect("verify CKB carrier context mismatch");
+        handle.join().expect("mock carrier code hash mismatch live-cell rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v1");
+        assert!(report.all_inputs_live);
+        assert!(report.all_cell_deps_live);
+        assert_eq!(report.carrier_verifier_code_hash.as_deref(), Some(verifier_code_hash.as_str()));
+        assert_eq!(report.carrier_verifier_code_dep_data_hash.as_deref(), Some(wrong_data_hash.as_str()));
+        assert_eq!(report.carrier_verifier_code_dep_data_hash_matches, Some(false));
+        assert!(!report.ready_for_ckb_submission);
+        assert!(report.notes.iter().any(|note| note.contains("does not match")));
+    }
+
+    #[test]
+    fn session_submission_context_rejects_missing_live_input() {
+        let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "33".repeat(32)), "index": "0x0"});
+        let dep_out_point = serde_json::json!({"tx_hash": format!("0x{}", "44".repeat(32)), "index": "0x1"});
+        let submission = serde_json::json!({
+            "schema": "myelin-session-settlement-submission-v1",
+            "ckb_raw_tx_hash": "bb".repeat(32),
+            "rpc_result": null,
+            "ckb_transaction_json": {
+                "inputs": [{"previous_output": input_out_point.clone(), "since": "0x0"}],
+                "cell_deps": [{"out_point": dep_out_point.clone(), "dep_type": "code"}],
+                "outputs": [],
+                "outputs_data": [],
+                "witnesses": []
+            }
+        });
+        let submission_path = std::env::temp_dir().join(format!("myelin-session-context-missing-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let live_keys = vec![ckb_out_point_key(&dep_out_point).unwrap()];
+        let (url, handle) = spawn_get_live_cell_mock(live_keys);
+
+        let report = verify_session_submission_context(submission_path.clone(), &url).expect("verify missing CKB context");
+        handle.join().expect("mock live-cell rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.submission_schema, "myelin-session-settlement-submission-v1");
+        assert_eq!(report.live_input_count, 0);
+        assert_eq!(report.live_cell_dep_count, 1);
+        assert!(!report.all_inputs_live);
+        assert!(report.all_cell_deps_live);
+        assert!(!report.ready_for_ckb_submission);
+        assert!(report.checks.iter().any(|check| check.role == "input" && !check.live && check.status.as_deref() == Some("unknown")));
+    }
+
+    #[test]
+    fn session_submission_economics_accepts_balanced_transaction_with_fee() {
+        let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "55".repeat(32)), "index": "0x0"});
+        let submission = serde_json::json!({
+            "schema": "myelin-session-da-anchor-submission-v1",
+            "ckb_raw_tx_hash": "aa".repeat(32),
+            "rpc_result": null,
+            "ckb_transaction_json": {
+                "inputs": [{"previous_output": input_out_point.clone(), "since": "0x0"}],
+                "outputs": [{
+                    "capacity": "0x3e8",
+                    "lock": {"code_hash": format!("0x{}", "00".repeat(32)), "hash_type": "type", "args": "0x"},
+                    "type": null
+                }],
+                "outputs_data": ["0x"]
+            }
+        });
+        let submission_path = std::env::temp_dir().join(format!("myelin-session-economics-ready-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let live_keys = vec![ckb_out_point_key(&input_out_point).unwrap()];
+        let (url, handle) = spawn_get_live_cell_capacity_mock(live_keys, "0x5dc".to_owned(), 1);
+
+        let report =
+            verify_session_submission_economics(submission_path.clone(), &url, 100, 1_000, None).expect("verify submission economics");
+        handle.join().expect("mock economics rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.schema, "myelin-session-submission-economics-v1");
+        assert_eq!(report.submission_schema, "myelin-session-da-anchor-submission-v1");
+        assert_eq!(report.request_method, "get_live_cell");
+        assert_eq!(report.input_count, 1);
+        assert_eq!(report.output_count, 1);
+        assert_eq!(report.outputs_data_count, 1);
+        assert_eq!(report.total_input_capacity, Some(1_500));
+        assert_eq!(report.total_output_capacity, Some(1_000));
+        assert_eq!(report.fee_shannons, Some(500));
+        assert_eq!(report.min_fee_shannons, 100);
+        assert!(report.transaction_size_bytes > 0);
+        assert_eq!(report.min_fee_rate_shannons_per_kb, 1_000);
+        assert_eq!(report.required_fee_shannons, report.transaction_size_bytes as u64);
+        assert_eq!(report.data_bearing_output_count, 0);
+        assert_eq!(report.empty_data_output_count, 1);
+        assert_eq!(report.explicit_change_output_count, 0);
+        assert_eq!(report.explicit_change_capacity, 0);
+        assert!(!report.explicit_change_observed);
+        assert_eq!(report.outputs.len(), 1);
+        assert_eq!(report.outputs[0].classification, "empty-data");
+        assert!(report.all_inputs_live);
+        assert!(report.outputs_data_count_matches);
+        assert!(report.capacity_balanced);
+        assert!(report.fee_sufficient);
+        assert!(report.fee_rate_sufficient);
+        assert!(report.fee_not_excessive);
+        assert!(report.economically_ready);
+    }
+
+    #[test]
+    fn session_submission_economics_rejects_underfunded_transaction() {
+        let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "66".repeat(32)), "index": "0x0"});
+        let submission = serde_json::json!({
+            "schema": "myelin-session-settlement-submission-v1",
+            "ckb_raw_tx_hash": "bb".repeat(32),
+            "rpc_result": null,
+            "ckb_transaction_json": {
+                "inputs": [{"previous_output": input_out_point.clone(), "since": "0x0"}],
+                "outputs": [{
+                    "capacity": "0x3e8",
+                    "lock": {"code_hash": format!("0x{}", "00".repeat(32)), "hash_type": "type", "args": "0x"},
+                    "type": null
+                }],
+                "outputs_data": ["0x"]
+            }
+        });
+        let submission_path = std::env::temp_dir().join(format!("myelin-session-economics-underfunded-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let live_keys = vec![ckb_out_point_key(&input_out_point).unwrap()];
+        let (url, handle) = spawn_get_live_cell_capacity_mock(live_keys, "0x1f4".to_owned(), 1);
+
+        let report =
+            verify_session_submission_economics(submission_path.clone(), &url, 1, 1, None).expect("verify underfunded economics");
+        handle.join().expect("mock economics rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.total_input_capacity, Some(500));
+        assert_eq!(report.total_output_capacity, Some(1_000));
+        assert_eq!(report.fee_shannons, None);
+        assert!(report.all_inputs_live);
+        assert!(!report.capacity_balanced);
+        assert!(!report.fee_sufficient);
+        assert!(!report.economically_ready);
+    }
+
+    #[test]
+    fn session_submission_economics_rejects_insufficient_fee_rate() {
+        let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "77".repeat(32)), "index": "0x0"});
+        let submission = serde_json::json!({
+            "schema": "myelin-session-da-anchor-submission-v1",
+            "ckb_raw_tx_hash": "cc".repeat(32),
+            "rpc_result": null,
+            "ckb_transaction_json": {
+                "inputs": [{"previous_output": input_out_point.clone(), "since": "0x0"}],
+                "outputs": [{
+                    "capacity": "0x3e7",
+                    "lock": {"code_hash": format!("0x{}", "00".repeat(32)), "hash_type": "type", "args": "0x"},
+                    "type": null
+                }],
+                "outputs_data": ["0x"]
+            }
+        });
+        let submission_path = std::env::temp_dir().join(format!("myelin-session-economics-feerate-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let live_keys = vec![ckb_out_point_key(&input_out_point).unwrap()];
+        let (url, handle) = spawn_get_live_cell_capacity_mock(live_keys, "0x3e8".to_owned(), 1);
+
+        let report =
+            verify_session_submission_economics(submission_path.clone(), &url, 1, 1_000_000, None).expect("verify fee-rate economics");
+        handle.join().expect("mock economics rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.fee_shannons, Some(1));
+        assert_eq!(report.min_fee_shannons, 1);
+        assert!(report.required_fee_shannons > 1);
+        assert!(report.capacity_balanced);
+        assert!(report.fee_sufficient);
+        assert!(!report.fee_rate_sufficient);
+        assert!(!report.economically_ready);
+    }
+
+    #[test]
+    fn session_submission_economics_rejects_excessive_fee_without_change() {
+        let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "88".repeat(32)), "index": "0x0"});
+        let submission = serde_json::json!({
+            "schema": "myelin-session-settlement-submission-v1",
+            "ckb_raw_tx_hash": "dd".repeat(32),
+            "rpc_result": null,
+            "ckb_transaction_json": {
+                "inputs": [{"previous_output": input_out_point.clone(), "since": "0x0"}],
+                "outputs": [{
+                    "capacity": "0x3e8",
+                    "lock": {"code_hash": format!("0x{}", "00".repeat(32)), "hash_type": "type", "args": "0x"},
+                    "type": null
+                }],
+                "outputs_data": ["0x"]
+            }
+        });
+        let submission_path = std::env::temp_dir().join(format!("myelin-session-economics-maxfee-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let live_keys = vec![ckb_out_point_key(&input_out_point).unwrap()];
+        let (url, handle) = spawn_get_live_cell_capacity_mock(live_keys, "0x7d0".to_owned(), 1);
+
+        let report =
+            verify_session_submission_economics(submission_path.clone(), &url, 1, 1, Some(500)).expect("verify max-fee economics");
+        handle.join().expect("mock economics rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.fee_shannons, Some(1_000));
+        assert!(report.capacity_balanced);
+        assert!(report.fee_sufficient);
+        assert!(report.fee_rate_sufficient);
+        assert_eq!(report.max_fee_shannons, Some(500));
+        assert!(!report.fee_not_excessive);
+        assert_eq!(report.explicit_change_output_count, 0);
+        assert!(!report.explicit_change_observed);
+        assert!(!report.economically_ready);
+    }
+
+    #[test]
+    fn session_submission_economics_reports_explicit_change_output() {
+        let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "89".repeat(32)), "index": "0x0"});
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "ckb_raw_tx_hash": "de".repeat(32),
+            "rpc_result": null,
+            "carrier_payload": format!("0x{}", "11".repeat(160)),
+            "carrier_verifier": {
+                "code_hash": format!("0x{}", "12".repeat(32)),
+                "type_script": {
+                    "code_hash": format!("0x{}", "12".repeat(32)),
+                    "hash_type": "data2",
+                    "args": "0x"
+                }
+            },
+            "ckb_transaction_json": {
+                "inputs": [{"previous_output": input_out_point.clone(), "since": "0x0"}],
+                "outputs": [
+                    {
+                        "capacity": "0x3e8",
+                        "lock": {"code_hash": format!("0x{}", "00".repeat(32)), "hash_type": "type", "args": "0x"},
+                        "type": {"code_hash": format!("0x{}", "12".repeat(32)), "hash_type": "data2", "args": "0x"}
+                    },
+                    {
+                        "capacity": "0x1f4",
+                        "lock": {"code_hash": format!("0x{}", "00".repeat(32)), "hash_type": "type", "args": "0x"},
+                        "type": null
+                    }
+                ],
+                "outputs_data": [format!("0x{}", "11".repeat(160)), "0x"]
+            }
+        });
+        let submission_path = std::env::temp_dir().join(format!("myelin-session-economics-change-{}.json", std::process::id()));
+        std::fs::write(&submission_path, serde_json::to_vec(&submission).unwrap()).unwrap();
+        let live_keys = vec![ckb_out_point_key(&input_out_point).unwrap()];
+        let (url, handle) = spawn_get_live_cell_capacity_mock(live_keys, "0x5dd".to_owned(), 1);
+
+        let report = verify_session_submission_economics(submission_path.clone(), &url, 1, 1, Some(1))
+            .expect("verify explicit change economics");
+        handle.join().expect("mock explicit-change economics rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.total_input_capacity, Some(1_501));
+        assert_eq!(report.total_output_capacity, Some(1_500));
+        assert_eq!(report.fee_shannons, Some(1));
+        assert_eq!(report.data_bearing_output_count, 1);
+        assert_eq!(report.empty_data_output_count, 1);
+        assert_eq!(report.explicit_change_output_count, 1);
+        assert_eq!(report.explicit_change_capacity, 500);
+        assert!(report.explicit_change_observed);
+        assert_eq!(report.outputs.len(), 2);
+        assert_eq!(report.outputs[0].classification, "data-bearing");
+        assert_eq!(report.outputs[1].classification, "explicit-change-like");
+        assert!(report.outputs[1].explicit_change_like);
+        assert!(report.capacity_balanced);
+        assert!(report.fee_sufficient);
+        assert!(report.fee_rate_sufficient);
+        assert!(report.fee_not_excessive);
+        assert!(report.economically_ready);
+    }
+
+    #[test]
+    fn session_carrier_submission_builds_payload_bound_ckb_request_with_change() {
+        let payload = format!("0x{}", ["21", "22", "23", "24", "25"].map(|byte| byte.repeat(32)).join(""));
+        let payload_bytes = decode_hex_bytes(&payload).expect("carrier payload bytes");
+        let package = da_anchor_package_from_carrier_payload(&payload);
+        let package_path = write_temp_json("carrier-submission-package", &package);
+        let verifier_source = std::env::temp_dir().join(format!("myelin-carrier-source-{}.cell", std::process::id()));
+        let verifier_source_bytes = b"module myelin::test_carrier\n";
+        std::fs::write(&verifier_source, verifier_source_bytes).expect("write verifier source");
+        let expected_verifier_source_hash = format!("0x{}", hex::encode(myelin_hashes::sha256(verifier_source_bytes)));
+        let carrier_capacity = 40_000_000_000u64;
+        let change_capacity = 10_000_000_000u64;
+        let fee = 1_000u64;
+        let input_capacity = carrier_capacity + change_capacity + fee;
+        let build_args = |accepted_tx_hash: Option<String>| SessionCarrierSubmissionArgs {
+            package: package_path.clone(),
+            input_tx_hash: format!("0x{}", "32".repeat(32)),
+            input_index: "0x0".to_owned(),
+            input_capacity_shannons: input_capacity,
+            evidence_cell_dep_tx_hash: None,
+            evidence_cell_dep_index: None,
+            evidence_cell_dep_capacity_shannons: None,
+            authority_input_tx_hash: None,
+            authority_input_index: None,
+            authority_input_capacity_shannons: None,
+            carrier_capacity_shannons: carrier_capacity,
+            fee_shannons: fee,
+            lock_code_hash: format!("0x{}", "33".repeat(32)),
+            lock_hash_type: "data".to_owned(),
+            lock_args: "0x".to_owned(),
+            lock_code_dep_tx_hash: format!("0x{}", "34".repeat(32)),
+            lock_code_dep_index: "0x5".to_owned(),
+            verifier_code_hash: format!("0x{}", "35".repeat(32)),
+            verifier_code_dep_tx_hash: format!("0x{}", "36".repeat(32)),
+            verifier_code_dep_index: "0x1".to_owned(),
+            verifier_source: verifier_source.display().to_string(),
+            verifier_role: "carrier".to_owned(),
+            witness: "0x1234".to_owned(),
+            outputs_validator: "passthrough".to_owned(),
+            rpc_url: Some("http://127.0.0.1:8114".to_owned()),
+            submit: false,
+            require_accepted: false,
+            accepted_tx_hash,
+            out: None,
+        };
+        let dry_report = session_carrier_submission(build_args(None)).expect("build dry-run carrier submission");
+        let accepted_tx_hash = dry_report["ckb_raw_tx_hash"].as_str().expect("projected carrier tx hash").to_owned();
+        let report =
+            session_carrier_submission(build_args(Some(accepted_tx_hash.clone()))).expect("build accepted carrier submission");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(verifier_source);
+
+        assert_eq!(report["schema"], "myelin-session-ckb-carrier-submission-v1");
+        assert_eq!(report["dry_run"], false);
+        assert_eq!(report["submitted_to_rpc"], false);
+        assert_eq!(report["accepted_by_rpc"], false);
+        assert_eq!(report["recorded_accepted_tx_hash"], accepted_tx_hash);
+        assert_eq!(report["recorded_accepted_tx_hash_matches"], true);
+        assert!(report["rpc_result"].is_null());
+        assert_eq!(report["ckb_raw_tx_hash"], accepted_tx_hash);
+        assert_eq!(report["outputs_validator"], "passthrough");
+        assert_eq!(report["carrier_payload_data_hash"], package["carrier_payload_data_hash"]);
+        assert_eq!(report["carrier_identity"], package["da_manifest_hash"]);
+        assert_eq!(
+            report["carrier_type_args"],
+            carrier_payload_type_args_hex(Some("myelin-session-da-anchor-carrier-v1"), &payload_bytes)
+        );
+        assert_eq!(report["input_capacity_shannons"], input_capacity);
+        assert_eq!(report["carrier_capacity_shannons"], carrier_capacity);
+        assert_eq!(report["change_capacity_shannons"], change_capacity);
+        assert_eq!(report["fee_shannons"], fee);
+        assert!(report["carrier_min_capacity_shannons"].as_u64().unwrap() <= carrier_capacity);
+        assert!(report["change_min_capacity_shannons"].as_u64().unwrap() <= change_capacity);
+        assert_eq!(report["send_transaction_request_json"]["method"], "send_transaction");
+        assert_eq!(report["send_transaction_request_json"]["params"][0], report["ckb_transaction_json"]);
+        assert_eq!(report["ckb_transaction_json"]["outputs"][0]["capacity"], format!("0x{carrier_capacity:x}"));
+        assert_eq!(report["ckb_transaction_json"]["outputs"][1]["capacity"], format!("0x{change_capacity:x}"));
+        assert_eq!(report["ckb_transaction_json"]["outputs_data"][0], payload);
+        assert_eq!(report["ckb_transaction_json"]["outputs_data"][1], "0x");
+        assert_eq!(report["carrier_verifier"]["cellscript_source_hash_algorithm"], "sha256");
+        assert_eq!(report["carrier_verifier"]["cellscript_source_hash"], expected_verifier_source_hash);
+        assert_eq!(report["carrier_verifier"]["code_dep"], report["ckb_transaction_json"]["cell_deps"][1]);
+        assert_eq!(report["carrier_verifier"]["type_script"], report["ckb_transaction_json"]["outputs"][0]["type"]);
+
+        let submission_path = write_temp_json("carrier-submission-report", &report);
+        let input_out_point = report["ckb_transaction_json"]["inputs"][0]["previous_output"].clone();
+        let live_keys = vec![ckb_out_point_key(&input_out_point).unwrap()];
+        let (url, handle) = spawn_get_live_cell_capacity_mock(live_keys, format!("0x{input_capacity:x}"), 1);
+        let economics =
+            verify_session_submission_economics(submission_path.clone(), &url, 1, 0, Some(fee)).expect("carrier submission economics");
+        handle.join().expect("mock carrier builder economics rpc thread");
+        let _ = std::fs::remove_file(submission_path);
+
+        assert!(economics.economically_ready);
+        assert_eq!(economics.fee_shannons, Some(fee));
+        assert_eq!(economics.explicit_change_output_count, 1);
+        assert_eq!(economics.explicit_change_capacity, change_capacity);
+    }
+
+    #[test]
+    fn session_carrier_submission_rejects_package_payload_binding_drift() {
+        let payload = format!("0x{}", ["31", "32", "33", "34", "35"].map(|byte| byte.repeat(32)).join(""));
+        let base_args = |package_path: PathBuf| SessionCarrierSubmissionArgs {
+            package: package_path,
+            input_tx_hash: format!("0x{}", "42".repeat(32)),
+            input_index: "0x0".to_owned(),
+            input_capacity_shannons: 50_000_001_000,
+            evidence_cell_dep_tx_hash: None,
+            evidence_cell_dep_index: None,
+            evidence_cell_dep_capacity_shannons: None,
+            authority_input_tx_hash: None,
+            authority_input_index: None,
+            authority_input_capacity_shannons: None,
+            carrier_capacity_shannons: 40_000_000_000,
+            fee_shannons: 1_000,
+            lock_code_hash: format!("0x{}", "43".repeat(32)),
+            lock_hash_type: "data".to_owned(),
+            lock_args: "0x".to_owned(),
+            lock_code_dep_tx_hash: format!("0x{}", "44".repeat(32)),
+            lock_code_dep_index: "0x5".to_owned(),
+            verifier_code_hash: format!("0x{}", "45".repeat(32)),
+            verifier_code_dep_tx_hash: format!("0x{}", "46".repeat(32)),
+            verifier_code_dep_index: "0x1".to_owned(),
+            verifier_source: "da-anchor-carrier.cell".to_owned(),
+            verifier_role: "carrier".to_owned(),
+            witness: "0x1234".to_owned(),
+            outputs_validator: "passthrough".to_owned(),
+            rpc_url: Some("http://127.0.0.1:8114".to_owned()),
+            submit: false,
+            require_accepted: false,
+            accepted_tx_hash: None,
+            out: None,
+        };
+
+        let mut mismatched_field = da_anchor_package_from_carrier_payload(&payload);
+        mismatched_field["court_bundle_hash"] = Value::String(format!("0x{}", "ff".repeat(32)));
+        let mismatched_path = write_temp_json("carrier-submission-mismatched-field-package", &mismatched_field);
+        let mismatched_error = session_carrier_submission(base_args(mismatched_path.clone()))
+            .expect_err("carrier submission should reject package field drift");
+        let _ = std::fs::remove_file(mismatched_path);
+        assert!(
+            mismatched_error.to_string().contains("carrier payload field court_bundle_hash does not match package court_bundle_hash"),
+            "{mismatched_error}"
+        );
+
+        let mut mismatched_kind = da_anchor_package_from_carrier_payload(&payload);
+        mismatched_kind["carrier_payload_kind"] = Value::String("myelin-session-settlement-carrier-v1".to_owned());
+        let kind_path = write_temp_json("carrier-submission-mismatched-kind-package", &mismatched_kind);
+        let kind_error =
+            session_carrier_submission(base_args(kind_path.clone())).expect_err("carrier submission should reject package kind drift");
+        let _ = std::fs::remove_file(kind_path);
+        assert!(
+            kind_error.to_string().contains("DA-anchor package must use myelin-session-da-anchor-carrier-v1 carrier payload kind"),
+            "{kind_error}"
+        );
+    }
+
+    #[test]
+    fn session_carrier_submission_requires_declared_authority_for_final_settlement() {
+        let payload = format!("0x{}", ["a1", "a2", "a3", "a4", "a5"].map(|byte| byte.repeat(32)).join(""));
+        let package = settlement_package_from_carrier_payload(&payload);
+        let package_path = write_temp_json("final-settlement-missing-authority-package", &package);
+        let carrier_capacity = 40_000_000_000u64;
+        let change_capacity = 10_000_000_000u64;
+        let fee = 1_000u64;
+        let input_capacity = carrier_capacity + change_capacity + fee;
+
+        let error = session_carrier_submission(SessionCarrierSubmissionArgs {
+            package: package_path.clone(),
+            input_tx_hash: format!("0x{}", "b2".repeat(32)),
+            input_index: "0x0".to_owned(),
+            input_capacity_shannons: input_capacity,
+            evidence_cell_dep_tx_hash: None,
+            evidence_cell_dep_index: None,
+            evidence_cell_dep_capacity_shannons: None,
+            authority_input_tx_hash: None,
+            authority_input_index: None,
+            authority_input_capacity_shannons: None,
+            carrier_capacity_shannons: carrier_capacity,
+            fee_shannons: fee,
+            lock_code_hash: format!("0x{}", "b3".repeat(32)),
+            lock_hash_type: "data".to_owned(),
+            lock_args: "0x".to_owned(),
+            lock_code_dep_tx_hash: format!("0x{}", "b4".repeat(32)),
+            lock_code_dep_index: "0x5".to_owned(),
+            verifier_code_hash: format!("0x{}", "b5".repeat(32)),
+            verifier_code_dep_tx_hash: format!("0x{}", "b6".repeat(32)),
+            verifier_code_dep_index: "0x1".to_owned(),
+            verifier_source: "settlement-final.cell".to_owned(),
+            verifier_role: "final-l1-script".to_owned(),
+            witness: "0x1234".to_owned(),
+            outputs_validator: "passthrough".to_owned(),
+            rpc_url: Some("http://127.0.0.1:8114".to_owned()),
+            submit: false,
+            require_accepted: false,
+            accepted_tx_hash: None,
+            out: None,
+        })
+        .expect_err("final settlement submission should require a package-declared authority input");
+        let _ = std::fs::remove_file(package_path);
+
+        assert!(
+            error.to_string().contains("final L1 settlement submission requires the package-declared settlement authority input"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn session_carrier_submission_requires_final_da_dep_for_final_settlement() {
+        let payload = format!("0x{}", ["a6", "a7", "a8", "a9", "aa"].map(|byte| byte.repeat(32)).join(""));
+        let package = settlement_package_from_carrier_payload(&payload);
+        let package_path = write_temp_json("final-settlement-missing-da-dep-package", &package);
+        let carrier_capacity = 40_000_000_000u64;
+        let change_capacity = 10_000_000_000u64;
+        let fee = 1_000u64;
+        let authority_capacity = 8_000_000_000u64;
+        let funding_capacity = carrier_capacity + change_capacity + fee - authority_capacity;
+
+        let error = session_carrier_submission(SessionCarrierSubmissionArgs {
+            package: package_path.clone(),
+            input_tx_hash: format!("0x{}", "bc".repeat(32)),
+            input_index: "0x0".to_owned(),
+            input_capacity_shannons: funding_capacity,
+            evidence_cell_dep_tx_hash: None,
+            evidence_cell_dep_index: None,
+            evidence_cell_dep_capacity_shannons: None,
+            authority_input_tx_hash: Some(format!("0x{}", "bd".repeat(32))),
+            authority_input_index: Some("0x2".to_owned()),
+            authority_input_capacity_shannons: Some(authority_capacity),
+            carrier_capacity_shannons: carrier_capacity,
+            fee_shannons: fee,
+            lock_code_hash: format!("0x{}", "be".repeat(32)),
+            lock_hash_type: "data".to_owned(),
+            lock_args: "0x".to_owned(),
+            lock_code_dep_tx_hash: format!("0x{}", "bf".repeat(32)),
+            lock_code_dep_index: "0x5".to_owned(),
+            verifier_code_hash: format!("0x{}", "c0".repeat(32)),
+            verifier_code_dep_tx_hash: format!("0x{}", "c1".repeat(32)),
+            verifier_code_dep_index: "0x1".to_owned(),
+            verifier_source: "settlement-final.cell".to_owned(),
+            verifier_role: "final-l1-script".to_owned(),
+            witness: "0x1234".to_owned(),
+            outputs_validator: "passthrough".to_owned(),
+            rpc_url: Some("http://127.0.0.1:8114".to_owned()),
+            submit: false,
+            require_accepted: false,
+            accepted_tx_hash: None,
+            out: None,
+        })
+        .expect_err("final settlement submission should require final DA publication evidence CellDep");
+        let _ = std::fs::remove_file(package_path);
+
+        assert!(
+            error.to_string().contains("final L1 settlement submission requires the final DA publication evidence CellDep"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn session_carrier_submission_builds_final_settlement_with_authority_input() {
+        let payload = format!("0x{}", ["c1", "c2", "c3", "c4", "c5"].map(|byte| byte.repeat(32)).join(""));
+        let payload_bytes = decode_hex_bytes(&payload).expect("settlement payload bytes");
+        let package = settlement_package_from_carrier_payload(&payload);
+        let package_path = write_temp_json("final-settlement-authority-package", &package);
+        let carrier_capacity = 40_000_000_000u64;
+        let change_capacity = 10_000_000_000u64;
+        let fee = 1_000u64;
+        let authority_capacity = 8_000_000_000u64;
+        let funding_capacity = carrier_capacity + change_capacity + fee - authority_capacity;
+        let authority_tx_hash = format!("0x{}", "d7".repeat(32));
+        let authority_index = "0x2".to_owned();
+
+        let report = session_carrier_submission(SessionCarrierSubmissionArgs {
+            package: package_path.clone(),
+            input_tx_hash: format!("0x{}", "d2".repeat(32)),
+            input_index: "0x0".to_owned(),
+            input_capacity_shannons: funding_capacity,
+            evidence_cell_dep_tx_hash: Some(format!("0x{}", "d1".repeat(32))),
+            evidence_cell_dep_index: Some("0x0".to_owned()),
+            evidence_cell_dep_capacity_shannons: Some(1_000),
+            authority_input_tx_hash: Some(authority_tx_hash.clone()),
+            authority_input_index: Some(authority_index.clone()),
+            authority_input_capacity_shannons: Some(authority_capacity),
+            carrier_capacity_shannons: carrier_capacity,
+            fee_shannons: fee,
+            lock_code_hash: format!("0x{}", "d3".repeat(32)),
+            lock_hash_type: "data".to_owned(),
+            lock_args: "0x".to_owned(),
+            lock_code_dep_tx_hash: format!("0x{}", "d4".repeat(32)),
+            lock_code_dep_index: "0x5".to_owned(),
+            verifier_code_hash: format!("0x{}", "d5".repeat(32)),
+            verifier_code_dep_tx_hash: format!("0x{}", "d6".repeat(32)),
+            verifier_code_dep_index: "0x1".to_owned(),
+            verifier_source: "settlement-final.cell".to_owned(),
+            verifier_role: "final-l1-script".to_owned(),
+            witness: "0x1234".to_owned(),
+            outputs_validator: "passthrough".to_owned(),
+            rpc_url: Some("http://127.0.0.1:8114".to_owned()),
+            submit: false,
+            require_accepted: false,
+            accepted_tx_hash: None,
+            out: None,
+        })
+        .expect("build final settlement submission with authority input");
+        let _ = std::fs::remove_file(package_path);
+
+        assert_eq!(report["schema"], "myelin-session-ckb-final-script-submission-v1");
+        assert_eq!(report["package_kind"], "myelin-session-settlement-package-v1");
+        assert_eq!(report["authority_input_present"], true);
+        assert_eq!(report["authority_input"]["tx_hash"], authority_tx_hash);
+        assert_eq!(report["authority_input"]["index"], authority_index);
+        assert_eq!(report["authority_input"]["input_position"], 1);
+        assert_eq!(report["settlement_authority_requirement"], package["settlement_authority"]);
+        assert_eq!(report["total_input_capacity_shannons"], funding_capacity + authority_capacity);
+        assert_eq!(report["change_capacity_shannons"], change_capacity);
+        assert_eq!(report["ckb_transaction_json"]["inputs"].as_array().expect("inputs").len(), 2);
+        assert_eq!(report["ckb_transaction_json"]["inputs"][1]["previous_output"]["tx_hash"], authority_tx_hash);
+        assert_eq!(report["ckb_transaction_json"]["inputs"][1]["previous_output"]["index"], authority_index);
+        assert_eq!(report["ckb_transaction_json"]["cell_deps"].as_array().expect("cell deps").len(), 3);
+        let settlement_authority =
+            serde_json::from_value::<SessionSettlementAuthorityRequirement>(package["settlement_authority"].clone())
+                .expect("settlement authority");
+        assert_eq!(
+            report["carrier_type_args"],
+            settlement_final_type_args_hex(&payload_bytes, &settlement_authority).expect("final settlement type args")
+        );
+    }
+
+    #[test]
+    fn session_carrier_submission_preflights_final_settlement_lock_binding() {
+        let payload = format!("0x{}", ["e1", "e2", "e3", "e4", "e5"].map(|byte| byte.repeat(32)).join(""));
+        let package = settlement_package_from_carrier_payload(&payload);
+        let package_path = write_temp_json("final-settlement-live-lock-package", &package);
+        let verifier_source = std::env::temp_dir().join(format!("myelin-final-settlement-lock-source-{}.cell", std::process::id()));
+        std::fs::write(&verifier_source, b"module myelin::final_settlement_lock\n").expect("write final verifier source");
+        let carrier_capacity = 40_000_000_000u64;
+        let change_capacity = 10_000_000_000u64;
+        let fee = 1_000u64;
+        let authority_capacity = 8_000_000_000u64;
+        let funding_capacity = carrier_capacity + change_capacity + fee - authority_capacity;
+        let evidence_capacity = 40_000_000_000u64;
+        let input_tx_hash = format!("0x{}", "f2".repeat(32));
+        let input_index = "0x0".to_owned();
+        let evidence_tx_hash = format!("0x{}", "f1".repeat(32));
+        let evidence_index = "0x0".to_owned();
+        let authority_tx_hash = format!("0x{}", "f7".repeat(32));
+        let authority_index = "0x2".to_owned();
+        let lock_code_hash = format!("0x{}", "f3".repeat(32));
+        let lock_dep_tx_hash = format!("0x{}", "f4".repeat(32));
+        let lock_dep_index = "0x5".to_owned();
+        let verifier_code_hash = format!("0x{}", "f5".repeat(32));
+        let verifier_dep_tx_hash = format!("0x{}", "f6".repeat(32));
+        let verifier_dep_index = "0x1".to_owned();
+        let authority_data_hash = package["settlement_authority"]["data_hash"].as_str().expect("authority data hash").to_owned();
+        let build_args = |rpc_url: Option<String>, submit: bool, require_accepted: bool| SessionCarrierSubmissionArgs {
+            package: package_path.clone(),
+            input_tx_hash: input_tx_hash.clone(),
+            input_index: input_index.clone(),
+            input_capacity_shannons: funding_capacity,
+            evidence_cell_dep_tx_hash: Some(evidence_tx_hash.clone()),
+            evidence_cell_dep_index: Some(evidence_index.clone()),
+            evidence_cell_dep_capacity_shannons: Some(evidence_capacity),
+            authority_input_tx_hash: Some(authority_tx_hash.clone()),
+            authority_input_index: Some(authority_index.clone()),
+            authority_input_capacity_shannons: Some(authority_capacity),
+            carrier_capacity_shannons: carrier_capacity,
+            fee_shannons: fee,
+            lock_code_hash: lock_code_hash.clone(),
+            lock_hash_type: "data".to_owned(),
+            lock_args: "0x".to_owned(),
+            lock_code_dep_tx_hash: lock_dep_tx_hash.clone(),
+            lock_code_dep_index: lock_dep_index.clone(),
+            verifier_code_hash: verifier_code_hash.clone(),
+            verifier_code_dep_tx_hash: verifier_dep_tx_hash.clone(),
+            verifier_code_dep_index: verifier_dep_index.clone(),
+            verifier_source: verifier_source.display().to_string(),
+            verifier_role: "final-l1-script".to_owned(),
+            witness: "0x1234".to_owned(),
+            outputs_validator: "passthrough".to_owned(),
+            rpc_url,
+            submit,
+            require_accepted,
+            accepted_tx_hash: None,
+            out: None,
+        };
+        let dry_report = session_carrier_submission(build_args(None, false, false)).expect("build final settlement dry run");
+        let accepted_tx_hash = dry_report["ckb_raw_tx_hash"].as_str().expect("projected final settlement tx hash").to_owned();
+        let valid_cells = || {
+            let mut cells = std::collections::BTreeMap::new();
+            cells.insert(
+                ckb_out_point_key(&serde_json::json!({ "tx_hash": input_tx_hash, "index": input_index })).unwrap(),
+                mock_carrier_live_cell(
+                    format!("0x{funding_capacity:x}"),
+                    "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                    lock_code_hash.clone(),
+                ),
+            );
+            cells.insert(
+                ckb_out_point_key(&serde_json::json!({ "tx_hash": evidence_tx_hash, "index": evidence_index })).unwrap(),
+                mock_carrier_live_cell(
+                    format!("0x{evidence_capacity:x}"),
+                    "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                    lock_code_hash.clone(),
+                ),
+            );
+            cells.insert(
+                ckb_out_point_key(&serde_json::json!({ "tx_hash": authority_tx_hash, "index": authority_index })).unwrap(),
+                mock_carrier_live_cell(format!("0x{authority_capacity:x}"), authority_data_hash.clone(), lock_code_hash.clone()),
+            );
+            cells.insert(
+                ckb_out_point_key(&serde_json::json!({ "tx_hash": lock_dep_tx_hash, "index": lock_dep_index })).unwrap(),
+                mock_carrier_live_cell(
+                    "0x3e8".to_owned(),
+                    "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                    "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                ),
+            );
+            cells.insert(
+                ckb_out_point_key(&serde_json::json!({ "tx_hash": verifier_dep_tx_hash, "index": verifier_dep_index })).unwrap(),
+                mock_carrier_live_cell(
+                    "0x3e8".to_owned(),
+                    verifier_code_hash.clone(),
+                    "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                ),
+            );
+            cells
+        };
+        let (url, handle) = spawn_carrier_submission_rpc_mock_with_request_count(valid_cells(), Some(accepted_tx_hash.clone()), 6);
+        let report =
+            session_carrier_submission(build_args(Some(url), true, true)).expect("submit final settlement after lock preflight");
+        handle.join().expect("mock final-settlement lock preflight rpc thread");
+
+        let mut evidence_lock_mismatch_cells = valid_cells();
+        evidence_lock_mismatch_cells
+            .get_mut(&ckb_out_point_key(&serde_json::json!({ "tx_hash": evidence_tx_hash, "index": evidence_index })).unwrap())
+            .expect("evidence cell")
+            .lock_code_hash = format!("0x{}", "fa".repeat(32));
+        let (evidence_url, evidence_handle) =
+            spawn_carrier_submission_rpc_mock_with_request_count(evidence_lock_mismatch_cells, None, 2);
+        let evidence_error = session_carrier_submission(build_args(Some(evidence_url), true, true))
+            .expect_err("final settlement should reject final DA lock mismatch before broadcast");
+        evidence_handle.join().expect("mock evidence-lock mismatch rpc thread");
+
+        let mut authority_lock_mismatch_cells = valid_cells();
+        authority_lock_mismatch_cells
+            .get_mut(&ckb_out_point_key(&serde_json::json!({ "tx_hash": authority_tx_hash, "index": authority_index })).unwrap())
+            .expect("authority cell")
+            .lock_code_hash = format!("0x{}", "fb".repeat(32));
+        let (authority_url, authority_handle) =
+            spawn_carrier_submission_rpc_mock_with_request_count(authority_lock_mismatch_cells, None, 3);
+        let authority_error = session_carrier_submission(build_args(Some(authority_url), true, true))
+            .expect_err("final settlement should reject authority lock mismatch before broadcast");
+        authority_handle.join().expect("mock authority-lock mismatch rpc thread");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(verifier_source);
+
+        assert_eq!(report["accepted_by_rpc"], true);
+        assert_eq!(report["pre_submit_evidence_cell_dep_lock_matches"], true);
+        assert_eq!(report["pre_submit_authority_input_data_hash_matches"], true);
+        assert_eq!(report["pre_submit_authority_input_lock_matches"], true);
+        assert!(evidence_error.to_string().contains("final DA publication CellDep lock mismatch"), "{evidence_error}");
+        assert!(authority_error.to_string().contains("settlement authority input lock mismatch"), "{authority_error}");
+    }
+
+    #[test]
+    fn session_carrier_submission_can_submit_to_rpc_and_record_result() {
+        let payload = format!("0x{}", ["61", "62", "63", "64", "65"].map(|byte| byte.repeat(32)).join(""));
+        let package = da_anchor_package_from_carrier_payload(&payload);
+        let package_path = write_temp_json("carrier-submission-live-package", &package);
+        let verifier_source = std::env::temp_dir().join(format!("myelin-carrier-live-source-{}.cell", std::process::id()));
+        std::fs::write(&verifier_source, b"module myelin::live_carrier\n").expect("write live verifier source");
+        let carrier_capacity = 40_000_000_000u64;
+        let change_capacity = 10_000_000_000u64;
+        let fee = 1_000u64;
+        let input_capacity = carrier_capacity + change_capacity + fee;
+        let input_tx_hash = format!("0x{}", "72".repeat(32));
+        let input_index = "0x0".to_owned();
+        let lock_dep_tx_hash = format!("0x{}", "74".repeat(32));
+        let lock_dep_index = "0x5".to_owned();
+        let verifier_code_hash = format!("0x{}", "75".repeat(32));
+        let verifier_dep_tx_hash = format!("0x{}", "76".repeat(32));
+        let verifier_dep_index = "0x1".to_owned();
+        let lock_code_hash = format!("0x{}", "73".repeat(32));
+        let build_args = |rpc_url: Option<String>, submit: bool, require_accepted: bool| SessionCarrierSubmissionArgs {
+            package: package_path.clone(),
+            input_tx_hash: input_tx_hash.clone(),
+            input_index: input_index.clone(),
+            input_capacity_shannons: input_capacity,
+            evidence_cell_dep_tx_hash: None,
+            evidence_cell_dep_index: None,
+            evidence_cell_dep_capacity_shannons: None,
+            authority_input_tx_hash: None,
+            authority_input_index: None,
+            authority_input_capacity_shannons: None,
+            carrier_capacity_shannons: carrier_capacity,
+            fee_shannons: fee,
+            lock_code_hash: lock_code_hash.clone(),
+            lock_hash_type: "data".to_owned(),
+            lock_args: "0x".to_owned(),
+            lock_code_dep_tx_hash: lock_dep_tx_hash.clone(),
+            lock_code_dep_index: lock_dep_index.clone(),
+            verifier_code_hash: verifier_code_hash.clone(),
+            verifier_code_dep_tx_hash: verifier_dep_tx_hash.clone(),
+            verifier_code_dep_index: verifier_dep_index.clone(),
+            verifier_source: verifier_source.display().to_string(),
+            verifier_role: "carrier".to_owned(),
+            witness: "0x1234".to_owned(),
+            outputs_validator: "passthrough".to_owned(),
+            rpc_url,
+            submit,
+            require_accepted,
+            accepted_tx_hash: None,
+            out: None,
+        };
+        let dry_report = session_carrier_submission(build_args(None, false, false)).expect("build dry-run carrier submission");
+        let accepted_tx_hash = dry_report["ckb_raw_tx_hash"].as_str().expect("projected carrier tx hash").to_owned();
+        let mut cells = std::collections::BTreeMap::new();
+        cells.insert(
+            ckb_out_point_key(&serde_json::json!({ "tx_hash": input_tx_hash, "index": input_index })).unwrap(),
+            mock_carrier_live_cell(
+                format!("0x{input_capacity:x}"),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                lock_code_hash.clone(),
+            ),
+        );
+        cells.insert(
+            ckb_out_point_key(&serde_json::json!({ "tx_hash": lock_dep_tx_hash, "index": lock_dep_index })).unwrap(),
+            mock_carrier_live_cell(
+                "0x3e8".to_owned(),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            ),
+        );
+        cells.insert(
+            ckb_out_point_key(&serde_json::json!({ "tx_hash": verifier_dep_tx_hash, "index": verifier_dep_index })).unwrap(),
+            mock_carrier_live_cell(
+                "0x3e8".to_owned(),
+                verifier_code_hash.clone(),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            ),
+        );
+        let (url, handle) = spawn_carrier_submission_rpc_mock(cells, Some(accepted_tx_hash.clone()));
+
+        let report = session_carrier_submission(build_args(Some(url), true, true)).expect("submit carrier transaction");
+        handle.join().expect("mock send-transaction rpc thread");
+
+        let mut mismatch_cells = std::collections::BTreeMap::new();
+        mismatch_cells.insert(
+            ckb_out_point_key(&serde_json::json!({ "tx_hash": input_tx_hash, "index": input_index })).unwrap(),
+            mock_carrier_live_cell(
+                format!("0x{input_capacity:x}"),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                lock_code_hash.clone(),
+            ),
+        );
+        mismatch_cells.insert(
+            ckb_out_point_key(&serde_json::json!({ "tx_hash": lock_dep_tx_hash, "index": lock_dep_index })).unwrap(),
+            mock_carrier_live_cell(
+                "0x3e8".to_owned(),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            ),
+        );
+        mismatch_cells.insert(
+            ckb_out_point_key(&serde_json::json!({ "tx_hash": verifier_dep_tx_hash, "index": verifier_dep_index })).unwrap(),
+            mock_carrier_live_cell(
+                "0x3e8".to_owned(),
+                verifier_code_hash.clone(),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            ),
+        );
+        let mismatched_tx_hash = format!("0x{}", "77".repeat(32));
+        assert_ne!(mismatched_tx_hash, accepted_tx_hash);
+        let (mismatch_url, mismatch_handle) = spawn_carrier_submission_rpc_mock(mismatch_cells, Some(mismatched_tx_hash));
+        let mismatch_error = session_carrier_submission(build_args(Some(mismatch_url), true, true))
+            .expect_err("carrier submission should reject mismatched RPC tx hash");
+        mismatch_handle.join().expect("mock mismatched carrier rpc thread");
+        assert!(mismatch_error.to_string().contains("projected raw transaction hash"), "{mismatch_error}");
+
+        let mut lock_mismatch_cells = std::collections::BTreeMap::new();
+        lock_mismatch_cells.insert(
+            ckb_out_point_key(&serde_json::json!({ "tx_hash": input_tx_hash, "index": input_index })).unwrap(),
+            mock_carrier_live_cell(
+                format!("0x{input_capacity:x}"),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                format!("0x{}", "78".repeat(32)),
+            ),
+        );
+        let (lock_mismatch_url, lock_mismatch_handle) =
+            spawn_carrier_submission_rpc_mock_with_request_count(lock_mismatch_cells, None, 1);
+        let lock_mismatch_error = session_carrier_submission(build_args(Some(lock_mismatch_url), true, true))
+            .expect_err("carrier submission should reject a funding-cell lock mismatch before broadcast");
+        lock_mismatch_handle.join().expect("mock input-lock mismatch carrier rpc thread");
+        assert!(lock_mismatch_error.to_string().contains("carrier input lock mismatch"), "{lock_mismatch_error}");
+
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(verifier_source);
+
+        assert_eq!(report["dry_run"], false);
+        assert_eq!(report["submit_mode"], true);
+        assert_eq!(report["submitted_to_rpc"], true);
+        assert_eq!(report["accepted_by_rpc"], true);
+        assert_eq!(report["ckb_raw_tx_hash"], accepted_tx_hash);
+        assert_eq!(report["rpc_result"], accepted_tx_hash);
+        assert!(report["rpc_error"].is_null());
+        assert_eq!(report["pre_submit_context_checked"], true);
+        assert_eq!(report["pre_submit_input_live"], true);
+        assert_eq!(report["pre_submit_input_capacity_matches"], true);
+        assert_eq!(report["pre_submit_input_lock_matches"], true);
+        assert_eq!(report["pre_submit_lock_code_dep_live"], true);
+        assert_eq!(report["pre_submit_verifier_code_dep_live"], true);
+        assert_eq!(report["pre_submit_verifier_code_dep_data_hash_matches"], true);
+    }
+
+    #[test]
+    fn session_carrier_submission_rejects_submit_when_verifier_dep_hash_mismatches() {
+        let payload = format!("0x{}", ["91", "92", "93", "94", "95"].map(|byte| byte.repeat(32)).join(""));
+        let package = da_anchor_package_from_carrier_payload(&payload);
+        let package_path = write_temp_json("carrier-submission-bad-verifier-dep-package", &package);
+        let verifier_source = std::env::temp_dir().join(format!("myelin-carrier-bad-dep-source-{}.cell", std::process::id()));
+        std::fs::write(&verifier_source, b"module myelin::bad_dep_carrier\n").expect("write bad dep verifier source");
+        let carrier_capacity = 40_000_000_000u64;
+        let change_capacity = 10_000_000_000u64;
+        let fee = 1_000u64;
+        let input_capacity = carrier_capacity + change_capacity + fee;
+        let input_tx_hash = format!("0x{}", "92".repeat(32));
+        let input_index = "0x0".to_owned();
+        let lock_dep_tx_hash = format!("0x{}", "94".repeat(32));
+        let lock_dep_index = "0x5".to_owned();
+        let verifier_code_hash = format!("0x{}", "95".repeat(32));
+        let verifier_dep_tx_hash = format!("0x{}", "96".repeat(32));
+        let verifier_dep_index = "0x1".to_owned();
+        let lock_code_hash = format!("0x{}", "93".repeat(32));
+        let mut cells = std::collections::BTreeMap::new();
+        cells.insert(
+            ckb_out_point_key(&serde_json::json!({ "tx_hash": input_tx_hash, "index": input_index })).unwrap(),
+            mock_carrier_live_cell(
+                format!("0x{input_capacity:x}"),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                lock_code_hash.clone(),
+            ),
+        );
+        cells.insert(
+            ckb_out_point_key(&serde_json::json!({ "tx_hash": lock_dep_tx_hash, "index": lock_dep_index })).unwrap(),
+            mock_carrier_live_cell(
+                "0x3e8".to_owned(),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            ),
+        );
+        cells.insert(
+            ckb_out_point_key(&serde_json::json!({ "tx_hash": verifier_dep_tx_hash, "index": verifier_dep_index })).unwrap(),
+            mock_carrier_live_cell(
+                "0x3e8".to_owned(),
+                format!("0x{}", "97".repeat(32)),
+                "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            ),
+        );
+        let (url, handle) = spawn_carrier_submission_rpc_mock(cells, None);
+
+        let error = session_carrier_submission(SessionCarrierSubmissionArgs {
+            package: package_path.clone(),
+            input_tx_hash,
+            input_index,
+            input_capacity_shannons: input_capacity,
+            evidence_cell_dep_tx_hash: None,
+            evidence_cell_dep_index: None,
+            evidence_cell_dep_capacity_shannons: None,
+            authority_input_tx_hash: None,
+            authority_input_index: None,
+            authority_input_capacity_shannons: None,
+            carrier_capacity_shannons: carrier_capacity,
+            fee_shannons: fee,
+            lock_code_hash,
+            lock_hash_type: "data".to_owned(),
+            lock_args: "0x".to_owned(),
+            lock_code_dep_tx_hash: lock_dep_tx_hash,
+            lock_code_dep_index: lock_dep_index,
+            verifier_code_hash,
+            verifier_code_dep_tx_hash: verifier_dep_tx_hash,
+            verifier_code_dep_index: verifier_dep_index,
+            verifier_source: verifier_source.display().to_string(),
+            verifier_role: "carrier".to_owned(),
+            witness: "0x1234".to_owned(),
+            outputs_validator: "passthrough".to_owned(),
+            rpc_url: Some(url),
+            submit: true,
+            require_accepted: true,
+            accepted_tx_hash: None,
+            out: None,
+        })
+        .expect_err("live carrier submission should reject mismatched verifier code dep hash");
+        handle.join().expect("mock carrier preflight rejection rpc thread");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(verifier_source);
+        assert!(error.to_string().contains("carrier verifier code dep data hash mismatch"), "{error}");
+    }
+
+    #[test]
+    fn session_carrier_submission_rejects_live_submit_without_readable_verifier_source() {
+        let payload = format!("0x{}", ["81", "82", "83", "84", "85"].map(|byte| byte.repeat(32)).join(""));
+        let package = da_anchor_package_from_carrier_payload(&payload);
+        let package_path = write_temp_json("carrier-submission-missing-source-package", &package);
+        let carrier_capacity = 40_000_000_000u64;
+        let change_capacity = 10_000_000_000u64;
+        let fee = 1_000u64;
+        let input_capacity = carrier_capacity + change_capacity + fee;
+
+        let error = session_carrier_submission(SessionCarrierSubmissionArgs {
+            package: package_path.clone(),
+            input_tx_hash: format!("0x{}", "82".repeat(32)),
+            input_index: "0x0".to_owned(),
+            input_capacity_shannons: input_capacity,
+            evidence_cell_dep_tx_hash: None,
+            evidence_cell_dep_index: None,
+            evidence_cell_dep_capacity_shannons: None,
+            authority_input_tx_hash: None,
+            authority_input_index: None,
+            authority_input_capacity_shannons: None,
+            carrier_capacity_shannons: carrier_capacity,
+            fee_shannons: fee,
+            lock_code_hash: format!("0x{}", "83".repeat(32)),
+            lock_hash_type: "data".to_owned(),
+            lock_args: "0x".to_owned(),
+            lock_code_dep_tx_hash: format!("0x{}", "84".repeat(32)),
+            lock_code_dep_index: "0x5".to_owned(),
+            verifier_code_hash: format!("0x{}", "85".repeat(32)),
+            verifier_code_dep_tx_hash: format!("0x{}", "86".repeat(32)),
+            verifier_code_dep_index: "0x1".to_owned(),
+            verifier_source: "/tmp/myelin-missing-carrier-source.cell".to_owned(),
+            verifier_role: "carrier".to_owned(),
+            witness: "0x1234".to_owned(),
+            outputs_validator: "passthrough".to_owned(),
+            rpc_url: Some("http://127.0.0.1:8114".to_owned()),
+            submit: true,
+            require_accepted: true,
+            accepted_tx_hash: None,
+            out: None,
+        })
+        .expect_err("live carrier submission should require readable verifier source");
+        let _ = std::fs::remove_file(package_path);
+        assert!(
+            error
+                .to_string()
+                .contains("live carrier submission requires --verifier-source to point to a readable CellScript source file"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn session_carrier_submission_rejects_under_capacity_outputs() {
+        let payload = format!("0x{}", ["41", "42", "43", "44", "45"].map(|byte| byte.repeat(32)).join(""));
+        let package = da_anchor_package_from_carrier_payload(&payload);
+        let package_path = write_temp_json("carrier-submission-under-capacity-package", &package);
+        let error = session_carrier_submission(SessionCarrierSubmissionArgs {
+            package: package_path.clone(),
+            input_tx_hash: format!("0x{}", "52".repeat(32)),
+            input_index: "0x0".to_owned(),
+            input_capacity_shannons: 1_501,
+            evidence_cell_dep_tx_hash: None,
+            evidence_cell_dep_index: None,
+            evidence_cell_dep_capacity_shannons: None,
+            authority_input_tx_hash: None,
+            authority_input_index: None,
+            authority_input_capacity_shannons: None,
+            carrier_capacity_shannons: 1_000,
+            fee_shannons: 1,
+            lock_code_hash: format!("0x{}", "53".repeat(32)),
+            lock_hash_type: "data".to_owned(),
+            lock_args: "0x".to_owned(),
+            lock_code_dep_tx_hash: format!("0x{}", "54".repeat(32)),
+            lock_code_dep_index: "0x5".to_owned(),
+            verifier_code_hash: format!("0x{}", "55".repeat(32)),
+            verifier_code_dep_tx_hash: format!("0x{}", "56".repeat(32)),
+            verifier_code_dep_index: "0x1".to_owned(),
+            verifier_source: "da-anchor-carrier.cell".to_owned(),
+            verifier_role: "carrier".to_owned(),
+            witness: "0x1234".to_owned(),
+            outputs_validator: "passthrough".to_owned(),
+            rpc_url: Some("http://127.0.0.1:8114".to_owned()),
+            submit: false,
+            require_accepted: false,
+            accepted_tx_hash: None,
+            out: None,
+        })
+        .expect_err("under-capacity carrier output must be rejected");
+        let _ = std::fs::remove_file(package_path);
+
+        assert!(error.to_string().contains("carrier output capacity"));
+    }
+
+    #[test]
+    fn session_submission_readiness_accepts_coherent_ready_reports() {
+        let expected_hash = format!("0x{}", "aa".repeat(32));
+        let block_hash = format!("0x{}", "bb".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash.clone());
+        let submission_path = write_readiness_submission(&expected_hash);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-ok", &context);
+        let economics_path = write_temp_json("readiness-economics-ok", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-ok", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-ok", &stability);
+        let finality_path = write_temp_json("readiness-finality-ok", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            false,
+        )
+        .expect("verify coherent readiness");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.schema, "myelin-session-submission-readiness-v1");
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert!(report.report_hashes_match);
+        assert!(report.submission_report_valid);
+        assert!(!report.submission_report_live_accepted);
+        assert!(!report.live_submission_required);
+        assert!(report.submission_lineage_matches);
+        assert!(report.inclusion_lineage_matches);
+        assert!(report.block_identity_matches);
+        assert!(report.context_ready);
+        assert!(report.economically_ready);
+        assert!(report.inclusion_observed);
+        assert!(report.stable_block_identity);
+        assert!(report.finality_confirmed);
+        assert!(report.reorg_risk_bounded);
+        assert!(report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(!report.live_carrier_submission_ready);
+        assert!(!report.final_l1_script_submission_ready);
+        assert_eq!(report.readiness_evidence_mode, "coherent-offline-or-mock");
+        assert!(report.checks.iter().all(|check| check.ok));
+        assert!(report.notes.iter().any(|note| note.contains("operationally ready")));
+        assert!(report.notes.iter().any(|note| note.contains("offline/mock/coherent-report readiness")));
+    }
+
+    #[test]
+    fn session_submission_readiness_rejects_mismatched_hash_and_unconfirmed_finality() {
+        let expected_hash = format!("0x{}", "cc".repeat(32));
+        let block_hash = format!("0x{}", "dd".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        let submission_path = write_readiness_submission(&expected_hash);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        economics.expected_ckb_tx_hash = format!("0x{}", "ee".repeat(32));
+        finality.finality_confirmed = false;
+        finality.reorg_risk_bounded = false;
+        finality.confirmations = Some(2);
+        let context_path = write_temp_json("readiness-context-bad", &context);
+        let economics_path = write_temp_json("readiness-economics-bad", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-bad", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-bad", &stability);
+        let finality_path = write_temp_json("readiness-finality-bad", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            false,
+        )
+        .expect("verify rejected readiness");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert!(!report.report_hashes_match);
+        assert!(report.submission_report_valid);
+        assert!(!report.submission_report_live_accepted);
+        assert!(report.submission_lineage_matches);
+        assert!(report.inclusion_lineage_matches);
+        assert!(report.context_ready);
+        assert!(report.economically_ready);
+        assert!(report.inclusion_observed);
+        assert!(report.stable_block_identity);
+        assert!(!report.finality_confirmed);
+        assert!(!report.reorg_risk_bounded);
+        assert!(!report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(report.checks.iter().any(|check| check.name == "report-hashes-match" && !check.ok));
+        assert!(report.checks.iter().any(|check| check.name == "finality-confirmed" && !check.ok));
+    }
+
+    #[test]
+    fn session_submission_readiness_rejects_mixed_report_lineage() {
+        let expected_hash = format!("0x{}", "ef".repeat(32));
+        let block_hash = format!("0x{}", "fe".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        let submission_path = write_readiness_submission(&expected_hash);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        economics.submission = "other-session-submit.json".to_owned();
+        let context_path = write_temp_json("readiness-context-mixed-lineage", &context);
+        let economics_path = write_temp_json("readiness-economics-mixed-lineage", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-mixed-lineage", &inclusion);
+        stability.inclusion = "other-session-inclusion.json".to_owned();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-mixed-lineage", &stability);
+        let finality_path = write_temp_json("readiness-finality-mixed-lineage", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            false,
+        )
+        .expect("verify mixed-lineage readiness");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert!(report.report_hashes_match);
+        assert!(report.submission_report_valid);
+        assert!(!report.submission_report_live_accepted);
+        assert!(!report.submission_lineage_matches);
+        assert!(!report.inclusion_lineage_matches);
+        assert!(report.context_ready);
+        assert!(report.economically_ready);
+        assert!(report.inclusion_observed);
+        assert!(report.stable_block_identity);
+        assert!(report.finality_confirmed);
+        assert!(report.reorg_risk_bounded);
+        assert!(!report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(report.checks.iter().any(|check| check.name == "submission-lineage-matches" && !check.ok));
+        assert!(report.checks.iter().any(|check| check.name == "inclusion-lineage-matches" && !check.ok));
+    }
+
+    #[test]
+    fn session_submission_readiness_rejects_invalid_submission_report_reference() {
+        let expected_hash = format!("0x{}", "12".repeat(32));
+        let block_hash = format!("0x{}", "34".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        let wrong_submission_path = write_readiness_submission(&format!("0x{}", "56".repeat(32)));
+        bind_readiness_submission(&wrong_submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-bad-submission", &context);
+        let economics_path = write_temp_json("readiness-economics-bad-submission", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-bad-submission", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-bad-submission", &stability);
+        let finality_path = write_temp_json("readiness-finality-bad-submission", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            false,
+        )
+        .expect("verify invalid-submission readiness");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(wrong_submission_path);
+
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert!(report.report_hashes_match);
+        assert!(!report.submission_report_valid);
+        assert!(!report.submission_report_live_accepted);
+        assert!(report.submission_lineage_matches);
+        assert!(report.inclusion_lineage_matches);
+        assert!(report.context_ready);
+        assert!(report.economically_ready);
+        assert!(report.inclusion_observed);
+        assert!(report.stable_block_identity);
+        assert!(report.finality_confirmed);
+        assert!(report.reorg_risk_bounded);
+        assert!(!report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(report.checks.iter().any(|check| check.name == "submission-report-valid" && !check.ok));
+    }
+
+    #[test]
+    fn session_submission_readiness_requires_live_submission_when_requested() {
+        let expected_hash = format!("0x{}", "78".repeat(32));
+        let block_hash = format!("0x{}", "9a".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        let submission_path = write_readiness_live_da_submission(&expected_hash, false);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-require-live", &context);
+        let economics_path = write_temp_json("readiness-economics-require-live", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-require-live", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-require-live", &stability);
+        let finality_path = write_temp_json("readiness-finality-require-live", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+        )
+        .expect("verify strict live-submission readiness");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert!(report.report_hashes_match);
+        assert!(report.submission_report_valid);
+        assert!(!report.submission_report_live_accepted);
+        assert!(!report.submission_report_carrier_live_accepted);
+        assert!(report.live_submission_required);
+        assert!(report.submission_lineage_matches);
+        assert!(report.inclusion_lineage_matches);
+        assert!(report.context_ready);
+        assert!(report.economically_ready);
+        assert!(report.inclusion_observed);
+        assert!(report.stable_block_identity);
+        assert!(report.finality_confirmed);
+        assert!(report.reorg_risk_bounded);
+        assert!(!report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(report.checks.iter().any(|check| check.name == "submission-report-live-accepted" && !check.ok));
+    }
+
+    #[test]
+    fn session_submission_readiness_accepts_live_submission_when_rpc_result_matches() {
+        let expected_hash = format!("0x{}", "7b".repeat(32));
+        let block_hash = format!("0x{}", "9c".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        context.submission_schema = "myelin-session-ckb-carrier-submission-v1".to_owned();
+        economics.submission_schema = context.submission_schema.clone();
+        inclusion.submission_schema = context.submission_schema.clone();
+        let submission_path = write_readiness_live_carrier_submission(&expected_hash, true);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-live-ok", &context);
+        let economics_path = write_temp_json("readiness-economics-live-ok", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-live-ok", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-live-ok", &stability);
+        let finality_path = write_temp_json("readiness-finality-live-ok", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+        )
+        .expect("verify strict accepted live-submission readiness");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert!(report.report_hashes_match);
+        assert!(report.submission_report_valid);
+        assert!(report.submission_report_live_accepted);
+        assert!(report.submission_report_carrier_live_accepted);
+        assert!(report.live_submission_required);
+        assert!(report.submission_lineage_matches);
+        assert!(report.inclusion_lineage_matches);
+        assert!(report.context_ready);
+        assert!(report.economically_ready);
+        assert!(report.inclusion_observed);
+        assert!(report.stable_block_identity);
+        assert!(report.finality_confirmed);
+        assert!(report.reorg_risk_bounded);
+        assert!(report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(report.live_carrier_submission_ready);
+        assert!(!report.final_l1_script_submission_ready);
+        assert_eq!(report.readiness_evidence_mode, "live-ckb-carrier");
+        assert!(report.checks.iter().any(|check| check.name == "submission-report-live-accepted" && check.ok));
+        assert!(report.notes.iter().any(|note| note.contains("live carrier evidence")));
+    }
+
+    #[test]
+    fn session_submission_readiness_labels_final_l1_script_evidence_separately() {
+        let expected_hash = format!("0x{}", "7f".repeat(32));
+        let block_hash = format!("0x{}", "9f".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        economics.submission_schema = context.submission_schema.clone();
+        inclusion.submission_schema = context.submission_schema.clone();
+        let submission_path = write_readiness_live_final_script_submission(&expected_hash, true);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-final-l1", &context);
+        let economics_path = write_temp_json("readiness-economics-final-l1", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-final-l1", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-final-l1", &stability);
+        let finality_path = write_temp_json("readiness-finality-final-l1", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+        )
+        .expect("verify final-L1-script readiness label");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert!(report.production_submission_ready);
+        assert!(report.strict_production_submission_ready);
+        assert!(report.submission_report_live_accepted);
+        assert!(!report.submission_report_carrier_live_accepted);
+        assert!(report.submission_report_final_l1_script_live_accepted);
+        assert!(report.live_submission_required);
+        assert!(!report.live_carrier_submission_ready);
+        assert!(report.final_l1_script_submission_ready);
+        assert_eq!(report.readiness_evidence_mode, "final-l1-script");
+    }
+
+    #[test]
+    fn session_submission_readiness_rejects_final_l1_script_without_preflight_evidence() {
+        let expected_hash = format!("0x{}", "8a".repeat(32));
+        let block_hash = format!("0x{}", "8b".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        economics.submission_schema = context.submission_schema.clone();
+        inclusion.submission_schema = context.submission_schema.clone();
+        let submission_path = write_readiness_live_final_script_submission_without_preflight(&expected_hash);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-final-l1-no-preflight", &context);
+        let economics_path = write_temp_json("readiness-economics-final-l1-no-preflight", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-final-l1-no-preflight", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-final-l1-no-preflight", &stability);
+        let finality_path = write_temp_json("readiness-finality-final-l1-no-preflight", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+        )
+        .expect("verify final-L1-script readiness without preflight");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert!(report.report_hashes_match);
+        assert!(report.submission_report_valid);
+        assert!(!report.submission_report_live_accepted);
+        assert!(!report.submission_report_final_l1_script_live_accepted);
+        assert!(!report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(!report.final_l1_script_submission_ready);
+        assert_eq!(report.readiness_evidence_mode, "not-ready");
+        assert!(report.checks.iter().any(|check| check.name == "submission-report-live-accepted" && !check.ok));
+    }
+
+    #[test]
+    fn session_submission_readiness_requires_final_settlement_authority_preflight() {
+        let expected_hash = format!("0x{}", "8c".repeat(32));
+        let block_hash = format!("0x{}", "8d".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        economics.submission_schema = context.submission_schema.clone();
+        inclusion.submission_schema = context.submission_schema.clone();
+        let submission_path = write_readiness_live_final_settlement_submission(&expected_hash, false);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-final-settlement-authority-bad", &context);
+        let economics_path = write_temp_json("readiness-economics-final-settlement-authority-bad", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-final-settlement-authority-bad", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-final-settlement-authority-bad", &stability);
+        let finality_path = write_temp_json("readiness-finality-final-settlement-authority-bad", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+        )
+        .expect("verify final settlement readiness with authority preflight failure");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert!(report.report_hashes_match);
+        assert!(report.submission_report_valid);
+        assert!(!report.submission_report_live_accepted);
+        assert!(!report.submission_report_final_l1_script_live_accepted);
+        assert!(!report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(!report.final_l1_script_submission_ready);
+        assert_eq!(report.readiness_evidence_mode, "not-ready");
+
+        let valid_submission_path = write_readiness_live_final_settlement_submission(&expected_hash, true);
+        let valid_submission =
+            serde_json::from_slice::<Value>(&std::fs::read(&valid_submission_path).expect("read valid final settlement"))
+                .expect("valid final settlement JSON");
+        assert!(submission_report_final_l1_script_live_accepted(
+            &valid_submission,
+            "myelin-session-ckb-final-script-submission-v1",
+            &expected_hash
+        ));
+        let _ = std::fs::remove_file(valid_submission_path);
+    }
+
+    #[test]
+    fn session_submission_readiness_rejects_recorded_carrier_hash_when_live_is_required() {
+        let expected_hash = format!("0x{}", "7d".repeat(32));
+        let block_hash = format!("0x{}", "9e".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        context.submission_schema = "myelin-session-ckb-carrier-submission-v1".to_owned();
+        economics.submission_schema = context.submission_schema.clone();
+        inclusion.submission_schema = context.submission_schema.clone();
+        let submission_path = write_readiness_recorded_carrier_submission(&expected_hash);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-recorded-carrier", &context);
+        let economics_path = write_temp_json("readiness-economics-recorded-carrier", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-recorded-carrier", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-recorded-carrier", &stability);
+        let finality_path = write_temp_json("readiness-finality-recorded-carrier", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+        )
+        .expect("verify strict recorded-carrier readiness");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert!(report.report_hashes_match);
+        assert!(report.submission_report_valid);
+        assert!(!report.submission_report_live_accepted);
+        assert!(!report.submission_report_carrier_live_accepted);
+        assert!(report.live_submission_required);
+        assert!(report.submission_lineage_matches);
+        assert!(report.inclusion_lineage_matches);
+        assert!(report.context_ready);
+        assert!(report.economically_ready);
+        assert!(report.inclusion_observed);
+        assert!(report.stable_block_identity);
+        assert!(report.finality_confirmed);
+        assert!(report.reorg_risk_bounded);
+        assert!(!report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(!report.live_carrier_submission_ready);
+        assert!(!report.final_l1_script_submission_ready);
+        assert_eq!(report.readiness_evidence_mode, "not-ready");
+        assert!(report.checks.iter().any(|check| check.name == "submission-report-live-accepted" && !check.ok));
+    }
+
+    #[test]
+    fn session_submission_readiness_requires_carrier_submission_when_live_is_required() {
+        let expected_hash = format!("0x{}", "7c".repeat(32));
+        let block_hash = format!("0x{}", "9d".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        let submission_path = write_readiness_live_da_submission(&expected_hash, true);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-direct-live", &context);
+        let economics_path = write_temp_json("readiness-economics-direct-live", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-direct-live", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-direct-live", &stability);
+        let finality_path = write_temp_json("readiness-finality-direct-live", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+        )
+        .expect("verify strict direct live-submission readiness");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert_eq!(report.expected_ckb_tx_hash, expected_hash);
+        assert!(report.report_hashes_match);
+        assert!(report.submission_report_valid);
+        assert!(report.submission_report_live_accepted);
+        assert!(!report.submission_report_carrier_live_accepted);
+        assert!(report.live_submission_required);
+        assert!(report.submission_lineage_matches);
+        assert!(report.inclusion_lineage_matches);
+        assert!(report.context_ready);
+        assert!(report.economically_ready);
+        assert!(report.inclusion_observed);
+        assert!(report.stable_block_identity);
+        assert!(report.finality_confirmed);
+        assert!(report.reorg_risk_bounded);
+        assert!(!report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(!report.live_carrier_submission_ready);
+        assert!(!report.final_l1_script_submission_ready);
+        assert_eq!(report.readiness_evidence_mode, "not-ready");
+        assert!(report.checks.iter().any(|check| check.name == "submission-report-live-accepted" && !check.ok));
+    }
+
+    #[test]
+    fn session_settlement_package_rejects_tampered_intent_hash() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-package-tamper-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-package-tamper-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-package-tamper-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-package-tamper-{}.json", std::process::id()));
+        std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
+        let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
+            .expect("settlement intent");
+        let intent_path = std::env::temp_dir().join(format!("myelin-session-intent-package-tamper-{}.json", std::process::id()));
+        std::fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+
+        let mut package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+            .expect("settlement package");
+        package.intent_hash = "11".repeat(32);
+        let package_path = std::env::temp_dir().join(format!("myelin-session-package-tamper-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+        let verification = verify_session_settlement_package(
+            package_path.clone(),
+            intent_path.clone(),
+            bundle_path.clone(),
+            da_manifest_path.clone(),
+        )
+        .expect("verify tampered settlement package");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(!verification.valid);
+        assert!(verification.checks.iter().any(|check| check.name == "intent-hash" && !check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-celltx-recomputes" && check.ok));
+    }
+
+    #[test]
+    fn session_settlement_package_rejects_tampered_authority_lineage() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-authority-lineage-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-authority-lineage-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-authority-lineage-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-authority-lineage-{}.json", std::process::id()));
+        std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
+        let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
+            .expect("settlement intent");
+        let intent_path = std::env::temp_dir().join(format!("myelin-session-intent-authority-lineage-{}.json", std::process::id()));
+        std::fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+
+        let mut package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+            .expect("settlement package");
+        package.settlement_authority.session_authority_commitment = "11".repeat(32);
+        let package_path = std::env::temp_dir().join(format!("myelin-session-package-authority-lineage-{}.json", std::process::id()));
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+        let verification = verify_session_settlement_package(
+            package_path.clone(),
+            intent_path.clone(),
+            bundle_path.clone(),
+            da_manifest_path.clone(),
+        )
+        .expect("verify tampered settlement authority lineage");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(!verification.valid);
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-lineage-commitment" && !check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-celltx-recomputes" && check.ok));
+    }
+
+    #[test]
+    fn session_settlement_intent_rejects_premature_settlement_permission() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-premature-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-premature-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-premature-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-premature-{}.json", std::process::id()));
+        std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
+
+        let mut intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 10_000, 60_000)
+            .expect("settlement intent");
+        assert!(!intent.settlement_permitted);
+        intent.settlement_permitted = true;
+
+        let intent_path = std::env::temp_dir().join(format!("myelin-session-intent-premature-{}.json", std::process::id()));
+        std::fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        let verification = verify_session_settlement_intent(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+            .expect("verify premature settlement intent");
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(!verification.valid);
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-permitted" && !check.ok));
+    }
+
+    #[test]
+    fn session_fixture_tendermint_commit_court_bundle_verifies() {
+        let open = session_open_fixture("tendermint").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-tm-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_fixture(open_path.clone()).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+
+        assert_eq!(commit.consensus_kind, "tendermint");
+        assert!(!commit.static_committee_evidence.finalised);
+        let tm = commit.tendermint_evidence.as_ref().expect("tendermint evidence");
+        assert_eq!(tm.consensus_kind, "tendermint");
+        assert_eq!(tm.certificate_step, "precommit");
+        assert!(tm.finalised);
+        assert_eq!(tm.signatures.len(), 2);
+
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-tm-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        assert!(bundle.tendermint_evidence.is_some());
+
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-tm-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let verification = verify_session_court_bundle(bundle_path.clone()).expect("verify session court bundle");
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "tendermint-certificate"));
+        assert!(!verification.checks.iter().any(|check| check.name == "committee-certificate"));
+    }
+
+    #[test]
+    fn session_fixture_state_transition_is_consensus_agnostic() {
+        let static_open = session_open_fixture("static-closed-committee").expect("open static");
+        let tm_open = session_open_fixture("tendermint").expect("open tendermint");
+        assert_eq!(static_open.session_id, tm_open.session_id);
+        assert_eq!(static_open.initial_state_root, tm_open.initial_state_root);
+
+        let static_path = std::env::temp_dir().join(format!("myelin-session-open-static-cross-{}.json", std::process::id()));
+        let tm_path = std::env::temp_dir().join(format!("myelin-session-open-tm-cross-{}.json", std::process::id()));
+        std::fs::write(&static_path, serde_json::to_vec(&static_open).unwrap()).unwrap();
+        std::fs::write(&tm_path, serde_json::to_vec(&tm_open).unwrap()).unwrap();
+        let static_commit = session_commit_fixture(static_path.clone()).expect("commit static");
+        let tm_commit = session_commit_fixture(tm_path.clone()).expect("commit tendermint");
+        let _ = std::fs::remove_file(static_path);
+        let _ = std::fs::remove_file(tm_path);
+
+        assert_eq!(static_commit.session_id, tm_commit.session_id);
+        assert_eq!(static_commit.cell_tx_id, tm_commit.cell_tx_id);
+        assert_eq!(static_commit.cell_wtxid, tm_commit.cell_wtxid);
+        assert_eq!(static_commit.state_root_before, tm_commit.state_root_before);
+        assert_eq!(static_commit.state_root_after, tm_commit.state_root_after);
+        assert_eq!(static_commit.ordered_cell_tx_commitments, tm_commit.ordered_cell_tx_commitments);
+        assert_eq!(static_commit.data_commitments, tm_commit.data_commitments);
+        assert_eq!(static_commit.scheduler_commitment, tm_commit.scheduler_commitment);
+        assert_ne!(
+            static_commit.block.block_hash, tm_commit.block.block_hash,
+            "block hash is consensus-domain separated because MyelinBlock carries consensus_kind"
+        );
+    }
+
+    #[test]
+    fn session_court_bundle_rejects_tampered_state_root() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-tamper-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_fixture(open_path.clone()).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-tamper-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let mut bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+
+        bundle.state_root_after = "11".repeat(32);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-tamper-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let verification = verify_session_court_bundle(bundle_path.clone()).expect("verify tampered session court bundle");
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(!verification.valid);
+        assert!(verification.checks.iter().any(|check| check.name == "block-state-root-after-matches" && !check.ok));
+    }
+
+    #[test]
     fn runtime_smoke_static_closed_committee_finalises_a_block() {
         let report = runtime_smoke("static-closed-committee").expect("smoke static");
         assert_eq!(report.schema, "myelin-runtime-smoke-v1");
         assert_eq!(report.consensus_kind, "static-closed-committee");
+        assert_eq!(report.vm_profile, "no-vm-runtime-smoke");
+        assert_eq!(report.ckb_spawn_ipc_enabled, CKB_SPAWN_IPC_SYSCALLS_ENABLED);
         assert_eq!(report.cell_tx_id.len(), 64);
         assert_eq!(report.cell_wtxid.len(), 64);
         assert_eq!(report.pool_size_before, 0);
@@ -2266,6 +12872,8 @@ mod tests {
         let report = runtime_smoke("tendermint").expect("smoke tendermint");
         assert_eq!(report.schema, "myelin-runtime-smoke-v1");
         assert_eq!(report.consensus_kind, "tendermint");
+        assert_eq!(report.vm_profile, "no-vm-runtime-smoke");
+        assert_eq!(report.ckb_spawn_ipc_enabled, CKB_SPAWN_IPC_SYSCALLS_ENABLED);
         assert_eq!(report.cell_tx_id.len(), 64);
         assert_eq!(report.cell_wtxid.len(), 64);
         assert_eq!(report.pool_size_before, 0);
@@ -2292,6 +12900,8 @@ mod tests {
         assert_eq!(static_report.state_root_after, tendermint_report.state_root_after);
         assert_eq!(static_report.pool_size_before, tendermint_report.pool_size_before);
         assert_eq!(static_report.pool_size_after, tendermint_report.pool_size_after);
+        assert_eq!(static_report.vm_profile, tendermint_report.vm_profile);
+        assert_eq!(static_report.ckb_spawn_ipc_enabled, tendermint_report.ckb_spawn_ipc_enabled);
         assert_ne!(
             static_report.certificate_hash, tendermint_report.certificate_hash,
             "the two engines must use different signature domains"

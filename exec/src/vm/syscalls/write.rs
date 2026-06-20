@@ -28,6 +28,12 @@ struct WriteRuntime {
     message_box: Arc<std::sync::Mutex<Vec<Message>>>,
 }
 
+impl Default for Write {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Write {
     pub fn new() -> Self {
         Self { runtime: None }

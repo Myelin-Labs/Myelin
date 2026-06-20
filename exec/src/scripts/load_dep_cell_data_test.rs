@@ -48,7 +48,7 @@ mod tests {
         let code_hash = load_dep_cell_data_code_hash();
         let input_out_point = OutPoint::new([0x81; 32], 0);
         let dep_out_point = OutPoint::new([0x82; 32], 1);
-        let provider = build_provider(code_hash, input_out_point.clone(), dep_out_point.clone(), EXPECTED_DATA.to_vec());
+        let provider = build_provider(code_hash, input_out_point, dep_out_point, EXPECTED_DATA.to_vec());
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, 0)],
@@ -70,7 +70,7 @@ mod tests {
         let code_hash = load_dep_cell_data_code_hash();
         let input_out_point = OutPoint::new([0x83; 32], 0);
         let dep_out_point = OutPoint::new([0x84; 32], 1);
-        let provider = build_provider(code_hash, input_out_point.clone(), dep_out_point.clone(), vec![0x00, 0x01, 0x02, 0x03]);
+        let provider = build_provider(code_hash, input_out_point, dep_out_point, vec![0x00, 0x01, 0x02, 0x03]);
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, 0)],

@@ -28,7 +28,7 @@ mod tests {
     fn test_htlc_minimal_loads_group_witness() {
         let code_hash = htlc_minimal_code_hash();
         let input_out_point = OutPoint::new([0x61; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, 0)],
@@ -49,7 +49,7 @@ mod tests {
     fn test_htlc_minimal_rejects_missing_group_witness() {
         let code_hash = htlc_minimal_code_hash();
         let input_out_point = OutPoint::new([0x62; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, 0)],

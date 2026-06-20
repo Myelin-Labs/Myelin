@@ -254,9 +254,8 @@ celltx simple-report:     status = Accepted,
                           molecule_transaction_bytes > 0
 ```
 
-The same commands are run by `scripts/myelin_protocol_gate.sh` in
-the protocol gate; passing them in isolation is a smoke
-verification, not a substitute for the full gate.
+The same commands are covered by `scripts/myelin_production_gate.sh`; passing
+them in isolation is a smoke verification, not a substitute for the full gate.
 
 ## 5. CLI blacklist — what must never appear
 

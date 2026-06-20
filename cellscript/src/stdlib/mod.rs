@@ -261,6 +261,11 @@ impl StdLib {
                 return_type: Some(IrType::Hash),
             },
             StdFunction {
+                name: "ckb_cell_exists".to_string(),
+                params: vec![("source_view".to_string(), IrType::U64)],
+                return_type: Some(IrType::Bool),
+            },
+            StdFunction {
                 name: "ckb_input_out_point_index".to_string(),
                 params: vec![("source_view".to_string(), IrType::U64)],
                 return_type: Some(IrType::U64),

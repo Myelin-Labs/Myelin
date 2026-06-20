@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn test_exec_loads_elf_from_cell_dep_data() {
         let dep = OutPoint::new([0x88; 32], 0);
-        let tx = sample_dep_tx(dep.clone());
+        let tx = sample_dep_tx(dep);
 
         let mut provider = SimpleDataProvider::new();
         provider.add_cell(
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn test_exec_rejects_out_of_bound_slice() {
         let dep = OutPoint::new([0x88; 32], 0);
-        let tx = sample_dep_tx(dep.clone());
+        let tx = sample_dep_tx(dep);
 
         let mut provider = SimpleDataProvider::new();
         provider.add_cell(
@@ -365,7 +365,7 @@ mod tests {
         machine.set_register(A1, Source::CellDep as u64);
         machine.set_register(A2, ExecPlace::CellData as u64);
         // offset in high 32 bits, length in low 32 bits
-        machine.set_register(A3, ((ALWAYS_SUCCESS_SCRIPT.len() as u64 + 1) << 32) | 0);
+        machine.set_register(A3, (ALWAYS_SUCCESS_SCRIPT.len() as u64 + 1) << 32);
         machine.set_register(A4, 0);
         machine.set_register(A5, 0);
         machine.set_register(A7, EXEC_SYSCALL_NUMBER);
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn test_exec_reports_wrong_format_for_non_elf_payload() {
         let dep = OutPoint::new([0x88; 32], 0);
-        let tx = sample_dep_tx(dep.clone());
+        let tx = sample_dep_tx(dep);
 
         let mut provider = SimpleDataProvider::new();
         provider.add_cell(
@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn test_exec_traps_on_invalid_source_encoding() {
         let out_point = OutPoint::new([0xAB; 32], 0);
-        let tx = sample_dep_tx(out_point.clone());
+        let tx = sample_dep_tx(out_point);
         let provider = Arc::new(SimpleDataProvider::new());
         let mut machine = ScriptVersion::V2.init_core_machine(10_000);
         machine.set_register(A0, 0);
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn test_exec_traps_on_invalid_place_encoding() {
         let out_point = OutPoint::new([0xAB; 32], 0);
-        let tx = sample_dep_tx(out_point.clone());
+        let tx = sample_dep_tx(out_point);
         let provider = Arc::new(SimpleDataProvider::new());
         let mut machine = ScriptVersion::V2.init_core_machine(10_000);
         machine.set_register(A0, 0);

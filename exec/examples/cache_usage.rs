@@ -6,8 +6,9 @@
 // This example demonstrates the serialization cache for optimizing
 // repeated serialization operations.
 
+use myelin_exec::serialization::cache::{SerializationCache, ThreadSafeSerializationCache};
 use myelin_exec::serialization::utils;
-use myelin_exec::{CellOutput, Script, SerializationCache, ThreadSafeSerializationCache};
+use myelin_exec::{CellOutput, Script};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Serialization Cache Usage Example ===\n");
@@ -93,8 +94,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // Add 3 items
-    for i in 0..3 {
-        small_cache.get_or_serialize(&items[i])?;
+    for (i, item) in items.iter().enumerate().take(3) {
+        small_cache.get_or_serialize(item)?;
         println!("Added item {}, cache size: {}", i, small_cache.len());
     }
 
@@ -103,8 +104,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Accessed item 0 (now most recent)");
 
     // Add 2 more items - should evict item 1
-    for i in 3..5 {
-        small_cache.get_or_serialize(&items[i])?;
+    for (i, item) in items.iter().enumerate().take(5).skip(3) {
+        small_cache.get_or_serialize(item)?;
         println!("Added item {}, cache size: {}", i, small_cache.len());
     }
 

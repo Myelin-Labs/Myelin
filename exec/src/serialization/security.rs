@@ -121,15 +121,10 @@ impl SecureEnvelope {
 
     /// 从字节解析
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SerializationError> {
-        let (length, hash, data) = match decode_table(bytes, 3) {
-            Ok(fields) => {
-                let length = decode_u32(fields[0], "SecureEnvelope.length")? as usize;
-                let hash = decode_array_32(fields[1], "SecureEnvelope.hash")?;
-                let data = fields[2].to_vec();
-                (length, hash, data)
-            }
-            Err(_) => decode_legacy_bytes(bytes)?,
-        };
+        let fields = decode_table(bytes, 3)?;
+        let length = decode_u32(fields[0], "SecureEnvelope.length")? as usize;
+        let hash = decode_array_32(fields[1], "SecureEnvelope.hash")?;
+        let data = fields[2].to_vec();
 
         if data.len() != length {
             return Err(SerializationError::DeserializationFailed(format!(
@@ -160,11 +155,6 @@ impl SecurityGuard {
     /// 创建新的安全守卫
     pub fn new(config: SecurityConfig) -> Self {
         Self { config, current_depth: 0 }
-    }
-
-    /// 使用默认配置创建
-    pub fn default() -> Self {
-        Self::new(SecurityConfig::default())
     }
 
     /// 检查大小限制
@@ -220,7 +210,7 @@ impl SecurityGuard {
 
 impl Default for SecurityGuard {
     fn default() -> Self {
-        Self::default()
+        Self::new(SecurityConfig::default())
     }
 }
 
@@ -267,7 +257,7 @@ fn encode_table(fields: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-fn decode_table<'a>(bytes: &'a [u8], expected_fields: usize) -> Result<Vec<&'a [u8]>, SerializationError> {
+fn decode_table(bytes: &[u8], expected_fields: usize) -> Result<Vec<&[u8]>, SerializationError> {
     if bytes.len() < 8 {
         return Err(SerializationError::DeserializationFailed("Molecule table too short".to_string()));
     }
@@ -276,7 +266,7 @@ fn decode_table<'a>(bytes: &'a [u8], expected_fields: usize) -> Result<Vec<&'a [
         return Err(SerializationError::DeserializationFailed("Molecule table total size mismatch".to_string()));
     }
     let first_offset = u32::from_le_bytes(bytes[4..8].try_into().expect("slice length checked")) as usize;
-    if first_offset < 4 || first_offset % 4 != 0 {
+    if first_offset < 4 || !first_offset.is_multiple_of(4) {
         return Err(SerializationError::DeserializationFailed("invalid Molecule table first offset".to_string()));
     }
     let field_count = (first_offset - 4) / 4;
@@ -312,18 +302,6 @@ fn decode_u32(bytes: &[u8], field: &'static str) -> Result<u32, SerializationErr
 
 fn decode_array_32(bytes: &[u8], field: &'static str) -> Result<[u8; 32], SerializationError> {
     bytes.try_into().map_err(|_| SerializationError::DeserializationFailed(format!("{field} must be 32 bytes")))
-}
-
-fn decode_legacy_bytes(bytes: &[u8]) -> Result<(usize, [u8; 32], Vec<u8>), SerializationError> {
-    if bytes.len() < 36 {
-        return Err(SerializationError::DeserializationFailed("Insufficient bytes for legacy SecureEnvelope".to_string()));
-    }
-    let length = u32::from_le_bytes(bytes[..4].try_into().expect("slice length checked")) as usize;
-    if bytes.len() != 36 + length {
-        return Err(SerializationError::DeserializationFailed(format!("Expected {} bytes, got {}", 36 + length, bytes.len())));
-    }
-    let hash = decode_array_32(&bytes[4..36], "legacy SecureEnvelope.hash")?;
-    Ok((length, hash, bytes[36..].to_vec()))
 }
 
 #[cfg(test)]

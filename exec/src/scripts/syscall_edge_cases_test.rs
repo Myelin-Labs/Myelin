@@ -35,7 +35,7 @@ mod tests {
         let tx = Arc::new(CellTx {
             version: 0xC001,
             inputs: vec![],
-            cell_deps: vec![CellDep { out_point: dep_out_point.clone(), dep_type: DepType::Code }],
+            cell_deps: vec![CellDep { out_point: dep_out_point, dep_type: DepType::Code }],
             header_deps: vec![],
             outputs: vec![],
             outputs_data: vec![],
@@ -76,7 +76,7 @@ mod tests {
         let tx = Arc::new(CellTx {
             version: 0xC001,
             inputs: vec![],
-            cell_deps: vec![CellDep { out_point: dep_out_point.clone(), dep_type: DepType::Code }],
+            cell_deps: vec![CellDep { out_point: dep_out_point, dep_type: DepType::Code }],
             header_deps: vec![],
             outputs: vec![],
             outputs_data: vec![],
@@ -313,7 +313,7 @@ mod tests {
 
         let tx = Arc::new(CellTx {
             version: 0xC001,
-            inputs: vec![CellInput::new(input_out_point.clone(), 0)],
+            inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![header_hash],
             outputs: vec![],

@@ -172,7 +172,7 @@ impl CellDB {
 
         let key = out_point.to_key();
 
-        match self.db.get_cf(&cf, &key).map_err(|e| StateError::Database(e.to_string()))? {
+        match self.db.get_cf(&cf, key).map_err(|e| StateError::Database(e.to_string()))? {
             Some(data) => {
                 let meta = Self::decode_cell_meta(&data)?;
                 Ok(Some(meta))
@@ -198,9 +198,9 @@ impl CellDB {
 
         let mut batch = WriteBatch::default();
         // Re-adding a live cell after a reorg must clear the previous canonical spend marker.
-        batch.delete_cf(&cf_spent, &key);
-        batch.delete_cf(&cf_journal, &key);
-        batch.put_cf(&cf, &key, &value);
+        batch.delete_cf(&cf_spent, key);
+        batch.delete_cf(&cf_journal, key);
+        batch.put_cf(&cf, key, &value);
 
         self.db.write(batch).map_err(|e| StateError::Database(e.to_string()))?;
 
@@ -219,13 +219,13 @@ impl CellDB {
         let cf = self.db.cf_handle(CF_CELLS).ok_or_else(|| StateError::Database("CF_CELLS not found".to_string()))?;
         let key = out_point.to_key();
 
-        let existing = self.db.get_cf(&cf, &key).map_err(|e| StateError::Database(e.to_string()))?;
+        let existing = self.db.get_cf(&cf, key).map_err(|e| StateError::Database(e.to_string()))?;
         let Some(existing) = existing else {
             return Ok(None);
         };
 
         let meta = Self::decode_cell_meta(&existing)?;
-        self.db.delete_cf(&cf, &key).map_err(|e| StateError::Database(e.to_string()))?;
+        self.db.delete_cf(&cf, key).map_err(|e| StateError::Database(e.to_string()))?;
         Ok(Some(meta))
     }
 
@@ -246,9 +246,9 @@ impl CellDB {
         // Get Cell metadata before deleting
         let cell_data = self
             .db
-            .get_cf(&cf_cells, &key)
+            .get_cf(&cf_cells, key)
             .map_err(|e| StateError::Database(e.to_string()))?
-            .ok_or_else(|| StateError::CellNotFound([0; 32]))?;
+            .ok_or(StateError::CellNotFound([0; 32]))?;
 
         let cell_meta = Self::decode_cell_meta(&cell_data)?;
 
@@ -257,9 +257,9 @@ impl CellDB {
 
         // Atomic update: delete from cells, add to spent + journal
         let mut batch = WriteBatch::default();
-        batch.delete_cf(&cf_cells, &key);
-        batch.put_cf(&cf_spent, &key, &spent_at_block_number.to_le_bytes());
-        batch.put_cf(&cf_journal, &key, &Self::encode_spend_record(&spend_record)?);
+        batch.delete_cf(&cf_cells, key);
+        batch.put_cf(&cf_spent, key, spent_at_block_number.to_le_bytes());
+        batch.put_cf(&cf_journal, key, &Self::encode_spend_record(&spend_record)?);
 
         self.db.write(batch).map_err(|e| StateError::Database(e.to_string()))?;
 
@@ -272,7 +272,7 @@ impl CellDB {
 
         let key = out_point.to_key();
 
-        match self.db.get_cf(&cf, &key).map_err(|e| StateError::Database(e.to_string()))? {
+        match self.db.get_cf(&cf, key).map_err(|e| StateError::Database(e.to_string()))? {
             Some(data) => {
                 if data.len() != 8 {
                     return Err(StateError::Serialization("Invalid block number".to_string()));
@@ -299,9 +299,9 @@ impl CellDB {
             let key = out_point.to_key();
             let normalized = Self::normalize_meta_for_storage(meta);
             let value = Self::encode_cell_meta(&normalized)?;
-            batch.delete_cf(&cf_spent, &key);
-            batch.delete_cf(&cf_journal, &key);
-            batch.put_cf(&cf, &key, &value);
+            batch.delete_cf(&cf_spent, key);
+            batch.delete_cf(&cf_journal, key);
+            batch.put_cf(&cf, key, &value);
         }
 
         self.db.write(batch).map_err(|e| StateError::Database(e.to_string()))?;
@@ -324,16 +324,16 @@ impl CellDB {
             let key = out_point.to_key();
 
             // Get Cell metadata before deleting
-            if let Some(cell_data) = self.db.get_cf(&cf_cells, &key).map_err(|e| StateError::Database(e.to_string()))? {
+            if let Some(cell_data) = self.db.get_cf(&cf_cells, key).map_err(|e| StateError::Database(e.to_string()))? {
                 let cell_meta = Self::decode_cell_meta(&cell_data)?;
 
                 // Create spend record
                 let spend_record =
                     SpendRecord { spent_in_block: *spent_in_block, spent_at_block_number: *spent_at_block_number, cell_meta };
 
-                batch.delete_cf(&cf_cells, &key);
-                batch.put_cf(&cf_spent, &key, &spent_at_block_number.to_le_bytes());
-                batch.put_cf(&cf_journal, &key, &Self::encode_spend_record(&spend_record)?);
+                batch.delete_cf(&cf_cells, key);
+                batch.put_cf(&cf_spent, key, spent_at_block_number.to_le_bytes());
+                batch.put_cf(&cf_journal, key, &Self::encode_spend_record(&spend_record)?);
             }
         }
 
@@ -373,7 +373,7 @@ impl CellDB {
         let key = out_point.to_key();
 
         // CASE 1: Cell is currently live
-        if let Some(data) = self.db.get_cf(&cf_cells, &key).map_err(|e| StateError::Database(e.to_string()))? {
+        if let Some(data) = self.db.get_cf(&cf_cells, key).map_err(|e| StateError::Database(e.to_string()))? {
             let meta = Self::decode_cell_meta(&data)?;
 
             // Cell exists and is live. Was it created by at_block_number?
@@ -386,7 +386,7 @@ impl CellDB {
         }
 
         // CASE 2: Cell has been spent - check spend journal
-        if let Some(journal_data) = self.db.get_cf(&cf_journal, &key).map_err(|e| StateError::Database(e.to_string()))? {
+        if let Some(journal_data) = self.db.get_cf(&cf_journal, key).map_err(|e| StateError::Database(e.to_string()))? {
             let spend_record = Self::decode_spend_record(&journal_data)?;
 
             // Check creation and spend block numbers
@@ -427,12 +427,12 @@ impl CellDB {
 
         let key = out_point.to_key();
 
-        if let Some(data) = self.db.get_cf(&cf_cells, &key).map_err(|e| StateError::Database(e.to_string()))? {
+        if let Some(data) = self.db.get_cf(&cf_cells, key).map_err(|e| StateError::Database(e.to_string()))? {
             let meta = Self::decode_cell_meta(&data)?;
             return if block_in_pov_history(meta.block_hash, pov)? { Ok(Some(meta)) } else { Ok(None) };
         }
 
-        if let Some(journal_data) = self.db.get_cf(&cf_journal, &key).map_err(|e| StateError::Database(e.to_string()))? {
+        if let Some(journal_data) = self.db.get_cf(&cf_journal, key).map_err(|e| StateError::Database(e.to_string()))? {
             let spend_record = Self::decode_spend_record(&journal_data)?;
 
             let created_visible = block_in_pov_history(spend_record.cell_meta.block_hash, pov)?;
@@ -708,10 +708,10 @@ mod tests {
         }
 
         // Spend first two Cells
-        let spends = vec![(OutPoint::new([0x01; 32], 0), 200), (OutPoint::new([0x02; 32], 0), 201)];
+        let spends = [(OutPoint::new([0x01; 32], 0), 200), (OutPoint::new([0x02; 32], 0), 201)];
 
         let spends_with_block =
-            spends.iter().map(|(out_point, block_number)| (out_point.clone(), *block_number, [0; 32])).collect::<Vec<_>>();
+            spends.iter().map(|(out_point, block_number)| (*out_point, *block_number, [0; 32])).collect::<Vec<_>>();
         db.batch_spend_in_block(&spends_with_block).unwrap();
 
         // Verify spends
@@ -861,7 +861,7 @@ mod tests {
         db.spend_in_block(&out2, 100, [0; 32]).unwrap();
 
         // Batch query at block number 80
-        let results = db.batch_get_cell_snapshots_at_block_number(&[out1.clone(), out2.clone(), out3.clone()], 80).unwrap();
+        let results = db.batch_get_cell_snapshots_at_block_number(&[out1, out2, out3], 80).unwrap();
 
         assert!(results[0].is_some()); // meta1: created at 50, still live
         assert!(results[1].is_some()); // meta2: created at 60, spent at 100 (live at 80)
@@ -967,7 +967,7 @@ mod tests {
         db.put(&out2, &meta2).unwrap();
 
         let results = db
-            .batch_get_cell_snapshots_at_pov(&[out1.clone(), out2.clone()], pov, |block_hash, query_pov| {
+            .batch_get_cell_snapshots_at_pov(&[out1, out2], pov, |block_hash, query_pov| {
                 Ok(query_pov == pov && block_hash == live_block)
             })
             .unwrap();

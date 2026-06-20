@@ -16,7 +16,7 @@ deviations. This document describes *what* the deviations are.
 | D-02 | Myelin has a `NetworkId` enum that is not present in CKB. | `exec/src/lib.rs::NetworkId` | Reserved for future session-network tagging. Not currently serialised into the CKB projection. |
 | D-03 | Myelin scheduler witnesses (CellScript typed-cell scheduler metadata) are not part of the CKB Molecule transaction layout. | `exec/src/celltx/types.rs::CellScriptSchedulerWitness`, `exec/src/celltx/types.rs::push_cellscript_scheduler_witness` | The scheduler witness is a Myelin-only artefact carried as a regular witness slot. The projection layer does not encode it into the CKB Molecule table; it is preserved as a typed witness for Myelin's own scheduler. |
 | D-04 | Myelin's `script` hash is domain-separated under `myelin:script-hash:v1` and is not the CKB script hash. | `exec/src/celltx/types.rs::Script::hash_v1` | The Myelin script hash is the local, versioned canonical form. CKB script hash is also exposed via `ckb_script_hash_molecule` for projection. |
-| D-05 | Myelin has an extended `VmSemantics::MyelinExtended` profile that allows `HeaderDep`-mapped `LOAD_CELL`, Myelin-only helper syscalls in the 3001..3004 range, the Myelin session header ABI, and a legacy group source encoding. | `exec/src/vm/mod.rs::VmSemantics` | The default profile is `MyelinExtended`. CKB-strict mode (`CkbStrict`) is selectable so the CKB-VM path is reproducible against upstream CKB semantics. The CLI's `teeworlds vm-probe` runs with `CkbStrict`. |
+| D-05 | Myelin has an extended `VmSemantics::MyelinExtended` profile that allows `HeaderDep`-mapped `LOAD_CELL`, Myelin-only helper syscalls in the 3001..3004 range, the Myelin session header ABI, and a legacy group source encoding. CKB VM v2 spawn/IPC is a separate `vm-ipc` build feature, not part of the minimal court profile. | `exec/src/vm/mod.rs::VmSemantics`; `exec/src/vm/mod.rs::CKB_SPAWN_IPC_SYSCALLS_ENABLED` | The default semantic profile remains `MyelinExtended`. CKB-strict mode (`CkbStrict`) is selectable so the CKB-VM path is reproducible against upstream CKB semantics. The CLI's `teeworlds vm-probe` runs with `CkbStrict`, and court bundles record `vm_profile = "ckb-strict-basic"` with `ckb_spawn_ipc_required = false`. |
 | D-06 | Myelin `Header.proposals_hash` and `Header.nonce` are *kept* in the CKB RawHeader Molecule struct even though Myelin does not perform PoW. | `exec/src/serialization/molecule_compat.rs::CkbRawHeader`, `CkbHeader` | The CKB Molecule wire layout requires the bytes to exist at the expected positions. The doc comments were rewritten from "Proof-of-work" / "PoW nonce" to "Compact CKB header target field" / "CKB header nonce field" in the previous preparation pass, so the code is honest about being wire-faithful rather than mining. |
 | D-07 | Myelin `CellInput.since` follows the CKB `since` bit layout (bit 63 = relative, bit 62 = block number). | `exec/src/celltx/types.rs::CellInput` | The bit layout is the same as CKB. The only Myelin-specific field is the encoding, which is plain little-endian `u64` to match CKB. |
 | D-08 | Myelin `CellOutput.capacity` follows the CKB occupied-capacity formula (`8 + 32 + 1 + lock.args.len() + 32 + 1 + type.args.len() + data_len`). | `exec/src/celltx/types.rs::CellOutput::occupied_capacity` | The CKB formula is required for a CKB-shaped projection to remain valid. Myelin's `verify_capacity` enforces it. |
@@ -37,11 +37,11 @@ projection report. They are listed here so future sweeps know what
 to add:
 
 ```text
-- VmSemantics::MyelinExtended (D-05) is recorded in the
-  `teeworlds vm-probe` report via the `ckb_strict` flag, but not in
-  the CKB projection report. A future sweep could surface a
-  `SemanticDeviation::NonCkbStrictSyscallProfile` when
-  `CkbStrict` is not selected.
+- VmSemantics::MyelinExtended (D-05) is separated from the Teeworlds court path:
+  `teeworlds vm-probe` records `ckb_strict`, `vm_profile`, and the spawn/IPC
+  build flag, while `teeworlds court-bundle` records the minimal court profile.
+  A future sweep could surface a `SemanticDeviation::NonCkbStrictSyscallProfile`
+  when `CkbStrict` is not selected.
 - Myelin scheduler witnesses (D-03) are not encoded in the CKB
   Molecule table. A future sweep could surface a
   `SemanticDeviation::SchedulerWitnessPresent` warning when an

@@ -141,7 +141,7 @@ impl<D: CellDataProvider> LoadHeader<D> {
         let Some(header_hash) = self.provider.load_ckb_header_hash_by_outpoint(tx_hash, index) else {
             return HeaderLookupResult::ItemMissing;
         };
-        if !self.tx.header_deps.iter().any(|hash| *hash == header_hash) {
+        if !self.tx.header_deps.contains(&header_hash) {
             return HeaderLookupResult::ItemMissing;
         }
         self.provider.load_ckb_header(&header_hash).map(HeaderLookupResult::Header).unwrap_or(HeaderLookupResult::ItemMissing)

@@ -49,9 +49,6 @@ pub mod streaming;
 /// 序列化安全
 pub mod security;
 
-/// 序列化压缩
-pub mod compression;
-
 /// 序列化错误类型
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum SerializationError {
@@ -259,7 +256,7 @@ fn decode_molecule_table(bytes: &[u8], expected_fields: usize) -> Result<Vec<&[u
     }
 
     let first_offset = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
-    if first_offset < 4 || first_offset % 4 != 0 {
+    if first_offset < 4 || !first_offset.is_multiple_of(4) {
         return Err(SerializationError::DeserializationFailed("invalid Molecule table first offset".to_string()));
     }
 
@@ -621,7 +618,7 @@ mod tests {
 
     #[test]
     fn test_serialization_error_conversions() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test error");
+        let io_err = std::io::Error::other("test error");
         let ser_err: SerializationError = io_err.into();
         assert!(matches!(ser_err, SerializationError::IoError(_)));
     }

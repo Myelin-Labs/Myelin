@@ -28,6 +28,12 @@ struct PipeRuntime {
     message_box: Arc<std::sync::Mutex<Vec<Message>>>,
 }
 
+impl Default for Pipe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Pipe {
     pub fn new() -> Self {
         Self { runtime: None }

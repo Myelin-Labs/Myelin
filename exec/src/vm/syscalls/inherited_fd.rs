@@ -28,6 +28,12 @@ struct InheritedFdRuntime {
     message_box: Arc<std::sync::Mutex<Vec<Message>>>,
 }
 
+impl Default for InheritedFd {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InheritedFd {
     pub fn new() -> Self {
         Self { runtime: None }

@@ -580,6 +580,7 @@ impl LspServer {
                     ("cell_type_hash_type", "ckb::cell_type_hash_type(${1:source::group_input(0)})"),
                     ("cell_lock_args_empty", "ckb::cell_lock_args_empty(${1:source::group_input(0)})"),
                     ("cell_type_args_empty", "ckb::cell_type_args_empty(${1:source::group_input(0)})"),
+                    ("cell_exists", "ckb::cell_exists(${1:source::group_input(0)})"),
                     ("cell_lock_args_hash", "ckb::cell_lock_args_hash(${1:source::group_input(0)})"),
                     ("cell_type_args_hash", "ckb::cell_type_args_hash(${1:source::group_input(0)})"),
                     ("require_cell_lock_hash", "ckb::require_cell_lock_hash(${1:source::group_input(0)}, ${2:expected_lock_hash})"),

@@ -30,7 +30,7 @@ mod tests {
     fn test_load_input_since_verification() {
         let code_hash = load_input_since_code_hash();
         let input_out_point = OutPoint::new([0x44; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, EXPECTED_SINCE)],
@@ -51,7 +51,7 @@ mod tests {
     fn test_load_input_since_rejects_wrong_since() {
         let code_hash = load_input_since_code_hash();
         let input_out_point = OutPoint::new([0x55; 32], 0);
-        let provider = build_provider(code_hash, input_out_point.clone());
+        let provider = build_provider(code_hash, input_out_point);
         let tx = CellTx {
             version: 0xC001,
             inputs: vec![CellInput::new(input_out_point, 7)],

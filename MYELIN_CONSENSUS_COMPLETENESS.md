@@ -135,7 +135,7 @@ The CLI command for both engines is the same:
 myelin-cli committee finalise-demo --config <path/to/config.toml>
 ```
 
-`scripts/myelin_protocol_gate.sh` exercises both modes and asserts:
+`scripts/myelin_production_gate.sh` exercises both modes and asserts:
 
 ```text
 require(committee["consensus_kind"] == "static-closed-committee", ...)
@@ -149,9 +149,8 @@ require(tendermint["quorum_weight"] == 2, ...)
 require(len(tendermint["signer_ids"]) >= 2, ...)
 ```
 
-The full Myelin protocol gate also exercises the Tendermint mode in
-the same run, so a silent fallback to static committee would fail
-the gate.
+The full Myelin production gate also exercises the Tendermint mode in the same
+run, so a silent fallback to static committee would fail the gate.
 
 ## 5. Legacy `verify_certificate` path is closed
 

@@ -33,6 +33,12 @@ struct SpawnRuntime {
     program_resolver: ProgramResolver,
 }
 
+impl Default for Spawn {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Spawn {
     pub fn new() -> Self {
         Self { runtime: None, semantics: VmSemantics::MyelinExtended }

@@ -28,6 +28,12 @@ struct CloseRuntime {
     message_box: Arc<std::sync::Mutex<Vec<Message>>>,
 }
 
+impl Default for Close {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Close {
     pub fn new() -> Self {
         Self { runtime: None }

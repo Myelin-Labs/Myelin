@@ -16,7 +16,7 @@ use ckb_vm::{
 /// Myelin currently executes one VM context per script verification path, so we
 /// expose a fixed root process id (`0`) for scripts that
 /// probe process identity.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessId {
     id: u64,
 }
@@ -24,12 +24,6 @@ pub struct ProcessId {
 impl ProcessId {
     pub fn new(id: u64) -> Self {
         Self { id }
-    }
-}
-
-impl Default for ProcessId {
-    fn default() -> Self {
-        Self { id: 0 }
     }
 }
 

@@ -224,6 +224,7 @@ fn is_v014_runtime_helper(func: &str) -> bool {
             | "__ckb_cell_type_hash_type"
             | "__ckb_cell_lock_args_empty"
             | "__ckb_cell_type_args_empty"
+            | "__ckb_cell_exists"
             | "__ckb_cell_lock_args_hash"
             | "__ckb_cell_type_args_hash"
             | "__ckb_require_cell_lock_hash"
@@ -9424,6 +9425,7 @@ impl CodeGenerator {
             func,
             "__ckb_cell_lock_hash"
                 | "__ckb_cell_type_hash"
+                | "__ckb_cell_data_hash"
                 | "__ckb_cell_lock_code_hash"
                 | "__ckb_cell_type_code_hash"
                 | "__ckb_cell_lock_args_hash"
@@ -11091,6 +11093,7 @@ impl CodeGenerator {
             ("__ckb_cell_type_hash_type", "SourceView type Script hash_type read"),
             ("__ckb_cell_lock_args_empty", "SourceView lock Script args_empty read"),
             ("__ckb_cell_type_args_empty", "SourceView type Script args_empty read"),
+            ("__ckb_cell_exists", "SourceView cell existence probe"),
             ("__ckb_cell_lock_args_hash", "SourceView lock Script 32-byte args read"),
             ("__ckb_cell_type_args_hash", "SourceView type Script 32-byte args read"),
             ("__ckb_require_cell_lock_hash", "SourceView lock hash full 32-byte binding check"),
@@ -11232,6 +11235,7 @@ impl CodeGenerator {
                 "__ckb_cell_type_args_empty" => {
                     self.emit_runtime_cell_script_scalar_field_helper(name, detail, CKB_CELL_FIELD_TYPE, ScriptScalarFieldRead::ArgsEmpty, enabled);
                 }
+                "__ckb_cell_exists" => self.emit_runtime_cell_exists_helper(enabled),
                 "__ckb_require_cell_lock_hash" => self.emit_runtime_cell_hash_requirement_helper(
                     name,
                     detail,
@@ -15345,6 +15349,63 @@ impl CodeGenerator {
         self.emit("ret");
     }
 
+    fn emit_runtime_cell_exists_helper(&mut self, enabled: bool) {
+        self.emit_global("__ckb_cell_exists");
+        self.emit_label("__ckb_cell_exists");
+        self.emit("# cellscript abi: CKB SourceView LOAD_CELL_DATA existence probe");
+        if !enabled {
+            self.emit("li a0, 0");
+            self.emit(format!("li a1, {}", CellScriptRuntimeError::SyscallFailed.code()));
+            self.emit("ret");
+            return;
+        }
+        let invalid = self.fresh_label("cell_exists_source_view_invalid");
+        let exists = self.fresh_label("cell_exists_true");
+        let missing = self.fresh_label("cell_exists_false");
+        let failed = self.fresh_label("cell_exists_failed");
+        let done = self.fresh_label("cell_exists_done");
+        let abi = self.runtime_abi();
+        self.emit("addi sp, sp, -48");
+        self.emit("sd ra, 40(sp)");
+        self.emit_decode_source_view_to_t1_t2(&invalid);
+        self.emit("li t0, 0");
+        self.emit("sd t0, 8(sp)");
+        self.emit("addi a0, sp, 16");
+        self.emit("addi a1, sp, 8");
+        self.emit("li a2, 0");
+        self.emit("addi a3, t1, 0");
+        self.emit("addi a4, t2, 0");
+        self.emit(format!("li a7, {}", abi.load_cell_data));
+        self.emit("ecall");
+        self.emit(format!("li t0, {}", CKB_INDEX_OUT_OF_BOUND));
+        self.emit("sub t1, a0, t0");
+        self.emit(format!("beqz t1, {}", missing));
+        self.emit(format!("li t0, {}", CKB_LENGTH_NOT_ENOUGH));
+        self.emit("sub t1, a0, t0");
+        self.emit(format!("beqz t1, {}", exists));
+        self.emit(format!("beqz a0, {}", exists));
+        self.emit(format!("j {}", failed));
+        self.emit_label(&exists);
+        self.emit("li a0, 1");
+        self.emit("li a1, 0");
+        self.emit(format!("j {}", done));
+        self.emit_label(&missing);
+        self.emit("li a0, 0");
+        self.emit("li a1, 0");
+        self.emit(format!("j {}", done));
+        self.emit_label(&invalid);
+        self.emit("li a0, 0");
+        self.emit(format!("li a1, {}", CellScriptRuntimeError::CkbSourceViewInvalid.code()));
+        self.emit(format!("j {}", done));
+        self.emit_label(&failed);
+        self.emit("li a0, 0");
+        self.emit(format!("li a1, {}", CellScriptRuntimeError::CkbSourceViewInvalid.code()));
+        self.emit_label(&done);
+        self.emit("ld ra, 40(sp)");
+        self.emit("addi sp, sp, 48");
+        self.emit("ret");
+    }
+
     fn emit_runtime_cell_data_hash_at_helper(&mut self, symbol: &str, detail: &str, enabled: bool) {
         self.emit_global(symbol);
         self.emit_label(symbol);
@@ -16771,8 +16832,14 @@ const ELF_HEADER_SIZE: usize = 64;
 const ELF_PROGRAM_HEADER_SIZE: usize = 56;
 const ELF_SEGMENT_ALIGN: usize = 0x1000;
 const ELF_BASE_ADDR: u64 = 0x10000;
+const ELF_LOAD_FLAG_X: u32 = 1;
+const ELF_LOAD_FLAG_W: u32 = 2;
+const ELF_LOAD_FLAG_R: u32 = 4;
+const CKB_ELF_PROGRAM_HEADER_COUNT: u16 = 2;
 const START_TRAMPOLINE_SIZE: usize = 28;
 const CKB_SCRIPT_STACK_TOP: i64 = 0x3f0000;
+const CKB_SCRIPT_STACK_SIZE: u64 = 0x10000;
+const CKB_SCRIPT_STACK_BASE: u64 = CKB_SCRIPT_STACK_TOP as u64 - CKB_SCRIPT_STACK_SIZE;
 const EXIT_SYSCALL_NUMBER: i64 = 93;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -16936,7 +17003,9 @@ enum Instruction {
 fn assemble_elf(lines: &[String]) -> Result<Vec<u8>> {
     reject_unresolved_calls(lines)?;
     if let Some(external) = try_external_elf_toolchain(lines)? {
-        return Ok(external);
+        if ckb_elf_has_writable_stack_segment(&external) {
+            return Ok(external);
+        }
     }
     assemble_elf_internal(lines)
 }
@@ -17018,27 +17087,78 @@ fn assemble_elf_internal(lines: &[String]) -> Result<Vec<u8>> {
     parsed.encode_section(SectionKind::Rodata, &mut rodata_bytes, &layout, 0)?;
 
     let segment_file_payload_size = rodata_offset + rodata_bytes.len();
-    let segment_file_offset = align_up(ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE, ELF_SEGMENT_ALIGN);
+    let segment_file_offset =
+        align_up(ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE * usize::from(CKB_ELF_PROGRAM_HEADER_COUNT), ELF_SEGMENT_ALIGN);
     let load_segment_offset = 0u64;
     let load_segment_vaddr = layout.text_base.checked_sub(segment_file_offset as u64).ok_or_else(|| {
         CompileError::new("ELF text base is smaller than the load segment file offset", crate::error::Span::default())
     })?;
     let load_segment_file_size = segment_file_offset + segment_file_payload_size;
     let mut elf = vec![0u8; load_segment_file_size];
-    write_elf_header(&mut elf[..ELF_HEADER_SIZE], layout.text_base, 1)?;
+    write_elf_header(&mut elf[..ELF_HEADER_SIZE], layout.text_base, CKB_ELF_PROGRAM_HEADER_COUNT)?;
     write_program_header(
         &mut elf[ELF_HEADER_SIZE..ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE],
-        5,
+        ELF_LOAD_FLAG_R | ELF_LOAD_FLAG_X,
         load_segment_offset,
         load_segment_vaddr,
         load_segment_file_size as u64,
         load_segment_file_size as u64,
+    )?;
+    write_program_header(
+        &mut elf[ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE..ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE * 2],
+        ELF_LOAD_FLAG_R | ELF_LOAD_FLAG_W,
+        load_segment_file_size as u64,
+        CKB_SCRIPT_STACK_BASE,
+        0,
+        CKB_SCRIPT_STACK_SIZE,
     )?;
 
     let segment = &mut elf[segment_file_offset..segment_file_offset + segment_file_payload_size];
     segment[..text_bytes.len()].copy_from_slice(&text_bytes);
     segment[rodata_offset..rodata_offset + rodata_bytes.len()].copy_from_slice(&rodata_bytes);
     Ok(elf)
+}
+
+fn ckb_elf_has_writable_stack_segment(elf: &[u8]) -> bool {
+    if elf.len() < ELF_HEADER_SIZE || &elf[..4] != b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
+        return false;
+    }
+
+    let program_header_offset = u64::from_le_bytes(elf[32..40].try_into().expect("slice length checked")) as usize;
+    let program_header_size = u16::from_le_bytes(elf[54..56].try_into().expect("slice length checked")) as usize;
+    let program_header_count = u16::from_le_bytes(elf[56..58].try_into().expect("slice length checked")) as usize;
+    if program_header_size < ELF_PROGRAM_HEADER_SIZE {
+        return false;
+    }
+
+    for index in 0..program_header_count {
+        let Some(header_start) = program_header_offset.checked_add(index.saturating_mul(program_header_size)) else {
+            return false;
+        };
+        let Some(header_end) = header_start.checked_add(ELF_PROGRAM_HEADER_SIZE) else {
+            return false;
+        };
+        if header_end > elf.len() {
+            return false;
+        }
+        let header = &elf[header_start..header_end];
+        let segment_type = u32::from_le_bytes(header[0..4].try_into().expect("slice length checked"));
+        let flags = u32::from_le_bytes(header[4..8].try_into().expect("slice length checked"));
+        let vaddr = u64::from_le_bytes(header[16..24].try_into().expect("slice length checked"));
+        let memory_size = u64::from_le_bytes(header[40..48].try_into().expect("slice length checked"));
+        let Some(segment_end) = vaddr.checked_add(memory_size) else {
+            continue;
+        };
+        if segment_type == 1
+            && flags & ELF_LOAD_FLAG_W != 0
+            && flags & ELF_LOAD_FLAG_X == 0
+            && vaddr <= CKB_SCRIPT_STACK_BASE
+            && segment_end >= CKB_SCRIPT_STACK_TOP as u64
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn try_external_elf_toolchain(lines: &[String]) -> Result<Option<Vec<u8>>> {
@@ -18657,6 +18777,7 @@ fn is_runtime_scalar_failclosed_call(func: &str) -> bool {
             | "__ckb_cell_occupied_capacity"
             | "__ckb_cell_unoccupied_capacity"
             | "__ckb_cell_output_index"
+            | "__ckb_cell_exists"
             | "__ckb_cell_data_size"
             | "__ckb_cell_data_u32_le"
             | "__ckb_cell_data_u64_le"
@@ -18797,6 +18918,38 @@ mod tests {
         ("subw", "subw a0, a0, a1"),
         ("tail", "tail target"),
     ];
+
+    #[test]
+    fn internal_elf_declares_non_executable_writable_ckb_stack_segment() {
+        let lines = vec![
+            ".section .text".to_string(),
+            ".global entry".to_string(),
+            "entry:".to_string(),
+            "li a0, 0".to_string(),
+            "ret".to_string(),
+        ];
+
+        let elf = assemble_elf_internal(&lines).expect("internal assembler should emit ELF");
+
+        assert_eq!(u16::from_le_bytes(elf[56..58].try_into().unwrap()), CKB_ELF_PROGRAM_HEADER_COUNT);
+        assert!(ckb_elf_has_writable_stack_segment(&elf));
+
+        let stack_header_start = ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE;
+        let stack_header = &elf[stack_header_start..stack_header_start + ELF_PROGRAM_HEADER_SIZE];
+        let segment_type = u32::from_le_bytes(stack_header[0..4].try_into().unwrap());
+        let flags = u32::from_le_bytes(stack_header[4..8].try_into().unwrap());
+        let offset = u64::from_le_bytes(stack_header[8..16].try_into().unwrap());
+        let vaddr = u64::from_le_bytes(stack_header[16..24].try_into().unwrap());
+        let file_size = u64::from_le_bytes(stack_header[32..40].try_into().unwrap());
+        let memory_size = u64::from_le_bytes(stack_header[40..48].try_into().unwrap());
+
+        assert_eq!(segment_type, 1);
+        assert_eq!(flags, ELF_LOAD_FLAG_R | ELF_LOAD_FLAG_W);
+        assert_eq!(offset, elf.len() as u64);
+        assert_eq!(vaddr, CKB_SCRIPT_STACK_BASE);
+        assert_eq!(file_size, 0);
+        assert_eq!(memory_size, CKB_SCRIPT_STACK_SIZE);
+    }
 
     #[test]
     fn internal_assembler_relaxes_out_of_range_conditional_branch() {

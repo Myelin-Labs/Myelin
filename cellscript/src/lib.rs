@@ -12736,6 +12736,7 @@ fn body_ckb_runtime_features(
                             | "__ckb_cell_type_hash_type"
                             | "__ckb_cell_lock_args_empty"
                             | "__ckb_cell_type_args_empty"
+                            | "__ckb_cell_exists"
                             | "__ckb_cell_lock_args_hash"
                             | "__ckb_cell_type_args_hash"
                             | "__ckb_require_cell_lock_hash"
@@ -13307,6 +13308,7 @@ fn ckb_v014_runtime_access(func: &str) -> Option<(&'static str, &'static str, &'
         "__ckb_cell_type_args_empty" => {
             Some(("cell-type-script-args-empty-read", "LOAD_CELL_BY_FIELD", "SourceView", "ckb::cell_type_args_empty"))
         }
+        "__ckb_cell_exists" => Some(("cell-exists", "LOAD_CELL_DATA", "SourceView", "ckb::cell_exists")),
         "__ckb_cell_lock_args_hash" => {
             Some(("cell-lock-script-args-hash-read", "LOAD_CELL_BY_FIELD", "SourceView", "ckb::cell_lock_args_hash"))
         }
@@ -15275,7 +15277,7 @@ mod tests {
         compile, compile_file, compile_file_with_entry_action, compile_file_with_entry_lock, compile_path,
         decode_scheduler_witness_hex, default_output_path_for_input, encode_entry_witness_args_for_params, incremental_cache_key,
         load_modules_for_input, resolve_input_path, ActionMetadata, ArtifactFormat, CompileOptions, EntryWitnessArg,
-        ENTRY_WITNESS_ABI_MAGIC, SCHEDULER_WITNESS_ABI_MOLECULE,
+        TypedCellSchedulerAccessInput, TypedCellTypeScriptInput, ENTRY_WITNESS_ABI_MAGIC, SCHEDULER_WITNESS_ABI_MOLECULE,
     };
     use crate::{ir, lexer, parser};
     use camino::{Utf8Path, Utf8PathBuf};
@@ -25634,6 +25636,92 @@ action transfer_token(token: Token, to: Address) -> next_token: Token {
         assert!(access_sources.contains(&3), "Output source missing from scheduler witness");
         assert!(witness.accesses.iter().any(|access| access.index == 0));
         assert!(witness.accesses.iter().any(|access| access.binding_hash != [0u8; 32]));
+    }
+
+    #[test]
+    fn typed_cell_profile_emits_scheduler_plan_and_live_witness_bytes() {
+        let source = r#"
+module test
+
+resource NFT has store
+    identity(field(token_id))
+{
+    token_id: u64,
+    owner: Address
+}
+
+action mint(token_id: u64, owner: Address) -> NFT {
+    verification
+        create NFT { token_id: token_id, owner: owner }
+}
+"#;
+
+        let result =
+            compile(source, CompileOptions { target_profile: Some("typed-cell".to_string()), ..CompileOptions::default() }).unwrap();
+        assert_eq!(result.metadata.target_profile.name, "typed-cell");
+        assert_eq!(result.metadata.target_profile.scheduler_abi, "myelin-typed-cell-scheduler-witness-v1-molecule");
+        assert_eq!(result.metadata.target_profile.hash_domain, "myelin-typed-cell-blake3");
+
+        let nft = result.metadata.types.iter().find(|ty| ty.name == "NFT").expect("NFT metadata");
+        let typed_cell = nft.typed_cell.as_ref().expect("typed-cell metadata");
+        assert_eq!(typed_cell.abi, "myelin-typed-cell-type-v1");
+        assert_eq!(typed_cell.conflict_key, "field(token_id)");
+        assert_eq!(typed_cell.conflict_key_fields, vec!["token_id"]);
+        assert_eq!(typed_cell.conflict_key_encoding, "single-field-fixed-bytes-v1");
+
+        let action = result.metadata.actions.iter().find(|action| action.name == "mint").expect("mint metadata");
+        let plan = action.typed_cell_scheduler_plan.as_ref().expect("typed-cell scheduler plan");
+        assert_eq!(plan.abi, "myelin-typed-cell-scheduler-plan-v1");
+        assert_eq!(plan.conflict_hash_domain, "myelin-typed-cell/conflict-hash/v1");
+        assert_eq!(plan.typed_data_hash_domain, "myelin-typed-cell/typed-data-hash/v1");
+        assert_eq!(plan.accesses.len(), 1);
+        let access = &plan.accesses[0];
+        assert_eq!(access.operation, "create");
+        assert_eq!(access.source, "Output");
+        assert_eq!(access.index, 0);
+        assert_eq!(access.ty, "NFT");
+        assert_eq!(access.conflict_key.as_deref(), Some("field(token_id)"));
+        assert_eq!(access.conflict_key_fields, vec!["token_id"]);
+        assert_eq!(access.conflict_key_value_source, "transaction-output-data-conflict-key-fields");
+        assert_eq!(access.typed_data_source, "transaction-output-data");
+
+        let type_script = TypedCellTypeScriptInput::new([7; 32], 1, b"nft-type".to_vec());
+        let token_id = 42u64.to_le_bytes().to_vec();
+        let witness = action
+            .typed_cell_scheduler_witness_bytes(&[TypedCellSchedulerAccessInput {
+                operation: "create".to_string(),
+                source: "Output".to_string(),
+                index: 0,
+                type_script: type_script.clone(),
+                conflict_key_value: token_id.clone(),
+                typed_data: b"nft-output-v1".to_vec(),
+            }])
+            .expect("typed-cell live witness");
+        let changed_witness = action
+            .typed_cell_scheduler_witness_bytes(&[TypedCellSchedulerAccessInput {
+                operation: "create".to_string(),
+                source: "Output".to_string(),
+                index: 0,
+                type_script,
+                conflict_key_value: token_id,
+                typed_data: b"nft-output-v2".to_vec(),
+            }])
+            .expect("typed-cell changed live witness");
+        assert_ne!(witness, changed_witness, "live typed data must affect typed-cell scheduler witness bytes");
+
+        let fields = decode_molecule_table(&witness, 7);
+        assert_eq!(read_u16(fields[0], "typed magic"), 0xCE11);
+        assert_eq!(read_u8(fields[1], "typed version"), 1);
+        assert_eq!(read_u8(fields[2], "typed effect class"), 3);
+        assert_eq!(read_bool(fields[3], "typed parallelizable"), action.parallelizable);
+        assert_eq!(read_u64(fields[4], "typed estimated cycles"), action.estimated_cycles);
+        assert_eq!(read_u32(fields[5], "typed access count"), 1);
+        let access_bytes = fields[6];
+        assert_eq!(access_bytes.len(), 4 + 70);
+        assert_eq!(read_u32(&access_bytes[..4], "typed access fixvec count"), 1);
+        assert_eq!(access_bytes[4], 7);
+        assert_eq!(access_bytes[5], 3);
+        assert_eq!(read_u32(&access_bytes[6..10], "typed access index"), 0);
     }
 
     #[test]
