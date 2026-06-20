@@ -349,12 +349,21 @@ offline/mock verifier evidence, live carrier evidence, and final compact L1
 script evidence cannot be confused; strict production readiness is only true for
 live final L1 script evidence whose referenced submission report also proves
 the final-script pre-submit checks: live funding/code cells, matching verifier
-code hash, and, for final settlement, the final DA evidence CellDep plus the
-package-declared authority input with matching data hash and settlement lock.
+code hash, and, for final settlement, the final DA evidence CellDep, the
+package-declared authority input with matching data hash and settlement lock,
+and explicit settlement uniqueness evidence. The readiness report also carries
+`operational_policy`, a public-chain operations commitment covering reorg
+confirmation depth, stability requery, fee floor/rate/max-fee policy, retry
+identity, key-submission evidence, and monitoring evidence. It can be
+`testnet_beta_ready` while still leaving `production_ready = false` until real
+operator custody and runbooks are configured.
 `session settlement-intent` then turns a verified court bundle plus verified DA
 manifest into an explicit disputed-close settlement object with challenge-window
-binding and `l1_da_published = false` / `l1_court_implemented = false` markers;
-`session verify-settlement-intent` recomputes the same three-way binding.
+binding and `l1_da_published = false` / `l1_court_implemented = false` markers.
+It includes `court_economics`, a deterministic dispute-economics commitment
+over participant/escrow binding, DA availability, and challenge timing;
+`session verify-settlement-intent` recomputes the same three-way binding and
+economics commitment.
 `session settlement-package` then emits a deterministic CKB-compatible
 settlement CellTx package that binds the exact intent JSON bytes, court bundle,
 DA manifest, challenge payload, and final state root. It also declares
@@ -364,8 +373,22 @@ escrow_input_cells_hash || session_lineage_commitment ||
 session_authority_commitment`, whose `data_hash` is the expected CKB data hash,
 whose lineage fields are copied from the verified session path, whose authority
 commitment binds those lineage fields together with the intent hash and
-`session_id`, whose consumed input index is `1`, and whose lock must match the
-final DA publication lock.
+`session_id`, whose `authority_authentication` carries a deterministic
+threshold-lock policy commitment over the authority data hash and session
+lineage, whose consumed input index is `1`, and whose lock must match the final
+DA publication lock. This is not yet participant-authenticated CKB lock-creation
+evidence.
+Final settlement type args are exactly `session_id_hash ||
+settlement_identity_hash`, where `session_id_hash` is copied from the consumed
+authority Cell and `settlement_identity_hash` is the CKB data hash of the
+160-byte final settlement payload. The final settlement CellScript rejects
+same-type inputs, duplicate same-type group outputs, and any second output in
+the transaction using the same deployed final-settlement code hash/hash type.
+That gives transaction-local singleton creation; cross-transaction replay is
+blocked by consuming the one-use authority Cell. The package now emits and
+verifies the authority-cell policy commitment, while participant-authenticated
+authority-cell creation, production key custody, and deployment policy remain
+outside this milestone.
 `session verify-settlement-package` recomputes the embedded Molecule
 transaction, CKB projection, and settlement-authority requirement.
 `session submit-settlement-package` builds the CKB
@@ -418,7 +441,8 @@ their typed-cell metadata, CKB ELFs, code hashes, and code deps.
 both valid carriers report `readiness_evidence_mode = "live-ckb-carrier"`, both
 final-script submissions report `readiness_evidence_mode = "final-l1-script"`,
 the final settlement report carries positive final DA/authority pre-submit
-checks, and both tampered carriers are rejected. It is
+checks plus settlement uniqueness evidence, the competing final settlement
+replay probe is rejected, and both tampered carriers are rejected. It is
 deliberately not part of the default production gate because it is slower and
 requires a local parent CKB checkout.
 
@@ -443,19 +467,24 @@ bind the same DA manifest hash carried by the settlement payload, requires a
 consumed settlement-authority input whose first 32-byte data field equals the
 settlement intent hash and whose remaining fields carry the session id,
 participant digest, escrow digest, session-lineage commitment, and authority
-commitment. It requires the settlement output type args to end in that authority
-commitment, requires both the authority input and settlement output lock hashes
-to match the DA publication lock hash, and leaves the DA publication cell
-unspent. The live parent-CKB devnet smoke deploys the DA-anchor and settlement
+commitment. It requires the settlement output type args to be `session_id_hash ||
+settlement_identity_hash`, requires both the authority input and settlement
+output lock hashes to match the DA publication lock hash, rejects competing
+final-settlement outputs under the same deployed final-settlement verifier in
+the same transaction, and leaves the DA publication cell unspent. The live
+parent-CKB devnet smoke deploys the DA-anchor and settlement
 carrier verifiers plus the final-script verifier artefacts as separate `data2`
 CKB type scripts, creates the one-use settlement-authority Cell from the
 settlement package's declared `settlement_authority`, records the authority
 session id, participant digest, escrow digest, session-lineage commitment, and
 authority commitment in the smoke report, and consumes it in the final
-settlement transaction. This proves deployed compact-payload script semantics
-for the local devnet carrier and final-script paths; it still does not claim
-full production DA availability, participant-authenticated authority-cell
-creation, or complete court-dispute economics.
+settlement transaction. It also submits a competing final-settlement output probe
+before the valid final settlement and requires live CKB script verification to
+reject it. This proves deployed compact-payload script semantics for the local
+devnet carrier and final-script paths, plus deterministic DA-availability and
+authority-authentication commitments. It still does not claim external DA
+availability guarantees, participant-authenticated authority-cell creation,
+production key management, or complete court-dispute economics.
 `teeworlds court-bundle` materialises one disputed chunk as a self-contained
 court-input bundle: chunk payload bytes, CKB Molecule transaction bytes,
 CKB-style projection evidence, deterministic challenge hashes, and

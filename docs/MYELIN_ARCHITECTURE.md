@@ -515,14 +515,33 @@ carrier transactions until `get_transaction` reports `committed`, then feeds
 both live carrier submissions through Myelin's context, economics, inclusion,
 stability, finality, and readiness verifiers. It then submits a tampered
 compact-payload carrier under the settlement verifier and requires CKB script
-verification to reject it. The resulting
-`myelin-ckb-devnet-smoke-v1` report proves devnet CKB acceptance, deployed
-compact-payload type-script execution, verifier readiness for both carriers, and
-live rejection of mismatched carrier data. For carrier submissions, the
-inclusion verifier only marks live inclusion as observed when CKB
-`outputs_data[0]` matches the declared carrier payload and
-`outputs[0].type.args` matches the expected data-hash-plus-identity layout,
-while keeping final DA/court script semantics out of scope.
+verification to reject it. The smoke also deploys final DA and final settlement
+CellScript verifier artefacts, submits final-script transactions, and requires
+final settlement type args to be `session_id_hash || settlement_identity_hash`.
+The final settlement verifier consumes a one-use authority Cell, checks the final
+DA publication as a read-only `CellDep`, rejects same-type inputs, rejects
+duplicate same-type group outputs, and rejects any second output in the same
+transaction using the same deployed final-settlement code hash/hash type. That
+is the current CKB-compatible anti-replay model: transaction-local singleton
+creation plus cross-transaction replay protection through the consumed authority
+Cell. The settlement package now also emits and verifies a deterministic CKB
+threshold-lock authority-authentication commitment for the future
+participant-controlled authority-cell creation policy; it is not itself live
+signature or lock-enforcement evidence. Production key custody and deployment
+policy remain separate operational work.
+Settlement intents carry a recomputable `court_economics` commitment over
+participant/escrow binding, DA availability, and challenge timing. Submission
+readiness carries an `operational_policy` commitment over confirmation depth,
+stability, fee policy, retry identity, live key-submission evidence, and
+monitoring checks; it can be testnet-beta ready while keeping
+`production_ready = false` until operator custody and runbooks are complete.
+The resulting `myelin-ckb-devnet-smoke-v1` report proves devnet CKB acceptance,
+deployed compact-payload type-script execution, final-script strict readiness,
+live rejection of mismatched carrier data, and live rejection of a competing
+final-settlement output probe. For carrier submissions, the inclusion verifier
+only marks live inclusion as observed when CKB `outputs_data[0]` matches the
+declared carrier payload and `outputs[0].type.args` matches the expected
+data-hash-plus-identity layout.
 
 The local CellScript tests
 `v0_18_myelin_package_commitment_has_typed_cell_metadata_and_ckb_vm_rejects_tamper`
@@ -530,14 +549,13 @@ and
 `v0_18_generic_package_commitment_binds_data_hash_to_type_args_in_ckb_vm` keep
 the package-commitment boundary covered. The
 `v0_18_myelin_da_and_settlement_carriers_bind_compact_payloads_to_type_args_in_ckb_vm`
-regression adds typed-cell `DaAnchorCarrier` and `SettlementCarrier` resources
-and executes their 160-byte compact-payload verifier shapes as CKB type scripts
-through `ckb-testtool`. Matching carrier output data plus identity-bound type
-args pass; tampered output data or mismatched identity args fail. The parent
-`../ckb` devnet smoke now deploys the compact carrier
-verifiers into the throw-away chain and confirms a tampered carrier is rejected
-by live CKB script verification; the remaining production hardening is final
-DA-anchor/court scripts rather than the compact carrier verifiers.
+regression adds typed-cell `DaAnchorCarrier`, `SettlementCarrier`,
+`DaAnchorFinal`, and `SettlementFinal` resources and executes their 160-byte
+compact-payload verifier shapes as CKB type scripts through `ckb-testtool`.
+Matching output data plus identity-bound type args pass; tampered output data,
+mismatched identity args, same-type final inputs, duplicate final outputs,
+competing final-settlement outputs, wrong final DA evidence, wrong authority
+session identity, and self-consistent zero-field payloads fail.
 
 ## Teeworlds Pressure Workload
 

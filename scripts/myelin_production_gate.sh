@@ -1079,6 +1079,22 @@ for context_path, economics_path, inclusion_path, stability_path, finality_path,
         raise SystemExit("production gate failed: readiness live carrier marker")
     if report.get("final_l1_script_submission_ready") is not False:
         raise SystemExit("production gate failed: readiness final L1 marker")
+    policy = report["operational_policy"]
+    if policy["schema"] != "myelin-public-chain-operational-policy-v1":
+        raise SystemExit("production gate failed: operational policy schema")
+    if policy["mode"] != "ckb-public-chain-testnet-beta":
+        raise SystemExit("production gate failed: operational policy mode")
+    for key in ("reorg_policy_checked", "fee_policy_checked", "retry_policy_checked", "monitoring_policy_checked", "testnet_beta_ready"):
+        if policy[key] is not True:
+            raise SystemExit(f"production gate failed: operational policy marker {key}")
+    if policy["key_policy_checked"] is not False:
+        raise SystemExit("production gate failed: dry-run readiness cannot claim live key policy")
+    if policy["public_chain_ready"] is not False:
+        raise SystemExit("production gate failed: dry-run readiness cannot claim public-chain ready")
+    if policy["production_ready"] is not False:
+        raise SystemExit("production gate failed: operational policy production marker")
+    if len(policy["policy_commitment"]) != 64:
+        raise SystemExit("production gate failed: operational policy commitment")
 PY
 
 run_step "Validate Session L2 reports" \
@@ -1141,6 +1157,19 @@ for da, verify, court, kind in ((da_static, da_verify_static, court_static, "sta
     require(da["molecule_transaction_hash"] == court["molecule_transaction_hash"], f"{kind} DA molecule tx binding")
     require(da["challenge_payload_hash"] == court["challenge_payload_hash"], f"{kind} DA challenge binding")
     require(da["proof_valid"] is True, f"{kind} DA proof valid")
+    availability = da["availability"]
+    require(availability["schema"] == "myelin-da-availability-v1", f"{kind} DA availability schema")
+    require(availability["mode"] == "replicated-da-committee", f"{kind} DA availability mode")
+    require(availability["required_attestations"] == 2, f"{kind} DA availability threshold")
+    require(availability["attestation_count"] >= availability["required_attestations"], f"{kind} DA availability attestation count")
+    require(availability["retrieval_probe_count"] >= 1, f"{kind} DA availability retrieval probe")
+    require(availability["payload_hash"] == da["molecule_transaction_hash"], f"{kind} DA availability payload binding")
+    require(availability["segment_root"] == da["segment_root"], f"{kind} DA availability segment-root binding")
+    require(len(availability["proof_molecule_hash"]) == 64, f"{kind} DA availability proof hash")
+    require(len(availability["availability_commitment"]) == 64, f"{kind} DA availability commitment")
+    require(availability["availability_checked"] is True, f"{kind} DA availability checked")
+    require(availability["testnet_beta_ready"] is False, f"{kind} DA availability is commitment-only, not testnet-beta ready")
+    require(availability["production_ready"] is False, f"{kind} DA availability production marker")
     require(da["local_da_published"] is True, f"{kind} local DA published")
     require(da["segment_sealed"] is True, f"{kind} DA segment sealed")
     require(da["da_storage_path"], f"{kind} DA storage path")
@@ -1202,6 +1231,17 @@ for settlement, verify, court, da, kind in ((settlement_static, settlement_verif
     require(settlement["challenge_window_ms"] == 60000, f"{kind} settlement challenge window")
     require(settlement["challenge_deadline_ms"] == 60000, f"{kind} settlement challenge deadline")
     require(settlement["settlement_permitted"] is True, f"{kind} settlement permitted")
+    economics = settlement["court_economics"]
+    require(economics["schema"] == "myelin-session-court-economics-v1", f"{kind} court economics schema")
+    require(economics["mode"] == "disputed-close-testnet-beta", f"{kind} court economics mode")
+    require(economics["participant_set_hash"] == court["participant_set_hash"], f"{kind} court economics participant binding")
+    require(economics["escrow_input_cells_hash"] == court["escrow_input_cells_hash"], f"{kind} court economics escrow binding")
+    require(economics["challenge_payload_hash"] == court["challenge_payload_hash"], f"{kind} court economics challenge binding")
+    require(economics["da_availability_commitment"] == da["availability"]["availability_commitment"], f"{kind} court economics DA availability binding")
+    require(economics["court_economics_checked"] is True, f"{kind} court economics checked")
+    require(economics["testnet_beta_ready"] is True, f"{kind} court economics testnet beta ready")
+    require(economics["production_ready"] is False, f"{kind} court economics production marker")
+    require(len(economics["economics_commitment"]) == 64, f"{kind} court economics commitment")
     require(settlement["l1_da_published"] is False, f"{kind} settlement L1 DA marker")
     require(settlement["l1_court_implemented"] is False, f"{kind} settlement L1 court marker")
     require(verify["valid"] is True, f"{kind} settlement verification")
@@ -1219,6 +1259,26 @@ for package, verify, settlement, court, da, kind in ((package_static, package_ve
     require(package["da_manifest_hash"] == settlement["da_manifest_hash"], f"{kind} package DA hash binding")
     require(package["challenge_payload_hash"] == settlement["challenge_payload_hash"], f"{kind} package challenge binding")
     require(package["final_state_root"] == settlement["final_state_root"], f"{kind} package final root")
+    authority = package["settlement_authority"]
+    auth = authority["authority_authentication"]
+    require(authority["schema"] == "myelin-session-settlement-authority-v1", f"{kind} authority schema")
+    require(len(authority["data"]) == 386, f"{kind} authority data length")
+    require(len(authority["data_hash"]) == 66, f"{kind} authority data hash")
+    require(authority["data_semantics"] == "settlement-authority-lineage-v1", f"{kind} authority data semantics")
+    require(authority["session_id"] == package["session_id"], f"{kind} authority session binding")
+    require(authority["participant_set_hash"] == package["participant_set_hash"], f"{kind} authority participant binding")
+    require(authority["escrow_input_cells_hash"] == package["escrow_input_cells_hash"], f"{kind} authority escrow binding")
+    require(authority["session_lineage_commitment"] == package["session_lineage_commitment"], f"{kind} authority lineage binding")
+    require(auth["schema"] == "myelin-session-settlement-authority-auth-v1", f"{kind} authority authentication schema")
+    require(auth["mode"] == "ckb-threshold-lock", f"{kind} authority authentication mode")
+    require(auth["threshold"] == 2, f"{kind} authority authentication threshold")
+    require(auth["signer_count"] >= auth["threshold"], f"{kind} authority authentication signer count")
+    require(auth["participant_set_hash"] == authority["participant_set_hash"], f"{kind} authority authentication participant binding")
+    require(len(auth["message_hash"]) == 64, f"{kind} authority authentication message hash")
+    require(len(auth["attestation_hash"]) == 64, f"{kind} authority authentication hash")
+    require(auth["ckb_enforceable"] is False, f"{kind} authority authentication is not yet CKB-enforceable")
+    require(auth["testnet_beta_ready"] is False, f"{kind} authority authentication is commitment-only, not testnet-beta ready")
+    require(auth["production_ready"] is False, f"{kind} authority authentication production marker")
     require(len(package["settlement_cell_tx_id"]) == 64, f"{kind} package txid")
     require(len(package["settlement_cell_wtxid"]) == 64, f"{kind} package wtxid")
     require(len(package["molecule_transaction_hash"]) == 64, f"{kind} package molecule tx hash")

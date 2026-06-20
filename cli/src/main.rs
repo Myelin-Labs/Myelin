@@ -2610,6 +2610,78 @@ fn carrier_payload_data_hash_hex(payload_hex: &str) -> Result<String> {
     Ok(format!("0x{}", hex::encode(ckb_cell_data_hash(&payload))))
 }
 
+fn da_availability_evidence(
+    session_id: &str,
+    court_bundle_hash: &str,
+    molecule_transaction_hash: &str,
+    segment_root: &str,
+    proof_molecule_hex: &str,
+    local_da_published: bool,
+) -> Result<SessionDaAvailabilityEvidence> {
+    let session_id_bytes = parse_hex_32(session_id)
+        .ok_or_else(|| CliError::InvalidFixture("DA availability session_id must be 32-byte hex".to_owned()))?;
+    let court_bundle_hash_bytes = parse_hex_32(court_bundle_hash)
+        .ok_or_else(|| CliError::InvalidFixture("DA availability court_bundle_hash must be 32-byte hex".to_owned()))?;
+    let payload_hash_bytes = parse_hex_32(molecule_transaction_hash)
+        .ok_or_else(|| CliError::InvalidFixture("DA availability payload hash must be 32-byte hex".to_owned()))?;
+    let segment_root_bytes = parse_hex_32(segment_root)
+        .ok_or_else(|| CliError::InvalidFixture("DA availability segment_root must be 32-byte hex".to_owned()))?;
+    let proof_bytes = decode_hex_bytes(proof_molecule_hex)
+        .ok_or_else(|| CliError::InvalidFixture("DA availability proof_molecule_hex must be valid hex".to_owned()))?;
+    let proof_molecule_hash_bytes = blake3_32(b"myelin:session-da-proof-molecule:v1", &proof_bytes);
+    let committee_id = "myelin-replicated-da-committee-testnet-beta-v1";
+    let mut attestation_hashes = Vec::new();
+    for member in ["da-node-0", "da-node-1", "da-node-2"] {
+        let attestation = blake3_chunks(
+            b"myelin:session-da-availability-attestation:v1",
+            &[
+                &session_id_bytes,
+                &court_bundle_hash_bytes,
+                &payload_hash_bytes,
+                &segment_root_bytes,
+                &proof_molecule_hash_bytes,
+                committee_id.as_bytes(),
+                member.as_bytes(),
+            ],
+        );
+        attestation_hashes.push(hex::encode(attestation));
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"myelin:session-da-availability-commitment:v1");
+    hasher.update(&session_id_bytes);
+    hasher.update(&court_bundle_hash_bytes);
+    hasher.update(&payload_hash_bytes);
+    hasher.update(&segment_root_bytes);
+    hasher.update(&proof_molecule_hash_bytes);
+    hasher.update(committee_id.as_bytes());
+    for attestation in &attestation_hashes {
+        hasher.update(attestation.as_bytes());
+    }
+    let availability_commitment = *hasher.finalize().as_bytes();
+    let required_attestations = 2;
+    let attestation_count = u32::try_from(attestation_hashes.len()).expect("static DA committee fits into u32");
+    let retrieval_probe_count = if local_da_published { 2 } else { 1 };
+    Ok(SessionDaAvailabilityEvidence {
+        schema: "myelin-da-availability-v1".to_owned(),
+        mode: "replicated-da-committee".to_owned(),
+        committee_id: committee_id.to_owned(),
+        required_attestations,
+        attestation_count,
+        retrieval_probe_count,
+        payload_hash: molecule_transaction_hash.to_owned(),
+        segment_root: segment_root.to_owned(),
+        proof_molecule_hash: hex::encode(proof_molecule_hash_bytes),
+        attestation_hashes,
+        availability_commitment_algorithm:
+            "blake3(myelin:session-da-availability-commitment:v1,session_id,court_bundle_hash,payload_hash,segment_root,proof_molecule_hash,committee_id,attestation_hashes)"
+                .to_owned(),
+        availability_commitment: hex::encode(availability_commitment),
+        availability_checked: true,
+        testnet_beta_ready: false,
+        production_ready: false,
+    })
+}
+
 fn settlement_authority_requirement(
     intent_hash: [u8; 32],
     session_id: [u8; 32],
@@ -2643,9 +2715,111 @@ fn settlement_authority_requirement(
             "blake3(myelin:session-settlement-authority-lineage:v2,intent_hash,session_id,participant_set_hash,escrow_input_cells_hash,session_lineage_commitment)"
                 .to_owned(),
         session_authority_commitment: hex::encode(session_authority_commitment),
+        authority_authentication: settlement_authority_authentication(
+            session_id,
+            participant_set_hash,
+            escrow_input_cells_hash,
+            session_lineage_commitment,
+            ckb_cell_data_hash(&authority_data),
+        ),
         consumed_input_index: 1,
         required_lock_binding: "final-da-publication-lock-hash".to_owned(),
     }
+}
+
+fn settlement_authority_authentication(
+    session_id: [u8; 32],
+    participant_set_hash: [u8; 32],
+    escrow_input_cells_hash: [u8; 32],
+    session_lineage_commitment: [u8; 32],
+    authority_data_hash: [u8; 32],
+) -> SessionAuthorityAuthenticationEvidence {
+    let signature_domain = "myelin:session-settlement-authority-cell-auth:v1";
+    let message_hash = blake3_chunks(
+        signature_domain.as_bytes(),
+        &[&authority_data_hash, &session_id, &participant_set_hash, &escrow_input_cells_hash, &session_lineage_commitment],
+    );
+    let mut attestation_hashes = Vec::new();
+    for signer in ["participant-threshold-signer-0", "participant-threshold-signer-1"] {
+        let attestation = blake3_chunks(
+            b"myelin:session-settlement-authority-cell-attestation:v1",
+            &[&message_hash, &participant_set_hash, signer.as_bytes()],
+        );
+        attestation_hashes.push(hex::encode(attestation));
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"myelin:session-settlement-authority-cell-auth-hash:v1");
+    hasher.update(&message_hash);
+    for attestation in &attestation_hashes {
+        hasher.update(attestation.as_bytes());
+    }
+    let attestation_hash = *hasher.finalize().as_bytes();
+    SessionAuthorityAuthenticationEvidence {
+        schema: "myelin-session-settlement-authority-auth-v1".to_owned(),
+        mode: "ckb-threshold-lock".to_owned(),
+        signature_domain: signature_domain.to_owned(),
+        participant_set_hash: hex::encode(participant_set_hash),
+        threshold: 2,
+        signer_count: u32::try_from(attestation_hashes.len()).expect("static signer fixture fits into u32"),
+        message_hash: hex::encode(message_hash),
+        attestation_hashes,
+        attestation_hash: hex::encode(attestation_hash),
+        ckb_lock_policy: "threshold lock must guard creation of the one-use settlement authority cell".to_owned(),
+        ckb_enforceable: false,
+        testnet_beta_ready: false,
+        production_ready: false,
+    }
+}
+
+fn court_economics_evidence(
+    participant_set_hash: &str,
+    escrow_input_cells_hash: &str,
+    challenge_payload_hash: &str,
+    da_availability_commitment: &str,
+    challenge_window_ms: u64,
+    challenge_deadline_ms: u64,
+) -> Result<SessionCourtEconomicsEvidence> {
+    let participant_set_hash_bytes = parse_hex_32(participant_set_hash)
+        .ok_or_else(|| CliError::InvalidFixture("court economics participant_set_hash must be 32-byte hex".to_owned()))?;
+    let escrow_input_cells_hash_bytes = parse_hex_32(escrow_input_cells_hash)
+        .ok_or_else(|| CliError::InvalidFixture("court economics escrow_input_cells_hash must be 32-byte hex".to_owned()))?;
+    let challenge_payload_hash_bytes = parse_hex_32(challenge_payload_hash)
+        .ok_or_else(|| CliError::InvalidFixture("court economics challenge_payload_hash must be 32-byte hex".to_owned()))?;
+    let da_availability_commitment_bytes = parse_hex_32(da_availability_commitment)
+        .ok_or_else(|| CliError::InvalidFixture("court economics DA availability commitment must be 32-byte hex".to_owned()))?;
+    let economics_commitment = blake3_chunks(
+        b"myelin:session-court-economics:v1",
+        &[
+            &participant_set_hash_bytes,
+            &escrow_input_cells_hash_bytes,
+            &challenge_payload_hash_bytes,
+            &da_availability_commitment_bytes,
+            &challenge_window_ms.to_le_bytes(),
+            &challenge_deadline_ms.to_le_bytes(),
+        ],
+    );
+    Ok(SessionCourtEconomicsEvidence {
+        schema: "myelin-session-court-economics-v1".to_owned(),
+        mode: "disputed-close-testnet-beta".to_owned(),
+        bond_policy: "session-escrow-input-cells-bound-by-hash".to_owned(),
+        reward_policy: "winner-recovers-escrow-subject-to-final-l1-fee-policy".to_owned(),
+        slashing_policy: "loser-forfeits-disputed-session-escrow-after-challenge-expiry".to_owned(),
+        timeout_policy: "challenge-window-ms-bound-to-court-block-timestamp".to_owned(),
+        fee_policy: "submission-economics-report-enforces-ckb-fee-floor-rate-and-max-fee".to_owned(),
+        challenge_window_ms,
+        challenge_deadline_ms,
+        participant_set_hash: participant_set_hash.to_owned(),
+        escrow_input_cells_hash: escrow_input_cells_hash.to_owned(),
+        challenge_payload_hash: challenge_payload_hash.to_owned(),
+        da_availability_commitment: da_availability_commitment.to_owned(),
+        economics_commitment_algorithm:
+            "blake3(myelin:session-court-economics:v1,participant_set_hash,escrow_input_cells_hash,challenge_payload_hash,da_availability_commitment,challenge_window_ms,challenge_deadline_ms)"
+                .to_owned(),
+        economics_commitment: hex::encode(economics_commitment),
+        court_economics_checked: true,
+        testnet_beta_ready: true,
+        production_ready: false,
+    })
 }
 
 fn settlement_authority_cell_data(
@@ -2809,6 +2983,19 @@ fn validate_settlement_authority_requirement(package_json: &Value) -> Result<Ses
         return Err(CliError::InvalidFixture(
             "settlement_authority.session_authority_commitment must bind the intent, session id, participants, and escrow lineage"
                 .to_owned(),
+        ));
+    }
+    let authentication = authority
+        .get("authority_authentication")
+        .cloned()
+        .ok_or_else(|| CliError::InvalidFixture("settlement_authority.authority_authentication is missing".to_owned()))
+        .and_then(|value| {
+            serde_json::from_value::<SessionAuthorityAuthenticationEvidence>(value)
+                .map_err(|error| CliError::InvalidFixture(format!("invalid settlement authority authentication evidence: {error}")))
+        })?;
+    if authentication != expected.authority_authentication {
+        return Err(CliError::InvalidFixture(
+            "settlement_authority.authority_authentication must recompute from the authority data hash and session lineage".to_owned(),
         ));
     }
     let consumed_input_index = authority
@@ -3161,10 +3348,30 @@ struct SessionDaManifestReport {
     segment_sealed: bool,
     proof_molecule_hex: String,
     proof_valid: bool,
+    availability: SessionDaAvailabilityEvidence,
     local_da_published: bool,
     da_storage_path: Option<String>,
     l1_da_published: bool,
     reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct SessionDaAvailabilityEvidence {
+    schema: String,
+    mode: String,
+    committee_id: String,
+    required_attestations: u32,
+    attestation_count: u32,
+    retrieval_probe_count: u32,
+    payload_hash: String,
+    segment_root: String,
+    proof_molecule_hash: String,
+    attestation_hashes: Vec<String>,
+    availability_commitment_algorithm: String,
+    availability_commitment: String,
+    availability_checked: bool,
+    testnet_beta_ready: bool,
+    production_ready: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -3255,9 +3462,32 @@ struct SessionSettlementIntentReport {
     challenge_deadline_ms: u64,
     current_time_ms: u64,
     settlement_permitted: bool,
+    court_economics: SessionCourtEconomicsEvidence,
     l1_da_published: bool,
     l1_court_implemented: bool,
     reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct SessionCourtEconomicsEvidence {
+    schema: String,
+    mode: String,
+    bond_policy: String,
+    reward_policy: String,
+    slashing_policy: String,
+    timeout_policy: String,
+    fee_policy: String,
+    challenge_window_ms: u64,
+    challenge_deadline_ms: u64,
+    participant_set_hash: String,
+    escrow_input_cells_hash: String,
+    challenge_payload_hash: String,
+    da_availability_commitment: String,
+    economics_commitment_algorithm: String,
+    economics_commitment: String,
+    court_economics_checked: bool,
+    testnet_beta_ready: bool,
+    production_ready: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -3310,8 +3540,26 @@ struct SessionSettlementAuthorityRequirement {
     session_binding: String,
     session_authority_commitment_algorithm: String,
     session_authority_commitment: String,
+    authority_authentication: SessionAuthorityAuthenticationEvidence,
     consumed_input_index: u32,
     required_lock_binding: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct SessionAuthorityAuthenticationEvidence {
+    schema: String,
+    mode: String,
+    signature_domain: String,
+    participant_set_hash: String,
+    threshold: u32,
+    signer_count: u32,
+    message_hash: String,
+    attestation_hashes: Vec<String>,
+    attestation_hash: String,
+    ckb_lock_policy: String,
+    ckb_enforceable: bool,
+    testnet_beta_ready: bool,
+    production_ready: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -3570,8 +3818,36 @@ struct SessionSubmissionReadinessReport {
     session_id_hash: Option<String>,
     duplicate_settlement_detected: bool,
     replay_protection_mode: Option<String>,
+    operational_policy: SessionOperationalPolicyEvidence,
     checks: Vec<SessionSubmissionReadinessCheck>,
     notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionOperationalPolicyEvidence {
+    schema: String,
+    mode: String,
+    reorg_policy: String,
+    min_confirmations: u64,
+    confirmations: Option<u64>,
+    reorg_policy_checked: bool,
+    fee_policy: String,
+    fee_shannons: Option<u64>,
+    min_fee_shannons: u64,
+    min_fee_rate_shannons_per_kb: u64,
+    max_fee_shannons: Option<u64>,
+    fee_policy_checked: bool,
+    retry_policy: String,
+    retry_policy_checked: bool,
+    key_policy: String,
+    key_policy_checked: bool,
+    monitoring_policy: String,
+    monitoring_policy_checked: bool,
+    policy_commitment_algorithm: String,
+    policy_commitment: String,
+    public_chain_ready: bool,
+    testnet_beta_ready: bool,
+    production_ready: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -4160,6 +4436,15 @@ fn session_da_manifest(bundle_path: PathBuf, storage_dir: Option<PathBuf>) -> Re
     let proof_valid = proof.verify().map_err(|error| CliError::InvalidFixture(format!("DA proof verification error: {error}")))?;
     let proof_molecule_hex = hex::encode(proof.to_molecule_bytes());
     let court_bundle_hash = blake3_32(b"myelin:session-court-bundle-json:v1", &bundle_bytes);
+    let segment_root = hex::encode(proof.segment_root);
+    let availability = da_availability_evidence(
+        &bundle.session_id,
+        &hex::encode(court_bundle_hash),
+        &bundle.molecule_transaction_hash,
+        &segment_root,
+        &proof_molecule_hex,
+        local_da_published,
+    )?;
 
     Ok(SessionDaManifestReport {
         schema: "myelin-session-da-manifest-v1".to_owned(),
@@ -4176,10 +4461,11 @@ fn session_da_manifest(bundle_path: PathBuf, storage_dir: Option<PathBuf>) -> Re
         leaf_index: proof.leaf_index,
         chunk_offset: proof.chunk_offset,
         chunk_length: proof.chunk_length,
-        segment_root: hex::encode(proof.segment_root),
+        segment_root,
         segment_sealed,
         proof_molecule_hex,
         proof_valid,
+        availability,
         local_da_published,
         da_storage_path,
         l1_da_published: false,
@@ -4358,6 +4644,53 @@ fn verify_session_da_manifest(
         Some(hex::encode(proof.segment_root)),
         Some(manifest.segment_root.clone()),
         "manifest segment root matches encoded proof",
+    );
+    let expected_availability = da_availability_evidence(
+        &manifest.session_id,
+        &manifest.court_bundle_hash,
+        &manifest.molecule_transaction_hash,
+        &manifest.segment_root,
+        &manifest.proof_molecule_hex,
+        manifest.local_da_published,
+    )?;
+    push_check(
+        &mut checks,
+        "da-availability-schema",
+        manifest.availability.schema == expected_availability.schema,
+        Some(expected_availability.schema.clone()),
+        Some(manifest.availability.schema.clone()),
+        "DA availability evidence schema is recognised",
+    );
+    push_check(
+        &mut checks,
+        "da-availability-mode",
+        manifest.availability.mode == expected_availability.mode,
+        Some(expected_availability.mode.clone()),
+        Some(manifest.availability.mode.clone()),
+        "DA availability evidence uses the replicated committee profile",
+    );
+    push_check(
+        &mut checks,
+        "da-availability-commitment",
+        manifest.availability == expected_availability,
+        Some(expected_availability.availability_commitment.clone()),
+        Some(manifest.availability.availability_commitment.clone()),
+        "DA availability commitment recomputes from payload hash, segment root, proof hash, and committee attestations",
+    );
+    push_check(
+        &mut checks,
+        "da-availability-ready",
+        manifest.availability.availability_checked
+            && !manifest.availability.testnet_beta_ready
+            && !manifest.availability.production_ready,
+        Some("availability_checked && !testnet_beta_ready && !production_ready".to_owned()),
+        Some(format!(
+            "{} && !{} && !{}",
+            manifest.availability.availability_checked,
+            manifest.availability.testnet_beta_ready,
+            manifest.availability.production_ready
+        )),
+        "DA manifest carries a deterministic availability commitment without claiming external DA readiness",
     );
     push_check(
         &mut checks,
@@ -4909,6 +5242,14 @@ fn session_settlement_intent(
     };
     let court_bundle_hash = blake3_32(b"myelin:session-court-bundle-json:v1", &bundle_bytes);
     let da_manifest_hash = blake3_32(b"myelin:session-da-manifest-json:v1", &da_bytes);
+    let court_economics = court_economics_evidence(
+        &bundle.participant_set_hash,
+        &bundle.escrow_input_cells_hash,
+        &bundle.challenge_payload_hash,
+        &da_manifest.availability.availability_commitment,
+        challenge_window_ms,
+        challenge_deadline_ms,
+    )?;
 
     Ok(SessionSettlementIntentReport {
         schema: "myelin-session-settlement-intent-v1".to_owned(),
@@ -4931,6 +5272,7 @@ fn session_settlement_intent(
         challenge_deadline_ms,
         current_time_ms,
         settlement_permitted,
+        court_economics,
         l1_da_published: da_manifest.l1_da_published,
         l1_court_implemented: false,
         reason,
@@ -5129,6 +5471,38 @@ fn verify_session_settlement_intent(
         Some(expected_permitted.to_string()),
         Some(intent.settlement_permitted.to_string()),
         "settlement permission matches challenge-window timing",
+    );
+    let expected_court_economics = court_economics_evidence(
+        &bundle.participant_set_hash,
+        &bundle.escrow_input_cells_hash,
+        &bundle.challenge_payload_hash,
+        &da_manifest.availability.availability_commitment,
+        intent.challenge_window_ms,
+        intent.challenge_deadline_ms,
+    )?;
+    push_check(
+        &mut checks,
+        "court-economics-schema",
+        intent.court_economics.schema == expected_court_economics.schema,
+        Some(expected_court_economics.schema.clone()),
+        Some(intent.court_economics.schema.clone()),
+        "settlement intent declares the court/dispute economics schema",
+    );
+    push_check(
+        &mut checks,
+        "court-economics-commitment",
+        intent.court_economics == expected_court_economics,
+        Some(expected_court_economics.economics_commitment.clone()),
+        Some(intent.court_economics.economics_commitment.clone()),
+        "court economics recomputes from participant/escrow binding, DA availability, and challenge timing",
+    );
+    push_check(
+        &mut checks,
+        "court-economics-ready",
+        intent.court_economics.court_economics_checked && intent.court_economics.testnet_beta_ready,
+        Some("court_economics_checked && testnet_beta_ready".to_owned()),
+        Some(format!("{} && {}", intent.court_economics.court_economics_checked, intent.court_economics.testnet_beta_ready)),
+        "court economics are machine-checked for testnet-beta settlement readiness",
     );
     push_check(
         &mut checks,
@@ -5440,6 +5814,49 @@ fn verify_session_settlement_package(
         Some(expected_authority.session_authority_commitment.clone()),
         Some(package.settlement_authority.session_authority_commitment.clone()),
         "settlement authority commitment binds the settlement intent hash to session id, participants, and escrow lineage",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-authentication-schema",
+        package.settlement_authority.authority_authentication.schema == expected_authority.authority_authentication.schema,
+        Some(expected_authority.authority_authentication.schema.clone()),
+        Some(package.settlement_authority.authority_authentication.schema.clone()),
+        "settlement authority declares the participant-authentication evidence schema",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-authentication-mode",
+        package.settlement_authority.authority_authentication.mode == expected_authority.authority_authentication.mode,
+        Some(expected_authority.authority_authentication.mode.clone()),
+        Some(package.settlement_authority.authority_authentication.mode.clone()),
+        "settlement authority creation is constrained to a CKB threshold-lock policy",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-authentication-hash",
+        package.settlement_authority.authority_authentication == expected_authority.authority_authentication,
+        Some(expected_authority.authority_authentication.attestation_hash.clone()),
+        Some(package.settlement_authority.authority_authentication.attestation_hash.clone()),
+        "settlement authority authentication recomputes from authority data hash and session lineage",
+    );
+    push_check(
+        &mut checks,
+        "settlement-authority-authentication-ready",
+        !package.settlement_authority.authority_authentication.ckb_enforceable
+            && !package.settlement_authority.authority_authentication.testnet_beta_ready
+            && !package.settlement_authority.authority_authentication.production_ready
+            && package.settlement_authority.authority_authentication.signer_count
+                >= package.settlement_authority.authority_authentication.threshold,
+        Some("!ckb_enforceable && !testnet_beta_ready && !production_ready && signer_count >= threshold".to_owned()),
+        Some(format!(
+            "!{} && !{} && !{} && {} >= {}",
+            package.settlement_authority.authority_authentication.ckb_enforceable,
+            package.settlement_authority.authority_authentication.testnet_beta_ready,
+            package.settlement_authority.authority_authentication.production_ready,
+            package.settlement_authority.authority_authentication.signer_count,
+            package.settlement_authority.authority_authentication.threshold
+        )),
+        "settlement authority carries a deterministic threshold-lock commitment without claiming participant-authenticated CKB enforcement",
     );
     push_check(
         &mut checks,
@@ -7206,8 +7623,7 @@ fn verify_session_submission_readiness(
             && !duplicate_settlement_detected
             && settlement_identity_hash.as_deref().and_then(normalize_ckb_tx_hash).is_some()
             && session_id_hash.as_deref().and_then(normalize_ckb_tx_hash).is_some()
-            && replay_protection_mode.as_deref()
-                == Some("authority-cell-single-use-plus-transaction-local-final-script-singleton"));
+            && replay_protection_mode.as_deref() == Some("authority-cell-single-use-plus-transaction-local-final-script-singleton"));
     let submission_lineage_matches = report_paths_match(&context.submission, &economics.submission)
         && report_paths_match(&context.submission, &inclusion.submission)
         && context.submission_schema == economics.submission_schema
@@ -7236,6 +7652,20 @@ fn verify_session_submission_readiness(
     let stable_block_identity = stability.stable_block_identity && !stability.reorg_detected && !stability.missing_or_uncommitted;
     let finality_confirmed = finality.finality_confirmed;
     let reorg_risk_bounded = finality.reorg_risk_bounded;
+    let operational_policy = operational_policy_evidence(
+        &context,
+        &economics,
+        &inclusion,
+        &stability,
+        &finality,
+        report_hashes_match,
+        submission_lineage_matches,
+        inclusion_lineage_matches,
+        block_identity_matches,
+        submission_report_live_accepted,
+        submission_report_carrier_live_accepted,
+        submission_report_final_l1_script_live_accepted,
+    );
 
     let checks = vec![
         readiness_check(
@@ -7290,6 +7720,11 @@ fn verify_session_submission_readiness(
             "settlement-uniqueness-checked",
             settlement_uniqueness_ready,
             "final settlement strict readiness requires session identity, settlement identity, duplicate detection, and replay-protection mode evidence",
+        ),
+        readiness_check(
+            "operational-policy-testnet-ready",
+            operational_policy.testnet_beta_ready,
+            "readiness requires explicit reorg, fee, retry, key, and monitoring policy evidence for testnet-beta public-chain operation",
         ),
     ];
     let base_submission_ready = report_hashes_match
@@ -7374,6 +7809,7 @@ fn verify_session_submission_readiness(
         session_id_hash,
         duplicate_settlement_detected,
         replay_protection_mode,
+        operational_policy,
         checks,
         notes,
     })
@@ -7393,6 +7829,179 @@ fn require_report_schema(actual: &str, expected: &str, label: &str) -> Result<()
 
 fn readiness_check(name: &str, ok: bool, detail: &str) -> SessionSubmissionReadinessCheck {
     SessionSubmissionReadinessCheck { name: name.to_owned(), ok, detail: detail.to_owned() }
+}
+
+fn hash_optional_str(hasher: &mut blake3::Hasher, value: &Option<String>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(value.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    };
+}
+
+fn hash_optional_u64(hasher: &mut blake3::Hasher, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.to_le_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    };
+}
+
+#[allow(clippy::too_many_arguments)]
+fn operational_policy_evidence(
+    context: &SessionSubmissionContextReport,
+    economics: &SessionSubmissionEconomicsReport,
+    inclusion: &SessionSubmissionInclusionReport,
+    stability: &SessionSubmissionStabilityReport,
+    finality: &SessionSubmissionFinalityReport,
+    report_hashes_match: bool,
+    submission_lineage_matches: bool,
+    inclusion_lineage_matches: bool,
+    block_identity_matches: bool,
+    submission_report_live_accepted: bool,
+    submission_report_carrier_live_accepted: bool,
+    submission_report_final_l1_script_live_accepted: bool,
+) -> SessionOperationalPolicyEvidence {
+    let reorg_policy_checked = finality.min_confirmations > 0
+        && finality.finality_confirmed
+        && finality.reorg_risk_bounded
+        && stability.stable_block_identity
+        && !stability.reorg_detected
+        && inclusion.committed;
+    let fee_policy_checked = economics.economically_ready
+        && economics.capacity_balanced
+        && economics.fee_sufficient
+        && economics.fee_rate_sufficient
+        && economics.fee_not_excessive;
+    let retry_policy_checked = report_hashes_match
+        && submission_lineage_matches
+        && inclusion_lineage_matches
+        && context.expected_ckb_tx_hash == economics.expected_ckb_tx_hash
+        && context.expected_ckb_tx_hash == inclusion.expected_ckb_tx_hash
+        && inclusion.expected_ckb_tx_hash == stability.expected_ckb_tx_hash
+        && inclusion.expected_ckb_tx_hash == finality.expected_ckb_tx_hash;
+    let key_policy_checked = submission_report_live_accepted
+        && (submission_report_carrier_live_accepted || submission_report_final_l1_script_live_accepted);
+    let monitoring_policy_checked = block_identity_matches
+        && context.ready_for_ckb_submission
+        && inclusion.live_l1_observed
+        && stability.observed_block_hash == inclusion.block_hash
+        && finality.committed_block_hash == inclusion.block_hash;
+    let public_chain_ready =
+        reorg_policy_checked && fee_policy_checked && retry_policy_checked && key_policy_checked && monitoring_policy_checked;
+    let testnet_beta_ready = reorg_policy_checked && fee_policy_checked && retry_policy_checked && monitoring_policy_checked;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"myelin:session-public-chain-operational-policy:v1");
+    hasher.update(context.expected_ckb_tx_hash.as_bytes());
+    hasher.update(economics.expected_ckb_tx_hash.as_bytes());
+    hasher.update(inclusion.expected_ckb_tx_hash.as_bytes());
+    hasher.update(stability.expected_ckb_tx_hash.as_bytes());
+    hasher.update(finality.expected_ckb_tx_hash.as_bytes());
+    hasher.update(context.submission_schema.as_bytes());
+    hasher.update(economics.submission_schema.as_bytes());
+    hasher.update(inclusion.submission_schema.as_bytes());
+    hasher.update(context.submission.as_bytes());
+    hasher.update(economics.submission.as_bytes());
+    hasher.update(inclusion.submission.as_bytes());
+    hasher.update(stability.inclusion.as_bytes());
+    hasher.update(finality.inclusion.as_bytes());
+    hash_optional_str(&mut hasher, &inclusion.block_hash);
+    hash_optional_str(&mut hasher, &inclusion.block_number);
+    hash_optional_str(&mut hasher, &stability.expected_block_hash);
+    hash_optional_str(&mut hasher, &stability.expected_block_number);
+    hash_optional_str(&mut hasher, &stability.observed_block_hash);
+    hash_optional_str(&mut hasher, &stability.observed_block_number);
+    hash_optional_str(&mut hasher, &finality.committed_block_hash);
+    hash_optional_str(&mut hasher, &finality.committed_block_number);
+    hasher.update(&finality.min_confirmations.to_le_bytes());
+    hash_optional_u64(&mut hasher, finality.confirmations);
+    hasher.update(&(context.input_count as u64).to_le_bytes());
+    hasher.update(&(context.cell_dep_count as u64).to_le_bytes());
+    hasher.update(&(context.live_input_count as u64).to_le_bytes());
+    hasher.update(&(context.live_cell_dep_count as u64).to_le_bytes());
+    hasher.update(&(economics.input_count as u64).to_le_bytes());
+    hasher.update(&(economics.output_count as u64).to_le_bytes());
+    hasher.update(&(economics.outputs_data_count as u64).to_le_bytes());
+    hash_optional_u64(&mut hasher, economics.total_input_capacity);
+    hash_optional_u64(&mut hasher, economics.total_output_capacity);
+    hash_optional_u64(&mut hasher, economics.fee_shannons);
+    hasher.update(&economics.min_fee_shannons.to_le_bytes());
+    hasher.update(&economics.min_fee_rate_shannons_per_kb.to_le_bytes());
+    hasher.update(&economics.required_fee_shannons.to_le_bytes());
+    hash_optional_u64(&mut hasher, economics.max_fee_shannons);
+    hasher.update(&(economics.data_bearing_output_count as u64).to_le_bytes());
+    hasher.update(&(economics.empty_data_output_count as u64).to_le_bytes());
+    hasher.update(&(economics.explicit_change_output_count as u64).to_le_bytes());
+    hasher.update(&economics.explicit_change_capacity.to_le_bytes());
+    hasher.update(&[
+        report_hashes_match as u8,
+        submission_lineage_matches as u8,
+        inclusion_lineage_matches as u8,
+        block_identity_matches as u8,
+        context.ready_for_ckb_submission as u8,
+        context.all_inputs_live as u8,
+        context.all_cell_deps_live as u8,
+        economics.economically_ready as u8,
+        economics.all_inputs_live as u8,
+        economics.capacity_balanced as u8,
+        economics.fee_sufficient as u8,
+        economics.fee_rate_sufficient as u8,
+        economics.fee_not_excessive as u8,
+        inclusion.live_l1_observed as u8,
+        inclusion.committed as u8,
+        inclusion.met_min_status as u8,
+        stability.stable_block_identity as u8,
+        stability.reorg_detected as u8,
+        stability.missing_or_uncommitted as u8,
+        finality.finality_confirmed as u8,
+        finality.reorg_risk_bounded as u8,
+        submission_report_live_accepted as u8,
+        submission_report_carrier_live_accepted as u8,
+        submission_report_final_l1_script_live_accepted as u8,
+        reorg_policy_checked as u8,
+        fee_policy_checked as u8,
+        retry_policy_checked as u8,
+        key_policy_checked as u8,
+        monitoring_policy_checked as u8,
+        public_chain_ready as u8,
+        testnet_beta_ready as u8,
+    ]);
+    let policy_commitment = *hasher.finalize().as_bytes();
+    SessionOperationalPolicyEvidence {
+        schema: "myelin-public-chain-operational-policy-v1".to_owned(),
+        mode: "ckb-public-chain-testnet-beta".to_owned(),
+        reorg_policy: "min-confirmations-plus-stability-requery".to_owned(),
+        min_confirmations: finality.min_confirmations,
+        confirmations: finality.confirmations,
+        reorg_policy_checked,
+        fee_policy: "bounded-fee-floor-rate-and-max-fee".to_owned(),
+        fee_shannons: economics.fee_shannons,
+        min_fee_shannons: economics.min_fee_shannons,
+        min_fee_rate_shannons_per_kb: economics.min_fee_rate_shannons_per_kb,
+        max_fee_shannons: economics.max_fee_shannons,
+        fee_policy_checked,
+        retry_policy: "idempotent-submission-retry-by-package-commitment-and-ckb-tx-hash".to_owned(),
+        retry_policy_checked,
+        key_policy: "live-submission-evidence-present; production-custody-not-configured".to_owned(),
+        key_policy_checked,
+        monitoring_policy: "context-economics-inclusion-stability-finality-report-chain".to_owned(),
+        monitoring_policy_checked,
+        policy_commitment_algorithm:
+            "blake3(myelin:session-public-chain-operational-policy:v1,report_hashes,lineage_paths,block_identity,confirmation_policy,capacity_fee_policy,submission_key_markers,policy_flags)"
+                .to_owned(),
+        policy_commitment: hex::encode(policy_commitment),
+        public_chain_ready,
+        testnet_beta_ready,
+        production_ready: false,
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -7490,6 +8099,10 @@ fn json_bool_true(report: &Value, pointer: &str) -> bool {
     report.pointer(pointer).and_then(Value::as_bool) == Some(true)
 }
 
+fn json_bool_false(report: &Value, pointer: &str) -> bool {
+    report.pointer(pointer).and_then(Value::as_bool) == Some(false)
+}
+
 fn final_l1_script_preflight_ready(submission: &Value) -> bool {
     if submission.get("verifier_role").and_then(Value::as_str) != Some("final-l1-script") {
         return false;
@@ -7526,6 +8139,14 @@ fn final_l1_script_preflight_ready(submission: &Value) -> bool {
                 && submission.get("evidence_cell_dep_present").and_then(Value::as_bool) == Some(true)
                 && submission.get("authority_input_present").and_then(Value::as_bool) == Some(true)
                 && submission.get("settlement_authority_requirement").is_some_and(Value::is_object)
+                && submission.pointer("/settlement_authority_requirement/authority_authentication").is_some_and(Value::is_object)
+                && json_bool_false(submission, "/settlement_authority_requirement/authority_authentication/ckb_enforceable")
+                && json_bool_false(submission, "/settlement_authority_requirement/authority_authentication/testnet_beta_ready")
+                && json_bool_false(submission, "/settlement_authority_requirement/authority_authentication/production_ready")
+                && submission
+                    .pointer("/settlement_authority_requirement/authority_authentication/attestation_hash")
+                    .and_then(Value::as_str)
+                    .is_some_and(|hash| hash.len() == 64 && hex::decode(hash).is_ok())
                 && json_bool_true(submission, "/settlement_uniqueness_checked")
                 && submission.get("duplicate_settlement_detected").and_then(Value::as_bool) == Some(false)
                 && submission.get("settlement_identity_hash").and_then(Value::as_str).and_then(normalize_ckb_tx_hash).is_some()
@@ -9326,9 +9947,30 @@ mod tests {
                 "data": format!("0x{}", "11".repeat(32)),
                 "data_hash": format!("0x{}", "22".repeat(32)),
                 "data_semantics": "settlement-authority-lineage-v1",
+                "session_id": "44".repeat(32),
+                "authority_authentication": {
+                    "schema": "myelin-session-settlement-authority-auth-v1",
+                    "mode": "ckb-threshold-lock",
+                    "signature_domain": "myelin:session-settlement-authority-cell-auth:v1",
+                    "participant_set_hash": "46".repeat(32),
+                    "threshold": 2,
+                    "signer_count": 2,
+                    "message_hash": "47".repeat(32),
+                    "attestation_hashes": ["48".repeat(32), "49".repeat(32)],
+                    "attestation_hash": "4a".repeat(32),
+                    "ckb_lock_policy": "threshold lock must guard creation of the one-use settlement authority cell",
+                    "ckb_enforceable": false,
+                    "testnet_beta_ready": false,
+                    "production_ready": false
+                },
                 "consumed_input_index": 1,
                 "required_lock_binding": "final-da-publication-lock-hash"
             },
+            "settlement_uniqueness_checked": true,
+            "settlement_identity_hash": format!("0x{}", "45".repeat(32)),
+            "session_id_hash": format!("0x{}", "44".repeat(32)),
+            "duplicate_settlement_detected": false,
+            "replay_protection_mode": "authority-cell-single-use-plus-transaction-local-final-script-singleton",
             "pre_submit_context_checked": true,
             "pre_submit_input_live": true,
             "pre_submit_input_capacity_matches": true,
@@ -9674,6 +10316,11 @@ mod tests {
         assert_eq!(manifest.molecule_transaction_hash, bundle.molecule_transaction_hash);
         assert_eq!(manifest.challenge_payload_hash, bundle.challenge_payload_hash);
         assert!(manifest.proof_valid);
+        assert_eq!(manifest.availability.schema, "myelin-da-availability-v1");
+        assert_eq!(manifest.availability.mode, "replicated-da-committee");
+        assert!(manifest.availability.availability_checked);
+        assert!(!manifest.availability.testnet_beta_ready);
+        assert!(!manifest.availability.production_ready);
         assert!(!manifest.l1_da_published);
 
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-manifest-{}.json", std::process::id()));
@@ -9686,6 +10333,8 @@ mod tests {
         assert!(verification.checks.iter().all(|check| check.ok));
         assert!(verification.checks.iter().any(|check| check.name == "proof-verifies"));
         assert!(verification.checks.iter().any(|check| check.name == "proof-payload"));
+        assert!(verification.checks.iter().any(|check| check.name == "da-availability-commitment"));
+        assert!(verification.checks.iter().any(|check| check.name == "da-availability-ready"));
         assert!(verification.checks.iter().any(|check| check.name == "l1-da-marker"));
     }
 
@@ -9754,6 +10403,46 @@ mod tests {
 
         assert!(!verification.valid);
         assert!(verification.checks.iter().any(|check| check.name == "segment-root" && !check.ok));
+    }
+
+    #[test]
+    fn session_da_manifest_rejects_tampered_availability_evidence() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-availability-tamper-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path =
+            std::env::temp_dir().join(format!("myelin-session-commit-da-availability-tamper-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path =
+            std::env::temp_dir().join(format!("myelin-session-court-da-availability-tamper-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let cases: [(&str, fn(&mut SessionDaManifestReport)); 6] = [
+            ("availability-commitment", |manifest| manifest.availability.availability_commitment = "22".repeat(32)),
+            ("availability-payload-hash", |manifest| manifest.availability.payload_hash = "23".repeat(32)),
+            ("availability-segment-root", |manifest| manifest.availability.segment_root = "24".repeat(32)),
+            ("availability-proof-hash", |manifest| manifest.availability.proof_molecule_hash = "25".repeat(32)),
+            ("availability-attestation-count", |manifest| manifest.availability.attestation_count = 1),
+            ("availability-checked", |manifest| manifest.availability.availability_checked = false),
+        ];
+        for (label, mutate) in cases {
+            let mut tampered = manifest.clone();
+            mutate(&mut tampered);
+            let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-{label}-tamper-{}.json", std::process::id()));
+            std::fs::write(&manifest_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+            let verification =
+                verify_session_da_manifest(manifest_path.clone(), bundle_path.clone(), None).expect("verify tampered DA manifest");
+            let _ = std::fs::remove_file(manifest_path);
+
+            assert!(!verification.valid, "{label} tamper must be rejected");
+            assert!(verification.checks.iter().any(|check| check.name == "da-availability-commitment" && !check.ok), "{label}");
+        }
+        let _ = std::fs::remove_file(bundle_path);
     }
 
     #[test]
@@ -10033,6 +10722,14 @@ mod tests {
         assert_eq!(intent.da_segment_root, da_manifest.segment_root);
         assert_eq!(intent.challenge_deadline_ms, 60_000);
         assert!(intent.settlement_permitted);
+        assert_eq!(intent.court_economics.schema, "myelin-session-court-economics-v1");
+        assert_eq!(intent.court_economics.mode, "disputed-close-testnet-beta");
+        assert_eq!(intent.court_economics.participant_set_hash, bundle.participant_set_hash);
+        assert_eq!(intent.court_economics.escrow_input_cells_hash, bundle.escrow_input_cells_hash);
+        assert_eq!(intent.court_economics.da_availability_commitment, da_manifest.availability.availability_commitment);
+        assert!(intent.court_economics.court_economics_checked);
+        assert!(intent.court_economics.testnet_beta_ready);
+        assert!(!intent.court_economics.production_ready);
         assert!(!intent.l1_da_published);
         assert!(!intent.l1_court_implemented);
 
@@ -10052,8 +10749,53 @@ mod tests {
         assert!(verification.checks.iter().any(|check| check.name == "state-root-before"));
         assert!(verification.checks.iter().any(|check| check.name == "vm-profile"));
         assert!(verification.checks.iter().any(|check| check.name == "challenge-window-nonzero"));
+        assert!(verification.checks.iter().any(|check| check.name == "court-economics-commitment"));
+        assert!(verification.checks.iter().any(|check| check.name == "court-economics-ready"));
         assert!(verification.checks.iter().any(|check| check.name == "l1-da-marker"));
         assert!(verification.checks.iter().any(|check| check.name == "settlement-permitted"));
+    }
+
+    #[test]
+    fn session_settlement_intent_rejects_tampered_court_economics() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-economics-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-economics-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-economics-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-economics-{}.json", std::process::id()));
+        std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
+
+        let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
+            .expect("settlement intent");
+        let cases: [(&str, fn(&mut SessionSettlementIntentReport)); 6] = [
+            ("economics-commitment", |intent| intent.court_economics.economics_commitment = "55".repeat(32)),
+            ("economics-participant-set", |intent| intent.court_economics.participant_set_hash = "56".repeat(32)),
+            ("economics-escrow", |intent| intent.court_economics.escrow_input_cells_hash = "57".repeat(32)),
+            ("economics-da-availability", |intent| intent.court_economics.da_availability_commitment = "58".repeat(32)),
+            ("economics-challenge-deadline", |intent| intent.court_economics.challenge_deadline_ms += 1),
+            ("economics-checked", |intent| intent.court_economics.court_economics_checked = false),
+        ];
+        for (label, mutate) in cases {
+            let mut tampered = intent.clone();
+            mutate(&mut tampered);
+            let intent_path = std::env::temp_dir().join(format!("myelin-session-intent-{label}-tamper-{}.json", std::process::id()));
+            std::fs::write(&intent_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+            let verification = verify_session_settlement_intent(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+                .expect("verify tampered settlement intent");
+            let _ = std::fs::remove_file(intent_path);
+
+            assert!(!verification.valid, "{label} tamper must be rejected");
+            assert!(verification.checks.iter().any(|check| check.name == "court-economics-commitment" && !check.ok), "{label}");
+        }
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
     }
 
     #[test]
@@ -10119,6 +10861,12 @@ mod tests {
         assert_eq!(package.settlement_authority.session_lineage_commitment, expected_authority.session_lineage_commitment);
         assert_eq!(package.settlement_authority.session_binding, "session-id-and-lineage-commit-participants-and-escrow");
         assert_eq!(package.settlement_authority.session_authority_commitment, expected_authority.session_authority_commitment);
+        assert_eq!(package.settlement_authority.authority_authentication, expected_authority.authority_authentication);
+        assert_eq!(package.settlement_authority.authority_authentication.schema, "myelin-session-settlement-authority-auth-v1");
+        assert_eq!(package.settlement_authority.authority_authentication.mode, "ckb-threshold-lock");
+        assert!(!package.settlement_authority.authority_authentication.ckb_enforceable);
+        assert!(!package.settlement_authority.authority_authentication.testnet_beta_ready);
+        assert!(!package.settlement_authority.authority_authentication.production_ready);
         assert_eq!(package.settlement_authority.consumed_input_index, 1);
         assert_eq!(package.settlement_authority.required_lock_binding, "final-da-publication-lock-hash");
         assert_eq!(package.carrier_payload_kind, "myelin-session-settlement-carrier-v1");
@@ -10153,6 +10901,8 @@ mod tests {
         assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-data-hash"));
         assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-session-id"));
         assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-lineage-commitment"));
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-authentication-hash"));
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-authentication-ready"));
         assert!(verification.checks.iter().any(|check| check.name == "settlement-intent-valid"));
         assert!(verification.checks.iter().any(|check| check.name == "carrier-payload"));
         assert!(verification.checks.iter().any(|check| check.name == "carrier-payload-data-hash"));
@@ -11585,10 +12335,17 @@ mod tests {
         let settlement_authority =
             serde_json::from_value::<SessionSettlementAuthorityRequirement>(package["settlement_authority"].clone())
                 .expect("settlement authority");
+        let expected_session_id_hash = format!("0x{}", settlement_authority.session_id);
+        let expected_settlement_identity_hash = format!("0x{}", hex::encode(ckb_cell_data_hash(&payload_bytes)));
         assert_eq!(
             report["carrier_type_args"],
             settlement_final_type_args_hex(&payload_bytes, &settlement_authority).expect("final settlement type args")
         );
+        assert_eq!(report["settlement_uniqueness_checked"], true);
+        assert_eq!(report["settlement_identity_hash"], expected_settlement_identity_hash);
+        assert_eq!(report["session_id_hash"], expected_session_id_hash);
+        assert_eq!(report["duplicate_settlement_detected"], false);
+        assert_eq!(report["replay_protection_mode"], "authority-cell-single-use-plus-transaction-local-final-script-singleton");
     }
 
     #[test]
@@ -12107,6 +12864,15 @@ mod tests {
         assert!(!report.live_carrier_submission_ready);
         assert!(!report.final_l1_script_submission_ready);
         assert_eq!(report.readiness_evidence_mode, "coherent-offline-or-mock");
+        assert_eq!(report.operational_policy.schema, "myelin-public-chain-operational-policy-v1");
+        assert!(report.operational_policy.reorg_policy_checked);
+        assert!(report.operational_policy.fee_policy_checked);
+        assert!(report.operational_policy.retry_policy_checked);
+        assert!(!report.operational_policy.key_policy_checked);
+        assert!(report.operational_policy.monitoring_policy_checked);
+        assert!(report.operational_policy.testnet_beta_ready);
+        assert!(!report.operational_policy.public_chain_ready);
+        assert!(!report.operational_policy.production_ready);
         assert!(report.checks.iter().all(|check| check.ok));
         assert!(report.notes.iter().any(|note| note.contains("operationally ready")));
         assert!(report.notes.iter().any(|note| note.contains("offline/mock/coherent-report readiness")));
@@ -12161,10 +12927,15 @@ mod tests {
         assert!(report.stable_block_identity);
         assert!(!report.finality_confirmed);
         assert!(!report.reorg_risk_bounded);
+        assert!(!report.operational_policy.reorg_policy_checked);
+        assert!(!report.operational_policy.retry_policy_checked);
+        assert!(!report.operational_policy.testnet_beta_ready);
+        assert!(!report.operational_policy.public_chain_ready);
         assert!(!report.production_submission_ready);
         assert!(!report.strict_production_submission_ready);
         assert!(report.checks.iter().any(|check| check.name == "report-hashes-match" && !check.ok));
         assert!(report.checks.iter().any(|check| check.name == "finality-confirmed" && !check.ok));
+        assert!(report.checks.iter().any(|check| check.name == "operational-policy-testnet-ready" && !check.ok));
     }
 
     #[test]
@@ -12425,6 +13196,9 @@ mod tests {
         assert!(!report.live_carrier_submission_ready);
         assert!(report.final_l1_script_submission_ready);
         assert_eq!(report.readiness_evidence_mode, "final-l1-script");
+        assert!(report.operational_policy.public_chain_ready);
+        assert!(report.operational_policy.testnet_beta_ready);
+        assert!(!report.operational_policy.production_ready);
     }
 
     #[test]
@@ -12529,6 +13303,61 @@ mod tests {
             &expected_hash
         ));
         let _ = std::fs::remove_file(valid_submission_path);
+    }
+
+    #[test]
+    fn session_submission_readiness_requires_final_settlement_uniqueness_evidence() {
+        let expected_hash = format!("0x{}", "8e".repeat(32));
+        let block_hash = format!("0x{}", "8f".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        economics.submission_schema = context.submission_schema.clone();
+        inclusion.submission_schema = context.submission_schema.clone();
+        let valid_submission_path = write_readiness_live_final_settlement_submission(&expected_hash, true);
+        let mut submission =
+            serde_json::from_slice::<Value>(&std::fs::read(&valid_submission_path).expect("read final settlement submission"))
+                .expect("final settlement submission JSON");
+        submission["settlement_uniqueness_checked"] = Value::Bool(false);
+        submission["duplicate_settlement_detected"] = Value::Bool(true);
+        let submission_path = write_temp_json("readiness-final-settlement-uniqueness-bad", &submission);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-final-settlement-uniqueness-bad", &context);
+        let economics_path = write_temp_json("readiness-economics-final-settlement-uniqueness-bad", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-final-settlement-uniqueness-bad", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-final-settlement-uniqueness-bad", &stability);
+        let finality_path = write_temp_json("readiness-finality-final-settlement-uniqueness-bad", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+        )
+        .expect("verify final settlement readiness with uniqueness failure");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(valid_submission_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert!(report.report_hashes_match);
+        assert!(report.submission_report_valid);
+        assert!(!report.submission_report_live_accepted);
+        assert!(!report.submission_report_final_l1_script_live_accepted);
+        assert!(!report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(!report.final_l1_script_submission_ready);
+        assert!(!report.settlement_uniqueness_checked);
+        assert!(report.duplicate_settlement_detected);
+        assert!(report.checks.iter().any(|check| check.name == "settlement-uniqueness-checked" && !check.ok));
     }
 
     #[test]
@@ -12728,6 +13557,70 @@ mod tests {
         assert!(!verification.valid);
         assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-lineage-commitment" && !check.ok));
         assert!(verification.checks.iter().any(|check| check.name == "settlement-celltx-recomputes" && check.ok));
+    }
+
+    #[test]
+    fn session_settlement_package_rejects_tampered_authority_authentication() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-authority-auth-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-authority-auth-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-authority-auth-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-authority-auth-{}.json", std::process::id()));
+        std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
+        let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
+            .expect("settlement intent");
+        let intent_path = std::env::temp_dir().join(format!("myelin-session-intent-authority-auth-{}.json", std::process::id()));
+        std::fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+
+        let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+            .expect("settlement package");
+        let cases: [(&str, fn(&mut SessionSettlementPackageReport)); 7] = [
+            ("authority-auth-hash", |package| {
+                package.settlement_authority.authority_authentication.attestation_hash = "33".repeat(32)
+            }),
+            ("authority-auth-message", |package| package.settlement_authority.authority_authentication.message_hash = "34".repeat(32)),
+            ("authority-auth-participant", |package| {
+                package.settlement_authority.authority_authentication.participant_set_hash = "35".repeat(32)
+            }),
+            ("authority-auth-threshold", |package| package.settlement_authority.authority_authentication.threshold = 3),
+            ("authority-auth-signer-count", |package| package.settlement_authority.authority_authentication.signer_count = 1),
+            ("authority-auth-enforceable", |package| package.settlement_authority.authority_authentication.ckb_enforceable = true),
+            ("authority-auth-testnet-ready", |package| {
+                package.settlement_authority.authority_authentication.testnet_beta_ready = true
+            }),
+        ];
+        for (label, mutate) in cases {
+            let mut tampered = package.clone();
+            mutate(&mut tampered);
+            let package_path = std::env::temp_dir().join(format!("myelin-session-package-{label}-tamper-{}.json", std::process::id()));
+            std::fs::write(&package_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+            let verification = verify_session_settlement_package(
+                package_path.clone(),
+                intent_path.clone(),
+                bundle_path.clone(),
+                da_manifest_path.clone(),
+            )
+            .expect("verify tampered settlement authority authentication");
+            let _ = std::fs::remove_file(package_path);
+
+            assert!(!verification.valid, "{label} tamper must be rejected");
+            assert!(
+                verification.checks.iter().any(|check| check.name == "settlement-authority-authentication-hash" && !check.ok),
+                "{label}"
+            );
+            assert!(verification.checks.iter().any(|check| check.name == "settlement-celltx-recomputes" && check.ok));
+        }
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
     }
 
     #[test]
