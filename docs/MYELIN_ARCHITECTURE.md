@@ -551,9 +551,13 @@ Cell. The settlement package now also emits and verifies local secp256k1
 threshold signatures and deterministic threshold-lock args for the
 participant-controlled authority-cell creation policy. Final-script submission
 and the devnet smoke path require the consumed authority Cell to use those
-declared lock args, but this is still not deployed CKB threshold-lock
-cryptographic enforcement. Production key custody and deployment policy remain
-separate operational work.
+declared lock args and expose an
+`authority_threshold_lock_deployment_checked` readiness marker when the live
+lock code dep plus final DA and authority cells all match the declared
+threshold-lock args. The package-level authority evidence still keeps
+`ckb_enforceable = false`; canonical deployed CKB threshold-lock cryptographic
+enforcement, production key custody, and deployment policy remain separate
+operational work.
 Settlement intents carry a recomputable `court_economics` policy commitment
 over participant/escrow binding, locally signature-verified DA committee
 availability evidence, challenge timing, minimum dispute bond, slash/reward

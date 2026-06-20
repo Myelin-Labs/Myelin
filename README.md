@@ -372,8 +372,15 @@ live final L1 script evidence whose referenced submission report also proves
 the final-script pre-submit checks: live funding/code cells, matching verifier
 code hash, and, for final settlement, the final DA evidence CellDep, the
 package-declared authority input with matching data hash and settlement lock,
-matching threshold-lock args, and explicit settlement uniqueness evidence. The
-readiness report also carries
+matching threshold-lock args, and explicit settlement uniqueness evidence. It
+also carries
+`authority_threshold_lock_deployment_checked` /
+`authority_threshold_lock_deployment_mode` for final settlement submissions,
+proving the live lock code-dep plus final DA and authority lock preflight used
+the declared threshold-lock args. It still leaves package-level
+`authority_authentication.ckb_enforceable = false` until the threshold-lock
+script itself is deployed and audited as the canonical authority lock.
+The readiness report carries
 `operational_policy`, a public-chain operations commitment covering reorg
 confirmation depth, stability requery, fee floor/rate/max-fee policy, retry
 identity, key-submission evidence, monitoring evidence, and optional hashed
@@ -417,9 +424,11 @@ That gives transaction-local singleton creation; cross-transaction replay is
 blocked by consuming the one-use authority Cell. The package now emits and
 verifies local threshold signatures plus deterministic threshold-lock args for
 authority-cell creation; final-script submission rejects a mismatched declared
-authority lock identity before broadcast, while deployed CKB threshold-lock
-cryptographic enforcement, production key custody, and deployment policy remain
-outside this milestone.
+authority lock identity before broadcast and exposes a live threshold-lock
+deployment preflight marker when the lock code dep plus final DA and authority
+cells all match the declared threshold-lock args, while canonical deployed CKB
+threshold-lock cryptographic enforcement, production key custody, and deployment
+policy remain outside this milestone.
 `session verify-settlement-package` recomputes the embedded Molecule
 transaction, CKB projection, and settlement-authority requirement.
 `session submit-settlement-package` builds the CKB

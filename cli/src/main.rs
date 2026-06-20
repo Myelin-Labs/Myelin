@@ -4216,6 +4216,8 @@ struct SessionSubmissionReadinessReport {
     session_id_hash: Option<String>,
     duplicate_settlement_detected: bool,
     replay_protection_mode: Option<String>,
+    authority_threshold_lock_deployment_checked: bool,
+    authority_threshold_lock_deployment_mode: Option<String>,
     operational_policy: SessionOperationalPolicyEvidence,
     checks: Vec<SessionSubmissionReadinessCheck>,
     notes: Vec<String>,
@@ -7149,6 +7151,16 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     });
     let l1_da_published = final_l1_script_role && accepted_by_rpc && package_kind == "myelin-session-da-anchor-package-v1";
     let l1_court_submitted = final_l1_script_role && accepted_by_rpc && package_kind == "myelin-session-settlement-package-v1";
+    let authority_threshold_lock_deployment_checked = final_l1_script_role
+        && package_kind == "myelin-session-settlement-package-v1"
+        && expected_settlement_authority.is_some()
+        && authority_threshold_lock_identity_checked
+        && pre_submit_lock_code_dep_live == Some(true)
+        && pre_submit_evidence_cell_dep_lock_matches == Some(true)
+        && pre_submit_authority_input_lock_matches == Some(true)
+        && pre_submit_authority_input_threshold_lock_args_matches == Some(true);
+    let authority_threshold_lock_deployment_mode =
+        if authority_threshold_lock_deployment_checked { Some("live-code-dep-and-authority-final-da-lock-preflight") } else { None };
     let evidence_cell_dep_report = evidence_cell_dep.as_ref().map(|(tx_hash, index, _, _, capacity)| {
         serde_json::json!({
             "tx_hash": tx_hash,
@@ -7205,6 +7217,8 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         "authority_input": authority_input_report,
         "settlement_authority_requirement": expected_settlement_authority,
         "authority_threshold_lock_identity_checked": authority_threshold_lock_identity_checked,
+        "authority_threshold_lock_deployment_checked": authority_threshold_lock_deployment_checked,
+        "authority_threshold_lock_deployment_mode": authority_threshold_lock_deployment_mode,
         "carrier_capacity_shannons": args.carrier_capacity_shannons,
         "carrier_min_capacity_shannons": carrier_min_capacity_shannons,
         "change_capacity_shannons": change_capacity,
@@ -8132,12 +8146,17 @@ fn verify_session_submission_readiness(
     let replay_protection_mode = submission_report_summary.replay_protection_mode.clone();
     let settlement_identity_hash = submission_report_summary.settlement_identity_hash.clone();
     let session_id_hash = submission_report_summary.session_id_hash.clone();
+    let authority_threshold_lock_deployment_checked = submission_report_summary.authority_threshold_lock_deployment_checked;
+    let authority_threshold_lock_deployment_mode = submission_report_summary.authority_threshold_lock_deployment_mode.clone();
     let settlement_uniqueness_ready = !settlement_uniqueness_required
         || (settlement_uniqueness_checked
             && !duplicate_settlement_detected
             && settlement_identity_hash.as_deref().and_then(normalize_ckb_tx_hash).is_some()
             && session_id_hash.as_deref().and_then(normalize_ckb_tx_hash).is_some()
             && replay_protection_mode.as_deref() == Some("authority-cell-single-use-plus-transaction-local-final-script-singleton"));
+    let authority_threshold_lock_deployment_ready = !settlement_uniqueness_required
+        || (authority_threshold_lock_deployment_checked
+            && authority_threshold_lock_deployment_mode.as_deref() == Some("live-code-dep-and-authority-final-da-lock-preflight"));
     let submission_lineage_matches = report_paths_match(&context.submission, &economics.submission)
         && report_paths_match(&context.submission, &inclusion.submission)
         && context.submission_schema == economics.submission_schema
@@ -8240,6 +8259,11 @@ fn verify_session_submission_readiness(
             "final settlement strict readiness requires session identity, settlement identity, duplicate detection, and replay-protection mode evidence",
         ),
         readiness_check(
+            "authority-threshold-lock-deployment-checked",
+            authority_threshold_lock_deployment_ready,
+            "final settlement strict readiness requires live threshold-lock code-dep and final DA/authority lock preflight evidence",
+        ),
+        readiness_check(
             "operational-policy-testnet-ready",
             operational_policy.testnet_beta_ready,
             "readiness requires explicit reorg, fee, retry, key, and monitoring policy evidence for testnet-beta public-chain operation",
@@ -8256,7 +8280,8 @@ fn verify_session_submission_readiness(
         && finality_confirmed
         && reorg_risk_bounded
         && block_identity_matches
-        && settlement_uniqueness_ready;
+        && settlement_uniqueness_ready
+        && authority_threshold_lock_deployment_ready;
     let production_submission_ready = checks.iter().all(|check| check.ok);
     let live_carrier_submission_ready =
         production_submission_ready && base_submission_ready && submission_report_carrier_live_accepted;
@@ -8327,6 +8352,8 @@ fn verify_session_submission_readiness(
         session_id_hash,
         duplicate_settlement_detected,
         replay_protection_mode,
+        authority_threshold_lock_deployment_checked,
+        authority_threshold_lock_deployment_mode,
         operational_policy,
         checks,
         notes,
@@ -8792,6 +8819,8 @@ struct ReadinessSubmissionReportSummary {
     session_id_hash: Option<String>,
     duplicate_settlement_detected: bool,
     replay_protection_mode: Option<String>,
+    authority_threshold_lock_deployment_checked: bool,
+    authority_threshold_lock_deployment_mode: Option<String>,
 }
 
 fn readiness_submission_report_summary(
@@ -8833,6 +8862,14 @@ fn readiness_submission_report_summary(
         session_id_hash: submission.get("session_id_hash").and_then(Value::as_str).map(ToOwned::to_owned),
         duplicate_settlement_detected: submission.get("duplicate_settlement_detected").and_then(Value::as_bool) == Some(true),
         replay_protection_mode: submission.get("replay_protection_mode").and_then(Value::as_str).map(ToOwned::to_owned),
+        authority_threshold_lock_deployment_checked: submission
+            .get("authority_threshold_lock_deployment_checked")
+            .and_then(Value::as_bool)
+            == Some(true),
+        authority_threshold_lock_deployment_mode: submission
+            .get("authority_threshold_lock_deployment_mode")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     }
 }
 
@@ -8959,6 +8996,9 @@ fn final_l1_script_preflight_ready(submission: &Value) -> bool {
                 && submission.get("session_id_hash").and_then(Value::as_str).and_then(normalize_ckb_tx_hash).is_some()
                 && submission.get("replay_protection_mode").and_then(Value::as_str)
                     == Some("authority-cell-single-use-plus-transaction-local-final-script-singleton")
+                && json_bool_true(submission, "/authority_threshold_lock_deployment_checked")
+                && submission.get("authority_threshold_lock_deployment_mode").and_then(Value::as_str)
+                    == Some("live-code-dep-and-authority-final-da-lock-preflight")
                 && json_bool_true(submission, "/pre_submit_evidence_cell_dep_live")
                 && json_bool_true(submission, "/pre_submit_evidence_cell_dep_capacity_matches")
                 && json_bool_true(submission, "/pre_submit_evidence_cell_dep_lock_matches")
@@ -10878,6 +10918,12 @@ mod tests {
                 "required_lock_binding": "final-da-publication-lock-hash"
             },
             "authority_threshold_lock_identity_checked": authority_lock_matches,
+            "authority_threshold_lock_deployment_checked": authority_lock_matches,
+            "authority_threshold_lock_deployment_mode": if authority_lock_matches {
+                Some("live-code-dep-and-authority-final-da-lock-preflight")
+            } else {
+                None
+            },
             "settlement_uniqueness_checked": true,
             "settlement_identity_hash": format!("0x{}", "45".repeat(32)),
             "session_id_hash": format!("0x{}", "44".repeat(32)),
@@ -13544,6 +13590,8 @@ mod tests {
 
         assert_eq!(report["accepted_by_rpc"], true);
         assert_eq!(report["authority_threshold_lock_identity_checked"], true);
+        assert_eq!(report["authority_threshold_lock_deployment_checked"], true);
+        assert_eq!(report["authority_threshold_lock_deployment_mode"], "live-code-dep-and-authority-final-da-lock-preflight");
         assert_eq!(report["pre_submit_evidence_cell_dep_lock_matches"], true);
         assert_eq!(report["pre_submit_authority_input_data_hash_matches"], true);
         assert_eq!(report["pre_submit_authority_input_lock_matches"], true);
@@ -14547,6 +14595,63 @@ mod tests {
             &expected_hash
         ));
         let _ = std::fs::remove_file(valid_submission_path);
+    }
+
+    #[test]
+    fn session_submission_readiness_requires_final_settlement_threshold_lock_deployment_preflight() {
+        let expected_hash = format!("0x{}", "86".repeat(32));
+        let block_hash = format!("0x{}", "87".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        economics.submission_schema = context.submission_schema.clone();
+        inclusion.submission_schema = context.submission_schema.clone();
+        let valid_submission_path = write_readiness_live_final_settlement_submission(&expected_hash, true);
+        let mut submission =
+            serde_json::from_slice::<Value>(&std::fs::read(&valid_submission_path).expect("read final settlement submission"))
+                .expect("final settlement submission JSON");
+        submission["authority_threshold_lock_deployment_checked"] = Value::Bool(false);
+        submission["authority_threshold_lock_deployment_mode"] = Value::Null;
+        let submission_path = write_temp_json("readiness-final-settlement-threshold-deployment-bad", &submission);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-final-settlement-threshold-deployment-bad", &context);
+        let economics_path = write_temp_json("readiness-economics-final-settlement-threshold-deployment-bad", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-final-settlement-threshold-deployment-bad", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-final-settlement-threshold-deployment-bad", &stability);
+        let finality_path = write_temp_json("readiness-finality-final-settlement-threshold-deployment-bad", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+            None,
+            None,
+        )
+        .expect("verify final settlement readiness with missing threshold-lock deployment preflight");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(valid_submission_path);
+        let _ = std::fs::remove_file(submission_path);
+
+        assert!(report.report_hashes_match);
+        assert!(report.submission_report_valid);
+        assert!(!report.submission_report_live_accepted);
+        assert!(!report.submission_report_final_l1_script_live_accepted);
+        assert!(!report.production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(!report.final_l1_script_submission_ready);
+        assert!(!report.authority_threshold_lock_deployment_checked);
+        assert!(report.authority_threshold_lock_deployment_mode.is_none());
+        assert!(report.checks.iter().any(|check| check.name == "authority-threshold-lock-deployment-checked" && !check.ok));
     }
 
     #[test]
