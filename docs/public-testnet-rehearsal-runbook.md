@@ -51,6 +51,26 @@ export CKB_TESTNET_DA_VERIFIER_CODE_HASH=0x...
 export CKB_TESTNET_DA_VERIFIER_DEP_TX_HASH=0x...
 export CKB_TESTNET_DA_VERIFIER_DEP_INDEX=0x...
 export CKB_TESTNET_DA_WITNESS=0x...
+export MYELIN_DA_PROVIDER=...
+export MYELIN_DA_RECEIPT_ID=...
+export MYELIN_DA_RETRIEVAL_ENDPOINT=https://...
+export MYELIN_DA_AUDIT_LOG_COMMITMENT=0x...
+export MYELIN_DA_PROVIDER_PUBKEY_HASH=...
+export MYELIN_DA_PROVIDER_SIGNATURE=...
+export MYELIN_COURT_VERIFIER_CODE_HASH=0x...
+export MYELIN_COURT_VERIFIER_CODE_DEP_TX_HASH=0x...
+export MYELIN_COURT_VERIFIER_CODE_DEP_INDEX=0x0
+export MYELIN_COURT_VERIFIER_SOURCE_HASH=0x...
+export MYELIN_COURT_VERIFIER_AUDIT_HASH=0x...
+export MYELIN_AUTHORITY_SIGNER_0_PUBKEY_HASH=...
+export MYELIN_AUTHORITY_SIGNER_0_SIGNATURE=...
+export MYELIN_AUTHORITY_SIGNER_1_PUBKEY_HASH=...
+export MYELIN_AUTHORITY_SIGNER_1_SIGNATURE=...
+export MYELIN_THRESHOLD_LOCK_CODE_HASH=0x...
+export MYELIN_THRESHOLD_LOCK_CODE_DEP_TX_HASH=0x...
+export MYELIN_THRESHOLD_LOCK_CODE_DEP_INDEX=0x0
+export MYELIN_THRESHOLD_LOCK_SOURCE_HASH=0x...
+export MYELIN_THRESHOLD_LOCK_AUDIT_HASH=0x...
 mkdir -p "$MYELIN_REHEARSAL_DIR"
 ```
 
@@ -140,7 +160,27 @@ export MYELIN_DA_PAYLOAD_HASH=$(jq -r '.molecule_transaction_hash' "$MYELIN_REHE
 export MYELIN_DA_SEGMENT_ROOT=$(jq -r '.segment_root' "$MYELIN_REHEARSAL_DIR/session-da-in-memory.json")
 ```
 
-Ask the DA provider to sign those exact fields, then generate the receipt JSON:
+Create the provider signing request. The DA provider signs
+`provider_message_hash` from this JSON with its external signing process:
+
+```bash
+cargo run -p myelin-cli -- session external-da-receipt \
+  --payload-hash "$MYELIN_DA_PAYLOAD_HASH" \
+  --segment-root "$MYELIN_DA_SEGMENT_ROOT" \
+  --provider "$MYELIN_DA_PROVIDER" \
+  --namespace session-court-payloads \
+  --receipt-id "$MYELIN_DA_RECEIPT_ID" \
+  --availability-window production-retention-30d \
+  --service-level production \
+  --retention-seconds 2592000 \
+  --retrieval-endpoint "$MYELIN_DA_RETRIEVAL_ENDPOINT" \
+  --audit-log-commitment "$MYELIN_DA_AUDIT_LOG_COMMITMENT" \
+  --signing-request \
+  --out "$MYELIN_REHEARSAL_DIR/external-da-receipt.signing-request.json"
+```
+
+After the provider returns the pubkey hash and recoverable signature, generate
+the receipt JSON:
 
 ```bash
 cargo run -p myelin-cli -- session external-da-receipt \
@@ -256,10 +296,14 @@ cargo run -p myelin-cli -- session settlement-package \
   --da-manifest "$MYELIN_REHEARSAL_DIR/session-da.json" \
   --out "$MYELIN_REHEARSAL_DIR/session-settlement-package.base.json"
 
+export MYELIN_AUTHORITY_MESSAGE_HASH=$(jq -r '.settlement_authority.authority_authentication.message_hash' "$MYELIN_REHEARSAL_DIR/session-settlement-package.base.json")
+
 cargo run -p myelin-cli -- session authority-signature-evidence \
   --package "$MYELIN_REHEARSAL_DIR/session-settlement-package.base.json" \
-  --signer-secret-key "$MYELIN_REHEARSAL_AUTHORITY_SIGNER_KEY_0" \
-  --signer-secret-key "$MYELIN_REHEARSAL_AUTHORITY_SIGNER_KEY_1" \
+  --signer-pubkey-hash "$MYELIN_AUTHORITY_SIGNER_0_PUBKEY_HASH" \
+  --signature "$MYELIN_AUTHORITY_SIGNER_0_SIGNATURE" \
+  --signer-pubkey-hash "$MYELIN_AUTHORITY_SIGNER_1_PUBKEY_HASH" \
+  --signature "$MYELIN_AUTHORITY_SIGNER_1_SIGNATURE" \
   --out "$MYELIN_REHEARSAL_DIR/authority-signature-evidence.json"
 
 cargo run -p myelin-cli -- session threshold-lock-deployment-evidence \
@@ -290,6 +334,9 @@ cargo run -p myelin-cli -- session verify-settlement-package \
   --da-manifest "$MYELIN_REHEARSAL_DIR/session-da.json" \
   --out "$MYELIN_REHEARSAL_DIR/session-settlement-package-verify.json"
 ```
+
+Each participant signs `MYELIN_AUTHORITY_MESSAGE_HASH` externally. The
+`--signer-secret-key` shortcut exists only for disposable rehearsal keys.
 
 Acceptance:
 

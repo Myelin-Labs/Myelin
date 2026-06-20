@@ -749,6 +749,9 @@ struct SessionExternalDaReceiptArgs {
     /// Provider recoverable secp256k1 signature when using external signing.
     #[arg(long)]
     provider_signature: Option<String>,
+    /// Emit the provider signing request instead of a signed receipt.
+    #[arg(long)]
+    signing_request: bool,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -760,8 +763,14 @@ struct SessionAuthoritySignatureEvidenceArgs {
     #[arg(long)]
     package: PathBuf,
     /// Participant authority secp256k1 secret key. Repeat for each signer.
-    #[arg(long = "signer-secret-key", required = true)]
+    #[arg(long = "signer-secret-key")]
     signer_secret_keys: Vec<String>,
+    /// Participant authority 20-byte pubkey hash when using externally created signatures. Repeat with --signature.
+    #[arg(long = "signer-pubkey-hash")]
+    signer_pubkey_hashes: Vec<String>,
+    /// Participant authority recoverable secp256k1 signature when using external signing. Repeat with --signer-pubkey-hash.
+    #[arg(long = "signature")]
+    signatures: Vec<String>,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -1136,7 +1145,12 @@ fn run() -> Result<()> {
                 write_json(out, &report)
             }
             SessionCommand::AuthoritySignatureEvidence(args) => {
-                let report = session_authority_signature_evidence(args.package, args.signer_secret_keys)?;
+                let report = session_authority_signature_evidence(
+                    args.package,
+                    args.signer_secret_keys,
+                    args.signer_pubkey_hashes,
+                    args.signatures,
+                )?;
                 write_json(args.out, &report)
             }
             SessionCommand::ThresholdLockDeploymentEvidence(args) => {
@@ -3081,6 +3095,38 @@ fn session_external_da_receipt(args: SessionExternalDaReceiptArgs) -> Result<Val
         audit_log_commitment: audit_log_commitment.as_deref(),
     };
     let provider_message_hash = external_da_receipt_provider_message_hash(&provider_message_fields);
+    if args.signing_request {
+        if args.provider_secret_key.is_some() || args.provider_pubkey_hash.is_some() || args.provider_signature.is_some() {
+            return Err(CliError::InvalidFixture(
+                "external DA receipt signing request must not include provider signing inputs".to_owned(),
+            ));
+        }
+        let mut request = serde_json::json!({
+            "schema": "myelin-external-da-receipt-signing-request-v1",
+            "receipt_schema": "myelin-external-da-receipt-v2",
+            "signature_scheme": "secp256k1-recoverable-blake3-pubkey-hash20",
+            "provider_message_hash": hex::encode(provider_message_hash),
+            "provider": args.provider,
+            "namespace": args.namespace,
+            "payload_hash": payload_hash,
+            "segment_root": segment_root,
+            "receipt_id": args.receipt_id,
+            "availability_window": args.availability_window
+        });
+        if let Some(service_level) = args.service_level {
+            request["service_level"] = Value::String(service_level);
+        }
+        if let Some(retention_seconds) = args.retention_seconds {
+            request["retention_seconds"] = Value::Number(serde_json::Number::from(retention_seconds));
+        }
+        if let Some(retrieval_endpoint) = args.retrieval_endpoint {
+            request["retrieval_endpoint"] = Value::String(retrieval_endpoint);
+        }
+        if let Some(audit_log_commitment) = audit_log_commitment {
+            request["audit_log_commitment"] = Value::String(audit_log_commitment);
+        }
+        return Ok(request);
+    }
     let (provider_pubkey_hash, provider_signature) = match args.provider_secret_key.as_deref() {
         Some(secret_key) => {
             if args.provider_pubkey_hash.is_some() || args.provider_signature.is_some() {
@@ -3155,18 +3201,56 @@ fn session_external_da_receipt(args: SessionExternalDaReceiptArgs) -> Result<Val
 fn session_authority_signature_evidence(
     package_path: PathBuf,
     signer_secret_keys: Vec<String>,
+    signer_pubkey_hashes: Vec<String>,
+    signatures: Vec<String>,
 ) -> Result<SessionAuthoritySignatureEvidence> {
     let package = read_json_report::<SessionSettlementPackageReport>(&package_path)?;
     let auth = &package.settlement_authority.authority_authentication;
     let message_hash = parse_hex_32(&auth.message_hash)
         .ok_or_else(|| CliError::InvalidFixture("settlement authority message_hash must be 32-byte hex".to_owned()))?;
-    let mut signer_pubkey_hashes = Vec::with_capacity(signer_secret_keys.len());
-    let mut signatures = Vec::with_capacity(signer_secret_keys.len());
-    for secret_key in &signer_secret_keys {
-        let (pubkey_hash, signature) = sign_recoverable_pubkey_hash20(&message_hash, secret_key, "authority signer secret key")?;
-        signer_pubkey_hashes.push(pubkey_hash);
-        signatures.push(signature);
-    }
+    let has_secret_signers = !signer_secret_keys.is_empty();
+    let has_external_signatures = !signer_pubkey_hashes.is_empty() || !signatures.is_empty();
+    let (signer_pubkey_hashes, signatures) = match (has_secret_signers, has_external_signatures) {
+        (true, true) => {
+            return Err(CliError::InvalidFixture(
+                "authority signature evidence accepts either --signer-secret-key or externally supplied --signer-pubkey-hash/--signature, not both"
+                    .to_owned(),
+            ));
+        }
+        (false, false) => {
+            return Err(CliError::InvalidFixture(
+                "authority signature evidence requires signer inputs; use --signer-secret-key for disposable rehearsals or --signer-pubkey-hash/--signature for external signing"
+                    .to_owned(),
+            ));
+        }
+        (true, false) => {
+            let mut derived_pubkey_hashes = Vec::with_capacity(signer_secret_keys.len());
+            let mut derived_signatures = Vec::with_capacity(signer_secret_keys.len());
+            for secret_key in &signer_secret_keys {
+                let (pubkey_hash, signature) =
+                    sign_recoverable_pubkey_hash20(&message_hash, secret_key, "authority signer secret key")?;
+                derived_pubkey_hashes.push(pubkey_hash);
+                derived_signatures.push(signature);
+            }
+            (derived_pubkey_hashes, derived_signatures)
+        }
+        (false, true) => {
+            if signer_pubkey_hashes.len() != signatures.len() {
+                return Err(CliError::InvalidFixture(
+                    "authority signature evidence requires the same number of --signer-pubkey-hash and --signature values".to_owned(),
+                ));
+            }
+            let pubkey_hashes = signer_pubkey_hashes
+                .iter()
+                .map(|value| bare_hex_20_arg(value, "authority signer pubkey hash"))
+                .collect::<Result<Vec<_>>>()?;
+            let signatures = signatures
+                .iter()
+                .map(|value| recoverable_signature_hex_arg(value, "authority signature"))
+                .collect::<Result<Vec<_>>>()?;
+            (pubkey_hashes, signatures)
+        }
+    };
     normalize_authority_signature_evidence(
         SessionAuthoritySignatureEvidence {
             schema: "myelin-session-authority-signature-evidence-v1".to_owned(),
@@ -13239,6 +13323,30 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = write_temp_json("external-da-helper-court", &bundle);
         let in_memory_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("in-memory DA manifest");
+        let signing_request = session_external_da_receipt(SessionExternalDaReceiptArgs {
+            payload_hash: in_memory_manifest.molecule_transaction_hash.clone(),
+            segment_root: in_memory_manifest.segment_root.clone(),
+            provider: "fixture-external-da".to_owned(),
+            namespace: "session-court-payloads".to_owned(),
+            receipt_id: "helper-receipt-0001".to_owned(),
+            availability_window: "production-retention-30d".to_owned(),
+            service_level: Some("production".to_owned()),
+            retention_seconds: Some(30 * 24 * 60 * 60),
+            retrieval_endpoint: Some("https://da.example.invalid/session-court-payloads/helper-receipt-0001".to_owned()),
+            audit_log_commitment: Some(format!("0x{}", "a5".repeat(32))),
+            provider_secret_key: None,
+            provider_pubkey_hash: None,
+            provider_signature: None,
+            signing_request: true,
+            out: None,
+        })
+        .expect("generate external DA signing request");
+        let provider_message_hash =
+            signing_request["provider_message_hash"].as_str().and_then(parse_hex_32).expect("provider message hash");
+        let (provider_pubkey_hash, provider_signature) =
+            sign_recoverable_pubkey_hash20(&provider_message_hash, &"44".repeat(32), "external DA provider secret key")
+                .expect("external provider signs request");
+        assert_eq!(signing_request["schema"], "myelin-external-da-receipt-signing-request-v1");
         let receipt = session_external_da_receipt(SessionExternalDaReceiptArgs {
             payload_hash: in_memory_manifest.molecule_transaction_hash.clone(),
             segment_root: in_memory_manifest.segment_root.clone(),
@@ -13250,12 +13358,13 @@ mod tests {
             retention_seconds: Some(30 * 24 * 60 * 60),
             retrieval_endpoint: Some("https://da.example.invalid/session-court-payloads/helper-receipt-0001".to_owned()),
             audit_log_commitment: Some(format!("0x{}", "a5".repeat(32))),
-            provider_secret_key: Some("44".repeat(32)),
-            provider_pubkey_hash: None,
-            provider_signature: None,
+            provider_secret_key: None,
+            provider_pubkey_hash: Some(provider_pubkey_hash),
+            provider_signature: Some(provider_signature),
+            signing_request: false,
             out: None,
         })
-        .expect("generate signed external DA receipt");
+        .expect("generate externally signed external DA receipt");
         let receipt_path = write_temp_json("external-da-helper-receipt", &receipt);
         let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-helper-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&storage_dir);
@@ -13988,8 +14097,19 @@ mod tests {
             settlement_package_fixture("rehearsal-evidence-helpers");
         let package_path = write_temp_json("rehearsal-evidence-helper-package", &base_package);
 
-        let signature_evidence = session_authority_signature_evidence(package_path.clone(), vec!["11".repeat(32), "22".repeat(32)])
-            .expect("authority signature helper evidence");
+        let auth = &base_package.settlement_authority.authority_authentication;
+        let message_hash = parse_hex_32(&auth.message_hash).expect("authority message hash");
+        let (signer_0, signature_0) =
+            sign_recoverable_pubkey_hash20(&message_hash, &"11".repeat(32), "authority signer 0").expect("signer 0 signs externally");
+        let (signer_1, signature_1) =
+            sign_recoverable_pubkey_hash20(&message_hash, &"22".repeat(32), "authority signer 1").expect("signer 1 signs externally");
+        let signature_evidence = session_authority_signature_evidence(
+            package_path.clone(),
+            Vec::new(),
+            vec![signer_0, signer_1],
+            vec![signature_0, signature_1],
+        )
+        .expect("authority signature helper evidence");
         let threshold_deployment = session_threshold_lock_deployment_evidence(SessionThresholdLockDeploymentEvidenceArgs {
             package: package_path.clone(),
             network: "ckb-testnet".to_owned(),
@@ -14023,7 +14143,6 @@ mod tests {
         })
         .expect("court economics deployment helper evidence");
 
-        let auth = &base_package.settlement_authority.authority_authentication;
         assert!(signature_evidence.signature_verified);
         assert_eq!(signature_evidence.signer_count, 2);
         assert_eq!(signature_evidence.message_hash, auth.message_hash);
