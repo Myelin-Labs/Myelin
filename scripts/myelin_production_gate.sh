@@ -1075,6 +1075,13 @@ for context_path, economics_path, inclusion_path, stability_path, finality_path,
         raise SystemExit("production gate failed: readiness evidence mode")
     if report.get("strict_production_submission_ready") is not False:
         raise SystemExit("production gate failed: dry-run readiness cannot be strict production readiness")
+    if report.get("end_to_end_production_ready") is not False:
+        raise SystemExit("production gate failed: dry-run readiness cannot claim end-to-end production readiness")
+    end_to_end_blockers = set(report.get("end_to_end_production_blockers", []))
+    if "final-l1-script-submission-not-ready" not in end_to_end_blockers:
+        raise SystemExit("production gate failed: dry-run readiness must expose final L1 production blocker")
+    if "operator-custody-policy-missing" not in end_to_end_blockers or "operator-runbook-missing" not in end_to_end_blockers:
+        raise SystemExit("production gate failed: dry-run readiness must expose operational production blockers")
     if report.get("live_carrier_submission_ready") is not False:
         raise SystemExit("production gate failed: readiness live carrier marker")
     if report.get("final_l1_script_submission_ready") is not False:

@@ -365,15 +365,19 @@ stability, and finality reports into a `production_submission_ready` coherence
 decision and refuses readiness if the reports do not bind to the same CKB
 transaction or committed block identity. The report also exposes
 `strict_production_submission_ready`, `readiness_evidence_mode`,
+`end_to_end_production_ready`, `end_to_end_production_blockers`,
 `live_carrier_submission_ready`, and `final_l1_script_submission_ready`, so
-offline/mock verifier evidence, live carrier evidence, and final compact L1
-script evidence cannot be confused; strict production readiness is only true for
-live final L1 script evidence whose referenced submission report also proves
-the final-script pre-submit checks: live funding/code cells, matching verifier
-code hash, and, for final settlement, the final DA evidence CellDep, the
+offline/mock verifier evidence, live carrier evidence, final compact L1 script
+evidence, and full production readiness cannot be confused. Final L1 script
+readiness is true only when the referenced submission report also proves the
+final-script pre-submit checks: live funding/code cells, matching verifier code
+hash, and, for final settlement, the final DA evidence CellDep, the
 package-declared authority input with matching data hash and settlement lock,
-matching threshold-lock args, and explicit settlement uniqueness evidence. It
-also carries
+matching threshold-lock args, and explicit settlement uniqueness evidence.
+Strict end-to-end production readiness additionally requires no named blockers:
+real DA availability guarantees, canonical deployed threshold-lock enforcement,
+deployed CKB court-dispute economics, and operational custody/runbook evidence
+must all be present. The report also carries
 `authority_threshold_lock_deployment_checked` /
 `authority_threshold_lock_deployment_mode` for final settlement submissions,
 proving the live lock code-dep plus final DA and authority lock preflight used
@@ -480,6 +484,8 @@ their typed-cell metadata, CKB ELFs, code hashes, and code deps.
 `myelin-ckb-devnet-smoke-v1` report exposes `all_live_checks_passed` only when
 both valid carriers report `readiness_evidence_mode = "live-ckb-carrier"`, both
 final-script submissions report `readiness_evidence_mode = "final-l1-script"`,
+both final-script submissions keep `end_to_end_production_ready = false` with
+named production blockers,
 the final settlement report carries positive final DA/authority pre-submit
 checks plus settlement uniqueness evidence, the competing final settlement
 replay probe is rejected, and both tampered carriers are rejected. It is

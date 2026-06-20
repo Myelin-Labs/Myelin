@@ -508,8 +508,13 @@ requires the block hash and block number to remain unchanged. The
 committed inclusion to reach the configured confirmation depth.
 `verify-submission-readiness` aggregates those five reports and requires the
 same CKB transaction hash, same committed block identity, and all readiness
-markers before it emits `production_submission_ready = true`. The production
-gate covers context, economics, inclusion, stability, finality, and aggregate
+markers before it emits `production_submission_ready = true`. It separately
+emits `final_l1_script_submission_ready` for live final-script evidence and
+`end_to_end_production_ready` plus `end_to_end_production_blockers` for the
+larger production claim, so devnet final-script acceptance cannot mask missing
+DA availability guarantees, canonical threshold-lock enforcement, deployed CKB
+court economics, or operator custody/runbook evidence. The production gate
+covers context, economics, inclusion, stability, finality, and aggregate
 readiness verifiers with mock CKB RPC servers. The settlement-intent step binds the
 verified court bundle and verified DA manifest to a disputed-close decision and
 elapsed challenge window, while deliberately keeping `l1_da_published = false`
@@ -571,6 +576,10 @@ optional typed operator custody/runbook documents with machine-visible
 requirement lists; it can be testnet-beta ready while keeping
 `production_ready = false` and listing missing production blockers until those
 operator documents are present and live public-chain evidence is accepted.
+The top-level readiness report also keeps `end_to_end_production_ready = false`
+until the submission artefact itself proves production DA availability,
+canonical threshold-lock enforcement, deployed court-dispute economics, and the
+operational policy is production-ready.
 The resulting `myelin-ckb-devnet-smoke-v1` report proves devnet CKB acceptance,
 deployed compact-payload type-script execution, final-script strict readiness,
 live rejection of mismatched carrier data, and live rejection of a competing

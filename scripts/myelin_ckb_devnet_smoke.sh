@@ -1077,6 +1077,10 @@ PY
   production_submission_ready="$(jq -r '.production_submission_ready' "$readiness_path")"
   local strict_production_submission_ready
   strict_production_submission_ready="$(jq -r '.strict_production_submission_ready' "$readiness_path")"
+  local end_to_end_production_ready
+  end_to_end_production_ready="$(jq -r '.end_to_end_production_ready' "$readiness_path")"
+  local end_to_end_production_blockers
+  end_to_end_production_blockers="$(jq -c '.end_to_end_production_blockers' "$readiness_path")"
   local readiness_evidence_mode
   readiness_evidence_mode="$(jq -r '.readiness_evidence_mode' "$readiness_path")"
   local live_carrier_submission_ready
@@ -1102,7 +1106,8 @@ PY
   local operational_policy_commitment
   operational_policy_commitment="$(jq -r '.operational_policy.policy_commitment' "$readiness_path")"
   if [[ "$production_submission_ready" != "true" ]] \
-    || [[ "$strict_production_submission_ready" != "$expected_final_l1_ready" ]] \
+    || [[ "$strict_production_submission_ready" != "false" ]] \
+    || [[ "$end_to_end_production_ready" != "false" ]] \
     || [[ "$readiness_evidence_mode" != "$expected_readiness_mode" ]] \
     || [[ "$live_carrier_submission_ready" != "$expected_live_carrier_ready" ]] \
     || [[ "$final_l1_script_submission_ready" != "$expected_final_l1_ready" ]]; then
@@ -1122,6 +1127,29 @@ PY
   fi
   if ! jq -e 'index("operator-custody-policy-missing") and index("operator-runbook-missing")' <<<"$operational_production_blockers" >/dev/null; then
     echo "readiness operational policy must expose missing production custody/runbook blockers" >&2
+    exit 1
+  fi
+  if ! jq -e 'index("operator-custody-policy-missing") and index("operator-runbook-missing")' <<<"$end_to_end_production_blockers" >/dev/null; then
+    echo "readiness must expose end-to-end operational production blockers" >&2
+    exit 1
+  fi
+  if [[ "$expected_final_l1_ready" == "true" ]]; then
+    if jq -e 'index("final-l1-script-submission-not-ready")' <<<"$end_to_end_production_blockers" >/dev/null; then
+      echo "final L1 readiness must not carry the final-l1-script-not-ready blocker" >&2
+      exit 1
+    fi
+    if [[ "$package_kind" == "myelin-session-da-anchor-package-v1" ]] \
+      && ! jq -e 'index("real-da-availability-guarantee-missing")' <<<"$end_to_end_production_blockers" >/dev/null; then
+      echo "final DA readiness must expose the real DA availability production blocker" >&2
+      exit 1
+    fi
+    if [[ "$package_kind" == "myelin-session-settlement-package-v1" ]] \
+      && ! jq -e 'index("real-da-availability-guarantee-missing") and index("canonical-threshold-lock-enforcement-missing") and index("ckb-court-dispute-economics-missing")' <<<"$end_to_end_production_blockers" >/dev/null; then
+      echo "final settlement readiness must expose DA, threshold-lock, and court-economics production blockers" >&2
+      exit 1
+    fi
+  elif ! jq -e 'index("final-l1-script-submission-not-ready")' <<<"$end_to_end_production_blockers" >/dev/null; then
+    echo "carrier readiness must expose the missing final L1 script production blocker" >&2
     exit 1
   fi
   local verifier_source_hash
@@ -1156,6 +1184,8 @@ PY
     --arg finality_report "$finality_path" \
     --arg readiness_report "$readiness_path" \
     --arg readiness_evidence_mode "$readiness_evidence_mode" \
+    --argjson end_to_end_production_ready "$end_to_end_production_ready" \
+    --argjson end_to_end_production_blockers "$end_to_end_production_blockers" \
     --arg verifier_code_hash "$verifier_code_hash_for_carrier" \
     --arg verifier_tx "$verifier_deploy_tx_hash" \
     --arg verifier_dep_index "$verifier_code_dep_index_for_carrier" \
@@ -1253,6 +1283,8 @@ PY
         readiness_report: $readiness_report,
         production_submission_ready: true,
         strict_production_submission_ready: $strict_production_submission_ready,
+        end_to_end_production_ready: $end_to_end_production_ready,
+        end_to_end_production_blockers: $end_to_end_production_blockers,
         live_carrier_submission_ready: $live_carrier_submission_ready,
         final_l1_script_submission_ready: $final_l1_script_submission_ready,
         readiness_evidence_mode: $readiness_evidence_mode,
@@ -1700,6 +1732,10 @@ jq -n \
       and ($settlement_final.live_readiness.live_carrier_submission_ready | not)
       and $da_anchor_final.live_readiness.final_l1_script_submission_ready
       and $settlement_final.live_readiness.final_l1_script_submission_ready
+      and ($da_anchor.live_readiness.end_to_end_production_ready | not)
+      and ($settlement.live_readiness.end_to_end_production_ready | not)
+      and ($da_anchor_final.live_readiness.end_to_end_production_ready | not)
+      and ($settlement_final.live_readiness.end_to_end_production_ready | not)
       and ($da_anchor.live_readiness.final_l1_script_submission_ready | not)
       and ($settlement.live_readiness.final_l1_script_submission_ready | not)
       and $da_anchor.live_readiness.readiness_evidence_mode == "live-ckb-carrier"
@@ -1721,6 +1757,10 @@ jq -n \
       and ($settlement_final.live_readiness.live_carrier_submission_ready | not)
       and $da_anchor_final.live_readiness.final_l1_script_submission_ready
       and $settlement_final.live_readiness.final_l1_script_submission_ready
+      and ($da_anchor.live_readiness.end_to_end_production_ready | not)
+      and ($settlement.live_readiness.end_to_end_production_ready | not)
+      and ($da_anchor_final.live_readiness.end_to_end_production_ready | not)
+      and ($settlement_final.live_readiness.end_to_end_production_ready | not)
       and ($da_anchor.live_readiness.final_l1_script_submission_ready | not)
       and ($settlement.live_readiness.final_l1_script_submission_ready | not)
       and $da_anchor.live_readiness.readiness_evidence_mode == "live-ckb-carrier"

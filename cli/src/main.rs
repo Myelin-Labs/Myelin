@@ -4208,6 +4208,8 @@ struct SessionSubmissionReadinessReport {
     reorg_risk_bounded: bool,
     production_submission_ready: bool,
     strict_production_submission_ready: bool,
+    end_to_end_production_ready: bool,
+    end_to_end_production_blockers: Vec<String>,
     live_carrier_submission_ready: bool,
     final_l1_script_submission_ready: bool,
     readiness_evidence_mode: String,
@@ -8140,6 +8142,7 @@ fn verify_session_submission_readiness(
     let submission_report_live_accepted = submission_report_summary.live_accepted;
     let submission_report_carrier_live_accepted = submission_report_summary.carrier_live_accepted;
     let submission_report_final_l1_script_live_accepted = submission_report_summary.final_l1_script_live_accepted;
+    let final_l1_da_anchor = submission_report_summary.final_l1_da_anchor;
     let settlement_uniqueness_required = submission_report_summary.final_l1_settlement;
     let settlement_uniqueness_checked = submission_report_summary.settlement_uniqueness_checked;
     let duplicate_settlement_detected = submission_report_summary.duplicate_settlement_detected;
@@ -8287,7 +8290,32 @@ fn verify_session_submission_readiness(
         production_submission_ready && base_submission_ready && submission_report_carrier_live_accepted;
     let final_l1_script_submission_ready =
         production_submission_ready && base_submission_ready && submission_report_final_l1_script_live_accepted;
-    let strict_production_submission_ready = final_l1_script_submission_ready;
+    let mut end_to_end_production_blockers = Vec::new();
+    if !final_l1_script_submission_ready {
+        end_to_end_production_blockers.push("final-l1-script-submission-not-ready".to_owned());
+    }
+    if !operational_policy.production_ready {
+        end_to_end_production_blockers.extend(operational_policy.production_blockers.iter().cloned());
+    }
+    if (final_l1_da_anchor || settlement_uniqueness_required)
+        && submission_report_summary.da_availability_production_ready != Some(true)
+    {
+        end_to_end_production_blockers.push("real-da-availability-guarantee-missing".to_owned());
+    }
+    if settlement_uniqueness_required {
+        if submission_report_summary.authority_authentication_ckb_enforceable != Some(true)
+            || submission_report_summary.authority_authentication_production_ready != Some(true)
+        {
+            end_to_end_production_blockers.push("canonical-threshold-lock-enforcement-missing".to_owned());
+        }
+        if submission_report_summary.court_economics_production_ready != Some(true) {
+            end_to_end_production_blockers.push("ckb-court-dispute-economics-missing".to_owned());
+        }
+    }
+    end_to_end_production_blockers.sort();
+    end_to_end_production_blockers.dedup();
+    let end_to_end_production_ready = final_l1_script_submission_ready && end_to_end_production_blockers.is_empty();
+    let strict_production_submission_ready = final_l1_script_submission_ready && end_to_end_production_ready;
     let readiness_evidence_mode = if final_l1_script_submission_ready {
         "final-l1-script"
     } else if live_carrier_submission_ready {
@@ -8298,9 +8326,15 @@ fn verify_session_submission_readiness(
         "not-ready"
     }
     .to_owned();
-    let notes = if final_l1_script_submission_ready {
-        vec!["All submission readiness reports agree, and the referenced submission report proves a live final L1 script submission."
+    let notes = if end_to_end_production_ready {
+        vec!["All submission readiness reports agree, the referenced submission report proves a live final L1 script submission, and no end-to-end production blockers remain."
             .to_owned()]
+    } else if final_l1_script_submission_ready {
+        vec![
+            "All submission readiness reports agree, and the referenced submission report proves a live final L1 script submission."
+                .to_owned(),
+            format!("End-to-end production readiness is still blocked by: {}.", end_to_end_production_blockers.join(", ")),
+        ]
     } else if live_carrier_submission_ready {
         vec![
             "All submission readiness reports agree, and the referenced carrier submission proves live CKB RPC acceptance under the deployed carrier verifier."
@@ -8344,6 +8378,8 @@ fn verify_session_submission_readiness(
         reorg_risk_bounded,
         production_submission_ready,
         strict_production_submission_ready,
+        end_to_end_production_ready,
+        end_to_end_production_blockers,
         live_carrier_submission_ready,
         final_l1_script_submission_ready,
         readiness_evidence_mode,
@@ -8813,7 +8849,12 @@ struct ReadinessSubmissionReportSummary {
     live_accepted: bool,
     carrier_live_accepted: bool,
     final_l1_script_live_accepted: bool,
+    final_l1_da_anchor: bool,
     final_l1_settlement: bool,
+    da_availability_production_ready: Option<bool>,
+    court_economics_production_ready: Option<bool>,
+    authority_authentication_ckb_enforceable: Option<bool>,
+    authority_authentication_production_ready: Option<bool>,
     settlement_uniqueness_checked: bool,
     settlement_identity_hash: Option<String>,
     session_id_hash: Option<String>,
@@ -8849,14 +8890,38 @@ fn readiness_submission_report_summary(
     if validate_submission_rpc_result(&submission, expected_ckb_tx_hash).is_err() {
         return ReadinessSubmissionReportSummary::default();
     }
-    let final_l1_settlement = schema == "myelin-session-ckb-final-script-submission-v1"
-        && submission.get("package_kind").and_then(Value::as_str) == Some("myelin-session-settlement-package-v1");
+    let final_l1_script = schema == "myelin-session-ckb-final-script-submission-v1";
+    let final_l1_da_anchor =
+        final_l1_script && submission.get("package_kind").and_then(Value::as_str) == Some("myelin-session-da-anchor-package-v1");
+    let final_l1_settlement =
+        final_l1_script && submission.get("package_kind").and_then(Value::as_str) == Some("myelin-session-settlement-package-v1");
     ReadinessSubmissionReportSummary {
         valid: true,
         live_accepted: submission_report_live_accepted(&submission, schema, expected_ckb_tx_hash),
         carrier_live_accepted: submission_report_carrier_live_accepted(&submission, schema, expected_ckb_tx_hash),
         final_l1_script_live_accepted: submission_report_final_l1_script_live_accepted(&submission, schema, expected_ckb_tx_hash),
+        final_l1_da_anchor,
         final_l1_settlement,
+        da_availability_production_ready: first_json_bool(
+            &submission,
+            &["/availability/production_ready", "/da_availability/production_ready", "/da_manifest/availability/production_ready"],
+        ),
+        court_economics_production_ready: first_json_bool(
+            &submission,
+            &[
+                "/court_economics/production_ready",
+                "/settlement_intent/court_economics/production_ready",
+                "/settlement_authority_requirement/court_economics/production_ready",
+            ],
+        ),
+        authority_authentication_ckb_enforceable: first_json_bool(
+            &submission,
+            &["/settlement_authority_requirement/authority_authentication/ckb_enforceable"],
+        ),
+        authority_authentication_production_ready: first_json_bool(
+            &submission,
+            &["/settlement_authority_requirement/authority_authentication/production_ready"],
+        ),
         settlement_uniqueness_checked: submission.get("settlement_uniqueness_checked").and_then(Value::as_bool) == Some(true),
         settlement_identity_hash: submission.get("settlement_identity_hash").and_then(Value::as_str).map(ToOwned::to_owned),
         session_id_hash: submission.get("session_id_hash").and_then(Value::as_str).map(ToOwned::to_owned),
@@ -8871,6 +8936,10 @@ fn readiness_submission_report_summary(
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
     }
+}
+
+fn first_json_bool(value: &Value, pointers: &[&str]) -> Option<bool> {
+    pointers.iter().find_map(|pointer| value.pointer(pointer).and_then(Value::as_bool))
 }
 
 fn submission_report_live_accepted(submission: &Value, schema: &str, expected_ckb_tx_hash: &str) -> bool {
@@ -14324,7 +14393,9 @@ mod tests {
         let _ = std::fs::remove_file(submission_path);
 
         assert!(report.production_submission_ready);
-        assert!(report.strict_production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(!report.end_to_end_production_ready);
+        assert!(report.end_to_end_production_blockers.contains(&"real-da-availability-guarantee-missing".to_owned()));
         assert!(report.submission_report_live_accepted);
         assert!(!report.submission_report_carrier_live_accepted);
         assert!(report.submission_report_final_l1_script_live_accepted);
@@ -14381,7 +14452,9 @@ mod tests {
         let _ = std::fs::remove_file(custody_path);
         let _ = std::fs::remove_file(runbook_path);
 
-        assert!(report.strict_production_submission_ready);
+        assert!(!report.strict_production_submission_ready);
+        assert!(!report.end_to_end_production_ready);
+        assert!(report.end_to_end_production_blockers.contains(&"real-da-availability-guarantee-missing".to_owned()));
         assert!(report.operational_policy.public_chain_ready);
         assert!(report.operational_policy.operator_custody_policy_checked);
         assert!(report.operational_policy.operator_custody_policy_hash.as_ref().is_some_and(|hash| hash.len() == 64));
