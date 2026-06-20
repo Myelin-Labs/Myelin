@@ -386,6 +386,19 @@ cargo run -p myelin-cli -- session carrier-submission \
   --out "$MYELIN_REHEARSAL_DIR/da-anchor-carrier-submission.json"
 ```
 
+For a repeatable carrier submission and observation run, use:
+
+```bash
+MYELIN_REHEARSAL_LIVE_SUBMIT=1 \
+MYELIN_REHEARSAL_ROLES="da-anchor" \
+scripts/myelin_public_testnet_rehearsal_live.sh
+```
+
+This helper refuses to broadcast unless `MYELIN_REHEARSAL_LIVE_SUBMIT=1` is
+set. It writes submission, context, economics, inclusion, stability, finality,
+and readiness reports for each selected role. It is an execution helper, not a
+new gate.
+
 For the settlement carrier or final-script path, use the same command with the
 settlement package and settlement verifier. When rehearsing final-script
 settlement evidence, also provide the evidence cell dep and authority input
