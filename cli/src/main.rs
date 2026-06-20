@@ -2878,6 +2878,19 @@ fn court_economics_evidence(
         .ok_or_else(|| CliError::InvalidFixture("court economics challenge_payload_hash must be 32-byte hex".to_owned()))?;
     let da_availability_commitment_bytes = parse_hex_32(da_availability_commitment)
         .ok_or_else(|| CliError::InvalidFixture("court economics DA availability commitment must be 32-byte hex".to_owned()))?;
+    let minimum_dispute_bond_shannons: u64 = 100_000_000;
+    let challenger_reward_bps: u16 = 5_000;
+    let loser_slash_bps: u16 = 10_000;
+    let honest_party_refund_bps: u16 = 5_000;
+    let unresolved_remainder_bps: u16 = 0;
+    let payout_balance_bps: u16 = challenger_reward_bps + honest_party_refund_bps + unresolved_remainder_bps;
+    let settlement_after_deadline_only = true;
+    let da_evidence_required = true;
+    let economics_invariant_checked = payout_balance_bps == loser_slash_bps
+        && challenge_window_ms > 0
+        && challenge_deadline_ms >= challenge_window_ms
+        && settlement_after_deadline_only
+        && da_evidence_required;
     let economics_commitment = blake3_chunks(
         b"myelin:session-court-economics:v1",
         &[
@@ -2887,16 +2900,33 @@ fn court_economics_evidence(
             &da_availability_commitment_bytes,
             &challenge_window_ms.to_le_bytes(),
             &challenge_deadline_ms.to_le_bytes(),
+            &minimum_dispute_bond_shannons.to_le_bytes(),
+            &challenger_reward_bps.to_le_bytes(),
+            &loser_slash_bps.to_le_bytes(),
+            &honest_party_refund_bps.to_le_bytes(),
+            &unresolved_remainder_bps.to_le_bytes(),
+            &[u8::from(settlement_after_deadline_only)],
+            &[u8::from(da_evidence_required)],
         ],
     );
     Ok(SessionCourtEconomicsEvidence {
         schema: "myelin-session-court-economics-v1".to_owned(),
-        mode: "disputed-close-policy-commitment".to_owned(),
-        bond_policy: "session-escrow-input-cells-bound-by-hash".to_owned(),
-        reward_policy: "winner-recovers-escrow-subject-to-final-l1-fee-policy".to_owned(),
-        slashing_policy: "loser-forfeits-disputed-session-escrow-after-challenge-expiry".to_owned(),
-        timeout_policy: "challenge-window-ms-bound-to-court-block-timestamp".to_owned(),
+        mode: "disputed-close-explicit-policy-v1".to_owned(),
+        escrow_binding_mode: "session-escrow-input-cells-hash".to_owned(),
+        bond_policy: "minimum-dispute-bond-plus-session-escrow-digest-binding".to_owned(),
+        reward_policy: "challenger-reward-bps-from-loser-slash".to_owned(),
+        slashing_policy: "loser-slash-bps-after-challenge-expiry".to_owned(),
+        timeout_policy: "settlement-after-court-block-timestamp-plus-challenge-window".to_owned(),
         fee_policy: "submission-economics-report-enforces-ckb-fee-floor-rate-and-max-fee".to_owned(),
+        minimum_dispute_bond_shannons,
+        challenger_reward_bps,
+        loser_slash_bps,
+        honest_party_refund_bps,
+        unresolved_remainder_bps,
+        payout_balance_bps,
+        settlement_after_deadline_only,
+        da_evidence_required,
+        economics_invariant_checked,
         challenge_window_ms,
         challenge_deadline_ms,
         participant_set_hash: participant_set_hash.to_owned(),
@@ -2904,7 +2934,7 @@ fn court_economics_evidence(
         challenge_payload_hash: challenge_payload_hash.to_owned(),
         da_availability_commitment: da_availability_commitment.to_owned(),
         economics_commitment_algorithm:
-            "blake3(myelin:session-court-economics:v1,participant_set_hash,escrow_input_cells_hash,challenge_payload_hash,da_availability_commitment,challenge_window_ms,challenge_deadline_ms)"
+            "blake3(myelin:session-court-economics:v1,participant_set_hash,escrow_input_cells_hash,challenge_payload_hash,da_availability_commitment,challenge_window_ms,challenge_deadline_ms,minimum_dispute_bond_shannons,challenger_reward_bps,loser_slash_bps,honest_party_refund_bps,unresolved_remainder_bps,settlement_after_deadline_only,da_evidence_required)"
                 .to_owned(),
         economics_commitment: hex::encode(economics_commitment),
         court_economics_checked: true,
@@ -3567,11 +3597,21 @@ struct SessionSettlementIntentReport {
 struct SessionCourtEconomicsEvidence {
     schema: String,
     mode: String,
+    escrow_binding_mode: String,
     bond_policy: String,
     reward_policy: String,
     slashing_policy: String,
     timeout_policy: String,
     fee_policy: String,
+    minimum_dispute_bond_shannons: u64,
+    challenger_reward_bps: u16,
+    loser_slash_bps: u16,
+    honest_party_refund_bps: u16,
+    unresolved_remainder_bps: u16,
+    payout_balance_bps: u16,
+    settlement_after_deadline_only: bool,
+    da_evidence_required: bool,
+    economics_invariant_checked: bool,
     challenge_window_ms: u64,
     challenge_deadline_ms: u64,
     participant_set_hash: String,
@@ -5610,16 +5650,39 @@ fn verify_session_settlement_intent(
         &mut checks,
         "court-economics-ready",
         intent.court_economics.court_economics_checked
+            && intent.court_economics.economics_invariant_checked
+            && intent.court_economics.minimum_dispute_bond_shannons > 0
+            && intent.court_economics.loser_slash_bps == 10_000
+            && intent.court_economics.payout_balance_bps == intent.court_economics.loser_slash_bps
+            && intent.court_economics.challenger_reward_bps
+                + intent.court_economics.honest_party_refund_bps
+                + intent.court_economics.unresolved_remainder_bps
+                == intent.court_economics.payout_balance_bps
+            && intent.court_economics.settlement_after_deadline_only
+            && intent.court_economics.da_evidence_required
             && !intent.court_economics.testnet_beta_ready
             && !intent.court_economics.production_ready,
-        Some("court_economics_checked && !testnet_beta_ready && !production_ready".to_owned()),
+        Some(
+            "court_economics_checked && economics_invariant_checked && bond>0 && payout_bps_balance && settlement_after_deadline_only && da_evidence_required && !testnet_beta_ready && !production_ready"
+                .to_owned(),
+        ),
         Some(format!(
-            "{} && !{} && !{}",
+            "{} && {} && {} > 0 && {} == {} && {} + {} + {} == {} && {} && {} && !{} && !{}",
             intent.court_economics.court_economics_checked,
+            intent.court_economics.economics_invariant_checked,
+            intent.court_economics.minimum_dispute_bond_shannons,
+            intent.court_economics.payout_balance_bps,
+            intent.court_economics.loser_slash_bps,
+            intent.court_economics.challenger_reward_bps,
+            intent.court_economics.honest_party_refund_bps,
+            intent.court_economics.unresolved_remainder_bps,
+            intent.court_economics.payout_balance_bps,
+            intent.court_economics.settlement_after_deadline_only,
+            intent.court_economics.da_evidence_required,
             intent.court_economics.testnet_beta_ready,
             intent.court_economics.production_ready
         )),
-        "court economics are a deterministic policy commitment without claiming complete dispute-economics readiness",
+        "court economics expose explicit dispute-policy invariants without claiming deployed court-economics readiness",
     );
     push_check(
         &mut checks,
@@ -10891,7 +10954,17 @@ mod tests {
         assert_eq!(intent.challenge_deadline_ms, 60_000);
         assert!(intent.settlement_permitted);
         assert_eq!(intent.court_economics.schema, "myelin-session-court-economics-v1");
-        assert_eq!(intent.court_economics.mode, "disputed-close-policy-commitment");
+        assert_eq!(intent.court_economics.mode, "disputed-close-explicit-policy-v1");
+        assert_eq!(intent.court_economics.escrow_binding_mode, "session-escrow-input-cells-hash");
+        assert_eq!(intent.court_economics.minimum_dispute_bond_shannons, 100_000_000);
+        assert_eq!(intent.court_economics.challenger_reward_bps, 5_000);
+        assert_eq!(intent.court_economics.loser_slash_bps, 10_000);
+        assert_eq!(intent.court_economics.honest_party_refund_bps, 5_000);
+        assert_eq!(intent.court_economics.unresolved_remainder_bps, 0);
+        assert_eq!(intent.court_economics.payout_balance_bps, 10_000);
+        assert!(intent.court_economics.settlement_after_deadline_only);
+        assert!(intent.court_economics.da_evidence_required);
+        assert!(intent.court_economics.economics_invariant_checked);
         assert_eq!(intent.court_economics.participant_set_hash, bundle.participant_set_hash);
         assert_eq!(intent.court_economics.escrow_input_cells_hash, bundle.escrow_input_cells_hash);
         assert_eq!(intent.court_economics.da_availability_commitment, da_manifest.availability.availability_commitment);
@@ -10942,12 +11015,21 @@ mod tests {
 
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
             .expect("settlement intent");
-        let cases: [SettlementIntentTamperCase; 7] = [
+        let cases: [SettlementIntentTamperCase; 16] = [
             ("economics-commitment", |intent| intent.court_economics.economics_commitment = "55".repeat(32)),
             ("economics-participant-set", |intent| intent.court_economics.participant_set_hash = "56".repeat(32)),
             ("economics-escrow", |intent| intent.court_economics.escrow_input_cells_hash = "57".repeat(32)),
             ("economics-da-availability", |intent| intent.court_economics.da_availability_commitment = "58".repeat(32)),
             ("economics-challenge-deadline", |intent| intent.court_economics.challenge_deadline_ms += 1),
+            ("economics-bond", |intent| intent.court_economics.minimum_dispute_bond_shannons = 0),
+            ("economics-challenger-reward", |intent| intent.court_economics.challenger_reward_bps = 4_999),
+            ("economics-loser-slash", |intent| intent.court_economics.loser_slash_bps = 9_999),
+            ("economics-honest-refund", |intent| intent.court_economics.honest_party_refund_bps = 4_999),
+            ("economics-remainder", |intent| intent.court_economics.unresolved_remainder_bps = 1),
+            ("economics-payout-balance", |intent| intent.court_economics.payout_balance_bps = 9_999),
+            ("economics-deadline-only", |intent| intent.court_economics.settlement_after_deadline_only = false),
+            ("economics-da-required", |intent| intent.court_economics.da_evidence_required = false),
+            ("economics-invariant", |intent| intent.court_economics.economics_invariant_checked = false),
             ("economics-checked", |intent| intent.court_economics.court_economics_checked = false),
             ("economics-testnet-ready", |intent| intent.court_economics.testnet_beta_ready = true),
         ];

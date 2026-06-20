@@ -261,6 +261,39 @@ if [[ "$settlement_valid" != "true" ]]; then
   echo "generated settlement package did not verify" >&2
   exit 1
 fi
+court_economics_mode="$(jq -r '.court_economics.mode' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_min_bond="$(jq -r '.court_economics.minimum_dispute_bond_shannons' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_challenger_reward_bps="$(jq -r '.court_economics.challenger_reward_bps' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_loser_slash_bps="$(jq -r '.court_economics.loser_slash_bps' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_honest_refund_bps="$(jq -r '.court_economics.honest_party_refund_bps' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_unresolved_remainder_bps="$(jq -r '.court_economics.unresolved_remainder_bps' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_payout_balance_bps="$(jq -r '.court_economics.payout_balance_bps' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_deadline_only="$(jq -r '.court_economics.settlement_after_deadline_only' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_da_required="$(jq -r '.court_economics.da_evidence_required' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_invariant_checked="$(jq -r '.court_economics.economics_invariant_checked' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_checked="$(jq -r '.court_economics.court_economics_checked' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_testnet_ready="$(jq -r '.court_economics.testnet_beta_ready' "$WORKDIR/myelin/session-settlement.json")"
+court_economics_production_ready="$(jq -r '.court_economics.production_ready' "$WORKDIR/myelin/session-settlement.json")"
+if [[ "$court_economics_mode" != "disputed-close-explicit-policy-v1" ]]; then
+  echo "court economics must expose the explicit disputed-close policy" >&2
+  exit 1
+fi
+if (( court_economics_min_bond != 100000000 || court_economics_challenger_reward_bps != 5000 || court_economics_loser_slash_bps != 10000 || court_economics_honest_refund_bps != 5000 || court_economics_unresolved_remainder_bps != 0 )); then
+  echo "court economics numeric policy does not match the expected disputed-close terms" >&2
+  exit 1
+fi
+if (( court_economics_payout_balance_bps != court_economics_loser_slash_bps || court_economics_challenger_reward_bps + court_economics_honest_refund_bps + court_economics_unresolved_remainder_bps != court_economics_payout_balance_bps )); then
+  echo "court economics payout basis points must balance" >&2
+  exit 1
+fi
+if [[ "$court_economics_deadline_only" != "true" || "$court_economics_da_required" != "true" || "$court_economics_invariant_checked" != "true" || "$court_economics_checked" != "true" ]]; then
+  echo "court economics invariant checks must be explicit and true" >&2
+  exit 1
+fi
+if [[ "$court_economics_testnet_ready" != "false" || "$court_economics_production_ready" != "false" ]]; then
+  echo "court economics must remain non-testnet and non-production until CKB court enforcement exists" >&2
+  exit 1
+fi
 da_availability_schema="$(jq -r '.availability.schema' "$WORKDIR/myelin/session-da.json")"
 da_availability_mode="$(jq -r '.availability.mode' "$WORKDIR/myelin/session-da.json")"
 da_availability_signature_scheme="$(jq -r '.availability.signature_scheme' "$WORKDIR/myelin/session-da.json")"

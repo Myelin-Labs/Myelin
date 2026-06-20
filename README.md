@@ -360,11 +360,13 @@ operator custody and runbooks are configured.
 `session settlement-intent` then turns a verified court bundle plus verified DA
 manifest into an explicit disputed-close settlement object with challenge-window
 binding and `l1_da_published = false` / `l1_court_implemented = false` markers.
-It includes `court_economics`, a deterministic dispute-economics policy
-commitment over participant/escrow binding, DA availability, and challenge
-timing; it does not claim complete court/dispute economics. `session
-verify-settlement-intent` recomputes the same three-way binding and economics
-commitment.
+It includes `court_economics`, a deterministic disputed-close policy with an
+explicit minimum bond, loser-slash basis points, challenger reward, honest-party
+refund, zero unresolved remainder, DA-evidence requirement, and
+settlement-after-deadline invariant. `session verify-settlement-intent`
+recomputes the same three-way binding and economics commitment. The policy is
+now locally checkable but still does not claim deployed CKB court-economics
+enforcement.
 `session settlement-package` then emits a deterministic CKB-compatible
 settlement CellTx package that binds the exact intent JSON bytes, court bundle,
 DA manifest, challenge payload, and final state root. It also declares
@@ -484,7 +486,8 @@ reject it. This proves deployed compact-payload script semantics for the local
 devnet carrier and final-script paths, plus locally verified DA committee
 signatures and authority-authentication signatures. It still does not claim
 external DA availability guarantees, deployed threshold-lock authority
-enforcement, production key management, or complete court-dispute economics.
+enforcement, production key management, or deployed CKB court-dispute
+economics.
 `teeworlds court-bundle` materialises one disputed chunk as a self-contained
 court-input bundle: chunk payload bytes, CKB Molecule transaction bytes,
 CKB-style projection evidence, deterministic challenge hashes, and
