@@ -9850,6 +9850,16 @@ fn readiness_submission_report_summary(
         Some(true) if final_l1_settlement && !final_l1_court_economics_preflight_ready(&submission) => Some(false),
         other => other,
     };
+    let raw_da_availability_production_ready = first_json_bool(
+        &submission,
+        &["/availability/production_ready", "/da_availability/production_ready", "/da_manifest/availability/production_ready"],
+    );
+    let da_availability_production_ready = match raw_da_availability_production_ready {
+        Some(true) if (final_l1_da_anchor || final_l1_settlement) && !final_l1_da_availability_preflight_ready(&submission) => {
+            Some(false)
+        }
+        other => other,
+    };
     ReadinessSubmissionReportSummary {
         valid: true,
         live_accepted: submission_report_live_accepted(&submission, schema, expected_ckb_tx_hash),
@@ -9857,10 +9867,7 @@ fn readiness_submission_report_summary(
         final_l1_script_live_accepted: submission_report_final_l1_script_live_accepted(&submission, schema, expected_ckb_tx_hash),
         final_l1_da_anchor,
         final_l1_settlement,
-        da_availability_production_ready: first_json_bool(
-            &submission,
-            &["/availability/production_ready", "/da_availability/production_ready", "/da_manifest/availability/production_ready"],
-        ),
+        da_availability_production_ready,
         court_economics_production_ready,
         authority_authentication_ckb_enforceable: first_json_bool(
             &submission,
@@ -9888,6 +9895,63 @@ fn readiness_submission_report_summary(
 
 fn first_json_bool(value: &Value, pointers: &[&str]) -> Option<bool> {
     pointers.iter().find_map(|pointer| value.pointer(pointer).and_then(Value::as_bool))
+}
+
+fn final_l1_da_availability_preflight_ready(submission: &Value) -> bool {
+    let Some(manifest_value) = submission.get("da_manifest") else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_value::<SessionDaManifestReport>(manifest_value.clone()) else {
+        return false;
+    };
+    if manifest.schema != "myelin-session-da-manifest-v1"
+        || manifest.da_profile != "single-segment-merkle-v1"
+        || manifest.payload_kind != "session-court-molecule-transaction"
+    {
+        return false;
+    }
+    let Ok(proof_bytes) = decode_hex_field(&manifest.proof_molecule_hex, "proof_molecule_hex") else {
+        return false;
+    };
+    let Ok(proof) = SegmentProof::from_molecule_bytes(&proof_bytes) else {
+        return false;
+    };
+    let Ok(proof_verifies) = proof.verify() else {
+        return false;
+    };
+    if !proof_verifies || !manifest.proof_valid {
+        return false;
+    }
+    let expected_molecule_hash = hex::encode(blake3_32(b"myelin:session-molecule-transaction:v1", &proof.chunk_data));
+    if manifest.molecule_transaction_hash != expected_molecule_hash
+        || manifest.segment_id != proof.segment_id
+        || manifest.leaf_index != proof.leaf_index
+        || manifest.chunk_offset != proof.chunk_offset
+        || manifest.chunk_length != proof.chunk_length
+        || hex::encode(proof.segment_root) != manifest.segment_root
+        || manifest.chunk_length as usize != proof.chunk_data.len()
+        || !manifest.local_da_published
+        || !manifest.segment_sealed
+    {
+        return false;
+    }
+    let Ok(expected_availability) = da_availability_evidence(
+        &manifest.session_id,
+        &manifest.court_bundle_hash,
+        &manifest.molecule_transaction_hash,
+        &manifest.segment_root,
+        &manifest.proof_molecule_hex,
+        manifest.local_da_published,
+        manifest.availability.external_receipt.clone(),
+    ) else {
+        return false;
+    };
+    manifest.availability == expected_availability
+        && manifest.availability.availability_checked
+        && manifest.availability.attestation_signature_verified
+        && manifest.availability.attestation_count >= manifest.availability.required_attestations
+        && manifest.availability.production_ready
+        && da_availability_production_ready(&manifest.availability)
 }
 
 fn submission_report_live_accepted(submission: &Value, schema: &str, expected_ckb_tx_hash: &str) -> bool {
@@ -11765,6 +11829,27 @@ mod tests {
         write_temp_json(if production { "external-da-receipt-production" } else { "external-da-receipt" }, &receipt)
     }
 
+    fn production_da_manifest_fixture(label: &str) -> (SessionDaManifestReport, PathBuf, PathBuf, PathBuf) {
+        static NEXT_DA_FIXTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nonce = NEXT_DA_FIXTURE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = write_temp_json(&format!("{label}-open"), &open);
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = write_temp_json(&format!("{label}-commit"), &commit);
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = write_temp_json(&format!("{label}-court"), &bundle);
+        let in_memory_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("in-memory DA manifest");
+        let receipt_path =
+            write_production_external_da_receipt(&in_memory_manifest.molecule_transaction_hash, &in_memory_manifest.segment_root);
+        let storage_dir = std::env::temp_dir().join(format!("myelin-{label}-da-store-{}-{nonce}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&storage_dir);
+        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), Some(receipt_path.clone()))
+            .expect("production DA manifest");
+        (manifest, bundle_path, receipt_path, storage_dir)
+    }
+
     fn da_anchor_package_from_carrier_payload(payload: &str) -> Value {
         let payload_bytes = decode_hex_bytes(payload).expect("carrier payload bytes");
         assert_eq!(payload_bytes.len(), 160);
@@ -12164,6 +12249,8 @@ mod tests {
             Some(court_deployment),
         )
         .expect("production court economics fixture");
+        let (da_manifest, bundle_path, receipt_path, storage_dir) =
+            production_da_manifest_fixture("readiness-final-settlement-production-da");
         let submission = serde_json::json!({
             "schema": "myelin-session-ckb-final-script-submission-v1",
             "package_kind": "myelin-session-settlement-package-v1",
@@ -12176,9 +12263,7 @@ mod tests {
             "submit_mode": true,
             "l1_da_published": false,
             "l1_court_submitted": true,
-            "da_availability": {
-                "production_ready": true
-            },
+            "da_manifest": da_manifest,
             "evidence_cell_dep_present": true,
             "authority_input_present": true,
             "settlement_authority_requirement": authority,
@@ -12213,6 +12298,9 @@ mod tests {
             "rpc_result": expected_hash,
             "rpc_error": null
         });
+        let _ = std::fs::remove_file(bundle_path);
+        let _ = std::fs::remove_file(receipt_path);
+        let _ = std::fs::remove_dir_all(storage_dir);
         write_temp_json(&format!("readiness-live-final-settlement-production-submission-{label_hash}"), &submission)
     }
 
@@ -15806,7 +15894,7 @@ mod tests {
     }
 
     #[test]
-    fn session_submission_readiness_clears_da_blocker_for_production_da_receipt() {
+    fn session_submission_readiness_rejects_forged_production_da_flag() {
         let expected_hash = format!("0x{}", "80".repeat(32));
         let block_hash = format!("0x{}", "8a".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
@@ -15850,6 +15938,61 @@ mod tests {
         let _ = std::fs::remove_file(finality_path);
         let _ = std::fs::remove_file(base_submission_path);
         let _ = std::fs::remove_file(submission_path);
+
+        assert!(report.final_l1_script_submission_ready);
+        assert!(!report.end_to_end_production_ready);
+        assert!(report.end_to_end_production_blockers.contains(&"real-da-availability-guarantee-missing".to_owned()));
+        assert!(report.end_to_end_production_blockers.contains(&"operator-custody-policy-missing".to_owned()));
+        assert!(report.end_to_end_production_blockers.contains(&"operator-runbook-missing".to_owned()));
+    }
+
+    #[test]
+    fn session_submission_readiness_clears_da_blocker_for_recomputed_production_da_manifest() {
+        let expected_hash = format!("0x{}", "80".repeat(32));
+        let block_hash = format!("0x{}", "8a".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        economics.submission_schema = context.submission_schema.clone();
+        inclusion.submission_schema = context.submission_schema.clone();
+        let base_submission_path = write_readiness_live_final_script_submission(&expected_hash, true);
+        let mut submission =
+            serde_json::from_slice::<Value>(&std::fs::read(&base_submission_path).expect("read final script submission"))
+                .expect("final script submission JSON");
+        let (da_manifest, bundle_path, receipt_path, storage_dir) = production_da_manifest_fixture("readiness-final-l1-production-da");
+        submission["da_manifest"] = serde_json::to_value(&da_manifest).expect("DA manifest JSON");
+        let submission_path = write_temp_json("readiness-final-l1-production-da-manifest", &submission);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-final-l1-production-da-manifest", &context);
+        let economics_path = write_temp_json("readiness-economics-final-l1-production-da-manifest", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-final-l1-production-da-manifest", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-final-l1-production-da-manifest", &stability);
+        let finality_path = write_temp_json("readiness-finality-final-l1-production-da-manifest", &finality);
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+            None,
+            None,
+        )
+        .expect("verify final-L1-script readiness with recomputed production DA manifest");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(base_submission_path);
+        let _ = std::fs::remove_file(submission_path);
+        let _ = std::fs::remove_file(bundle_path);
+        let _ = std::fs::remove_file(receipt_path);
+        let _ = std::fs::remove_dir_all(storage_dir);
 
         assert!(report.final_l1_script_submission_ready);
         assert!(!report.end_to_end_production_ready);
