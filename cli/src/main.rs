@@ -788,6 +788,12 @@ struct SessionVerifySubmissionReadinessArgs {
     /// Require the original submission report to prove live RPC acceptance, not only dry-run projection.
     #[arg(long)]
     require_live_submission: bool,
+    /// JSON custody policy proving how production signing keys are controlled.
+    #[arg(long)]
+    operator_custody_policy: Option<PathBuf>,
+    /// JSON runbook proving how operators handle reorgs, fee bumps, retries, and monitoring alerts.
+    #[arg(long)]
+    operator_runbook: Option<PathBuf>,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -986,6 +992,8 @@ fn run() -> Result<()> {
                     args.stability,
                     args.finality,
                     args.require_live_submission,
+                    args.operator_custody_policy,
+                    args.operator_runbook,
                 )?;
                 write_json(args.out, &report)
             }
@@ -4004,8 +4012,17 @@ struct SessionOperationalPolicyEvidence {
     retry_policy_checked: bool,
     key_policy: String,
     key_policy_checked: bool,
+    operator_custody_policy: String,
+    operator_custody_policy_path: Option<String>,
+    operator_custody_policy_hash: Option<String>,
+    operator_custody_policy_checked: bool,
+    operator_runbook_policy: String,
+    operator_runbook_path: Option<String>,
+    operator_runbook_hash: Option<String>,
+    operator_runbook_checked: bool,
     monitoring_policy: String,
     monitoring_policy_checked: bool,
+    production_blockers: Vec<String>,
     policy_commitment_algorithm: String,
     policy_commitment: String,
     public_chain_ready: bool,
@@ -7828,6 +7845,8 @@ fn verify_session_submission_readiness(
     stability_path: PathBuf,
     finality_path: PathBuf,
     require_live_submission: bool,
+    operator_custody_policy_path: Option<PathBuf>,
+    operator_runbook_path: Option<PathBuf>,
 ) -> Result<SessionSubmissionReadinessReport> {
     let context = read_json_report::<SessionSubmissionContextReport>(&context_path)?;
     let economics = read_json_report::<SessionSubmissionEconomicsReport>(&economics_path)?;
@@ -7900,6 +7919,18 @@ fn verify_session_submission_readiness(
     let stable_block_identity = stability.stable_block_identity && !stability.reorg_detected && !stability.missing_or_uncommitted;
     let finality_confirmed = finality.finality_confirmed;
     let reorg_risk_bounded = finality.reorg_risk_bounded;
+    let operator_custody_policy = operator_policy_document_evidence(
+        operator_custody_policy_path.as_deref(),
+        "myelin-operator-custody-policy-v1",
+        &["key_storage", "signing_approval", "rotation_policy", "emergency_response"],
+        "operator-custody",
+    )?;
+    let operator_runbook = operator_policy_document_evidence(
+        operator_runbook_path.as_deref(),
+        "myelin-operator-runbook-v1",
+        &["reorg_response", "fee_bump_response", "retry_response", "monitoring_response"],
+        "operator-runbook",
+    )?;
     let operational_policy = operational_policy_evidence(
         &context,
         &economics,
@@ -7913,6 +7944,8 @@ fn verify_session_submission_readiness(
         submission_report_live_accepted,
         submission_report_carrier_live_accepted,
         submission_report_final_l1_script_live_accepted,
+        &operator_custody_policy,
+        &operator_runbook,
     );
 
     let checks = vec![
@@ -8079,6 +8112,60 @@ fn readiness_check(name: &str, ok: bool, detail: &str) -> SessionSubmissionReadi
     SessionSubmissionReadinessCheck { name: name.to_owned(), ok, detail: detail.to_owned() }
 }
 
+#[derive(Clone, Debug)]
+struct OperatorPolicyDocumentEvidence {
+    path: Option<String>,
+    hash: Option<String>,
+    checked: bool,
+}
+
+fn operator_policy_document_evidence(
+    path: Option<&Path>,
+    expected_schema: &str,
+    required_fields: &[&str],
+    label: &str,
+) -> Result<OperatorPolicyDocumentEvidence> {
+    let Some(path) = path else {
+        return Ok(OperatorPolicyDocumentEvidence { path: None, hash: None, checked: false });
+    };
+    let bytes = fs::read(path)?;
+    if bytes.is_empty() {
+        return Err(CliError::InvalidFixture(format!("{label} policy document is empty: {}", path.display())));
+    }
+    let json: Value = serde_json::from_slice(&bytes)?;
+    let object = json
+        .as_object()
+        .ok_or_else(|| CliError::InvalidFixture(format!("{label} policy document must be a JSON object: {}", path.display())))?;
+    let schema = object
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture(format!("{label} policy document is missing schema: {}", path.display())))?;
+    if schema != expected_schema {
+        return Err(CliError::InvalidFixture(format!(
+            "{label} policy document has unsupported schema {schema}; expected {expected_schema}"
+        )));
+    }
+    for field in required_fields {
+        let Some(value) = object.get(*field).and_then(Value::as_str) else {
+            return Err(CliError::InvalidFixture(format!(
+                "{label} policy document is missing non-empty string field {field}: {}",
+                path.display()
+            )));
+        };
+        if value.trim().is_empty() {
+            return Err(CliError::InvalidFixture(format!(
+                "{label} policy document field {field} must be non-empty: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(OperatorPolicyDocumentEvidence {
+        path: Some(path.display().to_string()),
+        hash: Some(hex::encode(blake3_32(format!("myelin:{label}-policy-document:v1").as_bytes(), &bytes))),
+        checked: true,
+    })
+}
+
 fn hash_optional_str(hasher: &mut blake3::Hasher, value: &Option<String>) {
     match value {
         Some(value) => {
@@ -8117,6 +8204,8 @@ fn operational_policy_evidence(
     submission_report_live_accepted: bool,
     submission_report_carrier_live_accepted: bool,
     submission_report_final_l1_script_live_accepted: bool,
+    operator_custody_policy: &OperatorPolicyDocumentEvidence,
+    operator_runbook: &OperatorPolicyDocumentEvidence,
 ) -> SessionOperationalPolicyEvidence {
     let reorg_policy_checked = finality.min_confirmations > 0
         && finality.finality_confirmed
@@ -8145,7 +8234,20 @@ fn operational_policy_evidence(
         && finality.committed_block_hash == inclusion.block_hash;
     let public_chain_ready =
         reorg_policy_checked && fee_policy_checked && retry_policy_checked && key_policy_checked && monitoring_policy_checked;
+    let operator_custody_policy_checked = operator_custody_policy.checked;
+    let operator_runbook_checked = operator_runbook.checked;
     let testnet_beta_ready = reorg_policy_checked && fee_policy_checked && retry_policy_checked && monitoring_policy_checked;
+    let production_ready = public_chain_ready && operator_custody_policy_checked && operator_runbook_checked;
+    let mut production_blockers = Vec::new();
+    if !public_chain_ready {
+        production_blockers.push("public-chain-live-submission-policy-not-ready".to_owned());
+    }
+    if !operator_custody_policy_checked {
+        production_blockers.push("operator-custody-policy-missing".to_owned());
+    }
+    if !operator_runbook_checked {
+        production_blockers.push("operator-runbook-missing".to_owned());
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"myelin:session-public-chain-operational-policy:v1");
     hasher.update(context.expected_ckb_tx_hash.as_bytes());
@@ -8185,6 +8287,10 @@ fn operational_policy_evidence(
     hasher.update(&economics.min_fee_rate_shannons_per_kb.to_le_bytes());
     hasher.update(&economics.required_fee_shannons.to_le_bytes());
     hash_optional_u64(&mut hasher, economics.max_fee_shannons);
+    hash_optional_str(&mut hasher, &operator_custody_policy.path);
+    hash_optional_str(&mut hasher, &operator_custody_policy.hash);
+    hash_optional_str(&mut hasher, &operator_runbook.path);
+    hash_optional_str(&mut hasher, &operator_runbook.hash);
     hasher.update(&(economics.data_bearing_output_count as u64).to_le_bytes());
     hasher.update(&(economics.empty_data_output_count as u64).to_le_bytes());
     hasher.update(&(economics.explicit_change_output_count as u64).to_le_bytes());
@@ -8218,9 +8324,12 @@ fn operational_policy_evidence(
         fee_policy_checked as u8,
         retry_policy_checked as u8,
         key_policy_checked as u8,
+        operator_custody_policy_checked as u8,
+        operator_runbook_checked as u8,
         monitoring_policy_checked as u8,
         public_chain_ready as u8,
         testnet_beta_ready as u8,
+        production_ready as u8,
     ]);
     let policy_commitment = *hasher.finalize().as_bytes();
     SessionOperationalPolicyEvidence {
@@ -8238,17 +8347,26 @@ fn operational_policy_evidence(
         fee_policy_checked,
         retry_policy: "idempotent-submission-retry-by-package-commitment-and-ckb-tx-hash".to_owned(),
         retry_policy_checked,
-        key_policy: "live-submission-evidence-present; production-custody-not-configured".to_owned(),
+        key_policy: "live-submission-evidence-present; production-custody-and-runbook-documents-required-for-production".to_owned(),
         key_policy_checked,
+        operator_custody_policy: "operator-custody-policy-json-with-key-storage-approval-rotation-emergency-response".to_owned(),
+        operator_custody_policy_path: operator_custody_policy.path.clone(),
+        operator_custody_policy_hash: operator_custody_policy.hash.clone(),
+        operator_custody_policy_checked,
+        operator_runbook_policy: "operator-runbook-json-with-reorg-fee-retry-monitoring-response".to_owned(),
+        operator_runbook_path: operator_runbook.path.clone(),
+        operator_runbook_hash: operator_runbook.hash.clone(),
+        operator_runbook_checked,
         monitoring_policy: "context-economics-inclusion-stability-finality-report-chain".to_owned(),
         monitoring_policy_checked,
+        production_blockers,
         policy_commitment_algorithm:
-            "blake3(myelin:session-public-chain-operational-policy:v1,report_hashes,lineage_paths,block_identity,confirmation_policy,capacity_fee_policy,submission_key_markers,policy_flags)"
+            "blake3(myelin:session-public-chain-operational-policy:v1,report_hashes,lineage_paths,block_identity,confirmation_policy,capacity_fee_policy,operator_custody_policy,operator_runbook,submission_key_markers,policy_flags)"
                 .to_owned(),
         policy_commitment: hex::encode(policy_commitment),
         public_chain_ready,
         testnet_beta_ready,
-        production_ready: false,
+        production_ready,
     }
 }
 
@@ -9917,6 +10035,32 @@ mod tests {
         let path = std::env::temp_dir().join(format!("myelin-{label}-{}.json", std::process::id()));
         std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
         path
+    }
+
+    fn write_operator_custody_policy() -> PathBuf {
+        write_temp_json(
+            "operator-custody-policy",
+            &serde_json::json!({
+                "schema": "myelin-operator-custody-policy-v1",
+                "key_storage": "external-hsm-or-multisig-wallet",
+                "signing_approval": "dual-control-approval",
+                "rotation_policy": "documented-rotation-and-revocation",
+                "emergency_response": "documented-pause-and-key-compromise-response"
+            }),
+        )
+    }
+
+    fn write_operator_runbook() -> PathBuf {
+        write_temp_json(
+            "operator-runbook",
+            &serde_json::json!({
+                "schema": "myelin-operator-runbook-v1",
+                "reorg_response": "wait-for-stability-requery-and-escalate-on-mismatch",
+                "fee_bump_response": "bounded-fee-bump-with-max-fee-cap",
+                "retry_response": "idempotent-retry-by-ckb-tx-hash-and-package-commitment",
+                "monitoring_response": "alert-on-missing-commitment-stability-or-finality"
+            }),
+        )
     }
 
     fn da_anchor_package_from_carrier_payload(payload: &str) -> Value {
@@ -13219,6 +13363,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             false,
+            None,
+            None,
         )
         .expect("verify coherent readiness");
 
@@ -13254,10 +13400,16 @@ mod tests {
         assert!(report.operational_policy.fee_policy_checked);
         assert!(report.operational_policy.retry_policy_checked);
         assert!(!report.operational_policy.key_policy_checked);
+        assert!(!report.operational_policy.operator_custody_policy_checked);
+        assert!(report.operational_policy.operator_custody_policy_hash.is_none());
+        assert!(!report.operational_policy.operator_runbook_checked);
+        assert!(report.operational_policy.operator_runbook_hash.is_none());
         assert!(report.operational_policy.monitoring_policy_checked);
         assert!(report.operational_policy.testnet_beta_ready);
         assert!(!report.operational_policy.public_chain_ready);
         assert!(!report.operational_policy.production_ready);
+        assert!(report.operational_policy.production_blockers.contains(&"operator-custody-policy-missing".to_owned()));
+        assert!(report.operational_policy.production_blockers.contains(&"operator-runbook-missing".to_owned()));
         assert!(report.checks.iter().all(|check| check.ok));
         assert!(report.notes.iter().any(|note| note.contains("operationally ready")));
         assert!(report.notes.iter().any(|note| note.contains("offline/mock/coherent-report readiness")));
@@ -13290,6 +13442,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             false,
+            None,
+            None,
         )
         .expect("verify rejected readiness");
 
@@ -13347,6 +13501,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             false,
+            None,
+            None,
         )
         .expect("verify mixed-lineage readiness");
 
@@ -13398,6 +13554,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             false,
+            None,
+            None,
         )
         .expect("verify invalid-submission readiness");
 
@@ -13448,6 +13606,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             true,
+            None,
+            None,
         )
         .expect("verify strict live-submission readiness");
 
@@ -13503,6 +13663,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             true,
+            None,
+            None,
         )
         .expect("verify strict accepted live-submission readiness");
 
@@ -13562,6 +13724,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             true,
+            None,
+            None,
         )
         .expect("verify final-L1-script readiness label");
 
@@ -13583,7 +13747,61 @@ mod tests {
         assert_eq!(report.readiness_evidence_mode, "final-l1-script");
         assert!(report.operational_policy.public_chain_ready);
         assert!(report.operational_policy.testnet_beta_ready);
+        assert!(!report.operational_policy.operator_custody_policy_checked);
+        assert!(!report.operational_policy.operator_runbook_checked);
         assert!(!report.operational_policy.production_ready);
+    }
+
+    #[test]
+    fn session_submission_readiness_binds_operator_custody_and_runbook_evidence() {
+        let expected_hash = format!("0x{}", "81".repeat(32));
+        let block_hash = format!("0x{}", "82".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        economics.submission_schema = context.submission_schema.clone();
+        inclusion.submission_schema = context.submission_schema.clone();
+        let submission_path = write_readiness_live_final_script_submission(&expected_hash, true);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-final-l1-ops", &context);
+        let economics_path = write_temp_json("readiness-economics-final-l1-ops", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-final-l1-ops", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-final-l1-ops", &stability);
+        let finality_path = write_temp_json("readiness-finality-final-l1-ops", &finality);
+        let custody_path = write_operator_custody_policy();
+        let runbook_path = write_operator_runbook();
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+            Some(custody_path.clone()),
+            Some(runbook_path.clone()),
+        )
+        .expect("verify final-L1-script readiness with operator evidence");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+        let _ = std::fs::remove_file(custody_path);
+        let _ = std::fs::remove_file(runbook_path);
+
+        assert!(report.strict_production_submission_ready);
+        assert!(report.operational_policy.public_chain_ready);
+        assert!(report.operational_policy.operator_custody_policy_checked);
+        assert!(report.operational_policy.operator_custody_policy_hash.as_ref().is_some_and(|hash| hash.len() == 64));
+        assert!(report.operational_policy.operator_runbook_checked);
+        assert!(report.operational_policy.operator_runbook_hash.as_ref().is_some_and(|hash| hash.len() == 64));
+        assert!(report.operational_policy.production_blockers.is_empty());
+        assert!(report.operational_policy.production_ready);
     }
 
     #[test]
@@ -13612,6 +13830,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             true,
+            None,
+            None,
         )
         .expect("verify final-L1-script readiness without preflight");
 
@@ -13659,6 +13879,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             true,
+            None,
+            None,
         )
         .expect("verify final settlement readiness with authority preflight failure");
 
@@ -13722,6 +13944,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             true,
+            None,
+            None,
         )
         .expect("verify final settlement readiness with uniqueness failure");
 
@@ -13771,6 +13995,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             true,
+            None,
+            None,
         )
         .expect("verify strict recorded-carrier readiness");
 
@@ -13826,6 +14052,8 @@ mod tests {
             stability_path.clone(),
             finality_path.clone(),
             true,
+            None,
+            None,
         )
         .expect("verify strict direct live-submission readiness");
 

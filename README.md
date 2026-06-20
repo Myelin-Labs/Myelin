@@ -299,6 +299,12 @@ cargo run -p myelin-cli -- teeworlds vm-probe \
   --config path/to/test_game.cfg
 ```
 
+For production operations evidence, `session verify-submission-readiness` also
+accepts `--operator-custody-policy reports/operator-custody-policy.json` and
+`--operator-runbook reports/operator-runbook.json`. Those files are schema
+checked and hashed into `operational_policy`; without them the report keeps
+`operational_policy.production_ready = false`.
+
 The Teeworlds command consumes the CKB mock transaction produced by xxuejie's
 `teeworlds-cli utils build-test-tx`, splits the tape witness into bounded
 chunks, emits CKB-style projection status for every chunk CellTx, commits those
@@ -355,9 +361,11 @@ matching threshold-lock args, and explicit settlement uniqueness evidence. The
 readiness report also carries
 `operational_policy`, a public-chain operations commitment covering reorg
 confirmation depth, stability requery, fee floor/rate/max-fee policy, retry
-identity, key-submission evidence, and monitoring evidence. It can be
-`testnet_beta_ready` while still leaving `production_ready = false` until real
-operator custody and runbooks are configured.
+identity, key-submission evidence, monitoring evidence, and optional hashed
+operator custody/runbook policy files. It can be `testnet_beta_ready` with live
+public-chain evidence while still leaving `production_ready = false` and listing
+`operator-custody-policy-missing` / `operator-runbook-missing` until those
+artefacts are supplied.
 `session settlement-intent` then turns a verified court bundle plus verified DA
 manifest into an explicit disputed-close settlement object with challenge-window
 binding and `l1_da_published = false` / `l1_court_implemented = false` markers.

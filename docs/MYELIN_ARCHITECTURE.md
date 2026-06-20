@@ -455,6 +455,13 @@ cargo run -p myelin-cli -- session verify-submission-finality --inclusion report
 cargo run -p myelin-cli -- session verify-submission-readiness --context reports/session-settlement-context.json --economics reports/session-settlement-economics.json --inclusion reports/session-settlement-inclusion.json --stability reports/session-settlement-stability.json --finality reports/session-settlement-finality.json --out reports/session-settlement-readiness.json
 ```
 
+Production operations evidence can be bound into either readiness command with
+`--operator-custody-policy reports/operator-custody-policy.json` and
+`--operator-runbook reports/operator-runbook.json`. The custody document must use
+`myelin-operator-custody-policy-v1`; the runbook must use
+`myelin-operator-runbook-v1`. Both files are schema checked and hashed into the
+`operational_policy` commitment.
+
 This fixture is intentionally small, but it exercises the real spine:
 `CellPool` admission, `CellStateTree` mutation, canonical `MyelinBlock`
 finality, CKB-compatible transaction projection, and court-bundle
@@ -539,9 +546,10 @@ DA evidence. This makes the disputed-close economics locally checkable while
 still leaving external DA availability guarantees and deployed CKB
 court-economics enforcement explicitly out of scope. Submission readiness
 carries an `operational_policy` commitment over confirmation depth, stability,
-fee policy, retry identity, live key-submission evidence, and monitoring checks;
-it can be testnet-beta ready while keeping `production_ready = false` until
-operator custody and runbooks are complete.
+fee policy, retry identity, live key-submission evidence, monitoring checks, and
+optional operator custody/runbook documents; it can be testnet-beta ready while
+keeping `production_ready = false` and listing missing production blockers until
+those operator documents are present and live public-chain evidence is accepted.
 The resulting `myelin-ckb-devnet-smoke-v1` report proves devnet CKB acceptance,
 deployed compact-payload type-script execution, final-script strict readiness,
 live rejection of mismatched carrier data, and live rejection of a competing

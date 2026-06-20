@@ -1082,6 +1082,12 @@ PY
   operational_policy_schema="$(jq -r '.operational_policy.schema' "$readiness_path")"
   local operational_public_chain_ready
   operational_public_chain_ready="$(jq -r '.operational_policy.public_chain_ready' "$readiness_path")"
+  local operational_operator_custody_checked
+  operational_operator_custody_checked="$(jq -r '.operational_policy.operator_custody_policy_checked' "$readiness_path")"
+  local operational_operator_runbook_checked
+  operational_operator_runbook_checked="$(jq -r '.operational_policy.operator_runbook_checked' "$readiness_path")"
+  local operational_production_blockers
+  operational_production_blockers="$(jq -c '.operational_policy.production_blockers' "$readiness_path")"
   local operational_testnet_beta_ready
   operational_testnet_beta_ready="$(jq -r '.operational_policy.testnet_beta_ready' "$readiness_path")"
   local operational_production_ready
@@ -1098,11 +1104,17 @@ PY
   fi
   if [[ "$operational_policy_schema" != "myelin-public-chain-operational-policy-v1" ]] \
     || [[ "$operational_public_chain_ready" != "true" ]] \
+    || [[ "$operational_operator_custody_checked" != "false" ]] \
+    || [[ "$operational_operator_runbook_checked" != "false" ]] \
     || [[ "$operational_testnet_beta_ready" != "true" ]] \
     || [[ "$operational_production_ready" != "false" ]] \
     || [[ "$operational_policy_commitment" == "null" ]] \
     || [[ ${#operational_policy_commitment} -ne 64 ]]; then
     jq . "$readiness_path" >&2
+    exit 1
+  fi
+  if ! jq -e 'index("operator-custody-policy-missing") and index("operator-runbook-missing")' <<<"$operational_production_blockers" >/dev/null; then
+    echo "readiness operational policy must expose missing production custody/runbook blockers" >&2
     exit 1
   fi
   local verifier_source_hash
