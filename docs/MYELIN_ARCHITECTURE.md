@@ -459,9 +459,12 @@ For external DA evidence, `session da-manifest` can additionally take
 `--external-da-receipt reports/external-da-receipt.json`. The receipt must use
 `myelin-external-da-receipt-v2`, must bind to the same payload hash and segment
 root as the manifest, and must carry a provider recoverable secp256k1 signature
-over the receipt fields. The signed receipt is hashed into the DA availability
-commitment. The default production gate path omits this receipt and therefore
-remains explicitly local-only DA evidence.
+over the receipt fields. For production DA readiness, the signed receipt must
+also cover `service_level = "production"`, a retention window of at least 30
+days, an HTTPS retrieval endpoint, and a 32-byte audit-log commitment. The
+signed receipt and SLA fields are hashed into the DA availability commitment.
+The default production gate path omits this receipt and therefore remains
+explicitly local-only DA evidence.
 
 Production operations evidence can be bound into either readiness command with
 `--operator-custody-policy reports/operator-custody-policy.json` and
@@ -485,8 +488,10 @@ while deliberately keeping `l1_da_published = false`. With `--storage-dir`, it
 uses `SegmentWriter` / `SegmentReader` to prove sealed local DA storage. With an
 external DA receipt, it also schema-checks, provider-signature-checks, and
 commitment-binds provider receipt evidence for the same payload hash and segment
-root, which can make DA availability `testnet_beta_ready` without claiming
-production DA or L1 publication. The DA anchor-package step converts that
+root, which can make DA availability `testnet_beta_ready`. A provider-signed
+production SLA receipt can additionally make DA availability `production_ready`;
+without that signed SLA, the report continues to avoid claiming production DA or
+L1 publication. The DA anchor-package step converts that
 verified manifest into a deterministic CKB-compatible anchor CellTx package and
 verifies the embedded Molecule transaction, CellTx ids, and projection. It
 still keeps `l1_da_publication_implemented = false`; the

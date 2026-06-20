@@ -315,8 +315,12 @@ For external DA evidence, `session da-manifest` also accepts
 `myelin-external-da-receipt-v2`, bind to the manifest payload hash and segment
 root, and carry a provider recoverable secp256k1 signature over the receipt
 fields. With sealed local DA storage and a matching provider-signed receipt, the
-DA availability evidence can be `testnet_beta_ready`; it still keeps
-`production_ready = false` and does not set `l1_da_published`.
+DA availability evidence can be `testnet_beta_ready`. It only sets
+`production_ready = true` when the same provider signature also covers explicit
+production SLA fields: `service_level = "production"`, at least 30 days of
+`retention_seconds`, an HTTPS `retrieval_endpoint`, and a 32-byte
+`audit_log_commitment`. The default local gate still omits this production
+receipt and does not set `l1_da_published`.
 
 The Teeworlds command consumes the CKB mock transaction produced by xxuejie's
 `teeworlds-cli utils build-test-tx`, splits the tape witness into bounded
@@ -530,9 +534,10 @@ settlement and requires live CKB script verification to reject it. This proves
 deployed compact-payload script semantics for the local devnet carrier and
 final-script paths, plus locally verified DA committee signatures,
 authority-authentication signatures, and threshold-lock args binding. It still
-does not claim external DA availability guarantees, deployed threshold-lock
-cryptographic authority enforcement, production key management, or deployed CKB
-court-dispute economics.
+does not claim production DA availability unless a signed production SLA receipt
+is supplied, and it still does not claim deployed threshold-lock cryptographic
+authority enforcement, production key management, or deployed CKB court-dispute
+economics.
 `teeworlds court-bundle` materialises one disputed chunk as a self-contained
 court-input bundle: chunk payload bytes, CKB Molecule transaction bytes,
 CKB-style projection evidence, deterministic challenge hashes, and
