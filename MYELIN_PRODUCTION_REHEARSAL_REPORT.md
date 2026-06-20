@@ -83,6 +83,10 @@ A public-testnet rehearsal is ready to start when the runner has:
 6. an output directory for immutable run artefacts.
 ```
 
+Starter evidence document shapes live under
+`docs/templates/public-testnet-rehearsal/`. They are rehearsal inputs, not
+readiness proof by themselves.
+
 ## Public-Testnet Rehearsal Exit Criteria
 
 The first public-testnet rehearsal is complete when the artefact directory

@@ -1,0 +1,21 @@
+{
+  "_template_note": "Replace signer_pubkey_hashes and signatures with participant authority signatures over the generated authority_authentication.message_hash.",
+  "schema": "myelin-session-authority-signature-evidence-v1",
+  "signature_scheme": "secp256k1-recoverable-blake3-pubkey-hash20",
+  "participant_set_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "threshold": 2,
+  "signer_count": 0,
+  "message_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "signer_pubkey_hashes": [
+    "0000000000000000000000000000000000000000",
+    "1111111111111111111111111111111111111111"
+  ],
+  "signatures": [
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111100"
+  ],
+  "attestation_hashes": [],
+  "signature_verified": false,
+  "evidence_commitment_algorithm": "",
+  "evidence_commitment": ""
+}

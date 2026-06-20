@@ -1,0 +1,13 @@
+{
+  "schema": "myelin-operator-custody-policy-v1",
+  "key_storage": "public-testnet-rehearsal-hsm-or-multisig-wallet",
+  "signing_approval": "dual-control-approval",
+  "rotation_policy": "documented-rotation-and-revocation",
+  "emergency_response": "documented-pause-and-key-compromise-response",
+  "hardware_backed_keys": true,
+  "dual_control_required": true,
+  "rotation_tested": true,
+  "emergency_drill_tested": true,
+  "signing_threshold": 2,
+  "operator_count": 3
+}

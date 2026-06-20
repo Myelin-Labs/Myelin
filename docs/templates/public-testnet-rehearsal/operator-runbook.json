@@ -1,0 +1,16 @@
+{
+  "schema": "myelin-operator-runbook-v1",
+  "reorg_response": "wait-for-stability-requery-and-escalate-on-mismatch",
+  "fee_bump_response": "bounded-fee-bump-with-max-fee-cap",
+  "retry_response": "idempotent-retry-by-ckb-tx-hash-and-package-commitment",
+  "monitoring_response": "alert-on-missing-commitment-stability-or-finality",
+  "stability_requery_required": true,
+  "min_confirmations": 6,
+  "min_fee_shannons": 1,
+  "min_fee_rate_shannons_per_kb": 1000,
+  "max_fee_shannons": 100000,
+  "max_retry_attempts": 3,
+  "retry_backoff_millis": 1000,
+  "monitoring_interval_millis": 5000,
+  "escalation_contact": "ops@example.invalid"
+}

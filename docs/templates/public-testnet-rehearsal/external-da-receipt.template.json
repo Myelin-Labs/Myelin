@@ -1,0 +1,16 @@
+{
+  "_template_note": "Replace every placeholder. Provider signature must be over the exact receipt fields for this payload_hash and segment_root.",
+  "schema": "myelin-external-da-receipt-v2",
+  "provider": "replace-with-provider-name",
+  "namespace": "session-court-payloads",
+  "payload_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "segment_root": "0000000000000000000000000000000000000000000000000000000000000000",
+  "receipt_id": "replace-with-provider-receipt-id",
+  "availability_window": "testnet-rehearsal-retention-window",
+  "service_level": "production",
+  "retention_seconds": 2592000,
+  "retrieval_endpoint": "https://replace-with-provider.example/session-court-payloads/receipt",
+  "audit_log_commitment": "0000000000000000000000000000000000000000000000000000000000000000",
+  "provider_pubkey_hash": "0000000000000000000000000000000000000000",
+  "provider_signature": "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+}

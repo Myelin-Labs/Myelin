@@ -75,6 +75,25 @@ cp cellscript/examples/myelin/da-anchor-final.cell "$MYELIN_REHEARSAL_DIR/"
 cp cellscript/examples/myelin/settlement-final.cell "$MYELIN_REHEARSAL_DIR/"
 ```
 
+Copy the evidence document starters:
+
+```bash
+cp docs/templates/public-testnet-rehearsal/operator-custody-policy.json "$MYELIN_REHEARSAL_DIR/"
+cp docs/templates/public-testnet-rehearsal/operator-runbook.json "$MYELIN_REHEARSAL_DIR/"
+cp docs/templates/public-testnet-rehearsal/*.template.json "$MYELIN_REHEARSAL_DIR/"
+```
+
+The `.template.json` files are shape references only. Replace their placeholder
+hashes, signatures, and deployment out-points before using them as CLI inputs.
+After replacement, save them with the filenames used below:
+
+```text
+external-da-receipt.json
+court-economics-deployment.json
+threshold-lock-deployment.json
+authority-signature-evidence.json
+```
+
 ## Phase 1: Build Session Artefacts
 
 Use deterministic fixture session data for the first rehearsal unless real game

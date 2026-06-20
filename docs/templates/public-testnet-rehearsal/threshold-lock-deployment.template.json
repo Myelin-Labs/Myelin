@@ -1,0 +1,23 @@
+{
+  "_template_note": "Replace fields from settlement_authority_requirement.authority_authentication before passing to session settlement-package.",
+  "schema": "myelin-session-threshold-lock-deployment-v1",
+  "network": "ckb-testnet",
+  "code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "hash_type": "data2",
+  "code_dep_tx_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "code_dep_index": "0x0",
+  "audited_source_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "audit_report_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "deployment_policy": "testnet-beta-threshold-lock-v1",
+  "ckb_lock_args_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "threshold": 2,
+  "signer_pubkey_hashes": [
+    "0000000000000000000000000000000000000000",
+    "1111111111111111111111111111111111111111"
+  ],
+  "ckb_enforceable_checked": false,
+  "testnet_beta_ready": false,
+  "production_ready": false,
+  "evidence_commitment_algorithm": "",
+  "evidence_commitment": ""
+}
