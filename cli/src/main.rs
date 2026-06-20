@@ -515,6 +515,9 @@ struct SessionSettlementIntentArgs {
     /// Challenge window in milliseconds.
     #[arg(long, default_value_t = 60_000)]
     challenge_window_ms: u64,
+    /// Optional court economics deployment evidence JSON for production court readiness.
+    #[arg(long)]
+    court_economics_deployment_evidence: Option<PathBuf>,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -928,12 +931,13 @@ fn run() -> Result<()> {
                 write_json(args.out, &report)
             }
             SessionCommand::SettlementIntent(args) => {
-                let report = session_settlement_intent(
+                let report = session_settlement_intent_with_court_deployment(
                     args.bundle,
                     args.da_manifest,
                     &args.kind,
                     args.current_time_ms,
                     args.challenge_window_ms,
+                    args.court_economics_deployment_evidence,
                 )?;
                 write_json(args.out, &report)
             }
@@ -3376,6 +3380,26 @@ fn court_economics_evidence(
     challenge_window_ms: u64,
     challenge_deadline_ms: u64,
 ) -> Result<SessionCourtEconomicsEvidence> {
+    court_economics_evidence_with_deployment(
+        participant_set_hash,
+        escrow_input_cells_hash,
+        challenge_payload_hash,
+        da_availability_commitment,
+        challenge_window_ms,
+        challenge_deadline_ms,
+        None,
+    )
+}
+
+fn court_economics_evidence_with_deployment(
+    participant_set_hash: &str,
+    escrow_input_cells_hash: &str,
+    challenge_payload_hash: &str,
+    da_availability_commitment: &str,
+    challenge_window_ms: u64,
+    challenge_deadline_ms: u64,
+    court_economics_deployment: Option<SessionCourtEconomicsDeploymentEvidence>,
+) -> Result<SessionCourtEconomicsEvidence> {
     let participant_set_hash_bytes = parse_hex_32(participant_set_hash)
         .ok_or_else(|| CliError::InvalidFixture("court economics participant_set_hash must be 32-byte hex".to_owned()))?;
     let escrow_input_cells_hash_bytes = parse_hex_32(escrow_input_cells_hash)
@@ -3397,25 +3421,22 @@ fn court_economics_evidence(
         && challenge_deadline_ms >= challenge_window_ms
         && settlement_after_deadline_only
         && da_evidence_required;
-    let economics_commitment = blake3_chunks(
-        b"myelin:session-court-economics:v1",
-        &[
-            &participant_set_hash_bytes,
-            &escrow_input_cells_hash_bytes,
-            &challenge_payload_hash_bytes,
-            &da_availability_commitment_bytes,
-            &challenge_window_ms.to_le_bytes(),
-            &challenge_deadline_ms.to_le_bytes(),
-            &minimum_dispute_bond_shannons.to_le_bytes(),
-            &challenger_reward_bps.to_le_bytes(),
-            &loser_slash_bps.to_le_bytes(),
-            &honest_party_refund_bps.to_le_bytes(),
-            &unresolved_remainder_bps.to_le_bytes(),
-            &[u8::from(settlement_after_deadline_only)],
-            &[u8::from(da_evidence_required)],
-        ],
+    let base_commitment = court_economics_base_commitment(
+        participant_set_hash_bytes,
+        escrow_input_cells_hash_bytes,
+        challenge_payload_hash_bytes,
+        da_availability_commitment_bytes,
+        challenge_window_ms,
+        challenge_deadline_ms,
+        minimum_dispute_bond_shannons,
+        challenger_reward_bps,
+        loser_slash_bps,
+        honest_party_refund_bps,
+        unresolved_remainder_bps,
+        settlement_after_deadline_only,
+        da_evidence_required,
     );
-    Ok(SessionCourtEconomicsEvidence {
+    let mut economics = SessionCourtEconomicsEvidence {
         schema: "myelin-session-court-economics-v1".to_owned(),
         mode: "disputed-close-explicit-policy-v1".to_owned(),
         escrow_binding_mode: "session-escrow-input-cells-hash".to_owned(),
@@ -3442,11 +3463,231 @@ fn court_economics_evidence(
         economics_commitment_algorithm:
             "blake3(myelin:session-court-economics:v1,participant_set_hash,escrow_input_cells_hash,challenge_payload_hash,da_availability_commitment,challenge_window_ms,challenge_deadline_ms,minimum_dispute_bond_shannons,challenger_reward_bps,loser_slash_bps,honest_party_refund_bps,unresolved_remainder_bps,settlement_after_deadline_only,da_evidence_required)"
                 .to_owned(),
-        economics_commitment: hex::encode(economics_commitment),
+        economics_commitment: hex::encode(base_commitment),
         court_economics_checked: true,
+        court_economics_deployment: None,
         testnet_beta_ready: false,
         production_ready: false,
-    })
+    };
+    if let Some(deployment) = court_economics_deployment {
+        let deployment = normalize_court_economics_deployment_evidence(deployment, &economics)?;
+        economics.court_economics_deployment = Some(deployment);
+        economics.testnet_beta_ready =
+            economics.court_economics_deployment.as_ref().is_some_and(|deployment| deployment.testnet_beta_ready);
+        economics.production_ready =
+            economics.court_economics_deployment.as_ref().is_some_and(|deployment| deployment.production_ready);
+        economics.economics_commitment_algorithm =
+            "blake3(myelin:session-court-economics:v1,base-fields,optional-court-economics-deployment-commitment)".to_owned();
+        economics.economics_commitment = court_economics_commitment(&economics)?;
+    }
+    Ok(economics)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn court_economics_base_commitment(
+    participant_set_hash: [u8; 32],
+    escrow_input_cells_hash: [u8; 32],
+    challenge_payload_hash: [u8; 32],
+    da_availability_commitment: [u8; 32],
+    challenge_window_ms: u64,
+    challenge_deadline_ms: u64,
+    minimum_dispute_bond_shannons: u64,
+    challenger_reward_bps: u16,
+    loser_slash_bps: u16,
+    honest_party_refund_bps: u16,
+    unresolved_remainder_bps: u16,
+    settlement_after_deadline_only: bool,
+    da_evidence_required: bool,
+) -> [u8; 32] {
+    blake3_chunks(
+        b"myelin:session-court-economics:v1",
+        &[
+            &participant_set_hash,
+            &escrow_input_cells_hash,
+            &challenge_payload_hash,
+            &da_availability_commitment,
+            &challenge_window_ms.to_le_bytes(),
+            &challenge_deadline_ms.to_le_bytes(),
+            &minimum_dispute_bond_shannons.to_le_bytes(),
+            &challenger_reward_bps.to_le_bytes(),
+            &loser_slash_bps.to_le_bytes(),
+            &honest_party_refund_bps.to_le_bytes(),
+            &unresolved_remainder_bps.to_le_bytes(),
+            &[u8::from(settlement_after_deadline_only)],
+            &[u8::from(da_evidence_required)],
+        ],
+    )
+}
+
+fn court_economics_commitment(economics: &SessionCourtEconomicsEvidence) -> Result<String> {
+    let participant_set_hash = parse_hex_32(&economics.participant_set_hash)
+        .ok_or_else(|| CliError::InvalidFixture("court economics participant_set_hash must be 32-byte hex".to_owned()))?;
+    let escrow_input_cells_hash = parse_hex_32(&economics.escrow_input_cells_hash)
+        .ok_or_else(|| CliError::InvalidFixture("court economics escrow_input_cells_hash must be 32-byte hex".to_owned()))?;
+    let challenge_payload_hash = parse_hex_32(&economics.challenge_payload_hash)
+        .ok_or_else(|| CliError::InvalidFixture("court economics challenge_payload_hash must be 32-byte hex".to_owned()))?;
+    let da_availability_commitment = parse_hex_32(&economics.da_availability_commitment)
+        .ok_or_else(|| CliError::InvalidFixture("court economics DA availability commitment must be 32-byte hex".to_owned()))?;
+    let base_commitment = court_economics_base_commitment(
+        participant_set_hash,
+        escrow_input_cells_hash,
+        challenge_payload_hash,
+        da_availability_commitment,
+        economics.challenge_window_ms,
+        economics.challenge_deadline_ms,
+        economics.minimum_dispute_bond_shannons,
+        economics.challenger_reward_bps,
+        economics.loser_slash_bps,
+        economics.honest_party_refund_bps,
+        economics.unresolved_remainder_bps,
+        economics.settlement_after_deadline_only,
+        economics.da_evidence_required,
+    );
+    if let Some(deployment) = &economics.court_economics_deployment {
+        let deployment_commitment = parse_hex_32(&deployment.evidence_commitment).ok_or_else(|| {
+            CliError::InvalidFixture("court economics deployment evidence_commitment must be 32-byte hex".to_owned())
+        })?;
+        Ok(hex::encode(blake3_chunks(
+            b"myelin:session-court-economics-with-deployment:v1",
+            &[&base_commitment, &deployment_commitment],
+        )))
+    } else {
+        Ok(hex::encode(base_commitment))
+    }
+}
+
+fn normalize_court_economics_deployment_evidence(
+    mut deployment: SessionCourtEconomicsDeploymentEvidence,
+    economics: &SessionCourtEconomicsEvidence,
+) -> Result<SessionCourtEconomicsDeploymentEvidence> {
+    if deployment.schema != "myelin-session-court-economics-deployment-v1" {
+        return Err(CliError::InvalidFixture("court economics deployment evidence schema is not recognised".to_owned()));
+    }
+    deployment.network = deployment.network.trim().to_ascii_lowercase();
+    if !matches!(deployment.network.as_str(), "ckb-mainnet" | "ckb-testnet") {
+        return Err(CliError::InvalidFixture("court economics deployment network must be ckb-mainnet or ckb-testnet".to_owned()));
+    }
+    deployment.verifier_code_hash = normalize_ckb_tx_hash(&deployment.verifier_code_hash)
+        .ok_or_else(|| CliError::InvalidFixture("court economics deployment verifier_code_hash must be 32-byte hex".to_owned()))?;
+    deployment.verifier_code_dep_tx_hash = normalize_ckb_tx_hash(&deployment.verifier_code_dep_tx_hash).ok_or_else(|| {
+        CliError::InvalidFixture("court economics deployment verifier_code_dep_tx_hash must be 32-byte hex".to_owned())
+    })?;
+    ckb_script_hash_type_arg(&deployment.verifier_hash_type, "court economics deployment verifier_hash_type")?;
+    deployment.verifier_code_dep_index =
+        ckb_quantity_arg(&deployment.verifier_code_dep_index, "court economics deployment verifier_code_dep_index")?;
+    deployment.audited_source_hash = normalize_ckb_tx_hash(&deployment.audited_source_hash)
+        .ok_or_else(|| CliError::InvalidFixture("court economics deployment audited_source_hash must be 32-byte hex".to_owned()))?;
+    deployment.audit_report_hash = normalize_ckb_tx_hash(&deployment.audit_report_hash)
+        .ok_or_else(|| CliError::InvalidFixture("court economics deployment audit_report_hash must be 32-byte hex".to_owned()))?;
+    if deployment.deployment_policy != "mainnet-production-court-dispute-economics-v1"
+        && deployment.deployment_policy != "testnet-beta-court-dispute-economics-v1"
+    {
+        return Err(CliError::InvalidFixture(
+            "court economics deployment deployment_policy must be mainnet-production-court-dispute-economics-v1 or testnet-beta-court-dispute-economics-v1"
+                .to_owned(),
+        ));
+    }
+    if deployment.economics_commitment != economics.economics_commitment {
+        return Err(CliError::InvalidFixture(
+            "court economics deployment economics_commitment does not match the base economics commitment".to_owned(),
+        ));
+    }
+    if deployment.challenge_payload_hash != economics.challenge_payload_hash {
+        return Err(CliError::InvalidFixture(
+            "court economics deployment challenge_payload_hash does not match court economics".to_owned(),
+        ));
+    }
+    if deployment.da_availability_commitment != economics.da_availability_commitment {
+        return Err(CliError::InvalidFixture(
+            "court economics deployment da_availability_commitment does not match court economics".to_owned(),
+        ));
+    }
+    if deployment.minimum_dispute_bond_shannons != economics.minimum_dispute_bond_shannons
+        || deployment.loser_slash_bps != economics.loser_slash_bps
+        || deployment.settlement_after_deadline_only != economics.settlement_after_deadline_only
+        || deployment.da_evidence_required != economics.da_evidence_required
+    {
+        return Err(CliError::InvalidFixture("court economics deployment policy fields do not match court economics".to_owned()));
+    }
+    if deployment.ckb_enforceable_checked && !deployment.testnet_beta_ready {
+        return Err(CliError::InvalidFixture(
+            "court economics deployment cannot be enforceable without testnet_beta_ready evidence".to_owned(),
+        ));
+    }
+    if deployment.testnet_beta_ready && !deployment.ckb_enforceable_checked {
+        return Err(CliError::InvalidFixture(
+            "court economics deployment testnet_beta_ready requires ckb_enforceable_checked".to_owned(),
+        ));
+    }
+    if deployment.production_ready
+        && !(deployment.ckb_enforceable_checked
+            && deployment.testnet_beta_ready
+            && deployment.network == "ckb-mainnet"
+            && deployment.deployment_policy == "mainnet-production-court-dispute-economics-v1")
+    {
+        return Err(CliError::InvalidFixture(
+            "court economics deployment production_ready requires checked mainnet court deployment evidence".to_owned(),
+        ));
+    }
+    if deployment.network == "ckb-testnet" && deployment.production_ready {
+        return Err(CliError::InvalidFixture("court economics deployment testnet evidence cannot claim production_ready".to_owned()));
+    }
+    let commitment = court_economics_deployment_commitment(&deployment)?;
+    deployment.evidence_commitment_algorithm =
+        "blake3(myelin:session-court-economics-deployment-evidence:v1,normalized-fields)".to_owned();
+    deployment.evidence_commitment = hex::encode(commitment);
+    Ok(deployment)
+}
+
+fn court_economics_deployment_commitment(deployment: &SessionCourtEconomicsDeploymentEvidence) -> Result<[u8; 32]> {
+    parse_hex_32(&deployment.economics_commitment)
+        .ok_or_else(|| CliError::InvalidFixture("court economics deployment economics_commitment must be 32-byte hex".to_owned()))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"myelin:session-court-economics-deployment-evidence:v1");
+    hasher.update(deployment.schema.as_bytes());
+    hasher.update(deployment.network.as_bytes());
+    hasher.update(deployment.verifier_code_hash.as_bytes());
+    hasher.update(deployment.verifier_hash_type.as_bytes());
+    hasher.update(deployment.verifier_code_dep_tx_hash.as_bytes());
+    hasher.update(deployment.verifier_code_dep_index.as_bytes());
+    hasher.update(deployment.audited_source_hash.as_bytes());
+    hasher.update(deployment.audit_report_hash.as_bytes());
+    hasher.update(deployment.deployment_policy.as_bytes());
+    hasher.update(deployment.economics_commitment.as_bytes());
+    hasher.update(deployment.challenge_payload_hash.as_bytes());
+    hasher.update(deployment.da_availability_commitment.as_bytes());
+    hasher.update(&deployment.minimum_dispute_bond_shannons.to_le_bytes());
+    hasher.update(&deployment.loser_slash_bps.to_le_bytes());
+    hasher.update(&[u8::from(deployment.settlement_after_deadline_only)]);
+    hasher.update(&[u8::from(deployment.da_evidence_required)]);
+    hasher.update(&[u8::from(deployment.ckb_enforceable_checked)]);
+    hasher.update(&[u8::from(deployment.testnet_beta_ready)]);
+    hasher.update(&[u8::from(deployment.production_ready)]);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn court_economics_deployment_flags_valid(economics: &SessionCourtEconomicsEvidence) -> bool {
+    match economics.court_economics_deployment.clone() {
+        Some(deployment) => {
+            let Ok(base_economics) = court_economics_evidence(
+                &economics.participant_set_hash,
+                &economics.escrow_input_cells_hash,
+                &economics.challenge_payload_hash,
+                &economics.da_availability_commitment,
+                economics.challenge_window_ms,
+                economics.challenge_deadline_ms,
+            ) else {
+                return false;
+            };
+            let Ok(deployment) = normalize_court_economics_deployment_evidence(deployment, &base_economics) else {
+                return false;
+            };
+            economics.testnet_beta_ready == deployment.testnet_beta_ready
+                && economics.production_ready == deployment.production_ready
+                && (!economics.production_ready || deployment.production_ready)
+        }
+        None => !economics.testnet_beta_ready && !economics.production_ready,
+    }
 }
 
 fn settlement_authority_cell_data(
@@ -4161,8 +4402,37 @@ struct SessionCourtEconomicsEvidence {
     economics_commitment_algorithm: String,
     economics_commitment: String,
     court_economics_checked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    court_economics_deployment: Option<SessionCourtEconomicsDeploymentEvidence>,
     testnet_beta_ready: bool,
     production_ready: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct SessionCourtEconomicsDeploymentEvidence {
+    schema: String,
+    network: String,
+    verifier_code_hash: String,
+    verifier_hash_type: String,
+    verifier_code_dep_tx_hash: String,
+    verifier_code_dep_index: String,
+    audited_source_hash: String,
+    audit_report_hash: String,
+    deployment_policy: String,
+    economics_commitment: String,
+    challenge_payload_hash: String,
+    da_availability_commitment: String,
+    minimum_dispute_bond_shannons: u64,
+    loser_slash_bps: u16,
+    settlement_after_deadline_only: bool,
+    da_evidence_required: bool,
+    ckb_enforceable_checked: bool,
+    testnet_beta_ready: bool,
+    production_ready: bool,
+    #[serde(default)]
+    evidence_commitment_algorithm: String,
+    #[serde(default)]
+    evidence_commitment: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -4188,6 +4458,7 @@ struct SessionSettlementPackageReport {
     da_manifest_hash: String,
     challenge_payload_hash: String,
     da_availability: SessionDaAvailabilityEvidence,
+    court_economics: SessionCourtEconomicsEvidence,
     final_state_root: String,
     settlement_authority: SessionSettlementAuthorityRequirement,
     carrier_payload_kind: String,
@@ -4293,6 +4564,7 @@ struct SessionSettlementSubmissionReport {
     settlement_cell_wtxid: String,
     molecule_transaction_hash: String,
     da_availability: SessionDaAvailabilityEvidence,
+    court_economics: SessionCourtEconomicsEvidence,
     ckb_raw_tx_hash: Option<String>,
     ckb_wtx_hash: Option<String>,
     ckb_transaction_json: Value,
@@ -5963,12 +6235,24 @@ fn session_submit_da_anchor_package(
     })
 }
 
+#[cfg(test)]
 fn session_settlement_intent(
     bundle_path: PathBuf,
     da_manifest_path: PathBuf,
     kind: &str,
     current_time_ms: u64,
     challenge_window_ms: u64,
+) -> Result<SessionSettlementIntentReport> {
+    session_settlement_intent_with_court_deployment(bundle_path, da_manifest_path, kind, current_time_ms, challenge_window_ms, None)
+}
+
+fn session_settlement_intent_with_court_deployment(
+    bundle_path: PathBuf,
+    da_manifest_path: PathBuf,
+    kind: &str,
+    current_time_ms: u64,
+    challenge_window_ms: u64,
+    court_economics_deployment_evidence_path: Option<PathBuf>,
 ) -> Result<SessionSettlementIntentReport> {
     if kind != "disputed-close" {
         return Err(CliError::InvalidFixture(format!("unsupported settlement intent kind: {kind}")));
@@ -6004,15 +6288,23 @@ fn session_settlement_intent(
     } else {
         "challenge window is still open; disputed close is not yet locally settleable even though DA proof verifies".to_owned()
     };
+    let court_economics_deployment = match court_economics_deployment_evidence_path {
+        Some(path) => {
+            let bytes = fs::read(path)?;
+            Some(serde_json::from_slice::<SessionCourtEconomicsDeploymentEvidence>(&bytes)?)
+        }
+        None => None,
+    };
     let court_bundle_hash = blake3_32(b"myelin:session-court-bundle-json:v1", &bundle_bytes);
     let da_manifest_hash = blake3_32(b"myelin:session-da-manifest-json:v1", &da_bytes);
-    let court_economics = court_economics_evidence(
+    let court_economics = court_economics_evidence_with_deployment(
         &bundle.participant_set_hash,
         &bundle.escrow_input_cells_hash,
         &bundle.challenge_payload_hash,
         &da_manifest.availability.availability_commitment,
         challenge_window_ms,
         challenge_deadline_ms,
+        court_economics_deployment,
     )?;
 
     Ok(SessionSettlementIntentReport {
@@ -6245,13 +6537,14 @@ fn verify_session_settlement_intent(
         Some(intent.settlement_permitted.to_string()),
         "settlement permission matches challenge-window timing",
     );
-    let expected_court_economics = court_economics_evidence(
+    let expected_court_economics = court_economics_evidence_with_deployment(
         &bundle.participant_set_hash,
         &bundle.escrow_input_cells_hash,
         &bundle.challenge_payload_hash,
         &da_manifest.availability.availability_commitment,
         intent.challenge_window_ms,
         intent.challenge_deadline_ms,
+        intent.court_economics.court_economics_deployment.clone(),
     )?;
     push_check(
         &mut checks,
@@ -6283,14 +6576,13 @@ fn verify_session_settlement_intent(
                 == intent.court_economics.payout_balance_bps
             && intent.court_economics.settlement_after_deadline_only
             && intent.court_economics.da_evidence_required
-            && !intent.court_economics.testnet_beta_ready
-            && !intent.court_economics.production_ready,
+            && court_economics_deployment_flags_valid(&intent.court_economics),
         Some(
-            "court_economics_checked && economics_invariant_checked && bond>0 && payout_bps_balance && settlement_after_deadline_only && da_evidence_required && !testnet_beta_ready && !production_ready"
+            "court_economics_checked && economics_invariant_checked && bond>0 && payout_bps_balance && settlement_after_deadline_only && da_evidence_required && deployment flags match verified evidence"
                 .to_owned(),
         ),
         Some(format!(
-            "{} && {} && {} > 0 && {} == {} && {} + {} + {} == {} && {} && {} && !{} && !{}",
+            "{} && {} && {} > 0 && {} == {} && {} + {} + {} == {} && {} && {} && {}:{}",
             intent.court_economics.court_economics_checked,
             intent.court_economics.economics_invariant_checked,
             intent.court_economics.minimum_dispute_bond_shannons,
@@ -6305,7 +6597,7 @@ fn verify_session_settlement_intent(
             intent.court_economics.testnet_beta_ready,
             intent.court_economics.production_ready
         )),
-        "court economics expose explicit dispute-policy invariants without claiming deployed court-economics readiness",
+        "court economics expose explicit dispute-policy invariants and only claim deployed CKB economics enforcement when deployment evidence is bound into the commitment",
     );
     push_check(
         &mut checks,
@@ -6403,6 +6695,7 @@ fn session_settlement_package_with_deployment(
         da_manifest_hash: intent.da_manifest_hash,
         challenge_payload_hash: intent.challenge_payload_hash,
         da_availability: intent.da_availability,
+        court_economics: intent.court_economics,
         final_state_root: intent.final_state_root,
         settlement_authority: settlement_authority_requirement_with_deployment(
             intent_hash,
@@ -6539,6 +6832,14 @@ fn verify_session_settlement_package(
         Some(intent.da_availability.availability_commitment.clone()),
         Some(package.da_availability.availability_commitment.clone()),
         "settlement package preserves the DA availability evidence from the settlement intent",
+    );
+    push_check(
+        &mut checks,
+        "court-economics",
+        package.court_economics == intent.court_economics,
+        Some(intent.court_economics.economics_commitment.clone()),
+        Some(package.court_economics.economics_commitment.clone()),
+        "settlement package preserves the court economics evidence from the settlement intent",
     );
     let expected_intent_hash_bytes =
         parse_hex_32(&expected_intent_hash).ok_or_else(|| CliError::InvalidFixture("intent_hash must be 32-byte hex".to_owned()))?;
@@ -7017,6 +7318,7 @@ fn session_submit_settlement_package(
         settlement_cell_wtxid: package.settlement_cell_wtxid,
         molecule_transaction_hash: package.molecule_transaction_hash,
         da_availability: package.da_availability,
+        court_economics: package.court_economics,
         ckb_raw_tx_hash: projection.ckb_raw_tx_hash,
         ckb_wtx_hash: projection.ckb_wtx_hash,
         ckb_transaction_json,
@@ -7160,6 +7462,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         .and_then(Value::as_str)
         .ok_or_else(|| CliError::InvalidFixture("carrier package is missing schema".to_owned()))?;
     let package_da_availability = package_json.get("da_availability").cloned();
+    let package_court_economics = package_json.get("court_economics").cloned();
     let identity_field = match package_kind {
         "myelin-session-da-anchor-package-v1" => "da_manifest_hash",
         "myelin-session-settlement-package-v1" => "intent_hash",
@@ -7603,6 +7906,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         "carrier_payload_data_hash": carrier_payload_data_hash,
         "carrier_identity": carrier_identity,
         "da_availability": package_da_availability,
+        "court_economics": package_court_economics,
         "carrier_type_args": carrier_type_args,
         "settlement_uniqueness_checked": settlement_uniqueness.as_ref().and_then(|value| value.get("settlement_uniqueness_checked")).and_then(Value::as_bool).unwrap_or(false),
         "settlement_identity_hash": settlement_uniqueness.as_ref().and_then(|value| value.get("settlement_identity_hash")).cloned(),
@@ -9293,6 +9597,18 @@ fn readiness_submission_report_summary(
         final_l1_script && submission.get("package_kind").and_then(Value::as_str) == Some("myelin-session-da-anchor-package-v1");
     let final_l1_settlement =
         final_l1_script && submission.get("package_kind").and_then(Value::as_str) == Some("myelin-session-settlement-package-v1");
+    let raw_court_economics_production_ready = first_json_bool(
+        &submission,
+        &[
+            "/court_economics/production_ready",
+            "/settlement_intent/court_economics/production_ready",
+            "/settlement_authority_requirement/court_economics/production_ready",
+        ],
+    );
+    let court_economics_production_ready = match raw_court_economics_production_ready {
+        Some(true) if final_l1_settlement && !final_l1_court_economics_preflight_ready(&submission) => Some(false),
+        other => other,
+    };
     ReadinessSubmissionReportSummary {
         valid: true,
         live_accepted: submission_report_live_accepted(&submission, schema, expected_ckb_tx_hash),
@@ -9304,14 +9620,7 @@ fn readiness_submission_report_summary(
             &submission,
             &["/availability/production_ready", "/da_availability/production_ready", "/da_manifest/availability/production_ready"],
         ),
-        court_economics_production_ready: first_json_bool(
-            &submission,
-            &[
-                "/court_economics/production_ready",
-                "/settlement_intent/court_economics/production_ready",
-                "/settlement_authority_requirement/court_economics/production_ready",
-            ],
-        ),
+        court_economics_production_ready,
         authority_authentication_ckb_enforceable: first_json_bool(
             &submission,
             &["/settlement_authority_requirement/authority_authentication/ckb_enforceable"],
@@ -9411,6 +9720,17 @@ fn final_l1_authority_authentication_preflight_ready(submission: &Value) -> bool
     }
 }
 
+fn final_l1_court_economics_preflight_ready(submission: &Value) -> bool {
+    let Some(economics_value) = submission.pointer("/court_economics") else {
+        return false;
+    };
+    let Ok(economics) = serde_json::from_value::<SessionCourtEconomicsEvidence>(economics_value.clone()) else {
+        return false;
+    };
+    court_economics_commitment(&economics).ok().as_deref() == Some(economics.economics_commitment.as_str())
+        && court_economics_deployment_flags_valid(&economics)
+}
+
 fn final_l1_script_preflight_ready(submission: &Value) -> bool {
     if submission.get("verifier_role").and_then(Value::as_str) != Some("final-l1-script") {
         return false;
@@ -9450,6 +9770,7 @@ fn final_l1_script_preflight_ready(submission: &Value) -> bool {
                 && submission.get("settlement_authority_requirement").is_some_and(Value::is_object)
                 && submission.pointer("/settlement_authority_requirement/authority_authentication").is_some_and(Value::is_object)
                 && final_l1_authority_authentication_preflight_ready(submission)
+                && final_l1_court_economics_preflight_ready(submission)
                 && json_bool_true(submission, "/settlement_authority_requirement/authority_authentication/signature_verified")
                 && json_array_has_hex_items(
                     submission,
@@ -10514,6 +10835,38 @@ mod tests {
         .expect("production threshold-lock deployment fixture")
     }
 
+    fn production_court_economics_deployment_fixture(
+        economics: &SessionCourtEconomicsEvidence,
+    ) -> SessionCourtEconomicsDeploymentEvidence {
+        normalize_court_economics_deployment_evidence(
+            SessionCourtEconomicsDeploymentEvidence {
+                schema: "myelin-session-court-economics-deployment-v1".to_owned(),
+                network: "ckb-mainnet".to_owned(),
+                verifier_code_hash: format!("0x{}", "e1".repeat(32)),
+                verifier_hash_type: "data2".to_owned(),
+                verifier_code_dep_tx_hash: format!("0x{}", "e2".repeat(32)),
+                verifier_code_dep_index: "0x0".to_owned(),
+                audited_source_hash: format!("0x{}", "e3".repeat(32)),
+                audit_report_hash: format!("0x{}", "e4".repeat(32)),
+                deployment_policy: "mainnet-production-court-dispute-economics-v1".to_owned(),
+                economics_commitment: economics.economics_commitment.clone(),
+                challenge_payload_hash: economics.challenge_payload_hash.clone(),
+                da_availability_commitment: economics.da_availability_commitment.clone(),
+                minimum_dispute_bond_shannons: economics.minimum_dispute_bond_shannons,
+                loser_slash_bps: economics.loser_slash_bps,
+                settlement_after_deadline_only: economics.settlement_after_deadline_only,
+                da_evidence_required: economics.da_evidence_required,
+                ckb_enforceable_checked: true,
+                testnet_beta_ready: true,
+                production_ready: true,
+                evidence_commitment_algorithm: String::new(),
+                evidence_commitment: String::new(),
+            },
+            economics,
+        )
+        .expect("production court economics deployment fixture")
+    }
+
     fn spawn_get_transaction_mock(
         expected_hash: String,
         status: String,
@@ -11427,6 +11780,9 @@ mod tests {
         let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
         let label_hash = &label_hash[..label_hash.len().min(8)];
         let authority = settlement_authority_requirement([0x10; 32], [0x44; 32], [0x46; 32], [0x50; 32], [0x53; 32]);
+        let court_economics =
+            court_economics_evidence(&"46".repeat(32), &"50".repeat(32), &"51".repeat(32), &"60".repeat(32), 60_000, 60_000)
+                .expect("readiness court economics fixture");
         let submission = serde_json::json!({
             "schema": "myelin-session-ckb-final-script-submission-v1",
             "package_kind": "myelin-session-settlement-package-v1",
@@ -11442,6 +11798,7 @@ mod tests {
             "evidence_cell_dep_present": true,
             "authority_input_present": true,
             "settlement_authority_requirement": authority,
+            "court_economics": court_economics,
             "authority_threshold_lock_identity_checked": authority_lock_matches,
             "authority_threshold_lock_deployment_checked": authority_lock_matches,
             "authority_threshold_lock_deployment_mode": if authority_lock_matches {
@@ -12384,6 +12741,45 @@ mod tests {
     }
 
     #[test]
+    fn session_settlement_intent_accepts_bound_court_economics_deployment_evidence() {
+        let (_package, intent, bundle_path, da_manifest_path, intent_path) = settlement_package_fixture("court-economics-deployment");
+        let deployment = production_court_economics_deployment_fixture(&intent.court_economics);
+        let deployment_path = write_temp_json("court-economics-deployment-evidence", &deployment);
+
+        let production_intent = session_settlement_intent_with_court_deployment(
+            bundle_path.clone(),
+            da_manifest_path.clone(),
+            "disputed-close",
+            60_000,
+            60_000,
+            Some(deployment_path.clone()),
+        )
+        .expect("settlement intent with court economics deployment evidence");
+        let economics = &production_intent.court_economics;
+        let bound_deployment = economics.court_economics_deployment.as_ref().expect("bound court deployment evidence");
+        assert!(economics.testnet_beta_ready);
+        assert!(economics.production_ready);
+        assert_eq!(bound_deployment.production_ready, economics.production_ready);
+        assert_eq!(bound_deployment.challenge_payload_hash, economics.challenge_payload_hash);
+        assert_eq!(bound_deployment.da_availability_commitment, economics.da_availability_commitment);
+        assert_eq!(court_economics_commitment(economics).expect("court economics commitment"), economics.economics_commitment);
+
+        let production_intent_path = write_temp_json("court-economics-deployment-intent", &production_intent);
+        let verification =
+            verify_session_settlement_intent(production_intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+                .expect("verify settlement intent with court economics deployment");
+        let _ = std::fs::remove_file(production_intent_path);
+        let _ = std::fs::remove_file(deployment_path);
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "court-economics-ready" && check.ok));
+    }
+
+    #[test]
     fn session_settlement_intent_rejects_tampered_court_economics() {
         let open = session_open_fixture("static-closed-committee").expect("open session");
         let open_path = std::env::temp_dir().join(format!("myelin-session-open-economics-{}.json", std::process::id()));
@@ -12402,7 +12798,7 @@ mod tests {
 
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
             .expect("settlement intent");
-        let cases: [SettlementIntentTamperCase; 16] = [
+        let cases: [SettlementIntentTamperCase; 17] = [
             ("economics-commitment", |intent| intent.court_economics.economics_commitment = "55".repeat(32)),
             ("economics-participant-set", |intent| intent.court_economics.participant_set_hash = "56".repeat(32)),
             ("economics-escrow", |intent| intent.court_economics.escrow_input_cells_hash = "57".repeat(32)),
@@ -12419,6 +12815,7 @@ mod tests {
             ("economics-invariant", |intent| intent.court_economics.economics_invariant_checked = false),
             ("economics-checked", |intent| intent.court_economics.court_economics_checked = false),
             ("economics-testnet-ready", |intent| intent.court_economics.testnet_beta_ready = true),
+            ("economics-production-ready", |intent| intent.court_economics.production_ready = true),
         ];
         for (label, mutate) in cases {
             let mut tampered = intent.clone();
@@ -12465,6 +12862,7 @@ mod tests {
         assert_eq!(package.court_bundle_hash, intent.court_bundle_hash);
         assert_eq!(package.da_manifest_hash, intent.da_manifest_hash);
         assert_eq!(package.challenge_payload_hash, intent.challenge_payload_hash);
+        assert_eq!(package.court_economics, intent.court_economics);
         assert_eq!(package.final_state_root, intent.final_state_root);
         assert_eq!(package.intent_hash.len(), 64);
         assert_eq!(package.participant_set_hash, intent.participant_set_hash);
@@ -12564,6 +12962,7 @@ mod tests {
         assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-lineage-commitment"));
         assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-authentication-hash"));
         assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-authentication-ready"));
+        assert!(verification.checks.iter().any(|check| check.name == "court-economics"));
         assert!(verification.checks.iter().any(|check| check.name == "settlement-intent-valid"));
         assert!(verification.checks.iter().any(|check| check.name == "carrier-payload"));
         assert!(verification.checks.iter().any(|check| check.name == "carrier-payload-data-hash"));

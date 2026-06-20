@@ -409,8 +409,12 @@ explicit minimum bond, loser-slash basis points, challenger reward, honest-party
 refund, zero unresolved remainder, DA-evidence requirement, and
 settlement-after-deadline invariant. `session verify-settlement-intent`
 recomputes the same three-way binding and economics commitment. The policy is
-now locally checkable but still does not claim deployed CKB court-economics
-enforcement.
+locally checkable by default and can opt into production court evidence via
+`--court-economics-deployment-evidence`; that file must bind the deployed CKB
+court verifier, audited source/report hashes, economics commitment, challenge
+payload, DA availability commitment, minimum bond, loser-slash basis points, and
+deadline/DA requirements before `court_economics.production_ready` can become
+true.
 `session settlement-package` then emits a deterministic CKB-compatible
 settlement CellTx package that binds the exact intent JSON bytes, court bundle,
 DA manifest, challenge payload, and final state root. It also declares

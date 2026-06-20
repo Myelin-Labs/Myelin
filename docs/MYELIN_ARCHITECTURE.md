@@ -576,8 +576,11 @@ over participant/escrow binding, locally signature-verified DA committee
 availability evidence, challenge timing, minimum dispute bond, slash/reward
 basis points, refund/remainder balance, deadline-only settlement, and required
 DA evidence. This makes the disputed-close economics locally checkable while
-still leaving external DA availability guarantees and deployed CKB
-court-economics enforcement explicitly out of scope. Submission readiness
+allowing an optional `--court-economics-deployment-evidence` file to bind a
+checked CKB court verifier deployment, audited source/report hashes, and the
+exact disputed-close economics commitment before `production_ready` can be true.
+External DA availability guarantees and actual deployed court economics remain
+separate evidence requirements. Submission readiness
 carries an `operational_policy` commitment over confirmation depth, stability,
 fee policy, retry identity, live key-submission evidence, monitoring checks, and
 optional typed operator custody/runbook documents with machine-visible

@@ -1280,6 +1280,7 @@ for settlement, verify, court, da, kind in ((settlement_static, settlement_verif
     require(economics["challenge_payload_hash"] == court["challenge_payload_hash"], f"{kind} court economics challenge binding")
     require(economics["da_availability_commitment"] == da["availability"]["availability_commitment"], f"{kind} court economics DA availability binding")
     require(economics["court_economics_checked"] is True, f"{kind} court economics checked")
+    require("court_economics_deployment" not in economics, f"{kind} default court economics has no deployment evidence")
     require(economics["testnet_beta_ready"] is False, f"{kind} court economics is explicit local policy, not testnet-beta ready")
     require(economics["production_ready"] is False, f"{kind} court economics production marker")
     require(len(economics["economics_commitment"]) == 64, f"{kind} court economics commitment")
@@ -1299,6 +1300,7 @@ for package, verify, settlement, court, da, kind in ((package_static, package_ve
     require(package["court_bundle_hash"] == settlement["court_bundle_hash"], f"{kind} package court hash binding")
     require(package["da_manifest_hash"] == settlement["da_manifest_hash"], f"{kind} package DA hash binding")
     require(package["challenge_payload_hash"] == settlement["challenge_payload_hash"], f"{kind} package challenge binding")
+    require(package["court_economics"] == settlement["court_economics"], f"{kind} package court economics binding")
     require(package["final_state_root"] == settlement["final_state_root"], f"{kind} package final root")
     authority = package["settlement_authority"]
     auth = authority["authority_authentication"]
@@ -1351,6 +1353,7 @@ for submit, package, kind in ((package_submit_static, package_static, "static-cl
     require(submit["settlement_cell_tx_id"] == package["settlement_cell_tx_id"], f"{kind} settlement submit txid binding")
     require(submit["settlement_cell_wtxid"] == package["settlement_cell_wtxid"], f"{kind} settlement submit wtxid binding")
     require(submit["molecule_transaction_hash"] == package["molecule_transaction_hash"], f"{kind} settlement submit molecule binding")
+    require(submit["court_economics"] == package["court_economics"], f"{kind} settlement submit court economics binding")
     require(submit["ckb_raw_tx_hash"] == package["ckb_projection"]["ckb_raw_tx_hash"], f"{kind} settlement submit raw hash")
     require(submit["ckb_wtx_hash"] == package["ckb_projection"]["ckb_wtx_hash"], f"{kind} settlement submit wtx hash")
     require(submit["ckb_transaction_json"]["outputs_data"], f"{kind} settlement submit CKB outputs data")
