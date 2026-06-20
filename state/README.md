@@ -1,10 +1,10 @@
-# Cell State Management
+# Myelin State
 
-DA storage layer with Segment files and NMT/KZG commitments.
+Finite Cell state and local data-availability storage for Myelin sessions.
 
 ## Overview
 
-This crate manages Cell state and data availability:
+This crate manages Cell state and data-availability artefacts:
 
 - **Cell Indexing**: OutPoint → Segment pointer mapping
 - **Segment Storage**: 1GB append-only files with mmap
@@ -46,14 +46,10 @@ state/
 | `segments` | SegmentID(4B) | SegmentMeta | Segment metadata (nmt_root) |
 | `spend_journal` | BlockHash(32B) | Vec\<CellChange\> | K-deep rollback log |
 
-## References
+## Boundary
 
-- CKB Store: `/home/arthur/RustRoverProjects/ckb/store/src/`
-- CKB Freezer: `/home/arthur/RustRoverProjects/ckb/freezer/src/freezer.rs`
-- Spec: `myelin.md` Section 7
-
-## Status
-
-🚧 **Under Construction** - Part of the Myelin fork
-
+This crate is not a CKB store/freezer fork. It stores and proves Myelin's finite
+session Cell state, including the local DA evidence used by the Session L2
+readiness path. Use `../README.md` and `../docs/MYELIN_ARCHITECTURE.md` for the
+current protocol positioning.
 

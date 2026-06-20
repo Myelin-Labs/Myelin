@@ -160,8 +160,8 @@ struct TeeworldsBenchArgs {
 #[derive(Debug, Args)]
 struct TeeworldsBuildFixtureArgs {
     /// Root of the cloned xxuejie Teeworlds repository.
-    #[arg(long, default_value = "/Users/arthur/RustroverProjects/teeworlds")]
-    teeworlds_root: PathBuf,
+    #[arg(long)]
+    teeworlds_root: Option<PathBuf>,
     /// Replayer binary passed to `teeworlds-cli utils build-test-tx`.
     #[arg(long)]
     replayer: PathBuf,
@@ -247,8 +247,8 @@ struct TeeworldsVerifyCourtBundleArgs {
 #[derive(Debug, Args)]
 struct TeeworldsDoctorArgs {
     /// Root of the cloned xxuejie Teeworlds repository.
-    #[arg(long, default_value = "/Users/arthur/RustroverProjects/teeworlds")]
-    teeworlds_root: PathBuf,
+    #[arg(long)]
+    teeworlds_root: Option<PathBuf>,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -1033,7 +1033,8 @@ fn run() -> Result<()> {
                 write_json(args.out, &report)
             }
             TeeworldsCommand::Doctor(args) => {
-                let report = teeworlds_doctor(&args.teeworlds_root);
+                let teeworlds_root = args.teeworlds_root.unwrap_or_else(default_teeworlds_root);
+                let report = teeworlds_doctor(&teeworlds_root);
                 write_json(args.out, &report)
             }
         },
@@ -1769,6 +1770,8 @@ fn teeworlds_doctor(teeworlds_root: &std::path::Path) -> TeeworldsDoctorReport {
         notes.push("The CKB replayer build is not ready on this machine yet; Myelin can still run fixture-builder and VM-probe commands when supplied with a valid ELF.".to_owned());
     }
 
+    let root = teeworlds_root.display().to_string();
+    let replayer = ckb_replayer.display().to_string();
     TeeworldsDoctorReport {
         teeworlds_root: teeworlds_root.display().to_string(),
         ready_for_rust_fixture_builder,
@@ -1778,12 +1781,21 @@ fn teeworlds_doctor(teeworlds_root: &std::path::Path) -> TeeworldsDoctorReport {
         tools,
         notes,
         next_commands: vec![
-            "cd /Users/arthur/RustroverProjects/teeworlds && git submodule update --init --recursive".to_owned(),
-            "cd /Users/arthur/RustroverProjects/teeworlds && cmake -S . -B build && cmake --build build --target teeworlds_replayer -j4".to_owned(),
-            "cd /Users/arthur/RustroverProjects/teeworlds/ckb && PATH=\"/opt/homebrew/opt/llvm/bin:$PATH\" make CLANG=/opt/homebrew/opt/llvm/bin/clang LD=/opt/homebrew/bin/ld.lld".to_owned(),
-            "cargo run -p myelin-cli -- teeworlds vm-probe --replayer /Users/arthur/RustroverProjects/teeworlds/ckb/build/replayer_stripped --tape path/to/tape.bin --map path/to/stripped.map --config path/to/test_game.cfg".to_owned(),
+            format!("cd {root} && git submodule update --init --recursive"),
+            format!("cd {root} && cmake -S . -B build && cmake --build build --target teeworlds_replayer -j4"),
+            format!("cd {root}/ckb && PATH=\"/opt/homebrew/opt/llvm/bin:$PATH\" make CLANG=/opt/homebrew/opt/llvm/bin/clang LD=/opt/homebrew/bin/ld.lld"),
+            format!(
+                "cargo run -p myelin-cli -- teeworlds vm-probe --replayer {replayer} --tape path/to/tape.bin --map path/to/stripped.map --config path/to/test_game.cfg"
+            ),
         ],
     }
+}
+
+fn default_teeworlds_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("RustroverProjects/teeworlds"))
+        .unwrap_or_else(|| PathBuf::from("../teeworlds"))
 }
 
 fn path_check(name: &'static str, path: PathBuf) -> PathCheck {
@@ -2457,7 +2469,8 @@ fn decode_hex_field(value: &str, field: &'static str) -> Result<Vec<u8>> {
 }
 
 fn build_and_bench_teeworlds_fixture(args: TeeworldsBuildFixtureArgs) -> Result<TeeworldsBuildFixtureReport> {
-    let manifest_path = args.teeworlds_root.join("rust-tools/Cargo.toml");
+    let teeworlds_root = args.teeworlds_root.unwrap_or_else(default_teeworlds_root);
+    let manifest_path = teeworlds_root.join("rust-tools/Cargo.toml");
     if !manifest_path.exists() {
         return Err(CliError::InvalidFixture(format!("missing Teeworlds rust-tools manifest: {}", manifest_path.display())));
     }
@@ -2518,7 +2531,7 @@ fn build_and_bench_teeworlds_fixture(args: TeeworldsBuildFixtureArgs) -> Result<
 
     let benchmark = bench_teeworlds_mock_tx(args.mock_tx_output.clone(), args.chunk_bytes, args.runs, &args.consensus)?;
     Ok(TeeworldsBuildFixtureReport {
-        teeworlds_root: args.teeworlds_root.display().to_string(),
+        teeworlds_root: teeworlds_root.display().to_string(),
         command,
         builder_stdout,
         builder_stderr,

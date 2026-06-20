@@ -116,9 +116,7 @@ It checks the active Myelin tree for removed source-chain and legacy serializer
 vocabulary, proves the native dependency graph has no removed serializer
 package, runs the focused Rust workspace checks, exercises runtime smoke,
 Session L2 open/commit/court/DA/settlement/package flows for both consensus
-engines, and then runs the Teeworlds acceptance gate. The older
-`scripts/myelin_protocol_gate.sh` name is kept only as a compatibility wrapper
-that delegates to the production gate.
+engines, and then runs the Teeworlds acceptance gate.
 
 The narrower Teeworlds integration gate is:
 
@@ -283,9 +281,9 @@ cargo run -p myelin-cli -- teeworlds court-bundle \
 cargo run -p myelin-cli -- teeworlds verify-court-bundle \
   --bundle reports/teeworlds-court-bundle.json
 cargo run -p myelin-cli -- teeworlds doctor \
-  --teeworlds-root /Users/arthur/RustroverProjects/teeworlds
+  --teeworlds-root $HOME/RustroverProjects/teeworlds
 cargo run -p myelin-cli -- teeworlds build-fixture \
-  --teeworlds-root /Users/arthur/RustroverProjects/teeworlds \
+  --teeworlds-root $HOME/RustroverProjects/teeworlds \
   --replayer path/to/replayer_stripped \
   --tape path/to/tape.bin \
   --map path/to/stripped.map \

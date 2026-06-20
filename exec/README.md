@@ -1,15 +1,20 @@
-# Cell Execution Layer
+# Myelin Execution Layer
 
-CKB-inspired Cell model implementation for the Myelin L2 kernel.
+CKB-style Cell execution for the Myelin session runtime.
 
 ## Overview
 
-This crate implements the execution layer for Cell transactions, including:
+This crate implements the execution layer for finite Cell transactions:
 
-- **CellTx Types**: Cell transaction structure (Lock/Type scripts, capacity, data)
-- **Scheduler**: Parallel transaction execution with RW-Set DAG
-- **VM Integration**: CKB-VM (RISC-V) for script verification
-- **Standard Scripts**: VM lock fixtures, timelock helpers, and script sources
+- **CellTx types**: Cell transaction structure with lock/type scripts,
+  capacity, data, deps, witnesses, and CKB-style projection support.
+- **Scheduler**: typed access metadata and CellDAG construction for conflict
+  ordering.
+- **VM integration**: CKB-VM RISC-V script verification with explicit CKB-strict
+  and Myelin-extended semantics.
+- **Standard scripts**: VM lock fixtures, timelock helpers, and script sources.
+- **Serialization**: Molecule-compatible public VM ABI and explicit internal
+  envelope codecs.
 
 ## Architecture
 
@@ -24,9 +29,9 @@ exec/
 │   ├── conflict.rs  # Conflict resolution (fee_density/wtxid)
 │   └── executor.rs  # Topological parallel execution
 ├── vm/              # VM adapter layer
-│   ├── ckbvm.rs     # CKB-VM RISC-V integration
-│   ├── interface.rs # Lock/type script interface
-│   └── syscalls.rs  # System calls: load_cell/load_tx/...
+│   ├── machine.rs   # CKB-VM machine wrapper
+│   ├── verifier.rs  # Lock/type script verifier
+│   └── syscalls/    # System calls: load_cell/load_tx/...
 └── scripts/         # Standard script library
     ├── mod.rs
     ├── secp256k1_blake3_lock.c
@@ -34,14 +39,13 @@ exec/
     └── fixtures/
 ```
 
-## References
+## Boundary
 
-- CKB Cell Model: `/home/arthur/RustRoverProjects/ckb/util/types/src/core/cell.rs`
-- CKB Script Verifier: `/home/arthur/RustRoverProjects/ckb/script/src/verify.rs`
-- Spec: `/home/arthur/RustRoverProjects/Myelin/myelin.md` Section 4-6
+`myelin-exec` is not a CKB full node and does not import the CKB client. Its
+job is to execute and report finite Cell transitions, expose CKB-style
+projection evidence, and provide the script-verification substrate used by the
+Session L2 and Teeworlds pressure workload.
 
-## Status
-
-🚧 **Under Construction** - Part of the Myelin L2 kernel
-
-See `myelin.md` for full implementation plan.
+Use `../docs/MYELIN_ARCHITECTURE.md`,
+`../MYELIN_CKB_PROJECTION_AUDIT.md`, and
+`../MYELIN_CKB_SEMANTIC_DEVIATIONS.md` for the current protocol boundary.

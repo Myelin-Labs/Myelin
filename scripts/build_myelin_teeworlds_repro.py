@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Generate reports/myelin-teeworlds-repro.json from the live Teeworlds
-acceptance output. Run after `bash scripts/myelin_teeworlds_acceptance.sh`
-to merge the static-committee and Tendermint reports into a single
-reproducible JSON artefact.
+Generate the local, uncommitted reports/myelin-teeworlds-repro.json from the
+live Teeworlds acceptance output. Run after
+`bash scripts/myelin_teeworlds_acceptance.sh` to merge the static-committee and
+Tendermint reports into a single reproducible JSON artefact.
 """
 import json
 import os

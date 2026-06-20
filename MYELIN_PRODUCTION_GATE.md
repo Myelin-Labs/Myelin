@@ -139,7 +139,7 @@ RUN_TEEWORLDS=0 scripts/myelin_production_gate.sh
 The Teeworlds path is at:
 
 ```text
-TEEWORLDS_ROOT=/Users/arthur/RustroverProjects/teeworlds
+TEEWORLDS_ROOT=$HOME/RustroverProjects/teeworlds
 ```
 
 This is overridable by env var. The gate verifies both the
@@ -248,7 +248,7 @@ request. It also rejects package/payload drift: the compact carrier payload kind
 must match the package schema, and each 32-byte DA-anchor or settlement payload
 field must match the package's declared hashes.
 
-And the reproducibility report was regenerated at:
+And the reproducibility report is regenerated locally at:
 
 ```text
 reports/myelin-teeworlds-repro.json
@@ -365,10 +365,10 @@ tests distinguish explicit returned change from surplus burned as implicit fee.
 The optional live-devnet smoke now provides the matching separate verifier
 deployment evidence and a live negative rejection check.
 
-The latest local run passed against parent CKB:
+An optional local parent-CKB smoke run writes a report under its temporary
+working directory. A passing report has this shape:
 
 ```text
-Report: /tmp/myelin-ckb-devnet.J0dAY0/myelin-ckb-devnet-smoke.json
 ckb_version: ckb 0.206.0 (5ebbc39 2026-04-10)
 da_anchor_ready: true
 settlement_ready: true

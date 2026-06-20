@@ -12,6 +12,7 @@
 *.swo
 *~
 .DS_Store
+__pycache__/
 
 # Cargo
 Cargo.lock
@@ -26,3 +27,6 @@ Cargo.lock
 
 # UTXO hotspots tracking (generated file)
 utxo_hotspots.txt
+
+# Local evidence reports
+/reports/myelin-teeworlds-repro.json

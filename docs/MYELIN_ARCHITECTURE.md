@@ -11,7 +11,7 @@ pipeline.
 The first pressure workload is xxuejie's Teeworlds-on-CKB repository, cloned at:
 
 ```text
-/Users/arthur/RustroverProjects/teeworlds
+$HOME/RustroverProjects/teeworlds
 ```
 
 The target execution flow is:
@@ -676,7 +676,7 @@ The benchmark command should write:
 ```json
 {
   "workload": "teeworlds",
-  "source_repo": "/Users/arthur/RustroverProjects/teeworlds",
+  "source_repo": "$HOME/RustroverProjects/teeworlds",
   "mode": "ckb-style-fixture",
   "game_duration_seconds": null,
   "player_count": null,
@@ -723,10 +723,10 @@ cargo run -p myelin-cli -- teeworlds verify-court-bundle \
   --bundle reports/teeworlds-court-bundle.json \
   --out reports/teeworlds-court-bundle-verify.json
 cargo run -p myelin-cli -- teeworlds doctor \
-  --teeworlds-root /Users/arthur/RustroverProjects/teeworlds \
+  --teeworlds-root $HOME/RustroverProjects/teeworlds \
   --out reports/teeworlds-doctor.json
 cargo run -p myelin-cli -- teeworlds build-fixture \
-  --teeworlds-root /Users/arthur/RustroverProjects/teeworlds \
+  --teeworlds-root $HOME/RustroverProjects/teeworlds \
   --replayer path/to/replayer_stripped \
   --tape path/to/tape.bin \
   --map path/to/stripped.map \
@@ -764,7 +764,7 @@ Completed in this preparation pass:
 
 - Teeworlds repository cloned to the parent project directory.
 - Teeworlds Rust tooling adapted locally by pinning `fixed` to `1.30.0`; `cargo
-  check` passes in `/Users/arthur/RustroverProjects/teeworlds/rust-tools`.
+  check` passes in `$HOME/RustroverProjects/teeworlds/rust-tools`.
 - Myelin workspace crate names and imports use the `myelin-*` prefix.
 - Old L1 mining and consensus vocabulary is absent from active Myelin code.
 - `myelin-consensus` provides `ConsensusEngine`, `SelectedConsensus`,
@@ -826,7 +826,7 @@ Completed in this preparation pass:
   CKB witness contract with input witness slots `1 = tape`, `2 = map`, and
   `3 = config`.
 - The local Teeworlds clone now builds
-  `/Users/arthur/RustroverProjects/teeworlds/ckb/build/replayer_stripped` as a
+  `$HOME/RustroverProjects/teeworlds/ckb/build/replayer_stripped` as a
   stripped RISC-V ELF.
 - `myelin-cli teeworlds build-fixture` has been run against the real stripped
   replayer, a real generated `dm1.map`, and a deterministic scripted tape
@@ -862,8 +862,6 @@ Completed in this preparation pass:
   runs formatting, workspace checks, focused protocol tests, runtime smoke,
   Session L2 open/commit/court/DA/settlement/package checks for both consensus
   modes, dependency and stale-surface scans, and the Teeworlds acceptance gate.
-  `scripts/myelin_protocol_gate.sh` remains only as a compatibility wrapper
-  that delegates to the production gate.
 - A local live-client Teeworlds session was attempted against the cloned fork,
   but the current launch paths did not produce a connected client or
   end-of-match sequencer dump. This keeps the present evidence boundary honest:
@@ -878,10 +876,10 @@ Completed in this preparation pass:
   - legacy vocabulary scan for inherited L1 terms, old branding, and legacy
     serializer markers returns no active matches outside ignored artefacts.
   - `cargo run --bin teeworlds-cli -- utils build-scripted-tape --ticks 300 --clients 1 --input-every 5 --seed 1 --output /tmp/myelin-teeworlds-scripted-tape.bin`
-  - `cargo run -p myelin-cli -- teeworlds build-fixture --teeworlds-root /Users/arthur/RustroverProjects/teeworlds --replayer /Users/arthur/RustroverProjects/teeworlds/ckb/build/replayer_stripped --tape /tmp/myelin-teeworlds-scripted-tape.bin --map /Users/arthur/RustroverProjects/teeworlds/build/data/maps/dm1.map --config /Users/arthur/RustroverProjects/teeworlds/build/myelin_replay_40265.cfg --mock-tx-output /tmp/myelin-teeworlds-scripted-mock-tx.json --runs 3 --out /tmp/myelin-teeworlds-scripted-build-fixture.json`
+  - `cargo run -p myelin-cli -- teeworlds build-fixture --teeworlds-root $HOME/RustroverProjects/teeworlds --replayer $HOME/RustroverProjects/teeworlds/ckb/build/replayer_stripped --tape /tmp/myelin-teeworlds-scripted-tape.bin --map $HOME/RustroverProjects/teeworlds/build/data/maps/dm1.map --config $HOME/RustroverProjects/teeworlds/build/myelin_replay_40265.cfg --mock-tx-output /tmp/myelin-teeworlds-scripted-mock-tx.json --runs 3 --out /tmp/myelin-teeworlds-scripted-build-fixture.json`
   - `cargo run -p myelin-cli -- teeworlds court-bundle --mock-tx /tmp/myelin-teeworlds-scripted-mock-tx.json --chunk-bytes 262144 --chunk-index 0 --out /tmp/myelin-teeworlds-scripted-court-bundle.json`
   - `cargo run -p myelin-cli -- teeworlds verify-court-bundle --bundle /tmp/myelin-teeworlds-scripted-court-bundle.json --out /tmp/myelin-teeworlds-scripted-court-bundle-verify.json`
-  - `cargo run -p myelin-cli -- teeworlds vm-probe --replayer /Users/arthur/RustroverProjects/teeworlds/ckb/build/replayer_stripped --tape /tmp/myelin-teeworlds-scripted-tape.bin --map /Users/arthur/RustroverProjects/teeworlds/build/data/maps/dm1.map --config /Users/arthur/RustroverProjects/teeworlds/build/myelin_replay_40265.cfg --out /tmp/myelin-teeworlds-scripted-vm-probe.json`
+  - `cargo run -p myelin-cli -- teeworlds vm-probe --replayer $HOME/RustroverProjects/teeworlds/ckb/build/replayer_stripped --tape /tmp/myelin-teeworlds-scripted-tape.bin --map $HOME/RustroverProjects/teeworlds/build/data/maps/dm1.map --config $HOME/RustroverProjects/teeworlds/build/myelin_replay_40265.cfg --out /tmp/myelin-teeworlds-scripted-vm-probe.json`
   - `scripts/myelin_teeworlds_acceptance.sh`
   - `scripts/myelin_production_gate.sh`
 

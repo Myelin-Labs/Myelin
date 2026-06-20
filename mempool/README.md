@@ -1,10 +1,11 @@
-# Cell Memory Pool
+# Myelin Mempool
 
-Cell transaction pool with parallel scheduler and RW-Set DAG.
+Deterministic admission and ordering support for Myelin Cell transactions.
 
 ## Overview
 
-This crate implements the Cell transaction pool (mempool):
+This crate implements the local Cell transaction pool used by the Myelin
+session runtime:
 
 - **CellPool**: Cell transaction queue with dependency tracking
 - **Scoring**: `fee_density·α + unlockability·β` prioritization
@@ -42,12 +43,9 @@ Priority order (deterministic):
 2. `effective_fee_rate` (considering cycles) must be higher
 3. Absolute fee must exceed total replaced fees + increment
 
-## References
+## Boundary
 
-- CKB TxPool: `/home/arthur/RustRoverProjects/ckb/tx-pool/src/`
-- Spec: `myelin.md` Section 9
-
-## Status
-
-🚧 **Under Construction** - Part of the Myelin L2 kernel
-
+This is not an L1 transaction relay or CKB tx-pool clone. It is the local
+admission and prioritisation layer for finite session CellTxs. Use
+`../README.md` and `../docs/MYELIN_ARCHITECTURE.md` for the current protocol
+positioning.

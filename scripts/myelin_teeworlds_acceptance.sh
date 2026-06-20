@@ -4,7 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MYELIN_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-TEEWORLDS_ROOT="${TEEWORLDS_ROOT:-/Users/arthur/RustroverProjects/teeworlds}"
+if [[ -n "${HOME:-}" ]]; then
+  DEFAULT_TEEWORLDS_ROOT="${HOME}/RustroverProjects/teeworlds"
+else
+  DEFAULT_TEEWORLDS_ROOT="$(cd -- "${MYELIN_ROOT}/.." && pwd)/teeworlds"
+fi
+TEEWORLDS_ROOT="${TEEWORLDS_ROOT:-${DEFAULT_TEEWORLDS_ROOT}}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/myelin-teeworlds-acceptance}"
 TICKS="${TICKS:-300}"
 CLIENTS="${CLIENTS:-1}"

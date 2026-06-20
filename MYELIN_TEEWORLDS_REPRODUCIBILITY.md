@@ -2,7 +2,7 @@
 
 > This document records the executable Teeworlds reproducibility
 > path for the standalone Myelin runtime. The path uses xxuejie's
-> cloned Teeworlds repository at `/Users/arthur/RustroverProjects/teeworlds`
+> cloned Teeworlds repository at `$HOME/RustroverProjects/teeworlds`
 > as an external pressure workload, not as a Spora module.
 
 ## 1. Repo path
@@ -12,7 +12,7 @@ hidden local state; the path is part of the acceptance script and
 is overridable by `TEEWORLDS_ROOT`.
 
 ```bash
-TEEWORLDS_ROOT="${TEEWORLDS_ROOT:-/Users/arthur/RustroverProjects/teeworlds}"
+TEEWORLDS_ROOT="${TEEWORLDS_ROOT:-$HOME/RustroverProjects/teeworlds}"
 ```
 
 The acceptance script requires the following files to exist at
@@ -197,8 +197,9 @@ covers the full round-trip:
 
 ## 7. The reproducible JSON report
 
-The Myelin tree keeps a single committed Teeworlds reproducibility
-report:
+The Teeworlds reproducibility report is generated locally by the acceptance
+gate. It is intentionally not committed, because it records local checkout
+paths and machine-specific evidence:
 
 ```text
 reports/myelin-teeworlds-repro.json

@@ -4,7 +4,7 @@ This directory contains standard lock and type scripts for Myelin.
 
 ## Lock Scripts
 
-### 1. Time Lock Scripts (CKB-VM Based) ⭐ NEW
+### 1. Time Lock Scripts (CKB-VM Based)
 
 **Replaces**: Legacy `OP_CHECKLOCKTIMEVERIFY` and `OP_CHECKSEQUENCEVERIFY`
 

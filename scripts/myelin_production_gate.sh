@@ -20,7 +20,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MYELIN_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-TEEWORLDS_ROOT="${TEEWORLDS_ROOT:-/Users/arthur/RustroverProjects/teeworlds}"
+if [[ -n "${HOME:-}" ]]; then
+  DEFAULT_TEEWORLDS_ROOT="${HOME}/RustroverProjects/teeworlds"
+else
+  DEFAULT_TEEWORLDS_ROOT="$(cd -- "${MYELIN_ROOT}/.." && pwd)/teeworlds"
+fi
+TEEWORLDS_ROOT="${TEEWORLDS_ROOT:-${DEFAULT_TEEWORLDS_ROOT}}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/myelin-production-gate}"
 RUN_TEEWORLDS="${RUN_TEEWORLDS:-1}"
 
@@ -1412,8 +1417,7 @@ paths = [
 # itself is not subject to the scan. We exclude the gate and the audit doc
 # explicitly so the gate can be the auditor.
 exclude = ("scripts/myelin_production_gate.sh", "scripts/myelin_teeworlds_acceptance.sh",
-           "scripts/myelin_protocol_gate.sh", "scripts/build_myelin_teeworlds_repro.py",
-           "MYELIN_STALE_SURFACE_AUDIT.md", "MYELIN_ARTEFACT_CLEANUP.md",
+           "scripts/build_myelin_teeworlds_repro.py",
            "MYELIN_CKB_SEMANTIC_DEVIATIONS.md")
 
 # Forbidden vocabulary for the active Myelin tree.
@@ -1457,8 +1461,7 @@ paths = [
     "README.md", "docs", "scripts", "cli", "consensus", "exec", "state", "mempool",
     "crypto", "math", "utils", "Cargo.toml", "Cargo.lock",
 ]
-exclude = ("scripts/myelin_production_gate.sh", "MYELIN_STALE_SURFACE_AUDIT.md",
-           "MYELIN_ARTEFACT_CLEANUP.md", "MYELIN_CKB_SEMANTIC_DEVIATIONS.md")
+exclude = ("scripts/myelin_production_gate.sh", "MYELIN_CKB_SEMANTIC_DEVIATIONS.md")
 patterns = [
     r"path\s*=\s*\"[^\"]*Spora[^\"]*\"",
     r"\.\./\.\./[Ss]pora",
