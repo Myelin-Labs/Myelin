@@ -9129,6 +9129,10 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    type DaManifestTamperCase = (&'static str, fn(&mut SessionDaManifestReport));
+    type SettlementIntentTamperCase = (&'static str, fn(&mut SessionSettlementIntentReport));
+    type SettlementPackageTamperCase = (&'static str, fn(&mut SessionSettlementPackageReport));
+
     fn spawn_get_transaction_mock(
         expected_hash: String,
         status: String,
@@ -10422,7 +10426,7 @@ mod tests {
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
 
         let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
-        let cases: [(&str, fn(&mut SessionDaManifestReport)); 6] = [
+        let cases: [DaManifestTamperCase; 6] = [
             ("availability-commitment", |manifest| manifest.availability.availability_commitment = "22".repeat(32)),
             ("availability-payload-hash", |manifest| manifest.availability.payload_hash = "23".repeat(32)),
             ("availability-segment-root", |manifest| manifest.availability.segment_root = "24".repeat(32)),
@@ -10774,7 +10778,7 @@ mod tests {
 
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
             .expect("settlement intent");
-        let cases: [(&str, fn(&mut SessionSettlementIntentReport)); 6] = [
+        let cases: [SettlementIntentTamperCase; 6] = [
             ("economics-commitment", |intent| intent.court_economics.economics_commitment = "55".repeat(32)),
             ("economics-participant-set", |intent| intent.court_economics.participant_set_hash = "56".repeat(32)),
             ("economics-escrow", |intent| intent.court_economics.escrow_input_cells_hash = "57".repeat(32)),
@@ -13582,7 +13586,7 @@ mod tests {
 
         let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
             .expect("settlement package");
-        let cases: [(&str, fn(&mut SessionSettlementPackageReport)); 7] = [
+        let cases: [SettlementPackageTamperCase; 7] = [
             ("authority-auth-hash", |package| {
                 package.settlement_authority.authority_authentication.attestation_hash = "33".repeat(32)
             }),
