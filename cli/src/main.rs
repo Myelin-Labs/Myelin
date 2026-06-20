@@ -12123,6 +12123,99 @@ mod tests {
         write_temp_json(&format!("readiness-live-final-settlement-submission-{label_hash}-{authority_lock_matches}"), &submission)
     }
 
+    fn write_readiness_live_final_settlement_production_submission(expected_hash: &str) -> PathBuf {
+        let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
+        let label_hash = &label_hash[..label_hash.len().min(8)];
+        let intent_hash = [0x10; 32];
+        let session_id = [0x44; 32];
+        let participant_set_hash = [0x46; 32];
+        let escrow_input_cells_hash = [0x50; 32];
+        let session_lineage_commitment = [0x53; 32];
+        let base_authority = settlement_authority_requirement(
+            intent_hash,
+            session_id,
+            participant_set_hash,
+            escrow_input_cells_hash,
+            session_lineage_commitment,
+        );
+        let signature_evidence = authority_signature_evidence_fixture(&base_authority.authority_authentication);
+        let threshold_deployment = production_threshold_lock_deployment_fixture(&base_authority.authority_authentication);
+        let authority = settlement_authority_requirement_with_deployment(
+            intent_hash,
+            session_id,
+            participant_set_hash,
+            escrow_input_cells_hash,
+            session_lineage_commitment,
+            Some(signature_evidence),
+            Some(threshold_deployment),
+        )
+        .expect("production authority fixture");
+        let base_court_economics =
+            court_economics_evidence(&"46".repeat(32), &"50".repeat(32), &"51".repeat(32), &"60".repeat(32), 60_000, 60_000)
+                .expect("readiness court economics fixture");
+        let court_deployment = production_court_economics_deployment_fixture(&base_court_economics);
+        let court_economics = court_economics_evidence_with_deployment(
+            &"46".repeat(32),
+            &"50".repeat(32),
+            &"51".repeat(32),
+            &"60".repeat(32),
+            60_000,
+            60_000,
+            Some(court_deployment),
+        )
+        .expect("production court economics fixture");
+        let submission = serde_json::json!({
+            "schema": "myelin-session-ckb-final-script-submission-v1",
+            "package_kind": "myelin-session-settlement-package-v1",
+            "verifier_role": "final-l1-script",
+            "ckb_raw_tx_hash": expected_hash,
+            "rpc_url": "http://127.0.0.1:8114",
+            "dry_run": false,
+            "submitted_to_rpc": true,
+            "accepted_by_rpc": true,
+            "submit_mode": true,
+            "l1_da_published": false,
+            "l1_court_submitted": true,
+            "da_availability": {
+                "production_ready": true
+            },
+            "evidence_cell_dep_present": true,
+            "authority_input_present": true,
+            "settlement_authority_requirement": authority,
+            "court_economics": court_economics,
+            "authority_threshold_lock_identity_checked": true,
+            "authority_threshold_lock_deployment_checked": true,
+            "authority_threshold_lock_deployment_mode": "live-code-dep-and-authority-final-da-lock-preflight",
+            "settlement_uniqueness_checked": true,
+            "settlement_identity_hash": format!("0x{}", "45".repeat(32)),
+            "session_id_hash": format!("0x{}", "44".repeat(32)),
+            "duplicate_settlement_detected": false,
+            "replay_protection_mode": "authority-cell-single-use-plus-transaction-local-final-script-singleton",
+            "pre_submit_context_checked": true,
+            "pre_submit_input_live": true,
+            "pre_submit_input_capacity_matches": true,
+            "pre_submit_input_lock_matches": true,
+            "pre_submit_lock_code_dep_live": true,
+            "pre_submit_verifier_code_dep_live": true,
+            "pre_submit_verifier_code_dep_data_hash_matches": true,
+            "pre_submit_evidence_cell_dep_live": true,
+            "pre_submit_evidence_cell_dep_capacity_matches": true,
+            "pre_submit_evidence_cell_dep_lock_matches": true,
+            "pre_submit_authority_input_live": true,
+            "pre_submit_authority_input_capacity_matches": true,
+            "pre_submit_authority_input_data_hash_matches": true,
+            "pre_submit_authority_input_lock_matches": true,
+            "pre_submit_authority_input_threshold_lock_args_matches": true,
+            "final_script_verifier": {
+                "verifier_role": "final-l1-script",
+                "cellscript_source_hash": format!("0x{}", "43".repeat(32))
+            },
+            "rpc_result": expected_hash,
+            "rpc_error": null
+        });
+        write_temp_json(&format!("readiness-live-final-settlement-production-submission-{label_hash}"), &submission)
+    }
+
     fn write_readiness_recorded_carrier_submission(expected_hash: &str) -> PathBuf {
         let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
         let label_hash = &label_hash[..label_hash.len().min(8)];
@@ -15821,6 +15914,58 @@ mod tests {
         assert!(report.operational_policy.operator_runbook_requirements.contains(&"monitoring_interval_millis".to_owned()));
         assert!(report.operational_policy.production_blockers.is_empty());
         assert!(report.operational_policy.production_ready);
+    }
+
+    #[test]
+    fn session_submission_readiness_accepts_end_to_end_production_final_settlement_evidence() {
+        let expected_hash = format!("0x{}", "86".repeat(32));
+        let block_hash = format!("0x{}", "87".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        economics.submission_schema = context.submission_schema.clone();
+        inclusion.submission_schema = context.submission_schema.clone();
+        let submission_path = write_readiness_live_final_settlement_production_submission(&expected_hash);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-final-settlement-prod", &context);
+        let economics_path = write_temp_json("readiness-economics-final-settlement-prod", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-final-settlement-prod", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-final-settlement-prod", &stability);
+        let finality_path = write_temp_json("readiness-finality-final-settlement-prod", &finality);
+        let custody_path = write_operator_custody_policy();
+        let runbook_path = write_operator_runbook();
+
+        let report = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+            Some(custody_path.clone()),
+            Some(runbook_path.clone()),
+        )
+        .expect("verify production final settlement readiness");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+        let _ = std::fs::remove_file(custody_path);
+        let _ = std::fs::remove_file(runbook_path);
+
+        assert!(report.production_submission_ready);
+        assert!(report.strict_production_submission_ready);
+        assert!(report.end_to_end_production_ready);
+        assert!(report.end_to_end_production_blockers.is_empty());
+        assert!(report.final_l1_script_submission_ready);
+        assert_eq!(report.readiness_evidence_mode, "final-l1-script");
+        assert!(report.operational_policy.production_ready);
+        assert!(report.operational_policy.production_blockers.is_empty());
     }
 
     #[test]
