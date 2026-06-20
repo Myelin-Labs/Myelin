@@ -16,7 +16,7 @@ COMMIT_MINING_BLOCKS="${COMMIT_MINING_BLOCKS:-8}"
 FEE_SHANNONS="${FEE_SHANNONS:-2000}"
 DEPLOY_FEE_SHANNONS="${DEPLOY_FEE_SHANNONS:-100000}"
 MIN_FUNDING_CELL_CAPACITY_SHANNONS="${MIN_FUNDING_CELL_CAPACITY_SHANNONS:-10000000000}"
-CARRIER_CELL_CAPACITY_SHANNONS="${CARRIER_CELL_CAPACITY_SHANNONS:-40000000000}"
+CARRIER_CELL_CAPACITY_SHANNONS="${CARRIER_CELL_CAPACITY_SHANNONS:-42000000000}"
 SETTLEMENT_AUTHORITY_CELL_CAPACITY_SHANNONS="${SETTLEMENT_AUTHORITY_CELL_CAPACITY_SHANNONS:-30000000000}"
 CKB_SHANNONS_PER_BYTE=100000000
 
@@ -364,6 +364,8 @@ settlement_authority_authentication_pubkey_hash_count="$(jq -r '.settlement_auth
 settlement_authority_authentication_signature_count="$(jq -r '.settlement_authority.authority_authentication.signatures | length' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_signature_verified="$(jq -r '.settlement_authority.authority_authentication.signature_verified' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_hash="$(jq -r '.settlement_authority.authority_authentication.attestation_hash' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_lock_args="$(jq -r '.settlement_authority.authority_authentication.ckb_lock_args' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_lock_args_hash="$(jq -r '.settlement_authority.authority_authentication.ckb_lock_args_hash' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_enforceable="$(jq -r '.settlement_authority.authority_authentication.ckb_enforceable' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_testnet_ready="$(jq -r '.settlement_authority.authority_authentication.testnet_beta_ready' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_production_ready="$(jq -r '.settlement_authority.authority_authentication.production_ready' "$WORKDIR/myelin/session-settlement-package.json")"
@@ -433,6 +435,10 @@ if [[ "$settlement_authority_authentication_signature_verified" != "true" ]]; th
 fi
 if [[ "$settlement_authority_authentication_hash" == "null" || ${#settlement_authority_authentication_hash} -ne 64 ]]; then
   echo "settlement authority authentication must expose a 32-byte attestation hash" >&2
+  exit 1
+fi
+if [[ "$settlement_authority_lock_args" != 0x6d79656c696e2d617574682d7631* || "$settlement_authority_lock_args_hash" == "null" || ${#settlement_authority_lock_args_hash} -ne 64 ]]; then
+  echo "settlement authority authentication must expose threshold-lock args and lock-args hash" >&2
   exit 1
 fi
 if [[ "$settlement_authority_authentication_enforceable" != "false" || "$settlement_authority_authentication_testnet_ready" != "false" || "$settlement_authority_authentication_production_ready" != "false" ]]; then
@@ -541,6 +547,7 @@ jq -n \
   --arg da_final_verifier_elf "$da_final_verifier_elf_hex" \
   --arg settlement_final_verifier_elf "$settlement_final_verifier_elf_hex" \
   --arg settlement_authority_data "$settlement_authority_data" \
+  --arg settlement_authority_lock_args "$settlement_authority_lock_args" \
   --arg lock "$ALWAYS_SUCCESS_CODE_HASH" \
   --arg genesis_tx "$genesis_tx_hash" \
   --arg dep_index "$GENESIS_ALWAYS_SUCCESS_DEP_INDEX" \
@@ -587,7 +594,7 @@ jq -n \
           },
           {
             capacity: $settlement_authority_capacity,
-            lock: { code_hash: $lock, hash_type: "data", args: "0x" },
+            lock: { code_hash: $lock, hash_type: "data", args: $settlement_authority_lock_args },
             type: null
           }
         ],
@@ -648,6 +655,11 @@ if [[ "$committed_settlement_authority_data" != "$settlement_authority_data" ]];
   echo "committed settlement authority cell data does not match settlement authority lineage payload" >&2
   exit 1
 fi
+committed_settlement_authority_lock_args="$(jq -r '.result.transaction.outputs[5].lock.args' "$deploy_get_tx_path")"
+if [[ "$committed_settlement_authority_lock_args" != "$settlement_authority_lock_args" ]]; then
+  echo "committed settlement authority cell lock args do not match declared threshold-lock args" >&2
+  exit 1
+fi
 
 da_verifier_code_dep_index="0x1"
 settlement_verifier_code_dep_index="0x2"
@@ -673,6 +685,7 @@ submit_and_verify_carrier() {
   local authority_input_tx_hash="${11:-}"
   local authority_input_index="${12:-}"
   local authority_input_capacity_hex="${13:-}"
+  local carrier_lock_args="${14:-0x}"
 
   local verifier_source verifier_action verifier_code_hash_for_carrier verifier_code_dep_index_for_carrier
   case "$verifier_role:$package_kind" in
@@ -781,7 +794,7 @@ submit_and_verify_carrier() {
     --fee-shannons "$FEE_SHANNONS" \
     --lock-code-hash "$ALWAYS_SUCCESS_CODE_HASH" \
     --lock-hash-type data \
-    --lock-args 0x \
+    --lock-args "$carrier_lock_args" \
     --lock-code-dep-tx-hash "$genesis_tx_hash" \
     --lock-code-dep-index "$GENESIS_ALWAYS_SUCCESS_DEP_INDEX" \
     --verifier-code-hash "$verifier_code_hash_for_carrier" \
@@ -937,7 +950,7 @@ PY
     --fee-shannons "$FEE_SHANNONS" \
     --lock-code-hash "$ALWAYS_SUCCESS_CODE_HASH" \
     --lock-hash-type data \
-    --lock-args 0x \
+    --lock-args "$carrier_lock_args" \
     --lock-code-dep-tx-hash "$genesis_tx_hash" \
     --lock-code-dep-index "$GENESIS_ALWAYS_SUCCESS_DEP_INDEX" \
     --verifier-code-hash "$verifier_code_hash_for_carrier" \
@@ -956,6 +969,7 @@ PY
   local pre_submit_evidence_cell_dep_lock_matches
   local pre_submit_authority_input_data_hash_matches
   local pre_submit_authority_input_lock_matches
+  local pre_submit_authority_input_threshold_lock_args_matches
   local settlement_uniqueness_checked
   local settlement_identity_hash
   local session_id_hash
@@ -964,6 +978,7 @@ PY
   pre_submit_evidence_cell_dep_lock_matches="$(jq -r '.pre_submit_evidence_cell_dep_lock_matches' "$submission_path")"
   pre_submit_authority_input_data_hash_matches="$(jq -r '.pre_submit_authority_input_data_hash_matches' "$submission_path")"
   pre_submit_authority_input_lock_matches="$(jq -r '.pre_submit_authority_input_lock_matches' "$submission_path")"
+  pre_submit_authority_input_threshold_lock_args_matches="$(jq -r '.pre_submit_authority_input_threshold_lock_args_matches' "$submission_path")"
   settlement_uniqueness_checked="$(jq -r '.settlement_uniqueness_checked' "$submission_path")"
   settlement_identity_hash="$(jq -r '.settlement_identity_hash // empty' "$submission_path")"
   session_id_hash="$(jq -r '.session_id_hash // empty' "$submission_path")"
@@ -973,6 +988,7 @@ PY
     if [[ "$pre_submit_evidence_cell_dep_lock_matches" != "true" ]] \
       || [[ "$pre_submit_authority_input_data_hash_matches" != "true" ]] \
       || [[ "$pre_submit_authority_input_lock_matches" != "true" ]] \
+      || [[ "$pre_submit_authority_input_threshold_lock_args_matches" != "true" ]] \
       || [[ "$settlement_uniqueness_checked" != "true" ]] \
       || [[ "$duplicate_settlement_detected" != "false" ]] \
       || [[ "$replay_protection_mode" != "authority-cell-single-use-plus-transaction-local-final-script-singleton" ]]; then
@@ -1134,6 +1150,7 @@ PY
     --argjson pre_submit_evidence_cell_dep_lock_matches "$pre_submit_evidence_cell_dep_lock_matches" \
     --argjson pre_submit_authority_input_data_hash_matches "$pre_submit_authority_input_data_hash_matches" \
     --argjson pre_submit_authority_input_lock_matches "$pre_submit_authority_input_lock_matches" \
+    --argjson pre_submit_authority_input_threshold_lock_args_matches "$pre_submit_authority_input_threshold_lock_args_matches" \
     --argjson settlement_uniqueness_checked "$settlement_uniqueness_checked" \
     --argjson duplicate_settlement_detected "$duplicate_settlement_detected" \
     --argjson live_carrier_submission_ready "$live_carrier_submission_ready" \
@@ -1172,6 +1189,7 @@ PY
         evidence_cell_dep_lock_matches: $pre_submit_evidence_cell_dep_lock_matches,
         authority_input_data_hash_matches: $pre_submit_authority_input_data_hash_matches,
         authority_input_lock_matches: $pre_submit_authority_input_lock_matches,
+        authority_input_threshold_lock_args_matches: $pre_submit_authority_input_threshold_lock_args_matches,
         settlement_uniqueness_checked: $settlement_uniqueness_checked,
         duplicate_settlement_detected: $duplicate_settlement_detected,
         replay_protection_mode: $replay_protection_mode
@@ -1462,7 +1480,14 @@ submit_and_verify_carrier \
   "$settlement_change_tx_hash" \
   "$settlement_change_index" \
   "$settlement_change_capacity" \
-  "final-l1-script"
+  "final-l1-script" \
+  "" \
+  "" \
+  "" \
+  "" \
+  "" \
+  "" \
+  "$settlement_authority_lock_args"
 
 da_anchor_final_change_tx_hash="$(jq -r '.change_output.tx_hash' "$WORKDIR/da-anchor-final-final-script-summary.json")"
 da_anchor_final_change_index="$(jq -r '.change_output.index' "$WORKDIR/da-anchor-final-final-script-summary.json")"
@@ -1485,7 +1510,8 @@ submit_and_verify_carrier \
   "$da_anchor_final_output_capacity" \
   "$settlement_authority_tx_hash" \
   "$settlement_authority_output_index" \
-  "$settlement_authority_output_capacity_hex"
+  "$settlement_authority_output_capacity_hex" \
+  "$settlement_authority_lock_args"
 
 jq -n \
   --arg schema "myelin-ckb-devnet-smoke-v1" \

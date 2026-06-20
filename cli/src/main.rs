@@ -2773,6 +2773,7 @@ fn settlement_authority_authentication(
         &[&authority_data_hash, &session_id, &participant_set_hash, &escrow_input_cells_hash, &session_lineage_commitment],
     );
     let signature_scheme = "secp256k1-recoverable-blake3-pubkey-hash20";
+    let threshold = 2;
     let secp = Secp256k1::new();
     let message = Message::from_digest_slice(&message_hash).expect("blake3 hash is a valid secp256k1 message digest");
     let mut signer_pubkey_hashes = Vec::new();
@@ -2810,8 +2811,11 @@ fn settlement_authority_authentication(
     for attestation in &attestation_hashes {
         hasher.update(attestation.as_bytes());
     }
+    let ckb_lock_args_bytes = settlement_authority_threshold_lock_args(threshold, &signer_pubkey_hashes);
+    let ckb_lock_args_hash = blake3_32(b"myelin:session-settlement-authority-threshold-lock-args:v1", &ckb_lock_args_bytes);
+    hasher.update(&ckb_lock_args_bytes);
+    hasher.update(&ckb_lock_args_hash);
     let attestation_hash = *hasher.finalize().as_bytes();
-    let threshold = 2;
     let signer_count = u32::try_from(signatures.len()).expect("static signer fixture fits into u32");
     let signature_verified = signature_verified && signer_count >= threshold;
     SessionAuthorityAuthenticationEvidence {
@@ -2828,11 +2832,28 @@ fn settlement_authority_authentication(
         attestation_hashes,
         attestation_hash: hex::encode(attestation_hash),
         signature_verified,
-        ckb_lock_policy: "threshold lock must guard creation of the one-use settlement authority cell".to_owned(),
+        ckb_lock_args_algorithm: "0x6d79656c696e2d617574682d7631 || threshold_le_u32 || signer_count_le_u32 || signer_pubkey_hash20[]"
+            .to_owned(),
+        ckb_lock_args: format!("0x{}", hex::encode(&ckb_lock_args_bytes)),
+        ckb_lock_args_hash: hex::encode(ckb_lock_args_hash),
+        ckb_lock_policy: "final DA publication and settlement authority cells must use these threshold-lock args".to_owned(),
         ckb_enforceable: false,
         testnet_beta_ready: false,
         production_ready: false,
     }
+}
+
+fn settlement_authority_threshold_lock_args(threshold: u32, signer_pubkey_hashes: &[String]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(b"myelin-auth-v1".len() + 8 + signer_pubkey_hashes.len() * 20);
+    bytes.extend_from_slice(b"myelin-auth-v1");
+    bytes.extend_from_slice(&threshold.to_le_bytes());
+    bytes.extend_from_slice(&u32::try_from(signer_pubkey_hashes.len()).expect("signer count fits u32").to_le_bytes());
+    for pubkey_hash in signer_pubkey_hashes {
+        let pubkey_hash_bytes = hex::decode(pubkey_hash).expect("generated signer pubkey hash is valid hex");
+        debug_assert_eq!(pubkey_hash_bytes.len(), 20);
+        bytes.extend_from_slice(&pubkey_hash_bytes);
+    }
+    bytes
 }
 
 fn secp256k1_pubkey_hash20(public_key: &PublicKey) -> [u8; 20] {
@@ -3695,6 +3716,9 @@ struct SessionAuthorityAuthenticationEvidence {
     attestation_hashes: Vec<String>,
     attestation_hash: String,
     signature_verified: bool,
+    ckb_lock_args_algorithm: String,
+    ckb_lock_args: String,
+    ckb_lock_args_hash: String,
     ckb_lock_policy: String,
     ckb_enforceable: bool,
     testnet_beta_ready: bool,
@@ -6029,13 +6053,21 @@ fn verify_session_settlement_package(
             && package.settlement_authority.authority_authentication.signatures.len()
                 == package.settlement_authority.authority_authentication.signer_pubkey_hashes.len()
             && package.settlement_authority.authority_authentication.signer_count
-                >= package.settlement_authority.authority_authentication.threshold,
+                >= package.settlement_authority.authority_authentication.threshold
+            && package
+                .settlement_authority
+                .authority_authentication
+                .ckb_lock_args
+                .starts_with("0x6d79656c696e2d617574682d7631")
+            && hex::decode(&package.settlement_authority.authority_authentication.ckb_lock_args[2..]).is_ok()
+            && package.settlement_authority.authority_authentication.ckb_lock_args_hash.len() == 64
+            && hex::decode(&package.settlement_authority.authority_authentication.ckb_lock_args_hash).is_ok(),
         Some(
-            "!ckb_enforceable && !testnet_beta_ready && !production_ready && signature_verified && signatures match signer keys && signer_count >= threshold"
+            "!ckb_enforceable && !testnet_beta_ready && !production_ready && signature_verified && signatures match signer keys && signer_count >= threshold && threshold lock args present"
                 .to_owned(),
         ),
         Some(format!(
-            "!{} && !{} && !{} && {} && {} == {} && {} >= {}",
+            "!{} && !{} && !{} && {} && {} == {} && {} >= {} && {}",
             package.settlement_authority.authority_authentication.ckb_enforceable,
             package.settlement_authority.authority_authentication.testnet_beta_ready,
             package.settlement_authority.authority_authentication.production_ready,
@@ -6043,9 +6075,10 @@ fn verify_session_settlement_package(
             package.settlement_authority.authority_authentication.signatures.len(),
             package.settlement_authority.authority_authentication.signer_pubkey_hashes.len(),
             package.settlement_authority.authority_authentication.signer_count,
-            package.settlement_authority.authority_authentication.threshold
+            package.settlement_authority.authority_authentication.threshold,
+            package.settlement_authority.authority_authentication.ckb_lock_args_hash
         )),
-        "settlement authority carries verified local threshold signatures without claiming deployed CKB threshold-lock enforcement",
+        "settlement authority carries verified local threshold signatures and declared CKB lock args without claiming deployed cryptographic lock enforcement",
     );
     push_check(
         &mut checks,
@@ -6517,6 +6550,18 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
             "final L1 settlement submission requires the final DA publication evidence CellDep".to_owned(),
         ));
     }
+    let authority_threshold_lock_identity_checked = expected_settlement_authority
+        .as_ref()
+        .is_none_or(|authority| lock_args.eq_ignore_ascii_case(&authority.authority_authentication.ckb_lock_args));
+    if !authority_threshold_lock_identity_checked {
+        let expected_lock_args = expected_settlement_authority
+            .as_ref()
+            .map(|authority| authority.authority_authentication.ckb_lock_args.as_str())
+            .unwrap_or("0x");
+        return Err(CliError::InvalidFixture(format!(
+            "final L1 settlement lock args must match settlement_authority.authority_authentication.ckb_lock_args: expected {expected_lock_args}, got {lock_args}"
+        )));
+    }
     let carrier_type_args = if let Some(authority) = expected_settlement_authority.as_ref() {
         settlement_final_type_args_hex(&carrier_payload_bytes, authority)?
     } else {
@@ -6616,6 +6661,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     let mut pre_submit_authority_input_capacity_matches = None;
     let mut pre_submit_authority_input_data_hash_matches = None;
     let mut pre_submit_authority_input_lock_matches = None;
+    let mut pre_submit_authority_input_threshold_lock_args_matches = None;
     if args.submit {
         submitted_to_rpc = true;
         let url = args
@@ -6730,7 +6776,18 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
                     authority_preflight.lock_code_hash.as_deref().is_some_and(|actual| actual.eq_ignore_ascii_case(&lock_code_hash))
                         && authority_preflight.lock_hash_type.as_deref() == Some(args.lock_hash_type.as_str())
                         && authority_preflight.lock_args.as_deref().is_some_and(|actual| actual.eq_ignore_ascii_case(&lock_args));
+                let authority_threshold_lock_args_matches = authority_preflight
+                    .lock_args
+                    .as_deref()
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(&expected_authority.authority_authentication.ckb_lock_args));
                 pre_submit_authority_input_lock_matches = Some(authority_lock_matches);
+                pre_submit_authority_input_threshold_lock_args_matches = Some(authority_threshold_lock_args_matches);
+                if !authority_threshold_lock_args_matches {
+                    return Err(CliError::InvalidFixture(format!(
+                        "settlement authority input threshold-lock args mismatch: declared {} but CKB returned {:?}",
+                        expected_authority.authority_authentication.ckb_lock_args, authority_preflight.lock_args
+                    )));
+                }
                 if !authority_lock_matches {
                     return Err(CliError::InvalidFixture(format!(
                         "settlement authority input lock mismatch: declared {lock_code_hash}/{}({lock_args}) but CKB returned {:?}/{:?}({:?})",
@@ -6883,6 +6940,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         "authority_input_present": authority_input.is_some(),
         "authority_input": authority_input_report,
         "settlement_authority_requirement": expected_settlement_authority,
+        "authority_threshold_lock_identity_checked": authority_threshold_lock_identity_checked,
         "carrier_capacity_shannons": args.carrier_capacity_shannons,
         "carrier_min_capacity_shannons": carrier_min_capacity_shannons,
         "change_capacity_shannons": change_capacity,
@@ -6905,6 +6963,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         "pre_submit_authority_input_capacity_matches": pre_submit_authority_input_capacity_matches,
         "pre_submit_authority_input_data_hash_matches": pre_submit_authority_input_data_hash_matches,
         "pre_submit_authority_input_lock_matches": pre_submit_authority_input_lock_matches,
+        "pre_submit_authority_input_threshold_lock_args_matches": pre_submit_authority_input_threshold_lock_args_matches,
         "pre_submit_lock_code_dep_live": pre_submit_lock_code_dep_live,
         "pre_submit_verifier_code_dep_live": pre_submit_verifier_code_dep_live,
         "pre_submit_verifier_code_dep_data_hash_matches": pre_submit_verifier_code_dep_data_hash_matches,
@@ -8335,6 +8394,7 @@ fn final_l1_script_preflight_ready(submission: &Value) -> bool {
                 && submission.get("l1_court_submitted").and_then(Value::as_bool) == Some(true)
                 && submission.get("evidence_cell_dep_present").and_then(Value::as_bool) == Some(true)
                 && submission.get("authority_input_present").and_then(Value::as_bool) == Some(true)
+                && json_bool_true(submission, "/authority_threshold_lock_identity_checked")
                 && submission.get("settlement_authority_requirement").is_some_and(Value::is_object)
                 && submission.pointer("/settlement_authority_requirement/authority_authentication").is_some_and(Value::is_object)
                 && json_bool_false(submission, "/settlement_authority_requirement/authority_authentication/ckb_enforceable")
@@ -8357,6 +8417,14 @@ fn final_l1_script_preflight_ready(submission: &Value) -> bool {
                     .pointer("/settlement_authority_requirement/authority_authentication/attestation_hash")
                     .and_then(Value::as_str)
                     .is_some_and(|hash| hash.len() == 64 && hex::decode(hash).is_ok())
+                && submission
+                    .pointer("/settlement_authority_requirement/authority_authentication/ckb_lock_args")
+                    .and_then(Value::as_str)
+                    .is_some_and(|args| args.starts_with("0x") && hex::decode(&args[2..]).is_ok())
+                && submission
+                    .pointer("/settlement_authority_requirement/authority_authentication/ckb_lock_args_hash")
+                    .and_then(Value::as_str)
+                    .is_some_and(|hash| hash.len() == 64 && hex::decode(hash).is_ok())
                 && json_bool_true(submission, "/settlement_uniqueness_checked")
                 && submission.get("duplicate_settlement_detected").and_then(Value::as_bool) == Some(false)
                 && submission.get("settlement_identity_hash").and_then(Value::as_str).and_then(normalize_ckb_tx_hash).is_some()
@@ -8370,6 +8438,7 @@ fn final_l1_script_preflight_ready(submission: &Value) -> bool {
                 && json_bool_true(submission, "/pre_submit_authority_input_capacity_matches")
                 && json_bool_true(submission, "/pre_submit_authority_input_data_hash_matches")
                 && json_bool_true(submission, "/pre_submit_authority_input_lock_matches")
+                && json_bool_true(submission, "/pre_submit_authority_input_threshold_lock_args_matches")
         }
         _ => false,
     }
@@ -9473,6 +9542,15 @@ mod tests {
         MockCarrierLiveCell { capacity, data_hash, lock_code_hash, lock_hash_type: "data".to_owned(), lock_args: "0x".to_owned() }
     }
 
+    fn mock_carrier_live_cell_with_lock_args(
+        capacity: String,
+        data_hash: String,
+        lock_code_hash: String,
+        lock_args: String,
+    ) -> MockCarrierLiveCell {
+        MockCarrierLiveCell { capacity, data_hash, lock_code_hash, lock_hash_type: "data".to_owned(), lock_args }
+    }
+
     fn spawn_carrier_submission_rpc_mock(
         cells: std::collections::BTreeMap<String, MockCarrierLiveCell>,
         accepted_hash: Option<String>,
@@ -10176,7 +10254,10 @@ mod tests {
                     "attestation_hashes": ["48".repeat(32), "49".repeat(32)],
                     "attestation_hash": "4a".repeat(32),
                     "signature_verified": true,
-                    "ckb_lock_policy": "threshold lock must guard creation of the one-use settlement authority cell",
+                    "ckb_lock_args_algorithm": "0x6d79656c696e2d617574682d7631 || threshold_le_u32 || signer_count_le_u32 || signer_pubkey_hash20[]",
+                    "ckb_lock_args": format!("0x{}", "51".repeat(61)),
+                    "ckb_lock_args_hash": "52".repeat(32),
+                    "ckb_lock_policy": "final DA publication and settlement authority cells must use these threshold-lock args",
                     "ckb_enforceable": false,
                     "testnet_beta_ready": false,
                     "production_ready": false
@@ -10184,6 +10265,7 @@ mod tests {
                 "consumed_input_index": 1,
                 "required_lock_binding": "final-da-publication-lock-hash"
             },
+            "authority_threshold_lock_identity_checked": authority_lock_matches,
             "settlement_uniqueness_checked": true,
             "settlement_identity_hash": format!("0x{}", "45".repeat(32)),
             "session_id_hash": format!("0x{}", "44".repeat(32)),
@@ -10203,6 +10285,7 @@ mod tests {
             "pre_submit_authority_input_capacity_matches": true,
             "pre_submit_authority_input_data_hash_matches": true,
             "pre_submit_authority_input_lock_matches": authority_lock_matches,
+            "pre_submit_authority_input_threshold_lock_args_matches": authority_lock_matches,
             "final_script_verifier": {
                 "verifier_role": "final-l1-script",
                 "cellscript_source_hash": format!("0x{}", "43".repeat(32))
@@ -11122,6 +11205,10 @@ mod tests {
         assert!(package.settlement_authority.authority_authentication.signature_verified);
         assert_eq!(package.settlement_authority.authority_authentication.signer_pubkey_hashes.len(), 2);
         assert_eq!(package.settlement_authority.authority_authentication.signatures.len(), 2);
+        assert!(package.settlement_authority.authority_authentication.ckb_lock_args.starts_with("0x6d79656c696e2d617574682d7631"));
+        assert_eq!(package.settlement_authority.authority_authentication.ckb_lock_args_hash.len(), 64);
+        assert!(hex::decode(&package.settlement_authority.authority_authentication.ckb_lock_args[2..]).is_ok());
+        assert!(hex::decode(&package.settlement_authority.authority_authentication.ckb_lock_args_hash).is_ok());
         assert!(package
             .settlement_authority
             .authority_authentication
@@ -12294,7 +12381,7 @@ mod tests {
         std::fs::write(&verifier_source, verifier_source_bytes).expect("write verifier source");
         let expected_verifier_source_hash = format!("0x{}", hex::encode(myelin_hashes::sha256(verifier_source_bytes)));
         let carrier_capacity = 40_000_000_000u64;
-        let change_capacity = 10_000_000_000u64;
+        let change_capacity = 16_000_000_000u64;
         let fee = 1_000u64;
         let input_capacity = carrier_capacity + change_capacity + fee;
         let build_args = |accepted_tx_hash: Option<String>| SessionCarrierSubmissionArgs {
@@ -12445,8 +12532,8 @@ mod tests {
         let payload = format!("0x{}", ["a1", "a2", "a3", "a4", "a5"].map(|byte| byte.repeat(32)).join(""));
         let package = settlement_package_from_carrier_payload(&payload);
         let package_path = write_temp_json("final-settlement-missing-authority-package", &package);
-        let carrier_capacity = 40_000_000_000u64;
-        let change_capacity = 10_000_000_000u64;
+        let carrier_capacity = 42_000_000_000u64;
+        let change_capacity = 16_000_000_000u64;
         let fee = 1_000u64;
         let input_capacity = carrier_capacity + change_capacity + fee;
 
@@ -12495,7 +12582,7 @@ mod tests {
         let payload = format!("0x{}", ["a6", "a7", "a8", "a9", "aa"].map(|byte| byte.repeat(32)).join(""));
         let package = settlement_package_from_carrier_payload(&payload);
         let package_path = write_temp_json("final-settlement-missing-da-dep-package", &package);
-        let carrier_capacity = 40_000_000_000u64;
+        let carrier_capacity = 42_000_000_000u64;
         let change_capacity = 10_000_000_000u64;
         let fee = 1_000u64;
         let authority_capacity = 8_000_000_000u64;
@@ -12547,13 +12634,17 @@ mod tests {
         let payload_bytes = decode_hex_bytes(&payload).expect("settlement payload bytes");
         let package = settlement_package_from_carrier_payload(&payload);
         let package_path = write_temp_json("final-settlement-authority-package", &package);
-        let carrier_capacity = 40_000_000_000u64;
-        let change_capacity = 10_000_000_000u64;
+        let carrier_capacity = 42_000_000_000u64;
+        let change_capacity = 16_000_000_000u64;
         let fee = 1_000u64;
         let authority_capacity = 8_000_000_000u64;
         let funding_capacity = carrier_capacity + change_capacity + fee - authority_capacity;
         let authority_tx_hash = format!("0x{}", "d7".repeat(32));
         let authority_index = "0x2".to_owned();
+        let authority_lock_args = package["settlement_authority"]["authority_authentication"]["ckb_lock_args"]
+            .as_str()
+            .expect("authority lock args")
+            .to_owned();
 
         let report = session_carrier_submission(SessionCarrierSubmissionArgs {
             package: package_path.clone(),
@@ -12570,7 +12661,7 @@ mod tests {
             fee_shannons: fee,
             lock_code_hash: format!("0x{}", "d3".repeat(32)),
             lock_hash_type: "data".to_owned(),
-            lock_args: "0x".to_owned(),
+            lock_args: authority_lock_args.clone(),
             lock_code_dep_tx_hash: format!("0x{}", "d4".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             verifier_code_hash: format!("0x{}", "d5".repeat(32)),
@@ -12596,6 +12687,7 @@ mod tests {
         assert_eq!(report["authority_input"]["index"], authority_index);
         assert_eq!(report["authority_input"]["input_position"], 1);
         assert_eq!(report["settlement_authority_requirement"], package["settlement_authority"]);
+        assert_eq!(report["authority_threshold_lock_identity_checked"], true);
         assert_eq!(report["total_input_capacity_shannons"], funding_capacity + authority_capacity);
         assert_eq!(report["change_capacity_shannons"], change_capacity);
         assert_eq!(report["ckb_transaction_json"]["inputs"].as_array().expect("inputs").len(), 2);
@@ -12625,8 +12717,8 @@ mod tests {
         let package_path = write_temp_json("final-settlement-live-lock-package", &package);
         let verifier_source = std::env::temp_dir().join(format!("myelin-final-settlement-lock-source-{}.cell", std::process::id()));
         std::fs::write(&verifier_source, b"module myelin::final_settlement_lock\n").expect("write final verifier source");
-        let carrier_capacity = 40_000_000_000u64;
-        let change_capacity = 10_000_000_000u64;
+        let carrier_capacity = 42_000_000_000u64;
+        let change_capacity = 16_000_000_000u64;
         let fee = 1_000u64;
         let authority_capacity = 8_000_000_000u64;
         let funding_capacity = carrier_capacity + change_capacity + fee - authority_capacity;
@@ -12644,6 +12736,10 @@ mod tests {
         let verifier_dep_tx_hash = format!("0x{}", "f6".repeat(32));
         let verifier_dep_index = "0x1".to_owned();
         let authority_data_hash = package["settlement_authority"]["data_hash"].as_str().expect("authority data hash").to_owned();
+        let authority_lock_args = package["settlement_authority"]["authority_authentication"]["ckb_lock_args"]
+            .as_str()
+            .expect("authority lock args")
+            .to_owned();
         let build_args = |rpc_url: Option<String>, submit: bool, require_accepted: bool| SessionCarrierSubmissionArgs {
             package: package_path.clone(),
             input_tx_hash: input_tx_hash.clone(),
@@ -12659,7 +12755,7 @@ mod tests {
             fee_shannons: fee,
             lock_code_hash: lock_code_hash.clone(),
             lock_hash_type: "data".to_owned(),
-            lock_args: "0x".to_owned(),
+            lock_args: authority_lock_args.clone(),
             lock_code_dep_tx_hash: lock_dep_tx_hash.clone(),
             lock_code_dep_index: lock_dep_index.clone(),
             verifier_code_hash: verifier_code_hash.clone(),
@@ -12676,28 +12772,45 @@ mod tests {
             out: None,
         };
         let dry_report = session_carrier_submission(build_args(None, false, false)).expect("build final settlement dry run");
+        let mut wrong_lock_args = build_args(None, false, false);
+        wrong_lock_args.lock_args = "0x".to_owned();
+        let wrong_lock_args_error =
+            session_carrier_submission(wrong_lock_args).expect_err("final settlement should require authority threshold-lock args");
+        assert!(
+            wrong_lock_args_error
+                .to_string()
+                .contains("final L1 settlement lock args must match settlement_authority.authority_authentication.ckb_lock_args"),
+            "{wrong_lock_args_error}"
+        );
         let accepted_tx_hash = dry_report["ckb_raw_tx_hash"].as_str().expect("projected final settlement tx hash").to_owned();
         let valid_cells = || {
             let mut cells = std::collections::BTreeMap::new();
             cells.insert(
                 ckb_out_point_key(&serde_json::json!({ "tx_hash": input_tx_hash, "index": input_index })).unwrap(),
-                mock_carrier_live_cell(
+                mock_carrier_live_cell_with_lock_args(
                     format!("0x{funding_capacity:x}"),
                     "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
                     lock_code_hash.clone(),
+                    authority_lock_args.clone(),
                 ),
             );
             cells.insert(
                 ckb_out_point_key(&serde_json::json!({ "tx_hash": evidence_tx_hash, "index": evidence_index })).unwrap(),
-                mock_carrier_live_cell(
+                mock_carrier_live_cell_with_lock_args(
                     format!("0x{evidence_capacity:x}"),
                     "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
                     lock_code_hash.clone(),
+                    authority_lock_args.clone(),
                 ),
             );
             cells.insert(
                 ckb_out_point_key(&serde_json::json!({ "tx_hash": authority_tx_hash, "index": authority_index })).unwrap(),
-                mock_carrier_live_cell(format!("0x{authority_capacity:x}"), authority_data_hash.clone(), lock_code_hash.clone()),
+                mock_carrier_live_cell_with_lock_args(
+                    format!("0x{authority_capacity:x}"),
+                    authority_data_hash.clone(),
+                    lock_code_hash.clone(),
+                    authority_lock_args.clone(),
+                ),
             );
             cells.insert(
                 ckb_out_point_key(&serde_json::json!({ "tx_hash": lock_dep_tx_hash, "index": lock_dep_index })).unwrap(),
@@ -12747,9 +12860,11 @@ mod tests {
         let _ = std::fs::remove_file(verifier_source);
 
         assert_eq!(report["accepted_by_rpc"], true);
+        assert_eq!(report["authority_threshold_lock_identity_checked"], true);
         assert_eq!(report["pre_submit_evidence_cell_dep_lock_matches"], true);
         assert_eq!(report["pre_submit_authority_input_data_hash_matches"], true);
         assert_eq!(report["pre_submit_authority_input_lock_matches"], true);
+        assert_eq!(report["pre_submit_authority_input_threshold_lock_args_matches"], true);
         assert!(evidence_error.to_string().contains("final DA publication CellDep lock mismatch"), "{evidence_error}");
         assert!(authority_error.to_string().contains("settlement authority input lock mismatch"), "{authority_error}");
     }
@@ -13852,7 +13967,7 @@ mod tests {
 
         let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
             .expect("settlement package");
-        let cases: [SettlementPackageTamperCase; 10] = [
+        let cases: [SettlementPackageTamperCase; 12] = [
             ("authority-auth-hash", |package| {
                 package.settlement_authority.authority_authentication.attestation_hash = "33".repeat(32)
             }),
@@ -13870,6 +13985,12 @@ mod tests {
             ("authority-auth-signer-count", |package| package.settlement_authority.authority_authentication.signer_count = 1),
             ("authority-auth-signature-verified", |package| {
                 package.settlement_authority.authority_authentication.signature_verified = false
+            }),
+            ("authority-auth-lock-args", |package| {
+                package.settlement_authority.authority_authentication.ckb_lock_args = format!("0x{}", "38".repeat(62))
+            }),
+            ("authority-auth-lock-args-hash", |package| {
+                package.settlement_authority.authority_authentication.ckb_lock_args_hash = "39".repeat(32)
             }),
             ("authority-auth-enforceable", |package| package.settlement_authority.authority_authentication.ckb_enforceable = true),
             ("authority-auth-testnet-ready", |package| {

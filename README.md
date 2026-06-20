@@ -351,7 +351,8 @@ live final L1 script evidence whose referenced submission report also proves
 the final-script pre-submit checks: live funding/code cells, matching verifier
 code hash, and, for final settlement, the final DA evidence CellDep, the
 package-declared authority input with matching data hash and settlement lock,
-and explicit settlement uniqueness evidence. The readiness report also carries
+matching threshold-lock args, and explicit settlement uniqueness evidence. The
+readiness report also carries
 `operational_policy`, a public-chain operations commitment covering reorg
 confirmation depth, stability requery, fee floor/rate/max-fee policy, retry
 identity, key-submission evidence, and monitoring evidence. It can be
@@ -378,8 +379,10 @@ whose lineage fields are copied from the verified session path, whose authority
 commitment binds those lineage fields together with the intent hash and
 `session_id`, whose `authority_authentication` carries locally verified
 secp256k1 threshold-signature evidence over the authority data hash and session
-lineage, whose consumed input index is `1`, and whose lock must match the final
-DA publication lock. This is not yet deployed CKB threshold-lock enforcement.
+lineage plus deterministic CKB lock args for the participant threshold set,
+whose consumed input index is `1`, and whose lock code and threshold-lock args
+must match the final DA publication lock. This is not yet deployed CKB
+threshold-lock cryptographic enforcement.
 Final settlement type args are exactly `session_id_hash ||
 settlement_identity_hash`, where `session_id_hash` is copied from the consumed
 authority Cell and `settlement_identity_hash` is the CKB data hash of the
@@ -388,9 +391,11 @@ same-type inputs, duplicate same-type group outputs, and any second output in
 the transaction using the same deployed final-settlement code hash/hash type.
 That gives transaction-local singleton creation; cross-transaction replay is
 blocked by consuming the one-use authority Cell. The package now emits and
-verifies local threshold signatures for authority-cell creation, while deployed
-CKB threshold-lock enforcement, production key custody, and deployment policy
-remain outside this milestone.
+verifies local threshold signatures plus deterministic threshold-lock args for
+authority-cell creation; final-script submission rejects a mismatched declared
+authority lock identity before broadcast, while deployed CKB threshold-lock
+cryptographic enforcement, production key custody, and deployment policy remain
+outside this milestone.
 `session verify-settlement-package` recomputes the embedded Molecule
 transaction, CKB projection, and settlement-authority requirement.
 `session submit-settlement-package` builds the CKB
@@ -480,14 +485,15 @@ CKB type scripts, creates the one-use settlement-authority Cell from the
 settlement package's declared `settlement_authority`, records the authority
 session id, participant digest, escrow digest, session-lineage commitment, and
 authority commitment in the smoke report, and consumes it in the final
-settlement transaction. It also submits a competing final-settlement output probe
-before the valid final settlement and requires live CKB script verification to
-reject it. This proves deployed compact-payload script semantics for the local
-devnet carrier and final-script paths, plus locally verified DA committee
-signatures and authority-authentication signatures. It still does not claim
-external DA availability guarantees, deployed threshold-lock authority
-enforcement, production key management, or deployed CKB court-dispute
-economics.
+settlement transaction using the package-declared threshold-lock args. It also
+submits a competing final-settlement output probe before the valid final
+settlement and requires live CKB script verification to reject it. This proves
+deployed compact-payload script semantics for the local devnet carrier and
+final-script paths, plus locally verified DA committee signatures,
+authority-authentication signatures, and threshold-lock args binding. It still
+does not claim external DA availability guarantees, deployed threshold-lock
+cryptographic authority enforcement, production key management, or deployed CKB
+court-dispute economics.
 `teeworlds court-bundle` materialises one disputed chunk as a self-contained
 court-input bundle: chunk payload bytes, CKB Molecule transaction bytes,
 CKB-style projection evidence, deterministic challenge hashes, and
