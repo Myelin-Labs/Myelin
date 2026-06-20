@@ -455,6 +455,13 @@ cargo run -p myelin-cli -- session verify-submission-finality --inclusion report
 cargo run -p myelin-cli -- session verify-submission-readiness --context reports/session-settlement-context.json --economics reports/session-settlement-economics.json --inclusion reports/session-settlement-inclusion.json --stability reports/session-settlement-stability.json --finality reports/session-settlement-finality.json --out reports/session-settlement-readiness.json
 ```
 
+For external DA evidence, `session da-manifest` can additionally take
+`--external-da-receipt reports/external-da-receipt.json`. The receipt must use
+`myelin-external-da-receipt-v1`, must bind to the same payload hash and segment
+root as the manifest, and is hashed into the DA availability commitment. The
+default production gate path omits this receipt and therefore remains explicitly
+local-only DA evidence.
+
 Production operations evidence can be bound into either readiness command with
 `--operator-custody-policy reports/operator-custody-policy.json` and
 `--operator-runbook reports/operator-runbook.json`. The custody document must use
@@ -470,7 +477,11 @@ session id, CellTx commitments, scheduler commitment, and state roots; their
 finality evidence remains consensus-domain separated. The DA manifest step emits and verifies a Merkle
 `SegmentProof` for the exact Molecule transaction bytes needed by court replay,
 while deliberately keeping `l1_da_published = false`. With `--storage-dir`, it
-uses `SegmentWriter` / `SegmentReader` to prove sealed local DA storage. The DA anchor-package step converts that
+uses `SegmentWriter` / `SegmentReader` to prove sealed local DA storage. With an
+external DA receipt, it also schema-checks and commitment-binds provider receipt
+evidence for the same payload hash and segment root, which can make DA
+availability `testnet_beta_ready` without claiming production DA or L1
+publication. The DA anchor-package step converts that
 verified manifest into a deterministic CKB-compatible anchor CellTx package and
 verifies the embedded Molecule transaction, CellTx ids, and projection. It
 still keeps `l1_da_publication_implemented = false`; the

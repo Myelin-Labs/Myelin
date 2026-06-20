@@ -305,6 +305,13 @@ accepts `--operator-custody-policy reports/operator-custody-policy.json` and
 checked and hashed into `operational_policy`; without them the report keeps
 `operational_policy.production_ready = false`.
 
+For external DA evidence, `session da-manifest` also accepts
+`--external-da-receipt reports/external-da-receipt.json`. The receipt must use
+`myelin-external-da-receipt-v1` and bind to the manifest payload hash and segment
+root. With sealed local DA storage and a matching receipt, the DA availability
+evidence can be `testnet_beta_ready`; it still keeps `production_ready = false`
+and does not set `l1_da_published`.
+
 The Teeworlds command consumes the CKB mock transaction produced by xxuejie's
 `teeworlds-cli utils build-test-tx`, splits the tape witness into bounded
 chunks, emits CKB-style projection status for every chunk CellTx, commits those
@@ -319,11 +326,12 @@ transaction hash, CKB-compatible projection, canonical block hash, challenge
 hash, and finality evidence. Both static-closed-committee and Tendermint
 profiles are supported; the state transition is consensus-independent while
 the finality evidence remains domain-separated. `session da-manifest` emits a
-Merkle `SegmentProof` for the exact
-Molecule transaction bytes needed by court replay, and
-`session verify-da-manifest` binds that proof back to the court bundle. With
-`--storage-dir`, the payload is durably written to a sealed local DA segment
-and the proof is rebuilt from `SegmentReader`. `session da-anchor-package` converts that
+Merkle `SegmentProof` for the exact Molecule transaction bytes needed by court
+replay, and `session verify-da-manifest` binds that proof back to the court
+bundle. With `--storage-dir`, the payload is durably written to a sealed local
+DA segment and the proof is rebuilt from `SegmentReader`; with
+`--external-da-receipt`, a provider-neutral receipt is schema-checked and
+hash-bound into the DA availability commitment. `session da-anchor-package` converts that
 verified manifest into a deterministic CKB-compatible DA anchor CellTx package,
 and `session verify-da-anchor-package` recomputes the manifest hash, embedded
 Molecule transaction, CellTx ids, and projection. `session submit-da-anchor-package`

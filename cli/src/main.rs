@@ -422,6 +422,9 @@ struct SessionDaManifestArgs {
     /// SegmentReader.
     #[arg(long)]
     storage_dir: Option<PathBuf>,
+    /// Optional JSON receipt from an external DA provider.
+    #[arg(long)]
+    external_da_receipt: Option<PathBuf>,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -896,7 +899,7 @@ fn run() -> Result<()> {
                 write_json(args.out, &report)
             }
             SessionCommand::DaManifest(args) => {
-                let report = session_da_manifest(args.bundle, args.storage_dir)?;
+                let report = session_da_manifest(args.bundle, args.storage_dir, args.external_da_receipt)?;
                 write_json(args.out, &report)
             }
             SessionCommand::VerifyDaManifest(args) => {
@@ -2619,6 +2622,89 @@ fn carrier_payload_data_hash_hex(payload_hex: &str) -> Result<String> {
     Ok(format!("0x{}", hex::encode(ckb_cell_data_hash(&payload))))
 }
 
+fn external_da_receipt_evidence(
+    receipt_path: Option<PathBuf>,
+    payload_hash: &str,
+    segment_root: &str,
+) -> Result<Option<SessionExternalDaReceiptEvidence>> {
+    let Some(receipt_path) = receipt_path else {
+        return Ok(None);
+    };
+    let receipt_bytes = fs::read(&receipt_path)?;
+    if receipt_bytes.is_empty() {
+        return Err(CliError::InvalidFixture(format!("external DA receipt is empty: {}", receipt_path.display())));
+    }
+    let receipt_json: Value = serde_json::from_slice(&receipt_bytes)?;
+    let receipt = receipt_json
+        .as_object()
+        .ok_or_else(|| CliError::InvalidFixture(format!("external DA receipt must be a JSON object: {}", receipt_path.display())))?;
+    let schema = receipt
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture(format!("external DA receipt is missing schema: {}", receipt_path.display())))?;
+    if schema != "myelin-external-da-receipt-v1" {
+        return Err(CliError::InvalidFixture(format!(
+            "external DA receipt has unsupported schema {schema}; expected myelin-external-da-receipt-v1"
+        )));
+    }
+    let string_field = |field: &str| -> Result<String> {
+        let value = receipt
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::InvalidFixture(format!("external DA receipt is missing string field {field}")))?;
+        if value.trim().is_empty() {
+            return Err(CliError::InvalidFixture(format!("external DA receipt field {field} must be non-empty")));
+        }
+        Ok(value.to_owned())
+    };
+    let provider = string_field("provider")?;
+    let namespace = string_field("namespace")?;
+    let receipt_payload_hash = string_field("payload_hash")?;
+    let receipt_segment_root = string_field("segment_root")?;
+    let receipt_id = string_field("receipt_id")?;
+    let availability_window = string_field("availability_window")?;
+    if receipt_payload_hash != payload_hash {
+        return Err(CliError::InvalidFixture(format!(
+            "external DA receipt payload_hash mismatch: expected {payload_hash}, got {receipt_payload_hash}"
+        )));
+    }
+    if receipt_segment_root != segment_root {
+        return Err(CliError::InvalidFixture(format!(
+            "external DA receipt segment_root mismatch: expected {segment_root}, got {receipt_segment_root}"
+        )));
+    }
+    if parse_hex_32(&receipt_payload_hash).is_none() {
+        return Err(CliError::InvalidFixture("external DA receipt payload_hash must be 32-byte hex".to_owned()));
+    }
+    if parse_hex_32(&receipt_segment_root).is_none() {
+        return Err(CliError::InvalidFixture("external DA receipt segment_root must be 32-byte hex".to_owned()));
+    }
+    let receipt_hash = hex::encode(blake3_32(b"myelin:external-da-receipt-document:v1", &receipt_bytes));
+    let receipt_commitment = hex::encode(blake3_chunks(
+        b"myelin:external-da-receipt-commitment:v1",
+        &[
+            provider.as_bytes(),
+            namespace.as_bytes(),
+            receipt_payload_hash.as_bytes(),
+            receipt_segment_root.as_bytes(),
+            receipt_id.as_bytes(),
+            availability_window.as_bytes(),
+            receipt_hash.as_bytes(),
+        ],
+    ));
+    Ok(Some(SessionExternalDaReceiptEvidence {
+        schema: schema.to_owned(),
+        provider,
+        namespace,
+        payload_hash: receipt_payload_hash,
+        segment_root: receipt_segment_root,
+        receipt_id,
+        availability_window,
+        receipt_hash,
+        receipt_commitment,
+    }))
+}
+
 fn da_availability_evidence(
     session_id: &str,
     court_bundle_hash: &str,
@@ -2626,6 +2712,7 @@ fn da_availability_evidence(
     segment_root: &str,
     proof_molecule_hex: &str,
     local_da_published: bool,
+    external_receipt: Option<SessionExternalDaReceiptEvidence>,
 ) -> Result<SessionDaAvailabilityEvidence> {
     let session_id_bytes = parse_hex_32(session_id)
         .ok_or_else(|| CliError::InvalidFixture("DA availability session_id must be 32-byte hex".to_owned()))?;
@@ -2695,9 +2782,22 @@ fn da_availability_evidence(
     for attestation in &attestation_hashes {
         hasher.update(attestation.as_bytes());
     }
+    let external_receipt_checked = external_receipt.is_some();
+    if let Some(receipt) = external_receipt.as_ref() {
+        hasher.update(receipt.schema.as_bytes());
+        hasher.update(receipt.provider.as_bytes());
+        hasher.update(receipt.namespace.as_bytes());
+        hasher.update(receipt.payload_hash.as_bytes());
+        hasher.update(receipt.segment_root.as_bytes());
+        hasher.update(receipt.receipt_id.as_bytes());
+        hasher.update(receipt.availability_window.as_bytes());
+        hasher.update(receipt.receipt_hash.as_bytes());
+        hasher.update(receipt.receipt_commitment.as_bytes());
+    }
     let availability_commitment = *hasher.finalize().as_bytes();
     let attestation_count = u32::try_from(attestation_signatures.len()).expect("static DA committee fits into u32");
     let retrieval_probe_count = if local_da_published { 2 } else { 1 };
+    let testnet_beta_ready = local_da_published && external_receipt_checked;
     Ok(SessionDaAvailabilityEvidence {
         schema: "myelin-da-availability-v1".to_owned(),
         mode: "replicated-da-committee".to_owned(),
@@ -2709,16 +2809,19 @@ fn da_availability_evidence(
         payload_hash: molecule_transaction_hash.to_owned(),
         segment_root: segment_root.to_owned(),
         proof_molecule_hash: hex::encode(proof_molecule_hash_bytes),
+        external_receipt_count: u32::from(external_receipt_checked),
+        external_receipt_checked,
+        external_receipt,
         attester_pubkey_hashes,
         attestation_signatures,
         attestation_hashes,
         availability_commitment_algorithm:
-            "blake3(myelin:session-da-availability-commitment:v1,session_id,court_bundle_hash,payload_hash,segment_root,proof_molecule_hash,committee_id,attester_pubkey_hashes,attestation_signatures,attestation_hashes)"
+            "blake3(myelin:session-da-availability-commitment:v1,session_id,court_bundle_hash,payload_hash,segment_root,proof_molecule_hash,committee_id,attester_pubkey_hashes,attestation_signatures,attestation_hashes,external_receipt)"
                 .to_owned(),
         availability_commitment: hex::encode(availability_commitment),
         attestation_signature_verified: attestation_signature_verified && attestation_count >= required_attestations,
         availability_checked: true,
-        testnet_beta_ready: false,
+        testnet_beta_ready,
         production_ready: false,
     })
 }
@@ -3517,6 +3620,9 @@ struct SessionDaAvailabilityEvidence {
     payload_hash: String,
     segment_root: String,
     proof_molecule_hash: String,
+    external_receipt_count: u32,
+    external_receipt_checked: bool,
+    external_receipt: Option<SessionExternalDaReceiptEvidence>,
     attester_pubkey_hashes: Vec<String>,
     attestation_signatures: Vec<String>,
     attestation_hashes: Vec<String>,
@@ -3526,6 +3632,19 @@ struct SessionDaAvailabilityEvidence {
     availability_checked: bool,
     testnet_beta_ready: bool,
     production_ready: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct SessionExternalDaReceiptEvidence {
+    schema: String,
+    provider: String,
+    namespace: String,
+    payload_hash: String,
+    segment_root: String,
+    receipt_id: String,
+    availability_window: String,
+    receipt_hash: String,
+    receipt_commitment: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -4562,7 +4681,11 @@ fn verify_session_court_bundle(path: PathBuf) -> Result<SessionCourtBundleVerifi
     Ok(SessionCourtBundleVerificationReport { bundle: path.display().to_string(), valid, checks })
 }
 
-fn session_da_manifest(bundle_path: PathBuf, storage_dir: Option<PathBuf>) -> Result<SessionDaManifestReport> {
+fn session_da_manifest(
+    bundle_path: PathBuf,
+    storage_dir: Option<PathBuf>,
+    external_da_receipt_path: Option<PathBuf>,
+) -> Result<SessionDaManifestReport> {
     let bundle_bytes = fs::read(&bundle_path)?;
     let bundle = serde_json::from_slice::<SessionCourtBundleInput>(&bundle_bytes)?;
     let verification = verify_session_court_bundle(bundle_path)?;
@@ -4617,6 +4740,8 @@ fn session_da_manifest(bundle_path: PathBuf, storage_dir: Option<PathBuf>) -> Re
     let proof_molecule_hex = hex::encode(proof.to_molecule_bytes());
     let court_bundle_hash = blake3_32(b"myelin:session-court-bundle-json:v1", &bundle_bytes);
     let segment_root = hex::encode(proof.segment_root);
+    let external_da_receipt =
+        external_da_receipt_evidence(external_da_receipt_path, &bundle.molecule_transaction_hash, &segment_root)?;
     let availability = da_availability_evidence(
         &bundle.session_id,
         &hex::encode(court_bundle_hash),
@@ -4624,6 +4749,7 @@ fn session_da_manifest(bundle_path: PathBuf, storage_dir: Option<PathBuf>) -> Re
         &segment_root,
         &proof_molecule_hex,
         local_da_published,
+        external_da_receipt,
     )?;
 
     Ok(SessionDaManifestReport {
@@ -4832,6 +4958,7 @@ fn verify_session_da_manifest(
         &manifest.segment_root,
         &manifest.proof_molecule_hex,
         manifest.local_da_published,
+        manifest.availability.external_receipt.clone(),
     )?;
     push_check(
         &mut checks,
@@ -4864,14 +4991,15 @@ fn verify_session_da_manifest(
             && manifest.availability.attestation_signature_verified
             && manifest.availability.attestation_signatures.len() == manifest.availability.attester_pubkey_hashes.len()
             && manifest.availability.attestation_count >= manifest.availability.required_attestations
-            && !manifest.availability.testnet_beta_ready
+            && manifest.availability.testnet_beta_ready
+                == (manifest.local_da_published && manifest.availability.external_receipt_checked)
             && !manifest.availability.production_ready,
         Some(
-            "availability_checked && attestation_signature_verified && signatures match attesters && attestation_count >= required_attestations && !testnet_beta_ready && !production_ready"
+            "availability_checked && attestation_signature_verified && signatures match attesters && attestation_count >= required_attestations && testnet_beta_ready == local_da_published && external_receipt_checked && !production_ready"
                 .to_owned(),
         ),
         Some(format!(
-            "{} && {} && {} == {} && {} >= {} && !{} && !{}",
+            "{} && {} && {} == {} && {} >= {} && {} == ({} && {}) && !{}",
             manifest.availability.availability_checked,
             manifest.availability.attestation_signature_verified,
             manifest.availability.attestation_signatures.len(),
@@ -4879,9 +5007,11 @@ fn verify_session_da_manifest(
             manifest.availability.attestation_count,
             manifest.availability.required_attestations,
             manifest.availability.testnet_beta_ready,
+            manifest.local_da_published,
+            manifest.availability.external_receipt_checked,
             manifest.availability.production_ready
         )),
-        "DA manifest carries locally verified committee signatures without claiming external DA readiness",
+        "DA manifest carries locally verified committee signatures and optional external DA receipt evidence without claiming production DA readiness",
     );
     push_check(
         &mut checks,
@@ -10063,6 +10193,21 @@ mod tests {
         )
     }
 
+    fn write_external_da_receipt(payload_hash: &str, segment_root: &str) -> PathBuf {
+        write_temp_json(
+            "external-da-receipt",
+            &serde_json::json!({
+                "schema": "myelin-external-da-receipt-v1",
+                "provider": "fixture-external-da",
+                "namespace": "session-court-payloads",
+                "payload_hash": payload_hash,
+                "segment_root": segment_root,
+                "receipt_id": format!("receipt-{payload_hash}-{segment_root}"),
+                "availability_window": "testnet-beta-retention-7d"
+            }),
+        )
+    }
+
     fn da_anchor_package_from_carrier_payload(payload: &str) -> Value {
         let payload_bytes = decode_hex_bytes(payload).expect("carrier payload bytes");
         assert_eq!(payload_bytes.len(), 160);
@@ -10752,7 +10897,7 @@ mod tests {
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
 
-        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         assert_eq!(manifest.schema, "myelin-session-da-manifest-v1");
         assert_eq!(manifest.da_profile, "single-segment-merkle-v1");
         assert_eq!(manifest.payload_kind, "session-court-molecule-transaction");
@@ -10809,7 +10954,7 @@ mod tests {
         let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&storage_dir);
 
-        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone())).expect("durable DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), None).expect("durable DA manifest");
         assert!(manifest.local_da_published);
         assert!(manifest.segment_sealed);
         let storage_display = storage_dir.display().to_string();
@@ -10833,6 +10978,60 @@ mod tests {
     }
 
     #[test]
+    fn session_da_manifest_binds_external_da_receipt_evidence() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-external-{}.json", std::process::id()));
+        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-external-{}.json", std::process::id()));
+        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-external-{}.json", std::process::id()));
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let in_memory_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("in-memory DA manifest");
+        let receipt_path = write_external_da_receipt(&in_memory_manifest.molecule_transaction_hash, &in_memory_manifest.segment_root);
+        let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-external-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&storage_dir);
+
+        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), Some(receipt_path.clone()))
+            .expect("external DA receipt manifest");
+        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-manifest-external-{}.json", std::process::id()));
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let verification = verify_session_da_manifest(manifest_path.clone(), bundle_path.clone(), Some(storage_dir.clone()))
+            .expect("verify external DA manifest");
+        let mut tampered = manifest.clone();
+        tampered.availability.external_receipt.as_mut().expect("external receipt").receipt_id = "tampered-receipt".to_owned();
+        let tampered_path =
+            std::env::temp_dir().join(format!("myelin-session-da-manifest-external-tamper-{}.json", std::process::id()));
+        std::fs::write(&tampered_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        let tampered_verification = verify_session_da_manifest(tampered_path.clone(), bundle_path.clone(), Some(storage_dir.clone()))
+            .expect("verify tampered external DA manifest");
+        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_file(tampered_path);
+        let _ = std::fs::remove_file(receipt_path);
+        let _ = std::fs::remove_file(bundle_path);
+        let _ = std::fs::remove_dir_all(storage_dir);
+
+        assert!(manifest.local_da_published);
+        assert_eq!(manifest.availability.external_receipt_count, 1);
+        assert!(manifest.availability.external_receipt_checked);
+        assert!(manifest.availability.external_receipt.as_ref().is_some_and(|receipt| {
+            receipt.payload_hash == manifest.molecule_transaction_hash
+                && receipt.segment_root == manifest.segment_root
+                && receipt.receipt_hash.len() == 64
+                && receipt.receipt_commitment.len() == 64
+        }));
+        assert!(manifest.availability.testnet_beta_ready);
+        assert!(!manifest.availability.production_ready);
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(!tampered_verification.valid);
+        assert!(tampered_verification.checks.iter().any(|check| check.name == "da-availability-commitment" && !check.ok));
+    }
+
+    #[test]
     fn session_da_manifest_rejects_tampered_segment_root() {
         let open = session_open_fixture("static-closed-committee").expect("open session");
         let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-tamper-{}.json", std::process::id()));
@@ -10846,7 +11045,7 @@ mod tests {
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-tamper-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
 
-        let mut manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let mut manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         manifest.segment_root = "11".repeat(32);
 
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-manifest-tamper-{}.json", std::process::id()));
@@ -10876,7 +11075,7 @@ mod tests {
             std::env::temp_dir().join(format!("myelin-session-court-da-availability-tamper-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
 
-        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let cases: [DaManifestTamperCase; 9] = [
             ("availability-commitment", |manifest| manifest.availability.availability_commitment = "22".repeat(32)),
             ("availability-payload-hash", |manifest| manifest.availability.payload_hash = "23".repeat(32)),
@@ -10918,7 +11117,7 @@ mod tests {
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
         let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-anchor-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&storage_dir);
-        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone())).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), None).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-anchor-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
@@ -10976,7 +11175,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-submit-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-submit-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
@@ -11025,7 +11224,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-rpc-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-rpc-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
@@ -11070,7 +11269,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-stale-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-stale-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
@@ -11101,7 +11300,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-rpc-mismatch-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-rpc-mismatch-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
@@ -11134,7 +11333,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-anchor-tamper-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-anchor-tamper-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
@@ -11166,7 +11365,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
 
@@ -11236,7 +11435,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-economics-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-economics-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
 
@@ -11289,7 +11488,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-package-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-package-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -11425,7 +11624,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-submit-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-submit-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -11480,7 +11679,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-rpc-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-rpc-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -11531,7 +11730,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-rpc-mismatch-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-rpc-mismatch-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -14099,7 +14298,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-package-tamper-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-package-tamper-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -14142,7 +14341,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-authority-lineage-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-authority-lineage-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -14185,7 +14384,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-authority-auth-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-authority-auth-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -14264,7 +14463,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-premature-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-premature-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
 

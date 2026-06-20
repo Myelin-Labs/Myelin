@@ -307,6 +307,9 @@ da_availability_signature_verified="$(jq -r '.availability.attestation_signature
 da_availability_payload_hash="$(jq -r '.availability.payload_hash' "$WORKDIR/myelin/session-da.json")"
 da_availability_segment_root="$(jq -r '.availability.segment_root' "$WORKDIR/myelin/session-da.json")"
 da_availability_commitment="$(jq -r '.availability.availability_commitment' "$WORKDIR/myelin/session-da.json")"
+da_availability_external_receipt_count="$(jq -r '.availability.external_receipt_count' "$WORKDIR/myelin/session-da.json")"
+da_availability_external_receipt_checked="$(jq -r '.availability.external_receipt_checked' "$WORKDIR/myelin/session-da.json")"
+da_availability_external_receipt="$(jq -r '.availability.external_receipt' "$WORKDIR/myelin/session-da.json")"
 da_manifest_molecule_hash="$(jq -r '.molecule_transaction_hash' "$WORKDIR/myelin/session-da.json")"
 da_manifest_segment_root="$(jq -r '.segment_root' "$WORKDIR/myelin/session-da.json")"
 if [[ "$da_availability_schema" != "myelin-da-availability-v1" || "$da_availability_mode" != "replicated-da-committee" ]]; then
@@ -331,6 +334,10 @@ if [[ "$da_availability_checked" != "true" || "$da_availability_testnet_ready" !
 fi
 if [[ "$da_availability_payload_hash" != "$da_manifest_molecule_hash" || "$da_availability_segment_root" != "$da_manifest_segment_root" ]]; then
   echo "DA availability evidence must bind the manifest payload hash and segment root" >&2
+  exit 1
+fi
+if [[ "$da_availability_external_receipt_count" != "0" || "$da_availability_external_receipt_checked" != "false" || "$da_availability_external_receipt" != "null" ]]; then
+  echo "default devnet DA availability evidence must explicitly remain local-only without an external receipt" >&2
   exit 1
 fi
 if [[ "$da_availability_commitment" == "null" || ${#da_availability_commitment} -ne 64 ]]; then
