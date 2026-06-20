@@ -550,6 +550,9 @@ struct SessionSettlementPackageArgs {
     /// JSON manifest emitted by `session da-manifest`.
     #[arg(long)]
     da_manifest: PathBuf,
+    /// Optional participant authority signature evidence JSON for production authority authentication.
+    #[arg(long)]
+    authority_signature_evidence: Option<PathBuf>,
     /// Optional threshold-lock deployment evidence JSON for production authority authentication.
     #[arg(long)]
     threshold_lock_deployment_evidence: Option<PathBuf>,
@@ -950,6 +953,7 @@ fn run() -> Result<()> {
                     args.intent,
                     args.bundle,
                     args.da_manifest,
+                    args.authority_signature_evidence,
                     args.threshold_lock_deployment_evidence,
                 )?;
                 write_json(args.out, &report)
@@ -3059,6 +3063,7 @@ fn settlement_authority_requirement_with_deployment(
     participant_set_hash: [u8; 32],
     escrow_input_cells_hash: [u8; 32],
     session_lineage_commitment: [u8; 32],
+    authority_signature_evidence: Option<SessionAuthoritySignatureEvidence>,
     threshold_lock_deployment: Option<SessionThresholdLockDeploymentEvidence>,
 ) -> Result<SessionSettlementAuthorityRequirement> {
     let mut authority = settlement_authority_requirement_base(
@@ -3068,7 +3073,31 @@ fn settlement_authority_requirement_with_deployment(
         escrow_input_cells_hash,
         session_lineage_commitment,
     );
+    if let Some(signature_evidence) = authority_signature_evidence {
+        let signature_evidence = normalize_authority_signature_evidence(signature_evidence, &authority.authority_authentication)?;
+        authority.authority_authentication.threshold = signature_evidence.threshold;
+        authority.authority_authentication.signer_count = signature_evidence.signer_count;
+        authority.authority_authentication.signer_pubkey_hashes = signature_evidence.signer_pubkey_hashes.clone();
+        authority.authority_authentication.signatures = signature_evidence.signatures.clone();
+        authority.authority_authentication.attestation_hashes = signature_evidence.attestation_hashes.clone();
+        authority.authority_authentication.signature_verified = signature_evidence.signature_verified;
+        let ckb_lock_args_bytes = settlement_authority_threshold_lock_args(
+            authority.authority_authentication.threshold,
+            &authority.authority_authentication.signer_pubkey_hashes,
+        );
+        authority.authority_authentication.ckb_lock_args = format!("0x{}", hex::encode(&ckb_lock_args_bytes));
+        authority.authority_authentication.ckb_lock_args_hash =
+            hex::encode(blake3_32(b"myelin:session-settlement-authority-threshold-lock-args:v1", &ckb_lock_args_bytes));
+        authority.authority_authentication.participant_signature_evidence = Some(signature_evidence);
+        authority.authority_authentication.attestation_hash =
+            authority_authentication_attestation_hash(&authority.authority_authentication)?;
+    }
     if let Some(deployment) = threshold_lock_deployment {
+        if deployment.production_ready && authority.authority_authentication.participant_signature_evidence.is_none() {
+            return Err(CliError::InvalidFixture(
+                "threshold-lock production deployment requires participant authority signature evidence".to_owned(),
+            ));
+        }
         let deployment = normalize_threshold_lock_deployment_evidence(deployment, &authority.authority_authentication)?;
         authority.authority_authentication.ckb_enforceable = deployment.ckb_enforceable_checked;
         authority.authority_authentication.testnet_beta_ready = deployment.testnet_beta_ready;
@@ -3186,6 +3215,7 @@ fn settlement_authority_authentication(
         ckb_lock_args: format!("0x{}", hex::encode(&ckb_lock_args_bytes)),
         ckb_lock_args_hash: hex::encode(ckb_lock_args_hash),
         ckb_lock_policy: "final DA publication and settlement authority cells must use these threshold-lock args".to_owned(),
+        participant_signature_evidence: None,
         threshold_lock_deployment: None,
         ckb_enforceable: false,
         testnet_beta_ready: false,
@@ -3223,6 +3253,12 @@ fn authority_authentication_attestation_hash(evidence: &SessionAuthorityAuthenti
             .ok_or_else(|| CliError::InvalidFixture("threshold-lock deployment evidence_commitment must be 32-byte hex".to_owned()))?;
         hasher.update(b"myelin:session-settlement-authority-threshold-lock-deployment:v1");
         hasher.update(&deployment_commitment);
+    }
+    if let Some(signature_evidence) = &evidence.participant_signature_evidence {
+        let signature_commitment = parse_hex_32(&signature_evidence.evidence_commitment)
+            .ok_or_else(|| CliError::InvalidFixture("authority signature evidence_commitment must be 32-byte hex".to_owned()))?;
+        hasher.update(b"myelin:session-settlement-authority-participant-signatures:v1");
+        hasher.update(&signature_commitment);
     }
     Ok(hex::encode(*hasher.finalize().as_bytes()))
 }
@@ -3310,11 +3346,151 @@ fn normalize_threshold_lock_deployment_evidence(
     if deployment.network == "ckb-testnet" && deployment.production_ready {
         return Err(CliError::InvalidFixture("threshold-lock deployment testnet evidence cannot claim production_ready".to_owned()));
     }
+    let provided_commitment =
+        if deployment.evidence_commitment.trim().is_empty() {
+            None
+        } else {
+            Some(parse_hex_32(&deployment.evidence_commitment).ok_or_else(|| {
+                CliError::InvalidFixture("threshold-lock deployment evidence_commitment must be 32-byte hex".to_owned())
+            })?)
+        };
     let commitment = threshold_lock_deployment_commitment(&deployment)?;
+    if provided_commitment.is_some_and(|provided| provided != commitment) {
+        return Err(CliError::InvalidFixture(
+            "threshold-lock deployment evidence_commitment does not match normalized fields".to_owned(),
+        ));
+    }
     deployment.evidence_commitment_algorithm =
         "blake3(myelin:session-threshold-lock-deployment-evidence:v1,normalized-fields)".to_owned();
     deployment.evidence_commitment = hex::encode(commitment);
     Ok(deployment)
+}
+
+fn normalize_authority_signature_evidence(
+    mut evidence: SessionAuthoritySignatureEvidence,
+    authority: &SessionAuthorityAuthenticationEvidence,
+) -> Result<SessionAuthoritySignatureEvidence> {
+    if evidence.schema != "myelin-session-authority-signature-evidence-v1" {
+        return Err(CliError::InvalidFixture("authority signature evidence schema is not recognised".to_owned()));
+    }
+    if evidence.signature_scheme != authority.signature_scheme {
+        return Err(CliError::InvalidFixture(
+            "authority signature evidence signature_scheme does not match authority authentication".to_owned(),
+        ));
+    }
+    if evidence.participant_set_hash != authority.participant_set_hash {
+        return Err(CliError::InvalidFixture(
+            "authority signature evidence participant_set_hash does not match authority authentication".to_owned(),
+        ));
+    }
+    if evidence.message_hash != authority.message_hash {
+        return Err(CliError::InvalidFixture(
+            "authority signature evidence message_hash does not match authority authentication".to_owned(),
+        ));
+    }
+    if evidence.threshold == 0 {
+        return Err(CliError::InvalidFixture("authority signature evidence threshold must be non-zero".to_owned()));
+    }
+    if evidence.threshold != authority.threshold {
+        return Err(CliError::InvalidFixture(
+            "authority signature evidence threshold does not match authority authentication threshold".to_owned(),
+        ));
+    }
+    if evidence.signer_pubkey_hashes.len() != evidence.signatures.len() {
+        return Err(CliError::InvalidFixture(
+            "authority signature evidence signer_pubkey_hashes and signatures length mismatch".to_owned(),
+        ));
+    }
+    if evidence.signer_pubkey_hashes.len() < usize::try_from(evidence.threshold).unwrap_or(usize::MAX) {
+        return Err(CliError::InvalidFixture(
+            "authority signature evidence signer set must contain at least threshold signers".to_owned(),
+        ));
+    }
+    let signer_count = u32::try_from(evidence.signatures.len())
+        .map_err(|_| CliError::InvalidFixture("authority signature evidence signer count overflows u32".to_owned()))?;
+    let message_hash = parse_hex_32(&evidence.message_hash)
+        .ok_or_else(|| CliError::InvalidFixture("authority signature evidence message_hash must be 32-byte hex".to_owned()))?;
+    let participant_set_hash = parse_hex_32(&evidence.participant_set_hash)
+        .ok_or_else(|| CliError::InvalidFixture("authority signature evidence participant_set_hash must be 32-byte hex".to_owned()))?;
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut attestation_hashes = Vec::with_capacity(evidence.signatures.len());
+    for (pubkey_hash, signature) in evidence.signer_pubkey_hashes.iter().zip(evidence.signatures.iter()) {
+        if pubkey_hash.len() != 40 || hex::decode(pubkey_hash).is_err() {
+            return Err(CliError::InvalidFixture(
+                "authority signature evidence signer_pubkey_hashes must be 20-byte hex values".to_owned(),
+            ));
+        }
+        if !seen.insert(pubkey_hash.clone()) {
+            return Err(CliError::InvalidFixture(
+                "authority signature evidence signer_pubkey_hashes must not contain duplicates".to_owned(),
+            ));
+        }
+        let pubkey_hash_bytes: [u8; 20] = hex::decode(pubkey_hash)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| CliError::InvalidFixture("authority signature evidence pubkey hash must be 20 bytes".to_owned()))?;
+        let signature_bytes: [u8; 65] = hex::decode(signature).ok().and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| {
+            CliError::InvalidFixture("authority signature evidence signatures must be 65-byte hex values".to_owned())
+        })?;
+        if !secp256k1_signature_matches_pubkey_hash(&message_hash, &signature_bytes, &pubkey_hash_bytes) {
+            return Err(CliError::InvalidFixture(
+                "authority signature evidence signature does not recover to the declared signer pubkey hash".to_owned(),
+            ));
+        }
+        let attestation = blake3_chunks(
+            b"myelin:session-settlement-authority-cell-signature-attestation:v1",
+            &[&message_hash, &participant_set_hash, &pubkey_hash_bytes, &signature_bytes],
+        );
+        attestation_hashes.push(hex::encode(attestation));
+    }
+    evidence.signer_count = signer_count;
+    evidence.attestation_hashes = attestation_hashes;
+    evidence.signature_verified = signer_count >= evidence.threshold;
+    let provided_commitment = if evidence.evidence_commitment.trim().is_empty() {
+        None
+    } else {
+        Some(
+            parse_hex_32(&evidence.evidence_commitment)
+                .ok_or_else(|| CliError::InvalidFixture("authority signature evidence_commitment must be 32-byte hex".to_owned()))?,
+        )
+    };
+    let commitment = authority_signature_evidence_commitment(&evidence)?;
+    if provided_commitment.is_some_and(|provided| provided != commitment) {
+        return Err(CliError::InvalidFixture("authority signature evidence_commitment does not match normalized fields".to_owned()));
+    }
+    evidence.evidence_commitment_algorithm = "blake3(myelin:session-authority-signature-evidence:v1,normalized-fields)".to_owned();
+    evidence.evidence_commitment = hex::encode(commitment);
+    Ok(evidence)
+}
+
+fn authority_signature_evidence_commitment(evidence: &SessionAuthoritySignatureEvidence) -> Result<[u8; 32]> {
+    if evidence.signer_pubkey_hashes.len() != evidence.signatures.len()
+        || evidence.signer_pubkey_hashes.len() != evidence.attestation_hashes.len()
+    {
+        return Err(CliError::InvalidFixture(
+            "authority signature evidence commitment requires aligned signer, signature, and attestation arrays".to_owned(),
+        ));
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"myelin:session-authority-signature-evidence:v1");
+    hasher.update(evidence.schema.as_bytes());
+    hasher.update(evidence.signature_scheme.as_bytes());
+    hasher.update(evidence.participant_set_hash.as_bytes());
+    hasher.update(&evidence.threshold.to_le_bytes());
+    hasher.update(&evidence.signer_count.to_le_bytes());
+    hasher.update(evidence.message_hash.as_bytes());
+    for pubkey_hash in &evidence.signer_pubkey_hashes {
+        hasher.update(pubkey_hash.as_bytes());
+    }
+    for signature in &evidence.signatures {
+        hasher.update(signature.as_bytes());
+    }
+    for attestation in &evidence.attestation_hashes {
+        hasher.update(attestation.as_bytes());
+    }
+    hasher.update(&[u8::from(evidence.signature_verified)]);
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn threshold_lock_deployment_commitment(deployment: &SessionThresholdLockDeploymentEvidence) -> Result<[u8; 32]> {
@@ -4512,10 +4688,33 @@ struct SessionAuthorityAuthenticationEvidence {
     ckb_lock_args_hash: String,
     ckb_lock_policy: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    participant_signature_evidence: Option<SessionAuthoritySignatureEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     threshold_lock_deployment: Option<SessionThresholdLockDeploymentEvidence>,
     ckb_enforceable: bool,
     testnet_beta_ready: bool,
     production_ready: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct SessionAuthoritySignatureEvidence {
+    schema: String,
+    signature_scheme: String,
+    participant_set_hash: String,
+    threshold: u32,
+    #[serde(default)]
+    signer_count: u32,
+    message_hash: String,
+    signer_pubkey_hashes: Vec<String>,
+    signatures: Vec<String>,
+    #[serde(default)]
+    attestation_hashes: Vec<String>,
+    #[serde(default)]
+    signature_verified: bool,
+    #[serde(default)]
+    evidence_commitment_algorithm: String,
+    #[serde(default)]
+    evidence_commitment: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -6631,13 +6830,14 @@ fn session_settlement_package(
     bundle_path: PathBuf,
     da_manifest_path: PathBuf,
 ) -> Result<SessionSettlementPackageReport> {
-    session_settlement_package_with_deployment(intent_path, bundle_path, da_manifest_path, None)
+    session_settlement_package_with_deployment(intent_path, bundle_path, da_manifest_path, None, None)
 }
 
 fn session_settlement_package_with_deployment(
     intent_path: PathBuf,
     bundle_path: PathBuf,
     da_manifest_path: PathBuf,
+    authority_signature_evidence_path: Option<PathBuf>,
     threshold_lock_deployment_evidence_path: Option<PathBuf>,
 ) -> Result<SessionSettlementPackageReport> {
     let intent_bytes = fs::read(&intent_path)?;
@@ -6680,6 +6880,13 @@ fn session_settlement_package_with_deployment(
         }
         None => None,
     };
+    let authority_signature_evidence = match authority_signature_evidence_path {
+        Some(path) => {
+            let bytes = fs::read(path)?;
+            Some(serde_json::from_slice::<SessionAuthoritySignatureEvidence>(&bytes)?)
+        }
+        None => None,
+    };
 
     Ok(SessionSettlementPackageReport {
         schema: "myelin-session-settlement-package-v1".to_owned(),
@@ -6703,6 +6910,7 @@ fn session_settlement_package_with_deployment(
             participant_set_hash,
             escrow_input_cells_hash,
             session_lineage_commitment,
+            authority_signature_evidence,
             threshold_lock_deployment,
         )?,
         carrier_payload_kind: "myelin-session-settlement-carrier-v1".to_owned(),
@@ -6856,6 +7064,7 @@ fn verify_session_settlement_package(
         expected_participant_set_hash,
         expected_escrow_input_cells_hash,
         expected_session_lineage_commitment,
+        package.settlement_authority.authority_authentication.participant_signature_evidence.clone(),
         package.settlement_authority.authority_authentication.threshold_lock_deployment.clone(),
     )?;
     push_check(
@@ -6973,18 +7182,9 @@ fn verify_session_settlement_package(
     );
     let authority_deployment = package.settlement_authority.authority_authentication.threshold_lock_deployment.as_ref();
     let authority_deployment_valid = match authority_deployment {
-        Some(deployment) => normalize_threshold_lock_deployment_evidence(
-            deployment.clone(),
-            &settlement_authority_requirement(
-                expected_intent_hash_bytes,
-                expected_session_id_bytes,
-                expected_participant_set_hash,
-                expected_escrow_input_cells_hash,
-                expected_session_lineage_commitment,
-            )
-            .authority_authentication,
-        )
-        .is_ok(),
+        Some(deployment) => {
+            normalize_threshold_lock_deployment_evidence(deployment.clone(), &expected_authority.authority_authentication).is_ok()
+        }
         None => {
             !package.settlement_authority.authority_authentication.ckb_enforceable
                 && !package.settlement_authority.authority_authentication.testnet_beta_ready
@@ -7005,6 +7205,34 @@ fn verify_session_settlement_package(
         }),
         "threshold-lock deployment evidence is optional for local signatures, but required and recomputable before claiming CKB enforcement",
     );
+    let authority_signature_evidence = package.settlement_authority.authority_authentication.participant_signature_evidence.as_ref();
+    let authority_signature_evidence_valid = match authority_signature_evidence {
+        Some(evidence) => {
+            let base_authority = settlement_authority_requirement(
+                expected_intent_hash_bytes,
+                expected_session_id_bytes,
+                expected_participant_set_hash,
+                expected_escrow_input_cells_hash,
+                expected_session_lineage_commitment,
+            );
+            normalize_authority_signature_evidence(evidence.clone(), &base_authority.authority_authentication).is_ok()
+        }
+        None => !package.settlement_authority.authority_authentication.production_ready,
+    };
+    push_check(
+        &mut checks,
+        "settlement-authority-participant-signature-evidence",
+        authority_signature_evidence_valid,
+        Some("valid participant signature evidence before authority production readiness is claimed".to_owned()),
+        Some(match authority_signature_evidence {
+            Some(evidence) => format!(
+                "{}:{}:{}",
+                evidence.threshold, evidence.signer_count, evidence.evidence_commitment
+            ),
+            None => "none".to_owned(),
+        }),
+        "participant authority signatures are optional for local fixtures, but mandatory and recomputable before production authority readiness",
+    );
     push_check(
         &mut checks,
         "settlement-authority-authentication-ready",
@@ -7013,6 +7241,7 @@ fn verify_session_settlement_package(
             || (!package.settlement_authority.authority_authentication.ckb_enforceable
                 && package.settlement_authority.authority_authentication.threshold_lock_deployment.is_none()))
             && authority_deployment_valid
+            && authority_signature_evidence_valid
             && package.settlement_authority.authority_authentication.signature_verified
             && package.settlement_authority.authority_authentication.signatures.len()
                 == package.settlement_authority.authority_authentication.signer_pubkey_hashes.len()
@@ -9706,6 +9935,14 @@ fn final_l1_authority_authentication_preflight_ready(submission: &Value) -> bool
     if authority_authentication_attestation_hash(&auth).ok().as_deref() != Some(auth.attestation_hash.as_str()) {
         return false;
     }
+    let signature_evidence_ready = match auth.participant_signature_evidence.clone() {
+        Some(evidence) => normalize_authority_signature_evidence(evidence, &auth)
+            .is_ok_and(|evidence| evidence.signature_verified && evidence.signer_count >= evidence.threshold),
+        None => !auth.production_ready,
+    };
+    if !signature_evidence_ready {
+        return false;
+    }
     match auth.threshold_lock_deployment.clone() {
         Some(deployment) => {
             let Ok(deployment) = normalize_threshold_lock_deployment_evidence(deployment, &auth) else {
@@ -10833,6 +11070,44 @@ mod tests {
             auth,
         )
         .expect("production threshold-lock deployment fixture")
+    }
+
+    fn authority_signature_evidence_fixture(auth: &SessionAuthorityAuthenticationEvidence) -> SessionAuthoritySignatureEvidence {
+        let message_hash = parse_hex_32(&auth.message_hash).expect("authority message hash");
+        let message = Message::from_digest_slice(&message_hash).expect("authority message digest");
+        let secp = Secp256k1::new();
+        let mut signer_pubkey_hashes = Vec::new();
+        let mut signatures = Vec::new();
+        for secret_key_bytes in [[0x11u8; 32], [0x22u8; 32]] {
+            let secret_key = SecretKey::from_slice(&secret_key_bytes).expect("static fixture secret key");
+            let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+            let pubkey_hash = secp256k1_pubkey_hash20(&public_key);
+            let signature = secp.sign_ecdsa_recoverable(&message, &secret_key);
+            let (recovery_id, compact_signature) = signature.serialize_compact();
+            let mut signature_bytes = [0u8; 65];
+            signature_bytes[..64].copy_from_slice(&compact_signature);
+            signature_bytes[64] = recovery_id.to_i32() as u8;
+            signer_pubkey_hashes.push(hex::encode(pubkey_hash));
+            signatures.push(hex::encode(signature_bytes));
+        }
+        normalize_authority_signature_evidence(
+            SessionAuthoritySignatureEvidence {
+                schema: "myelin-session-authority-signature-evidence-v1".to_owned(),
+                signature_scheme: auth.signature_scheme.clone(),
+                participant_set_hash: auth.participant_set_hash.clone(),
+                threshold: auth.threshold,
+                signer_count: 0,
+                message_hash: auth.message_hash.clone(),
+                signer_pubkey_hashes,
+                signatures,
+                attestation_hashes: Vec::new(),
+                signature_verified: false,
+                evidence_commitment_algorithm: String::new(),
+                evidence_commitment: String::new(),
+            },
+            auth,
+        )
+        .expect("authority signature evidence fixture")
     }
 
     fn production_court_economics_deployment_fixture(
@@ -12975,21 +13250,27 @@ mod tests {
     fn session_settlement_package_accepts_bound_threshold_lock_deployment_evidence() {
         let (base_package, _intent, bundle_path, da_manifest_path, intent_path) =
             settlement_package_fixture("threshold-lock-deployment");
+        let signature_evidence = authority_signature_evidence_fixture(&base_package.settlement_authority.authority_authentication);
         let deployment = production_threshold_lock_deployment_fixture(&base_package.settlement_authority.authority_authentication);
+        let signature_evidence_path = write_temp_json("authority-signature-evidence", &signature_evidence);
         let deployment_path = write_temp_json("threshold-lock-deployment-evidence", &deployment);
 
         let package = session_settlement_package_with_deployment(
             intent_path.clone(),
             bundle_path.clone(),
             da_manifest_path.clone(),
+            Some(signature_evidence_path.clone()),
             Some(deployment_path.clone()),
         )
         .expect("settlement package with threshold-lock deployment evidence");
         let auth = &package.settlement_authority.authority_authentication;
+        let bound_signature_evidence = auth.participant_signature_evidence.as_ref().expect("bound participant signature evidence");
         let bound_deployment = auth.threshold_lock_deployment.as_ref().expect("bound deployment evidence");
         assert!(auth.ckb_enforceable);
         assert!(auth.testnet_beta_ready);
         assert!(auth.production_ready);
+        assert_eq!(bound_signature_evidence.evidence_commitment, signature_evidence.evidence_commitment);
+        assert!(bound_signature_evidence.signature_verified);
         assert_eq!(bound_deployment.ckb_lock_args_hash, auth.ckb_lock_args_hash);
         assert_eq!(bound_deployment.signer_pubkey_hashes, auth.signer_pubkey_hashes);
         assert_eq!(bound_deployment.production_ready, auth.production_ready);
@@ -13004,6 +13285,7 @@ mod tests {
         )
         .expect("verify settlement package with threshold-lock deployment");
         let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(signature_evidence_path);
         let _ = std::fs::remove_file(deployment_path);
         let _ = std::fs::remove_file(intent_path);
         let _ = std::fs::remove_file(da_manifest_path);
@@ -13014,7 +13296,35 @@ mod tests {
             .checks
             .iter()
             .any(|check| check.name == "settlement-authority-threshold-lock-deployment-evidence" && check.ok));
+        assert!(verification
+            .checks
+            .iter()
+            .any(|check| check.name == "settlement-authority-participant-signature-evidence" && check.ok));
         assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-authentication-ready" && check.ok));
+    }
+
+    #[test]
+    fn session_settlement_package_rejects_production_threshold_lock_without_participant_signatures() {
+        let (base_package, _intent, bundle_path, da_manifest_path, intent_path) =
+            settlement_package_fixture("threshold-lock-without-signatures");
+        let deployment = production_threshold_lock_deployment_fixture(&base_package.settlement_authority.authority_authentication);
+        let deployment_path = write_temp_json("threshold-lock-without-signatures-deployment", &deployment);
+
+        let err = session_settlement_package_with_deployment(
+            intent_path.clone(),
+            bundle_path.clone(),
+            da_manifest_path.clone(),
+            None,
+            Some(deployment_path.clone()),
+        )
+        .expect_err("production deployment requires participant signature evidence");
+
+        let _ = std::fs::remove_file(deployment_path);
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(err.to_string().contains("threshold-lock production deployment requires participant authority signature evidence"));
     }
 
     #[test]

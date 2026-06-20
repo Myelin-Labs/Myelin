@@ -388,10 +388,12 @@ proving the live lock code-dep plus final DA and authority lock preflight used
 the declared threshold-lock args. It still leaves package-level
 `authority_authentication.ckb_enforceable = false` by default. Production
 authority evidence is now an explicit opt-in on `session settlement-package` via
-`--threshold-lock-deployment-evidence`; the evidence must bind a checked CKB
-deployment, code dep, audited source/report hashes, signer set, threshold, and
-the generated threshold-lock args hash into the authority attestation before
-`ckb_enforceable` / `production_ready` can become true.
+`--authority-signature-evidence` plus `--threshold-lock-deployment-evidence`.
+The signature evidence must recover the declared participant authority pubkey
+hashes against the settlement authority message, and the deployment evidence
+must bind a checked CKB deployment, code dep, audited source/report hashes,
+signer set, threshold, and generated threshold-lock args hash into the authority
+attestation before `ckb_enforceable` / `production_ready` can become true.
 The readiness report carries
 `operational_policy`, a public-chain operations commitment covering reorg
 confirmation depth, stability requery, fee floor/rate/max-fee policy, retry
@@ -438,13 +440,13 @@ same-type inputs, duplicate same-type group outputs, and any second output in
 the transaction using the same deployed final-settlement code hash/hash type.
 That gives transaction-local singleton creation; cross-transaction replay is
 blocked by consuming the one-use authority Cell. The package now emits and
-verifies local threshold signatures plus deterministic threshold-lock args for
-authority-cell creation; final-script submission rejects a mismatched declared
-authority lock identity before broadcast and exposes a live threshold-lock
-deployment preflight marker when the lock code dep plus final DA and authority
-cells all match the declared threshold-lock args, while canonical deployed CKB
-threshold-lock cryptographic enforcement, production key custody, and deployment
-policy remain outside this milestone.
+verifies fixture-local threshold signatures plus deterministic threshold-lock
+args for authority-cell creation, and can bind explicit participant authority
+signature evidence for production deployments. Final-script submission rejects a
+mismatched declared authority lock identity before broadcast and exposes a live
+threshold-lock deployment preflight marker when the lock code dep plus final DA
+and authority cells all match the declared threshold-lock args, while production
+key custody and deployed court economics remain outside this milestone.
 `session verify-settlement-package` recomputes the embedded Molecule
 transaction, CKB projection, and settlement-authority requirement.
 `session submit-settlement-package` builds the CKB
@@ -543,9 +545,10 @@ deployed compact-payload script semantics for the local devnet carrier and
 final-script paths, plus locally verified DA committee signatures,
 authority-authentication signatures, and threshold-lock args binding. It still
 does not claim production DA availability unless a signed production SLA receipt
-is supplied, and it still does not claim deployed threshold-lock cryptographic
-authority enforcement, production key management, or deployed CKB court-dispute
-economics.
+is supplied, and it does not claim production authority readiness unless
+participant authority signature evidence and threshold-lock deployment evidence
+are both supplied. Production key management and deployed CKB court-dispute
+economics remain separate requirements.
 `teeworlds court-bundle` materialises one disputed chunk as a self-contained
 court-input bundle: chunk payload bytes, CKB Molecule transaction bytes,
 CKB-style projection evidence, deterministic challenge hashes, and

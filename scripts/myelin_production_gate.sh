@@ -1330,6 +1330,7 @@ for package, verify, settlement, court, da, kind in ((package_static, package_ve
     require(bytes.fromhex(auth["ckb_lock_args"][2:]).startswith(b"myelin-auth-v1"), f"{kind} authority authentication lock args domain")
     require(len(auth["ckb_lock_args_hash"]) == 64, f"{kind} authority authentication lock args hash")
     require(len(bytes.fromhex(auth["ckb_lock_args_hash"])) == 32, f"{kind} authority authentication lock args hash hex")
+    require("participant_signature_evidence" not in auth, f"{kind} default authority authentication has no participant signature evidence")
     require("threshold_lock_deployment" not in auth, f"{kind} default authority authentication has no deployment evidence")
     require(auth["ckb_enforceable"] is False, f"{kind} authority authentication is not yet CKB-enforceable")
     require(auth["testnet_beta_ready"] is False, f"{kind} authority authentication is commitment-only, not testnet-beta ready")
