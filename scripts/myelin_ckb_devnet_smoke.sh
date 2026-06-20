@@ -306,9 +306,13 @@ settlement_authority_lock_binding="$(jq -r '.settlement_authority.required_lock_
 settlement_authority_authentication="$(jq -c '.settlement_authority.authority_authentication' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_schema="$(jq -r '.settlement_authority.authority_authentication.schema' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_mode="$(jq -r '.settlement_authority.authority_authentication.mode' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_authentication_signature_scheme="$(jq -r '.settlement_authority.authority_authentication.signature_scheme' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_participant_set_hash="$(jq -r '.settlement_authority.authority_authentication.participant_set_hash' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_threshold="$(jq -r '.settlement_authority.authority_authentication.threshold' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_signer_count="$(jq -r '.settlement_authority.authority_authentication.signer_count' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_authentication_pubkey_hash_count="$(jq -r '.settlement_authority.authority_authentication.signer_pubkey_hashes | length' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_authentication_signature_count="$(jq -r '.settlement_authority.authority_authentication.signatures | length' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_authentication_signature_verified="$(jq -r '.settlement_authority.authority_authentication.signature_verified' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_hash="$(jq -r '.settlement_authority.authority_authentication.attestation_hash' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_enforceable="$(jq -r '.settlement_authority.authority_authentication.ckb_enforceable' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_testnet_ready="$(jq -r '.settlement_authority.authority_authentication.testnet_beta_ready' "$WORKDIR/myelin/session-settlement-package.json")"
@@ -357,12 +361,24 @@ if [[ "$settlement_authority_authentication_schema" != "myelin-session-settlemen
   echo "settlement authority must expose CKB threshold-lock authentication evidence" >&2
   exit 1
 fi
+if [[ "$settlement_authority_authentication_signature_scheme" != "secp256k1-recoverable-blake3-pubkey-hash20" ]]; then
+  echo "settlement authority authentication must expose the secp256k1 recoverable signature scheme" >&2
+  exit 1
+fi
 if [[ "$settlement_authority_authentication_participant_set_hash" != "$settlement_authority_participant_set_hash" ]]; then
   echo "settlement authority authentication must bind the authority participant-set digest" >&2
   exit 1
 fi
 if (( settlement_authority_authentication_signer_count < settlement_authority_authentication_threshold )); then
   echo "settlement authority authentication signer count must satisfy threshold" >&2
+  exit 1
+fi
+if (( settlement_authority_authentication_pubkey_hash_count < settlement_authority_authentication_threshold || settlement_authority_authentication_signature_count < settlement_authority_authentication_threshold )); then
+  echo "settlement authority authentication must expose threshold pubkey hashes and signatures" >&2
+  exit 1
+fi
+if [[ "$settlement_authority_authentication_signature_verified" != "true" ]]; then
+  echo "settlement authority authentication signatures must verify locally" >&2
   exit 1
 fi
 if [[ "$settlement_authority_authentication_hash" == "null" || ${#settlement_authority_authentication_hash} -ne 64 ]]; then

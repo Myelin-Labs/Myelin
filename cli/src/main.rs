@@ -18,6 +18,7 @@ use myelin_exec::{
 };
 use myelin_mempool::CellPool;
 use myelin_state::{CellStateTree, MerkleTreeBuilder, SegmentProof, SegmentReader, SegmentWriter};
+use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -2739,36 +2740,94 @@ fn settlement_authority_authentication(
         signature_domain.as_bytes(),
         &[&authority_data_hash, &session_id, &participant_set_hash, &escrow_input_cells_hash, &session_lineage_commitment],
     );
+    let signature_scheme = "secp256k1-recoverable-blake3-pubkey-hash20";
+    let secp = Secp256k1::new();
+    let message = Message::from_digest_slice(&message_hash).expect("blake3 hash is a valid secp256k1 message digest");
+    let mut signer_pubkey_hashes = Vec::new();
+    let mut signatures = Vec::new();
     let mut attestation_hashes = Vec::new();
-    for signer in ["participant-threshold-signer-0", "participant-threshold-signer-1"] {
+    let mut signature_verified = true;
+    for secret_key_bytes in [[0x11u8; 32], [0x22u8; 32]] {
+        let secret_key = SecretKey::from_slice(&secret_key_bytes).expect("static fixture secret key is valid");
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let pubkey_hash = secp256k1_pubkey_hash20(&public_key);
+        let signature = secp.sign_ecdsa_recoverable(&message, &secret_key);
+        let (recovery_id, compact_signature) = signature.serialize_compact();
+        let mut signature_bytes = [0u8; 65];
+        signature_bytes[..64].copy_from_slice(&compact_signature);
+        signature_bytes[64] = recovery_id.to_i32() as u8;
+        signature_verified &= secp256k1_signature_matches_pubkey_hash(&message_hash, &signature_bytes, &pubkey_hash);
         let attestation = blake3_chunks(
-            b"myelin:session-settlement-authority-cell-attestation:v1",
-            &[&message_hash, &participant_set_hash, signer.as_bytes()],
+            b"myelin:session-settlement-authority-cell-signature-attestation:v1",
+            &[&message_hash, &participant_set_hash, &pubkey_hash, &signature_bytes],
         );
+        signer_pubkey_hashes.push(hex::encode(pubkey_hash));
+        signatures.push(hex::encode(signature_bytes));
         attestation_hashes.push(hex::encode(attestation));
     }
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"myelin:session-settlement-authority-cell-auth-hash:v1");
+    hasher.update(signature_scheme.as_bytes());
     hasher.update(&message_hash);
+    for pubkey_hash in &signer_pubkey_hashes {
+        hasher.update(pubkey_hash.as_bytes());
+    }
+    for signature in &signatures {
+        hasher.update(signature.as_bytes());
+    }
     for attestation in &attestation_hashes {
         hasher.update(attestation.as_bytes());
     }
     let attestation_hash = *hasher.finalize().as_bytes();
+    let threshold = 2;
+    let signer_count = u32::try_from(signatures.len()).expect("static signer fixture fits into u32");
+    let signature_verified = signature_verified && signer_count >= threshold;
     SessionAuthorityAuthenticationEvidence {
         schema: "myelin-session-settlement-authority-auth-v1".to_owned(),
         mode: "ckb-threshold-lock".to_owned(),
         signature_domain: signature_domain.to_owned(),
+        signature_scheme: signature_scheme.to_owned(),
         participant_set_hash: hex::encode(participant_set_hash),
-        threshold: 2,
-        signer_count: u32::try_from(attestation_hashes.len()).expect("static signer fixture fits into u32"),
+        threshold,
+        signer_count,
         message_hash: hex::encode(message_hash),
+        signer_pubkey_hashes,
+        signatures,
         attestation_hashes,
         attestation_hash: hex::encode(attestation_hash),
+        signature_verified,
         ckb_lock_policy: "threshold lock must guard creation of the one-use settlement authority cell".to_owned(),
         ckb_enforceable: false,
         testnet_beta_ready: false,
         production_ready: false,
     }
+}
+
+fn secp256k1_pubkey_hash20(public_key: &PublicKey) -> [u8; 20] {
+    let hash = blake3::hash(&public_key.serialize());
+    let mut pubkey_hash = [0u8; 20];
+    pubkey_hash.copy_from_slice(&hash.as_bytes()[..20]);
+    pubkey_hash
+}
+
+fn secp256k1_signature_matches_pubkey_hash(message_hash: &[u8; 32], signature: &[u8; 65], expected_pubkey_hash: &[u8; 20]) -> bool {
+    let recovery_id = match secp256k1::ecdsa::RecoveryId::from_i32(signature[64] as i32) {
+        Ok(recovery_id) => recovery_id,
+        Err(_) => return false,
+    };
+    let recoverable_signature = match secp256k1::ecdsa::RecoverableSignature::from_compact(&signature[..64], recovery_id) {
+        Ok(signature) => signature,
+        Err(_) => return false,
+    };
+    let message = match Message::from_digest_slice(message_hash) {
+        Ok(message) => message,
+        Err(_) => return false,
+    };
+    let recovered = match Secp256k1::new().recover_ecdsa(&message, &recoverable_signature) {
+        Ok(public_key) => public_key,
+        Err(_) => return false,
+    };
+    &secp256k1_pubkey_hash20(&recovered) == expected_pubkey_hash
 }
 
 fn court_economics_evidence(
@@ -3550,12 +3609,16 @@ struct SessionAuthorityAuthenticationEvidence {
     schema: String,
     mode: String,
     signature_domain: String,
+    signature_scheme: String,
     participant_set_hash: String,
     threshold: u32,
     signer_count: u32,
     message_hash: String,
+    signer_pubkey_hashes: Vec<String>,
+    signatures: Vec<String>,
     attestation_hashes: Vec<String>,
     attestation_hash: String,
+    signature_verified: bool,
     ckb_lock_policy: String,
     ckb_enforceable: bool,
     testnet_beta_ready: bool,
@@ -5852,18 +5915,27 @@ fn verify_session_settlement_package(
         !package.settlement_authority.authority_authentication.ckb_enforceable
             && !package.settlement_authority.authority_authentication.testnet_beta_ready
             && !package.settlement_authority.authority_authentication.production_ready
+            && package.settlement_authority.authority_authentication.signature_verified
+            && package.settlement_authority.authority_authentication.signatures.len()
+                == package.settlement_authority.authority_authentication.signer_pubkey_hashes.len()
             && package.settlement_authority.authority_authentication.signer_count
                 >= package.settlement_authority.authority_authentication.threshold,
-        Some("!ckb_enforceable && !testnet_beta_ready && !production_ready && signer_count >= threshold".to_owned()),
+        Some(
+            "!ckb_enforceable && !testnet_beta_ready && !production_ready && signature_verified && signatures match signer keys && signer_count >= threshold"
+                .to_owned(),
+        ),
         Some(format!(
-            "!{} && !{} && !{} && {} >= {}",
+            "!{} && !{} && !{} && {} && {} == {} && {} >= {}",
             package.settlement_authority.authority_authentication.ckb_enforceable,
             package.settlement_authority.authority_authentication.testnet_beta_ready,
             package.settlement_authority.authority_authentication.production_ready,
+            package.settlement_authority.authority_authentication.signature_verified,
+            package.settlement_authority.authority_authentication.signatures.len(),
+            package.settlement_authority.authority_authentication.signer_pubkey_hashes.len(),
             package.settlement_authority.authority_authentication.signer_count,
             package.settlement_authority.authority_authentication.threshold
         )),
-        "settlement authority carries a deterministic threshold-lock commitment without claiming participant-authenticated CKB enforcement",
+        "settlement authority carries verified local threshold signatures without claiming deployed CKB threshold-lock enforcement",
     );
     push_check(
         &mut checks,
@@ -8110,6 +8182,14 @@ fn json_bool_false(report: &Value, pointer: &str) -> bool {
     report.pointer(pointer).and_then(Value::as_bool) == Some(false)
 }
 
+fn json_array_has_hex_items(report: &Value, pointer: &str, min_len: usize, hex_chars: usize) -> bool {
+    let Some(values) = report.pointer(pointer).and_then(Value::as_array) else {
+        return false;
+    };
+    values.len() >= min_len
+        && values.iter().all(|value| value.as_str().is_some_and(|item| item.len() == hex_chars && hex::decode(item).is_ok()))
+}
+
 fn final_l1_script_preflight_ready(submission: &Value) -> bool {
     if submission.get("verifier_role").and_then(Value::as_str) != Some("final-l1-script") {
         return false;
@@ -8150,6 +8230,19 @@ fn final_l1_script_preflight_ready(submission: &Value) -> bool {
                 && json_bool_false(submission, "/settlement_authority_requirement/authority_authentication/ckb_enforceable")
                 && json_bool_false(submission, "/settlement_authority_requirement/authority_authentication/testnet_beta_ready")
                 && json_bool_false(submission, "/settlement_authority_requirement/authority_authentication/production_ready")
+                && json_bool_true(submission, "/settlement_authority_requirement/authority_authentication/signature_verified")
+                && json_array_has_hex_items(
+                    submission,
+                    "/settlement_authority_requirement/authority_authentication/signer_pubkey_hashes",
+                    2,
+                    40,
+                )
+                && json_array_has_hex_items(
+                    submission,
+                    "/settlement_authority_requirement/authority_authentication/signatures",
+                    2,
+                    130,
+                )
                 && submission
                     .pointer("/settlement_authority_requirement/authority_authentication/attestation_hash")
                     .and_then(Value::as_str)
@@ -9963,12 +10056,16 @@ mod tests {
                     "schema": "myelin-session-settlement-authority-auth-v1",
                     "mode": "ckb-threshold-lock",
                     "signature_domain": "myelin:session-settlement-authority-cell-auth:v1",
+                    "signature_scheme": "secp256k1-recoverable-blake3-pubkey-hash20",
                     "participant_set_hash": "46".repeat(32),
                     "threshold": 2,
                     "signer_count": 2,
                     "message_hash": "47".repeat(32),
+                    "signer_pubkey_hashes": ["4b".repeat(20), "4c".repeat(20)],
+                    "signatures": ["4d".repeat(65), "4e".repeat(65)],
                     "attestation_hashes": ["48".repeat(32), "49".repeat(32)],
                     "attestation_hash": "4a".repeat(32),
+                    "signature_verified": true,
                     "ckb_lock_policy": "threshold lock must guard creation of the one-use settlement authority cell",
                     "ckb_enforceable": false,
                     "testnet_beta_ready": false,
@@ -10876,6 +10973,25 @@ mod tests {
         assert_eq!(package.settlement_authority.authority_authentication, expected_authority.authority_authentication);
         assert_eq!(package.settlement_authority.authority_authentication.schema, "myelin-session-settlement-authority-auth-v1");
         assert_eq!(package.settlement_authority.authority_authentication.mode, "ckb-threshold-lock");
+        assert_eq!(
+            package.settlement_authority.authority_authentication.signature_scheme,
+            "secp256k1-recoverable-blake3-pubkey-hash20"
+        );
+        assert!(package.settlement_authority.authority_authentication.signature_verified);
+        assert_eq!(package.settlement_authority.authority_authentication.signer_pubkey_hashes.len(), 2);
+        assert_eq!(package.settlement_authority.authority_authentication.signatures.len(), 2);
+        assert!(package
+            .settlement_authority
+            .authority_authentication
+            .signer_pubkey_hashes
+            .iter()
+            .all(|hash| hash.len() == 40 && hex::decode(hash).is_ok()));
+        assert!(package
+            .settlement_authority
+            .authority_authentication
+            .signatures
+            .iter()
+            .all(|signature| signature.len() == 130 && hex::decode(signature).is_ok()));
         assert!(!package.settlement_authority.authority_authentication.ckb_enforceable);
         assert!(!package.settlement_authority.authority_authentication.testnet_beta_ready);
         assert!(!package.settlement_authority.authority_authentication.production_ready);
@@ -13594,7 +13710,7 @@ mod tests {
 
         let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
             .expect("settlement package");
-        let cases: [SettlementPackageTamperCase; 7] = [
+        let cases: [SettlementPackageTamperCase; 10] = [
             ("authority-auth-hash", |package| {
                 package.settlement_authority.authority_authentication.attestation_hash = "33".repeat(32)
             }),
@@ -13602,8 +13718,17 @@ mod tests {
             ("authority-auth-participant", |package| {
                 package.settlement_authority.authority_authentication.participant_set_hash = "35".repeat(32)
             }),
+            ("authority-auth-pubkey", |package| {
+                package.settlement_authority.authority_authentication.signer_pubkey_hashes[0] = "36".repeat(20)
+            }),
+            ("authority-auth-signature", |package| {
+                package.settlement_authority.authority_authentication.signatures[0] = "37".repeat(65)
+            }),
             ("authority-auth-threshold", |package| package.settlement_authority.authority_authentication.threshold = 3),
             ("authority-auth-signer-count", |package| package.settlement_authority.authority_authentication.signer_count = 1),
+            ("authority-auth-signature-verified", |package| {
+                package.settlement_authority.authority_authentication.signature_verified = false
+            }),
             ("authority-auth-enforceable", |package| package.settlement_authority.authority_authentication.ckb_enforceable = true),
             ("authority-auth-testnet-ready", |package| {
                 package.settlement_authority.authority_authentication.testnet_beta_ready = true

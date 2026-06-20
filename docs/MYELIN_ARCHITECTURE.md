@@ -524,11 +524,11 @@ duplicate same-type group outputs, and rejects any second output in the same
 transaction using the same deployed final-settlement code hash/hash type. That
 is the current CKB-compatible anti-replay model: transaction-local singleton
 creation plus cross-transaction replay protection through the consumed authority
-Cell. The settlement package now also emits and verifies a deterministic CKB
-threshold-lock authority-authentication commitment for the future
-participant-controlled authority-cell creation policy; it is not itself live
-signature or lock-enforcement evidence. Production key custody and deployment
-policy remain separate operational work.
+Cell. The settlement package now also emits and verifies local secp256k1
+threshold signatures for the future participant-controlled authority-cell
+creation policy; those signatures are not yet deployed CKB threshold-lock
+enforcement. Production key custody and deployment policy remain separate
+operational work.
 Settlement intents carry a recomputable `court_economics` policy commitment
 over participant/escrow binding, DA availability, and challenge timing, while
 leaving complete court/dispute economics explicitly out of scope. Submission
