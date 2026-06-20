@@ -529,8 +529,9 @@ threshold-lock authority-authentication commitment for the future
 participant-controlled authority-cell creation policy; it is not itself live
 signature or lock-enforcement evidence. Production key custody and deployment
 policy remain separate operational work.
-Settlement intents carry a recomputable `court_economics` commitment over
-participant/escrow binding, DA availability, and challenge timing. Submission
+Settlement intents carry a recomputable `court_economics` policy commitment
+over participant/escrow binding, DA availability, and challenge timing, while
+leaving complete court/dispute economics explicitly out of scope. Submission
 readiness carries an `operational_policy` commitment over confirmation depth,
 stability, fee policy, retry identity, live key-submission evidence, and
 monitoring checks; it can be testnet-beta ready while keeping

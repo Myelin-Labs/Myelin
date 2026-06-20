@@ -360,10 +360,11 @@ operator custody and runbooks are configured.
 `session settlement-intent` then turns a verified court bundle plus verified DA
 manifest into an explicit disputed-close settlement object with challenge-window
 binding and `l1_da_published = false` / `l1_court_implemented = false` markers.
-It includes `court_economics`, a deterministic dispute-economics commitment
-over participant/escrow binding, DA availability, and challenge timing;
-`session verify-settlement-intent` recomputes the same three-way binding and
-economics commitment.
+It includes `court_economics`, a deterministic dispute-economics policy
+commitment over participant/escrow binding, DA availability, and challenge
+timing; it does not claim complete court/dispute economics. `session
+verify-settlement-intent` recomputes the same three-way binding and economics
+commitment.
 `session settlement-package` then emits a deterministic CKB-compatible
 settlement CellTx package that binds the exact intent JSON bytes, court bundle,
 DA manifest, challenge payload, and final state root. It also declares

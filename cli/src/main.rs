@@ -2800,7 +2800,7 @@ fn court_economics_evidence(
     );
     Ok(SessionCourtEconomicsEvidence {
         schema: "myelin-session-court-economics-v1".to_owned(),
-        mode: "disputed-close-testnet-beta".to_owned(),
+        mode: "disputed-close-policy-commitment".to_owned(),
         bond_policy: "session-escrow-input-cells-bound-by-hash".to_owned(),
         reward_policy: "winner-recovers-escrow-subject-to-final-l1-fee-policy".to_owned(),
         slashing_policy: "loser-forfeits-disputed-session-escrow-after-challenge-expiry".to_owned(),
@@ -2817,7 +2817,7 @@ fn court_economics_evidence(
                 .to_owned(),
         economics_commitment: hex::encode(economics_commitment),
         court_economics_checked: true,
-        testnet_beta_ready: true,
+        testnet_beta_ready: false,
         production_ready: false,
     })
 }
@@ -5499,10 +5499,17 @@ fn verify_session_settlement_intent(
     push_check(
         &mut checks,
         "court-economics-ready",
-        intent.court_economics.court_economics_checked && intent.court_economics.testnet_beta_ready,
-        Some("court_economics_checked && testnet_beta_ready".to_owned()),
-        Some(format!("{} && {}", intent.court_economics.court_economics_checked, intent.court_economics.testnet_beta_ready)),
-        "court economics are machine-checked for testnet-beta settlement readiness",
+        intent.court_economics.court_economics_checked
+            && !intent.court_economics.testnet_beta_ready
+            && !intent.court_economics.production_ready,
+        Some("court_economics_checked && !testnet_beta_ready && !production_ready".to_owned()),
+        Some(format!(
+            "{} && !{} && !{}",
+            intent.court_economics.court_economics_checked,
+            intent.court_economics.testnet_beta_ready,
+            intent.court_economics.production_ready
+        )),
+        "court economics are a deterministic policy commitment without claiming complete dispute-economics readiness",
     );
     push_check(
         &mut checks,
@@ -10727,12 +10734,12 @@ mod tests {
         assert_eq!(intent.challenge_deadline_ms, 60_000);
         assert!(intent.settlement_permitted);
         assert_eq!(intent.court_economics.schema, "myelin-session-court-economics-v1");
-        assert_eq!(intent.court_economics.mode, "disputed-close-testnet-beta");
+        assert_eq!(intent.court_economics.mode, "disputed-close-policy-commitment");
         assert_eq!(intent.court_economics.participant_set_hash, bundle.participant_set_hash);
         assert_eq!(intent.court_economics.escrow_input_cells_hash, bundle.escrow_input_cells_hash);
         assert_eq!(intent.court_economics.da_availability_commitment, da_manifest.availability.availability_commitment);
         assert!(intent.court_economics.court_economics_checked);
-        assert!(intent.court_economics.testnet_beta_ready);
+        assert!(!intent.court_economics.testnet_beta_ready);
         assert!(!intent.court_economics.production_ready);
         assert!(!intent.l1_da_published);
         assert!(!intent.l1_court_implemented);
@@ -10778,13 +10785,14 @@ mod tests {
 
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
             .expect("settlement intent");
-        let cases: [SettlementIntentTamperCase; 6] = [
+        let cases: [SettlementIntentTamperCase; 7] = [
             ("economics-commitment", |intent| intent.court_economics.economics_commitment = "55".repeat(32)),
             ("economics-participant-set", |intent| intent.court_economics.participant_set_hash = "56".repeat(32)),
             ("economics-escrow", |intent| intent.court_economics.escrow_input_cells_hash = "57".repeat(32)),
             ("economics-da-availability", |intent| intent.court_economics.da_availability_commitment = "58".repeat(32)),
             ("economics-challenge-deadline", |intent| intent.court_economics.challenge_deadline_ms += 1),
             ("economics-checked", |intent| intent.court_economics.court_economics_checked = false),
+            ("economics-testnet-ready", |intent| intent.court_economics.testnet_beta_ready = true),
         ];
         for (label, mutate) in cases {
             let mut tampered = intent.clone();
