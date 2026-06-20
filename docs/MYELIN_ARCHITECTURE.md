@@ -466,8 +466,12 @@ Production operations evidence can be bound into either readiness command with
 `--operator-custody-policy reports/operator-custody-policy.json` and
 `--operator-runbook reports/operator-runbook.json`. The custody document must use
 `myelin-operator-custody-policy-v1`; the runbook must use
-`myelin-operator-runbook-v1`. Both files are schema checked and hashed into the
-`operational_policy` commitment.
+`myelin-operator-runbook-v1`. Both files are schema checked, typed-control
+checked, and hashed into the `operational_policy` commitment. The custody
+document must declare hardware-backed keys, dual-control signing, tested
+rotation and emergency drills, plus a valid signing threshold; the runbook must
+match the readiness report's confirmation depth and fee policy while declaring
+stability requery, bounded retries, monitoring cadence, and escalation contact.
 
 This fixture is intentionally small, but it exercises the real spine:
 `CellPool` admission, `CellStateTree` mutation, canonical `MyelinBlock`
@@ -558,9 +562,10 @@ still leaving external DA availability guarantees and deployed CKB
 court-economics enforcement explicitly out of scope. Submission readiness
 carries an `operational_policy` commitment over confirmation depth, stability,
 fee policy, retry identity, live key-submission evidence, monitoring checks, and
-optional operator custody/runbook documents; it can be testnet-beta ready while
-keeping `production_ready = false` and listing missing production blockers until
-those operator documents are present and live public-chain evidence is accepted.
+optional typed operator custody/runbook documents with machine-visible
+requirement lists; it can be testnet-beta ready while keeping
+`production_ready = false` and listing missing production blockers until those
+operator documents are present and live public-chain evidence is accepted.
 The resulting `myelin-ckb-devnet-smoke-v1` report proves devnet CKB acceptance,
 deployed compact-payload type-script execution, final-script strict readiness,
 live rejection of mismatched carrier data, and live rejection of a competing

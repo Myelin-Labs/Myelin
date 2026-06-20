@@ -4135,10 +4135,12 @@ struct SessionOperationalPolicyEvidence {
     operator_custody_policy_path: Option<String>,
     operator_custody_policy_hash: Option<String>,
     operator_custody_policy_checked: bool,
+    operator_custody_policy_requirements: Vec<String>,
     operator_runbook_policy: String,
     operator_runbook_path: Option<String>,
     operator_runbook_hash: Option<String>,
     operator_runbook_checked: bool,
+    operator_runbook_requirements: Vec<String>,
     monitoring_policy: String,
     monitoring_policy_checked: bool,
     production_blockers: Vec<String>,
@@ -8049,18 +8051,8 @@ fn verify_session_submission_readiness(
     let stable_block_identity = stability.stable_block_identity && !stability.reorg_detected && !stability.missing_or_uncommitted;
     let finality_confirmed = finality.finality_confirmed;
     let reorg_risk_bounded = finality.reorg_risk_bounded;
-    let operator_custody_policy = operator_policy_document_evidence(
-        operator_custody_policy_path.as_deref(),
-        "myelin-operator-custody-policy-v1",
-        &["key_storage", "signing_approval", "rotation_policy", "emergency_response"],
-        "operator-custody",
-    )?;
-    let operator_runbook = operator_policy_document_evidence(
-        operator_runbook_path.as_deref(),
-        "myelin-operator-runbook-v1",
-        &["reorg_response", "fee_bump_response", "retry_response", "monitoring_response"],
-        "operator-runbook",
-    )?;
+    let operator_custody_policy = operator_custody_policy_document_evidence(operator_custody_policy_path.as_deref())?;
+    let operator_runbook = operator_runbook_document_evidence(operator_runbook_path.as_deref(), &economics, &finality)?;
     let operational_policy = operational_policy_evidence(
         &context,
         &economics,
@@ -8247,16 +8239,16 @@ struct OperatorPolicyDocumentEvidence {
     path: Option<String>,
     hash: Option<String>,
     checked: bool,
+    requirements: Vec<String>,
 }
 
-fn operator_policy_document_evidence(
-    path: Option<&Path>,
-    expected_schema: &str,
-    required_fields: &[&str],
-    label: &str,
-) -> Result<OperatorPolicyDocumentEvidence> {
+fn empty_operator_policy_document_evidence() -> OperatorPolicyDocumentEvidence {
+    OperatorPolicyDocumentEvidence { path: None, hash: None, checked: false, requirements: Vec::new() }
+}
+
+fn read_operator_policy_document(path: Option<&Path>, expected_schema: &str, label: &str) -> Result<Option<(String, Vec<u8>, Value)>> {
     let Some(path) = path else {
-        return Ok(OperatorPolicyDocumentEvidence { path: None, hash: None, checked: false });
+        return Ok(None);
     };
     let bytes = fs::read(path)?;
     if bytes.is_empty() {
@@ -8275,24 +8267,189 @@ fn operator_policy_document_evidence(
             "{label} policy document has unsupported schema {schema}; expected {expected_schema}"
         )));
     }
-    for field in required_fields {
-        let Some(value) = object.get(*field).and_then(Value::as_str) else {
-            return Err(CliError::InvalidFixture(format!(
-                "{label} policy document is missing non-empty string field {field}: {}",
-                path.display()
-            )));
-        };
-        if value.trim().is_empty() {
-            return Err(CliError::InvalidFixture(format!(
-                "{label} policy document field {field} must be non-empty: {}",
-                path.display()
-            )));
-        }
+    Ok(Some((path.display().to_string(), bytes, json)))
+}
+
+fn required_json_object<'a>(json: &'a Value, label: &str) -> Result<&'a serde_json::Map<String, Value>> {
+    json.as_object().ok_or_else(|| CliError::InvalidFixture(format!("{label} policy document must be a JSON object")))
+}
+
+fn required_policy_string(object: &serde_json::Map<String, Value>, field: &str, label: &str) -> Result<String> {
+    let value = object
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture(format!("{label} policy document is missing non-empty string field {field}")))?;
+    if value.trim().is_empty() {
+        return Err(CliError::InvalidFixture(format!("{label} policy document field {field} must be non-empty")));
     }
+    Ok(value.to_owned())
+}
+
+fn required_policy_bool(object: &serde_json::Map<String, Value>, field: &str, label: &str) -> Result<bool> {
+    object
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| CliError::InvalidFixture(format!("{label} policy document is missing boolean field {field}")))
+}
+
+fn required_policy_u64(object: &serde_json::Map<String, Value>, field: &str, label: &str) -> Result<u64> {
+    object
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| CliError::InvalidFixture(format!("{label} policy document is missing u64 field {field}")))
+}
+
+fn optional_policy_u64(object: &serde_json::Map<String, Value>, field: &str, label: &str) -> Result<Option<u64>> {
+    match object.get(field) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| CliError::InvalidFixture(format!("{label} policy document field {field} must be a u64 or null"))),
+    }
+}
+
+fn require_true(value: bool, field: &str, label: &str) -> Result<()> {
+    if !value {
+        return Err(CliError::InvalidFixture(format!("{label} policy document field {field} must be true")));
+    }
+    Ok(())
+}
+
+fn require_positive(value: u64, field: &str, label: &str) -> Result<()> {
+    if value == 0 {
+        return Err(CliError::InvalidFixture(format!("{label} policy document field {field} must be greater than zero")));
+    }
+    Ok(())
+}
+
+fn operator_custody_policy_document_evidence(path: Option<&Path>) -> Result<OperatorPolicyDocumentEvidence> {
+    let Some((path, bytes, json)) = read_operator_policy_document(path, "myelin-operator-custody-policy-v1", "operator-custody")?
+    else {
+        return Ok(empty_operator_policy_document_evidence());
+    };
+    let object = required_json_object(&json, "operator-custody")?;
+    required_policy_string(object, "key_storage", "operator-custody")?;
+    required_policy_string(object, "signing_approval", "operator-custody")?;
+    required_policy_string(object, "rotation_policy", "operator-custody")?;
+    required_policy_string(object, "emergency_response", "operator-custody")?;
+    require_true(
+        required_policy_bool(object, "hardware_backed_keys", "operator-custody")?,
+        "hardware_backed_keys",
+        "operator-custody",
+    )?;
+    require_true(
+        required_policy_bool(object, "dual_control_required", "operator-custody")?,
+        "dual_control_required",
+        "operator-custody",
+    )?;
+    require_true(required_policy_bool(object, "rotation_tested", "operator-custody")?, "rotation_tested", "operator-custody")?;
+    require_true(
+        required_policy_bool(object, "emergency_drill_tested", "operator-custody")?,
+        "emergency_drill_tested",
+        "operator-custody",
+    )?;
+    let signing_threshold = required_policy_u64(object, "signing_threshold", "operator-custody")?;
+    require_positive(signing_threshold, "signing_threshold", "operator-custody")?;
+    let operator_count = required_policy_u64(object, "operator_count", "operator-custody")?;
+    if operator_count < signing_threshold {
+        return Err(CliError::InvalidFixture(
+            "operator-custody policy document field operator_count must be >= signing_threshold".to_owned(),
+        ));
+    }
+    let requirements = vec![
+        "key_storage".to_owned(),
+        "signing_approval".to_owned(),
+        "rotation_policy".to_owned(),
+        "emergency_response".to_owned(),
+        "hardware_backed_keys".to_owned(),
+        "dual_control_required".to_owned(),
+        "rotation_tested".to_owned(),
+        "emergency_drill_tested".to_owned(),
+        "signing_threshold".to_owned(),
+        "operator_count".to_owned(),
+    ];
     Ok(OperatorPolicyDocumentEvidence {
-        path: Some(path.display().to_string()),
-        hash: Some(hex::encode(blake3_32(format!("myelin:{label}-policy-document:v1").as_bytes(), &bytes))),
+        path: Some(path),
+        hash: Some(hex::encode(blake3_32(b"myelin:operator-custody-policy-document:v1", &bytes))),
         checked: true,
+        requirements,
+    })
+}
+
+fn operator_runbook_document_evidence(
+    path: Option<&Path>,
+    economics: &SessionSubmissionEconomicsReport,
+    finality: &SessionSubmissionFinalityReport,
+) -> Result<OperatorPolicyDocumentEvidence> {
+    let Some((path, bytes, json)) = read_operator_policy_document(path, "myelin-operator-runbook-v1", "operator-runbook")? else {
+        return Ok(empty_operator_policy_document_evidence());
+    };
+    let object = required_json_object(&json, "operator-runbook")?;
+    required_policy_string(object, "reorg_response", "operator-runbook")?;
+    required_policy_string(object, "fee_bump_response", "operator-runbook")?;
+    required_policy_string(object, "retry_response", "operator-runbook")?;
+    required_policy_string(object, "monitoring_response", "operator-runbook")?;
+    require_true(
+        required_policy_bool(object, "stability_requery_required", "operator-runbook")?,
+        "stability_requery_required",
+        "operator-runbook",
+    )?;
+    let min_confirmations = required_policy_u64(object, "min_confirmations", "operator-runbook")?;
+    if min_confirmations != finality.min_confirmations {
+        return Err(CliError::InvalidFixture(format!(
+            "operator-runbook policy document min_confirmations mismatch: expected {}, got {min_confirmations}",
+            finality.min_confirmations
+        )));
+    }
+    let min_fee_shannons = required_policy_u64(object, "min_fee_shannons", "operator-runbook")?;
+    if min_fee_shannons != economics.min_fee_shannons {
+        return Err(CliError::InvalidFixture(format!(
+            "operator-runbook policy document min_fee_shannons mismatch: expected {}, got {min_fee_shannons}",
+            economics.min_fee_shannons
+        )));
+    }
+    let min_fee_rate_shannons_per_kb = required_policy_u64(object, "min_fee_rate_shannons_per_kb", "operator-runbook")?;
+    if min_fee_rate_shannons_per_kb != economics.min_fee_rate_shannons_per_kb {
+        return Err(CliError::InvalidFixture(format!(
+            "operator-runbook policy document min_fee_rate_shannons_per_kb mismatch: expected {}, got {min_fee_rate_shannons_per_kb}",
+            economics.min_fee_rate_shannons_per_kb
+        )));
+    }
+    let max_fee_shannons = optional_policy_u64(object, "max_fee_shannons", "operator-runbook")?;
+    if max_fee_shannons != economics.max_fee_shannons {
+        return Err(CliError::InvalidFixture(format!(
+            "operator-runbook policy document max_fee_shannons mismatch: expected {:?}, got {:?}",
+            economics.max_fee_shannons, max_fee_shannons
+        )));
+    }
+    let max_retry_attempts = required_policy_u64(object, "max_retry_attempts", "operator-runbook")?;
+    require_positive(max_retry_attempts, "max_retry_attempts", "operator-runbook")?;
+    let retry_backoff_millis = required_policy_u64(object, "retry_backoff_millis", "operator-runbook")?;
+    require_positive(retry_backoff_millis, "retry_backoff_millis", "operator-runbook")?;
+    let monitoring_interval_millis = required_policy_u64(object, "monitoring_interval_millis", "operator-runbook")?;
+    require_positive(monitoring_interval_millis, "monitoring_interval_millis", "operator-runbook")?;
+    required_policy_string(object, "escalation_contact", "operator-runbook")?;
+    let requirements = vec![
+        "reorg_response".to_owned(),
+        "fee_bump_response".to_owned(),
+        "retry_response".to_owned(),
+        "monitoring_response".to_owned(),
+        "stability_requery_required".to_owned(),
+        "min_confirmations".to_owned(),
+        "min_fee_shannons".to_owned(),
+        "min_fee_rate_shannons_per_kb".to_owned(),
+        "max_fee_shannons".to_owned(),
+        "max_retry_attempts".to_owned(),
+        "retry_backoff_millis".to_owned(),
+        "monitoring_interval_millis".to_owned(),
+        "escalation_contact".to_owned(),
+    ];
+    Ok(OperatorPolicyDocumentEvidence {
+        path: Some(path),
+        hash: Some(hex::encode(blake3_32(b"myelin:operator-runbook-policy-document:v1", &bytes))),
+        checked: true,
+        requirements,
     })
 }
 
@@ -8419,8 +8576,14 @@ fn operational_policy_evidence(
     hash_optional_u64(&mut hasher, economics.max_fee_shannons);
     hash_optional_str(&mut hasher, &operator_custody_policy.path);
     hash_optional_str(&mut hasher, &operator_custody_policy.hash);
+    for requirement in &operator_custody_policy.requirements {
+        hasher.update(requirement.as_bytes());
+    }
     hash_optional_str(&mut hasher, &operator_runbook.path);
     hash_optional_str(&mut hasher, &operator_runbook.hash);
+    for requirement in &operator_runbook.requirements {
+        hasher.update(requirement.as_bytes());
+    }
     hasher.update(&(economics.data_bearing_output_count as u64).to_le_bytes());
     hasher.update(&(economics.empty_data_output_count as u64).to_le_bytes());
     hasher.update(&(economics.explicit_change_output_count as u64).to_le_bytes());
@@ -8483,15 +8646,17 @@ fn operational_policy_evidence(
         operator_custody_policy_path: operator_custody_policy.path.clone(),
         operator_custody_policy_hash: operator_custody_policy.hash.clone(),
         operator_custody_policy_checked,
+        operator_custody_policy_requirements: operator_custody_policy.requirements.clone(),
         operator_runbook_policy: "operator-runbook-json-with-reorg-fee-retry-monitoring-response".to_owned(),
         operator_runbook_path: operator_runbook.path.clone(),
         operator_runbook_hash: operator_runbook.hash.clone(),
         operator_runbook_checked,
+        operator_runbook_requirements: operator_runbook.requirements.clone(),
         monitoring_policy: "context-economics-inclusion-stability-finality-report-chain".to_owned(),
         monitoring_policy_checked,
         production_blockers,
         policy_commitment_algorithm:
-            "blake3(myelin:session-public-chain-operational-policy:v1,report_hashes,lineage_paths,block_identity,confirmation_policy,capacity_fee_policy,operator_custody_policy,operator_runbook,submission_key_markers,policy_flags)"
+            "blake3(myelin:session-public-chain-operational-policy:v1,report_hashes,lineage_paths,block_identity,confirmation_policy,capacity_fee_policy,operator_custody_policy_requirements,operator_runbook_requirements,submission_key_markers,policy_flags)"
                 .to_owned(),
         policy_commitment: hex::encode(policy_commitment),
         public_chain_ready,
@@ -10162,7 +10327,9 @@ mod tests {
     }
 
     fn write_temp_json<T: Serialize>(label: &str, value: &T) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("myelin-{label}-{}.json", std::process::id()));
+        static NEXT_TEMP_JSON_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nonce = NEXT_TEMP_JSON_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("myelin-{label}-{}-{nonce}.json", std::process::id()));
         std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
         path
     }
@@ -10175,7 +10342,13 @@ mod tests {
                 "key_storage": "external-hsm-or-multisig-wallet",
                 "signing_approval": "dual-control-approval",
                 "rotation_policy": "documented-rotation-and-revocation",
-                "emergency_response": "documented-pause-and-key-compromise-response"
+                "emergency_response": "documented-pause-and-key-compromise-response",
+                "hardware_backed_keys": true,
+                "dual_control_required": true,
+                "rotation_tested": true,
+                "emergency_drill_tested": true,
+                "signing_threshold": 2,
+                "operator_count": 3
             }),
         )
     }
@@ -10188,7 +10361,16 @@ mod tests {
                 "reorg_response": "wait-for-stability-requery-and-escalate-on-mismatch",
                 "fee_bump_response": "bounded-fee-bump-with-max-fee-cap",
                 "retry_response": "idempotent-retry-by-ckb-tx-hash-and-package-commitment",
-                "monitoring_response": "alert-on-missing-commitment-stability-or-finality"
+                "monitoring_response": "alert-on-missing-commitment-stability-or-finality",
+                "stability_requery_required": true,
+                "min_confirmations": 6,
+                "min_fee_shannons": 1,
+                "min_fee_rate_shannons_per_kb": 1000,
+                "max_fee_shannons": 764,
+                "max_retry_attempts": 3,
+                "retry_backoff_millis": 1000,
+                "monitoring_interval_millis": 5000,
+                "escalation_contact": "ops@example.invalid"
             }),
         )
     }
@@ -13997,10 +14179,108 @@ mod tests {
         assert!(report.operational_policy.public_chain_ready);
         assert!(report.operational_policy.operator_custody_policy_checked);
         assert!(report.operational_policy.operator_custody_policy_hash.as_ref().is_some_and(|hash| hash.len() == 64));
+        assert!(report.operational_policy.operator_custody_policy_requirements.contains(&"hardware_backed_keys".to_owned()));
+        assert!(report.operational_policy.operator_custody_policy_requirements.contains(&"dual_control_required".to_owned()));
         assert!(report.operational_policy.operator_runbook_checked);
         assert!(report.operational_policy.operator_runbook_hash.as_ref().is_some_and(|hash| hash.len() == 64));
+        assert!(report.operational_policy.operator_runbook_requirements.contains(&"min_confirmations".to_owned()));
+        assert!(report.operational_policy.operator_runbook_requirements.contains(&"monitoring_interval_millis".to_owned()));
         assert!(report.operational_policy.production_blockers.is_empty());
         assert!(report.operational_policy.production_ready);
+    }
+
+    #[test]
+    fn session_submission_readiness_rejects_weak_operator_policy_documents() {
+        let expected_hash = format!("0x{}", "83".repeat(32));
+        let block_hash = format!("0x{}", "84".repeat(32));
+        let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
+            readiness_fixture_reports(expected_hash.clone(), block_hash);
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        economics.submission_schema = context.submission_schema.clone();
+        inclusion.submission_schema = context.submission_schema.clone();
+        let submission_path = write_readiness_live_final_script_submission(&expected_hash, true);
+        bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
+        let context_path = write_temp_json("readiness-context-final-l1-weak-ops", &context);
+        let economics_path = write_temp_json("readiness-economics-final-l1-weak-ops", &economics);
+        let inclusion_path = write_temp_json("readiness-inclusion-final-l1-weak-ops", &inclusion);
+        stability.inclusion = inclusion_path.display().to_string();
+        finality.inclusion = inclusion_path.display().to_string();
+        let stability_path = write_temp_json("readiness-stability-final-l1-weak-ops", &stability);
+        let finality_path = write_temp_json("readiness-finality-final-l1-weak-ops", &finality);
+        let weak_custody_path = write_temp_json(
+            "operator-custody-policy-weak",
+            &serde_json::json!({
+                "schema": "myelin-operator-custody-policy-v1",
+                "key_storage": "hot-wallet",
+                "signing_approval": "single-operator",
+                "rotation_policy": "manual",
+                "emergency_response": "manual",
+                "hardware_backed_keys": false,
+                "dual_control_required": true,
+                "rotation_tested": true,
+                "emergency_drill_tested": true,
+                "signing_threshold": 1,
+                "operator_count": 1
+            }),
+        );
+        let runbook_mismatch_path = write_temp_json(
+            "operator-runbook-mismatch",
+            &serde_json::json!({
+                "schema": "myelin-operator-runbook-v1",
+                "reorg_response": "wait-for-stability-requery-and-escalate-on-mismatch",
+                "fee_bump_response": "bounded-fee-bump-with-max-fee-cap",
+                "retry_response": "idempotent-retry-by-ckb-tx-hash-and-package-commitment",
+                "monitoring_response": "alert-on-missing-commitment-stability-or-finality",
+                "stability_requery_required": true,
+                "min_confirmations": 1,
+                "min_fee_shannons": 1,
+                "min_fee_rate_shannons_per_kb": 1000,
+                "max_fee_shannons": 764,
+                "max_retry_attempts": 3,
+                "retry_backoff_millis": 1000,
+                "monitoring_interval_millis": 5000,
+                "escalation_contact": "ops@example.invalid"
+            }),
+        );
+        let valid_custody_path = write_operator_custody_policy();
+        let valid_runbook_path = write_operator_runbook();
+
+        let weak_custody_error = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+            Some(weak_custody_path.clone()),
+            Some(valid_runbook_path.clone()),
+        )
+        .expect_err("weak custody policy should be rejected");
+        let runbook_mismatch_error = verify_session_submission_readiness(
+            context_path.clone(),
+            economics_path.clone(),
+            inclusion_path.clone(),
+            stability_path.clone(),
+            finality_path.clone(),
+            true,
+            Some(valid_custody_path.clone()),
+            Some(runbook_mismatch_path.clone()),
+        )
+        .expect_err("runbook policy mismatch should be rejected");
+
+        let _ = std::fs::remove_file(context_path);
+        let _ = std::fs::remove_file(economics_path);
+        let _ = std::fs::remove_file(inclusion_path);
+        let _ = std::fs::remove_file(stability_path);
+        let _ = std::fs::remove_file(finality_path);
+        let _ = std::fs::remove_file(submission_path);
+        let _ = std::fs::remove_file(weak_custody_path);
+        let _ = std::fs::remove_file(runbook_mismatch_path);
+        let _ = std::fs::remove_file(valid_custody_path);
+        let _ = std::fs::remove_file(valid_runbook_path);
+
+        assert!(weak_custody_error.to_string().contains("hardware_backed_keys"), "{weak_custody_error}");
+        assert!(runbook_mismatch_error.to_string().contains("min_confirmations mismatch"), "{runbook_mismatch_error}");
     }
 
     #[test]

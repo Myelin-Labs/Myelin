@@ -1091,8 +1091,12 @@ for context_path, economics_path, inclusion_path, stability_path, finality_path,
         raise SystemExit("production gate failed: dry-run readiness cannot claim live key policy")
     if policy["operator_custody_policy_checked"] is not False or policy["operator_custody_policy_hash"] is not None:
         raise SystemExit("production gate failed: dry-run readiness cannot claim operator custody policy")
+    if policy.get("operator_custody_policy_requirements") != []:
+        raise SystemExit("production gate failed: dry-run readiness cannot claim operator custody requirements")
     if policy["operator_runbook_checked"] is not False or policy["operator_runbook_hash"] is not None:
         raise SystemExit("production gate failed: dry-run readiness cannot claim operator runbook")
+    if policy.get("operator_runbook_requirements") != []:
+        raise SystemExit("production gate failed: dry-run readiness cannot claim operator runbook requirements")
     blockers = set(policy.get("production_blockers", []))
     if "operator-custody-policy-missing" not in blockers or "operator-runbook-missing" not in blockers:
         raise SystemExit("production gate failed: operational policy must expose missing operator blockers")

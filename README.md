@@ -302,8 +302,13 @@ cargo run -p myelin-cli -- teeworlds vm-probe \
 For production operations evidence, `session verify-submission-readiness` also
 accepts `--operator-custody-policy reports/operator-custody-policy.json` and
 `--operator-runbook reports/operator-runbook.json`. Those files are schema
-checked and hashed into `operational_policy`; without them the report keeps
-`operational_policy.production_ready = false`.
+checked, typed-control checked, and hashed into `operational_policy`; without
+them the report keeps `operational_policy.production_ready = false`. The
+custody policy must declare hardware-backed keys, dual-control signing,
+tested rotation and emergency-drill controls, plus a non-zero signing threshold
+within the operator set. The runbook must bind to the readiness report's
+confirmation depth and fee policy, require stability requery, and declare
+bounded retry and monitoring cadence.
 
 For external DA evidence, `session da-manifest` also accepts
 `--external-da-receipt reports/external-da-receipt.json`. The receipt must use
@@ -370,9 +375,10 @@ readiness report also carries
 `operational_policy`, a public-chain operations commitment covering reorg
 confirmation depth, stability requery, fee floor/rate/max-fee policy, retry
 identity, key-submission evidence, monitoring evidence, and optional hashed
-operator custody/runbook policy files. It can be `testnet_beta_ready` with live
-public-chain evidence while still leaving `production_ready = false` and listing
-`operator-custody-policy-missing` / `operator-runbook-missing` until those
+operator custody/runbook policy files with machine-visible requirement lists.
+It can be `testnet_beta_ready` with live public-chain evidence while still
+leaving `production_ready = false` and listing
+`operator-custody-policy-missing` / `operator-runbook-missing` until those typed
 artefacts are supplied.
 `session settlement-intent` then turns a verified court bundle plus verified DA
 manifest into an explicit disputed-close settlement object with challenge-window
