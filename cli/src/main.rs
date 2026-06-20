@@ -547,6 +547,9 @@ struct SessionSettlementPackageArgs {
     /// JSON manifest emitted by `session da-manifest`.
     #[arg(long)]
     da_manifest: PathBuf,
+    /// Optional threshold-lock deployment evidence JSON for production authority authentication.
+    #[arg(long)]
+    threshold_lock_deployment_evidence: Option<PathBuf>,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -939,7 +942,12 @@ fn run() -> Result<()> {
                 write_json(args.out, &report)
             }
             SessionCommand::SettlementPackage(args) => {
-                let report = session_settlement_package(args.intent, args.bundle, args.da_manifest)?;
+                let report = session_settlement_package_with_deployment(
+                    args.intent,
+                    args.bundle,
+                    args.da_manifest,
+                    args.threshold_lock_deployment_evidence,
+                )?;
                 write_json(args.out, &report)
             }
             SessionCommand::VerifySettlementPackage(args) => {
@@ -3032,6 +3040,49 @@ fn settlement_authority_requirement(
     escrow_input_cells_hash: [u8; 32],
     session_lineage_commitment: [u8; 32],
 ) -> SessionSettlementAuthorityRequirement {
+    settlement_authority_requirement_base(
+        intent_hash,
+        session_id,
+        participant_set_hash,
+        escrow_input_cells_hash,
+        session_lineage_commitment,
+    )
+}
+
+fn settlement_authority_requirement_with_deployment(
+    intent_hash: [u8; 32],
+    session_id: [u8; 32],
+    participant_set_hash: [u8; 32],
+    escrow_input_cells_hash: [u8; 32],
+    session_lineage_commitment: [u8; 32],
+    threshold_lock_deployment: Option<SessionThresholdLockDeploymentEvidence>,
+) -> Result<SessionSettlementAuthorityRequirement> {
+    let mut authority = settlement_authority_requirement_base(
+        intent_hash,
+        session_id,
+        participant_set_hash,
+        escrow_input_cells_hash,
+        session_lineage_commitment,
+    );
+    if let Some(deployment) = threshold_lock_deployment {
+        let deployment = normalize_threshold_lock_deployment_evidence(deployment, &authority.authority_authentication)?;
+        authority.authority_authentication.ckb_enforceable = deployment.ckb_enforceable_checked;
+        authority.authority_authentication.testnet_beta_ready = deployment.testnet_beta_ready;
+        authority.authority_authentication.production_ready = deployment.production_ready;
+        authority.authority_authentication.threshold_lock_deployment = Some(deployment);
+        authority.authority_authentication.attestation_hash =
+            authority_authentication_attestation_hash(&authority.authority_authentication)?;
+    }
+    Ok(authority)
+}
+
+fn settlement_authority_requirement_base(
+    intent_hash: [u8; 32],
+    session_id: [u8; 32],
+    participant_set_hash: [u8; 32],
+    escrow_input_cells_hash: [u8; 32],
+    session_lineage_commitment: [u8; 32],
+) -> SessionSettlementAuthorityRequirement {
     let session_authority_commitment = blake3_chunks(
         b"myelin:session-settlement-authority-lineage:v2",
         &[&intent_hash, &session_id, &participant_set_hash, &escrow_input_cells_hash, &session_lineage_commitment],
@@ -3108,27 +3159,11 @@ fn settlement_authority_authentication(
         signatures.push(hex::encode(signature_bytes));
         attestation_hashes.push(hex::encode(attestation));
     }
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"myelin:session-settlement-authority-cell-auth-hash:v1");
-    hasher.update(signature_scheme.as_bytes());
-    hasher.update(&message_hash);
-    for pubkey_hash in &signer_pubkey_hashes {
-        hasher.update(pubkey_hash.as_bytes());
-    }
-    for signature in &signatures {
-        hasher.update(signature.as_bytes());
-    }
-    for attestation in &attestation_hashes {
-        hasher.update(attestation.as_bytes());
-    }
     let ckb_lock_args_bytes = settlement_authority_threshold_lock_args(threshold, &signer_pubkey_hashes);
     let ckb_lock_args_hash = blake3_32(b"myelin:session-settlement-authority-threshold-lock-args:v1", &ckb_lock_args_bytes);
-    hasher.update(&ckb_lock_args_bytes);
-    hasher.update(&ckb_lock_args_hash);
-    let attestation_hash = *hasher.finalize().as_bytes();
     let signer_count = u32::try_from(signatures.len()).expect("static signer fixture fits into u32");
     let signature_verified = signature_verified && signer_count >= threshold;
-    SessionAuthorityAuthenticationEvidence {
+    let mut evidence = SessionAuthorityAuthenticationEvidence {
         schema: "myelin-session-settlement-authority-auth-v1".to_owned(),
         mode: "ckb-threshold-lock".to_owned(),
         signature_domain: signature_domain.to_owned(),
@@ -3140,17 +3175,52 @@ fn settlement_authority_authentication(
         signer_pubkey_hashes,
         signatures,
         attestation_hashes,
-        attestation_hash: hex::encode(attestation_hash),
+        attestation_hash: String::new(),
         signature_verified,
         ckb_lock_args_algorithm: "0x6d79656c696e2d617574682d7631 || threshold_le_u32 || signer_count_le_u32 || signer_pubkey_hash20[]"
             .to_owned(),
         ckb_lock_args: format!("0x{}", hex::encode(&ckb_lock_args_bytes)),
         ckb_lock_args_hash: hex::encode(ckb_lock_args_hash),
         ckb_lock_policy: "final DA publication and settlement authority cells must use these threshold-lock args".to_owned(),
+        threshold_lock_deployment: None,
         ckb_enforceable: false,
         testnet_beta_ready: false,
         production_ready: false,
+    };
+    evidence.attestation_hash = authority_authentication_attestation_hash(&evidence)
+        .expect("generated settlement authority authentication is internally consistent");
+    evidence
+}
+
+fn authority_authentication_attestation_hash(evidence: &SessionAuthorityAuthenticationEvidence) -> Result<String> {
+    let message_hash = parse_hex_32(&evidence.message_hash)
+        .ok_or_else(|| CliError::InvalidFixture("authority authentication message_hash must be 32-byte hex".to_owned()))?;
+    let ckb_lock_args = decode_hex_bytes(&evidence.ckb_lock_args)
+        .ok_or_else(|| CliError::InvalidFixture("authority authentication ckb_lock_args must be hex".to_owned()))?;
+    let ckb_lock_args_hash = parse_hex_32(&evidence.ckb_lock_args_hash)
+        .ok_or_else(|| CliError::InvalidFixture("authority authentication ckb_lock_args_hash must be 32-byte hex".to_owned()))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"myelin:session-settlement-authority-cell-auth-hash:v1");
+    hasher.update(evidence.signature_scheme.as_bytes());
+    hasher.update(&message_hash);
+    for pubkey_hash in &evidence.signer_pubkey_hashes {
+        hasher.update(pubkey_hash.as_bytes());
     }
+    for signature in &evidence.signatures {
+        hasher.update(signature.as_bytes());
+    }
+    for attestation in &evidence.attestation_hashes {
+        hasher.update(attestation.as_bytes());
+    }
+    hasher.update(&ckb_lock_args);
+    hasher.update(&ckb_lock_args_hash);
+    if let Some(deployment) = &evidence.threshold_lock_deployment {
+        let deployment_commitment = parse_hex_32(&deployment.evidence_commitment)
+            .ok_or_else(|| CliError::InvalidFixture("threshold-lock deployment evidence_commitment must be 32-byte hex".to_owned()))?;
+        hasher.update(b"myelin:session-settlement-authority-threshold-lock-deployment:v1");
+        hasher.update(&deployment_commitment);
+    }
+    Ok(hex::encode(*hasher.finalize().as_bytes()))
 }
 
 fn settlement_authority_threshold_lock_args(threshold: u32, signer_pubkey_hashes: &[String]) -> Vec<u8> {
@@ -3164,6 +3234,111 @@ fn settlement_authority_threshold_lock_args(threshold: u32, signer_pubkey_hashes
         bytes.extend_from_slice(&pubkey_hash_bytes);
     }
     bytes
+}
+
+fn normalize_threshold_lock_deployment_evidence(
+    mut deployment: SessionThresholdLockDeploymentEvidence,
+    authority: &SessionAuthorityAuthenticationEvidence,
+) -> Result<SessionThresholdLockDeploymentEvidence> {
+    if deployment.schema != "myelin-session-threshold-lock-deployment-v1" {
+        return Err(CliError::InvalidFixture("threshold-lock deployment evidence schema is not recognised".to_owned()));
+    }
+    deployment.network = deployment.network.trim().to_ascii_lowercase();
+    if !matches!(deployment.network.as_str(), "ckb-mainnet" | "ckb-testnet") {
+        return Err(CliError::InvalidFixture("threshold-lock deployment network must be ckb-mainnet or ckb-testnet".to_owned()));
+    }
+    deployment.code_hash = normalize_ckb_tx_hash(&deployment.code_hash)
+        .ok_or_else(|| CliError::InvalidFixture("threshold-lock deployment code_hash must be 32-byte hex".to_owned()))?;
+    deployment.code_dep_tx_hash = normalize_ckb_tx_hash(&deployment.code_dep_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("threshold-lock deployment code_dep_tx_hash must be 32-byte hex".to_owned()))?;
+    ckb_script_hash_type_arg(&deployment.hash_type, "threshold-lock deployment hash_type")?;
+    deployment.code_dep_index = ckb_quantity_arg(&deployment.code_dep_index, "threshold-lock deployment code_dep_index")?;
+    deployment.audited_source_hash = normalize_ckb_tx_hash(&deployment.audited_source_hash)
+        .ok_or_else(|| CliError::InvalidFixture("threshold-lock deployment audited_source_hash must be 32-byte hex".to_owned()))?;
+    deployment.audit_report_hash = normalize_ckb_tx_hash(&deployment.audit_report_hash)
+        .ok_or_else(|| CliError::InvalidFixture("threshold-lock deployment audit_report_hash must be 32-byte hex".to_owned()))?;
+    if deployment.deployment_policy != "mainnet-production-threshold-lock-v1"
+        && deployment.deployment_policy != "testnet-beta-threshold-lock-v1"
+    {
+        return Err(CliError::InvalidFixture(
+            "threshold-lock deployment deployment_policy must be mainnet-production-threshold-lock-v1 or testnet-beta-threshold-lock-v1"
+                .to_owned(),
+        ));
+    }
+    if deployment.threshold != authority.threshold {
+        return Err(CliError::InvalidFixture("threshold-lock deployment threshold does not match authority threshold".to_owned()));
+    }
+    if deployment.signer_pubkey_hashes != authority.signer_pubkey_hashes {
+        return Err(CliError::InvalidFixture(
+            "threshold-lock deployment signer_pubkey_hashes do not match authority signer set".to_owned(),
+        ));
+    }
+    if deployment.ckb_lock_args_hash != authority.ckb_lock_args_hash {
+        return Err(CliError::InvalidFixture(
+            "threshold-lock deployment ckb_lock_args_hash does not match authority lock args hash".to_owned(),
+        ));
+    }
+    if !deployment.signer_pubkey_hashes.iter().all(|hash| hash.len() == 40 && hex::decode(hash).is_ok()) {
+        return Err(CliError::InvalidFixture(
+            "threshold-lock deployment signer_pubkey_hashes must all be 20-byte hex values".to_owned(),
+        ));
+    }
+    if deployment.ckb_enforceable_checked && !deployment.testnet_beta_ready {
+        return Err(CliError::InvalidFixture(
+            "threshold-lock deployment cannot be enforceable without testnet_beta_ready evidence".to_owned(),
+        ));
+    }
+    if deployment.testnet_beta_ready && !deployment.ckb_enforceable_checked {
+        return Err(CliError::InvalidFixture(
+            "threshold-lock deployment testnet_beta_ready requires ckb_enforceable_checked".to_owned(),
+        ));
+    }
+    if deployment.production_ready
+        && !(deployment.ckb_enforceable_checked
+            && deployment.testnet_beta_ready
+            && deployment.network == "ckb-mainnet"
+            && deployment.deployment_policy == "mainnet-production-threshold-lock-v1")
+    {
+        return Err(CliError::InvalidFixture(
+            "threshold-lock deployment production_ready requires checked mainnet production deployment evidence".to_owned(),
+        ));
+    }
+    if deployment.network == "ckb-testnet" && deployment.production_ready {
+        return Err(CliError::InvalidFixture("threshold-lock deployment testnet evidence cannot claim production_ready".to_owned()));
+    }
+    let commitment = threshold_lock_deployment_commitment(&deployment)?;
+    deployment.evidence_commitment_algorithm =
+        "blake3(myelin:session-threshold-lock-deployment-evidence:v1,normalized-fields)".to_owned();
+    deployment.evidence_commitment = hex::encode(commitment);
+    Ok(deployment)
+}
+
+fn threshold_lock_deployment_commitment(deployment: &SessionThresholdLockDeploymentEvidence) -> Result<[u8; 32]> {
+    if deployment.signer_pubkey_hashes.len() < usize::try_from(deployment.threshold).unwrap_or(usize::MAX) {
+        return Err(CliError::InvalidFixture(
+            "threshold-lock deployment signer set must contain at least threshold signers".to_owned(),
+        ));
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"myelin:session-threshold-lock-deployment-evidence:v1");
+    hasher.update(deployment.schema.as_bytes());
+    hasher.update(deployment.network.as_bytes());
+    hasher.update(deployment.code_hash.as_bytes());
+    hasher.update(deployment.hash_type.as_bytes());
+    hasher.update(deployment.code_dep_tx_hash.as_bytes());
+    hasher.update(deployment.code_dep_index.as_bytes());
+    hasher.update(deployment.audited_source_hash.as_bytes());
+    hasher.update(deployment.audit_report_hash.as_bytes());
+    hasher.update(deployment.deployment_policy.as_bytes());
+    hasher.update(deployment.ckb_lock_args_hash.as_bytes());
+    hasher.update(&deployment.threshold.to_le_bytes());
+    for signer_pubkey_hash in &deployment.signer_pubkey_hashes {
+        hasher.update(signer_pubkey_hash.as_bytes());
+    }
+    hasher.update(&[u8::from(deployment.ckb_enforceable_checked)]);
+    hasher.update(&[u8::from(deployment.testnet_beta_ready)]);
+    hasher.update(&[u8::from(deployment.production_ready)]);
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn secp256k1_pubkey_hash20(public_key: &PublicKey) -> [u8; 20] {
@@ -4065,9 +4240,34 @@ struct SessionAuthorityAuthenticationEvidence {
     ckb_lock_args: String,
     ckb_lock_args_hash: String,
     ckb_lock_policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    threshold_lock_deployment: Option<SessionThresholdLockDeploymentEvidence>,
     ckb_enforceable: bool,
     testnet_beta_ready: bool,
     production_ready: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct SessionThresholdLockDeploymentEvidence {
+    schema: String,
+    network: String,
+    code_hash: String,
+    hash_type: String,
+    code_dep_tx_hash: String,
+    code_dep_index: String,
+    audited_source_hash: String,
+    audit_report_hash: String,
+    deployment_policy: String,
+    ckb_lock_args_hash: String,
+    threshold: u32,
+    signer_pubkey_hashes: Vec<String>,
+    ckb_enforceable_checked: bool,
+    testnet_beta_ready: bool,
+    production_ready: bool,
+    #[serde(default)]
+    evidence_commitment_algorithm: String,
+    #[serde(default)]
+    evidence_commitment: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -6133,10 +6333,20 @@ fn verify_session_settlement_intent(
     })
 }
 
+#[cfg(test)]
 fn session_settlement_package(
     intent_path: PathBuf,
     bundle_path: PathBuf,
     da_manifest_path: PathBuf,
+) -> Result<SessionSettlementPackageReport> {
+    session_settlement_package_with_deployment(intent_path, bundle_path, da_manifest_path, None)
+}
+
+fn session_settlement_package_with_deployment(
+    intent_path: PathBuf,
+    bundle_path: PathBuf,
+    da_manifest_path: PathBuf,
+    threshold_lock_deployment_evidence_path: Option<PathBuf>,
 ) -> Result<SessionSettlementPackageReport> {
     let intent_bytes = fs::read(&intent_path)?;
     let intent = serde_json::from_slice::<SessionSettlementIntentReport>(&intent_bytes)?;
@@ -6171,6 +6381,13 @@ fn session_settlement_package(
         parse_package_hash_field(&intent.escrow_input_cells_hash, "settlement intent escrow_input_cells_hash")?;
     let session_lineage_commitment =
         parse_package_hash_field(&intent.session_lineage_commitment, "settlement intent session_lineage_commitment")?;
+    let threshold_lock_deployment = match threshold_lock_deployment_evidence_path {
+        Some(path) => {
+            let bytes = fs::read(path)?;
+            Some(serde_json::from_slice::<SessionThresholdLockDeploymentEvidence>(&bytes)?)
+        }
+        None => None,
+    };
 
     Ok(SessionSettlementPackageReport {
         schema: "myelin-session-settlement-package-v1".to_owned(),
@@ -6187,13 +6404,14 @@ fn session_settlement_package(
         challenge_payload_hash: intent.challenge_payload_hash,
         da_availability: intent.da_availability,
         final_state_root: intent.final_state_root,
-        settlement_authority: settlement_authority_requirement(
+        settlement_authority: settlement_authority_requirement_with_deployment(
             intent_hash,
             session_id_bytes,
             participant_set_hash,
             escrow_input_cells_hash,
             session_lineage_commitment,
-        ),
+            threshold_lock_deployment,
+        )?,
         carrier_payload_kind: "myelin-session-settlement-carrier-v1".to_owned(),
         carrier_payload,
         carrier_payload_data_hash,
@@ -6331,13 +6549,14 @@ fn verify_session_settlement_package(
         parse_package_hash_field(&intent.escrow_input_cells_hash, "intent escrow_input_cells_hash")?;
     let expected_session_lineage_commitment =
         parse_package_hash_field(&intent.session_lineage_commitment, "intent session_lineage_commitment")?;
-    let expected_authority = settlement_authority_requirement(
+    let expected_authority = settlement_authority_requirement_with_deployment(
         expected_intent_hash_bytes,
         expected_session_id_bytes,
         expected_participant_set_hash,
         expected_escrow_input_cells_hash,
         expected_session_lineage_commitment,
-    );
+        package.settlement_authority.authority_authentication.threshold_lock_deployment.clone(),
+    )?;
     push_check(
         &mut checks,
         "settlement-authority-schema",
@@ -6451,12 +6670,48 @@ fn verify_session_settlement_package(
         Some(package.settlement_authority.authority_authentication.attestation_hash.clone()),
         "settlement authority authentication recomputes from authority data hash and session lineage",
     );
+    let authority_deployment = package.settlement_authority.authority_authentication.threshold_lock_deployment.as_ref();
+    let authority_deployment_valid = match authority_deployment {
+        Some(deployment) => normalize_threshold_lock_deployment_evidence(
+            deployment.clone(),
+            &settlement_authority_requirement(
+                expected_intent_hash_bytes,
+                expected_session_id_bytes,
+                expected_participant_set_hash,
+                expected_escrow_input_cells_hash,
+                expected_session_lineage_commitment,
+            )
+            .authority_authentication,
+        )
+        .is_ok(),
+        None => {
+            !package.settlement_authority.authority_authentication.ckb_enforceable
+                && !package.settlement_authority.authority_authentication.testnet_beta_ready
+                && !package.settlement_authority.authority_authentication.production_ready
+        }
+    };
+    push_check(
+        &mut checks,
+        "settlement-authority-threshold-lock-deployment-evidence",
+        authority_deployment_valid,
+        Some("valid deployment evidence when authority production/testnet flags are claimed".to_owned()),
+        Some(match authority_deployment {
+            Some(deployment) => format!(
+                "{}:{}:{}",
+                deployment.network, deployment.deployment_policy, deployment.evidence_commitment
+            ),
+            None => "none".to_owned(),
+        }),
+        "threshold-lock deployment evidence is optional for local signatures, but required and recomputable before claiming CKB enforcement",
+    );
     push_check(
         &mut checks,
         "settlement-authority-authentication-ready",
-        !package.settlement_authority.authority_authentication.ckb_enforceable
-            && !package.settlement_authority.authority_authentication.testnet_beta_ready
-            && !package.settlement_authority.authority_authentication.production_ready
+        ((package.settlement_authority.authority_authentication.ckb_enforceable
+            == package.settlement_authority.authority_authentication.threshold_lock_deployment.is_some())
+            || (!package.settlement_authority.authority_authentication.ckb_enforceable
+                && package.settlement_authority.authority_authentication.threshold_lock_deployment.is_none()))
+            && authority_deployment_valid
             && package.settlement_authority.authority_authentication.signature_verified
             && package.settlement_authority.authority_authentication.signatures.len()
                 == package.settlement_authority.authority_authentication.signer_pubkey_hashes.len()
@@ -6471,11 +6726,11 @@ fn verify_session_settlement_package(
             && package.settlement_authority.authority_authentication.ckb_lock_args_hash.len() == 64
             && hex::decode(&package.settlement_authority.authority_authentication.ckb_lock_args_hash).is_ok(),
         Some(
-            "!ckb_enforceable && !testnet_beta_ready && !production_ready && signature_verified && signatures match signer keys && signer_count >= threshold && threshold lock args present"
+            "deployment flags match verified evidence && signature_verified && signatures match signer keys && signer_count >= threshold && threshold lock args present"
                 .to_owned(),
         ),
         Some(format!(
-            "!{} && !{} && !{} && {} && {} == {} && {} >= {} && {}",
+            "{}:{}:{} && {} && {} == {} && {} >= {} && {}",
             package.settlement_authority.authority_authentication.ckb_enforceable,
             package.settlement_authority.authority_authentication.testnet_beta_ready,
             package.settlement_authority.authority_authentication.production_ready,
@@ -6486,7 +6741,7 @@ fn verify_session_settlement_package(
             package.settlement_authority.authority_authentication.threshold,
             package.settlement_authority.authority_authentication.ckb_lock_args_hash
         )),
-        "settlement authority carries verified local threshold signatures and declared CKB lock args without claiming deployed cryptographic lock enforcement",
+        "settlement authority carries verified local threshold signatures and only claims deployed CKB enforcement when threshold-lock deployment evidence is bound into the attestation",
     );
     push_check(
         &mut checks,
@@ -9124,16 +9379,36 @@ fn json_bool_true(report: &Value, pointer: &str) -> bool {
     report.pointer(pointer).and_then(Value::as_bool) == Some(true)
 }
 
-fn json_bool_false(report: &Value, pointer: &str) -> bool {
-    report.pointer(pointer).and_then(Value::as_bool) == Some(false)
-}
-
 fn json_array_has_hex_items(report: &Value, pointer: &str, min_len: usize, hex_chars: usize) -> bool {
     let Some(values) = report.pointer(pointer).and_then(Value::as_array) else {
         return false;
     };
     values.len() >= min_len
         && values.iter().all(|value| value.as_str().is_some_and(|item| item.len() == hex_chars && hex::decode(item).is_ok()))
+}
+
+fn final_l1_authority_authentication_preflight_ready(submission: &Value) -> bool {
+    let Some(auth_value) = submission.pointer("/settlement_authority_requirement/authority_authentication") else {
+        return false;
+    };
+    let Ok(auth) = serde_json::from_value::<SessionAuthorityAuthenticationEvidence>(auth_value.clone()) else {
+        return false;
+    };
+    if authority_authentication_attestation_hash(&auth).ok().as_deref() != Some(auth.attestation_hash.as_str()) {
+        return false;
+    }
+    match auth.threshold_lock_deployment.clone() {
+        Some(deployment) => {
+            let Ok(deployment) = normalize_threshold_lock_deployment_evidence(deployment, &auth) else {
+                return false;
+            };
+            auth.ckb_enforceable == deployment.ckb_enforceable_checked
+                && auth.testnet_beta_ready == deployment.testnet_beta_ready
+                && auth.production_ready == deployment.production_ready
+                && (!auth.production_ready || (auth.ckb_enforceable && deployment.production_ready))
+        }
+        None => !auth.ckb_enforceable && !auth.testnet_beta_ready && !auth.production_ready,
+    }
 }
 
 fn final_l1_script_preflight_ready(submission: &Value) -> bool {
@@ -9174,9 +9449,7 @@ fn final_l1_script_preflight_ready(submission: &Value) -> bool {
                 && json_bool_true(submission, "/authority_threshold_lock_identity_checked")
                 && submission.get("settlement_authority_requirement").is_some_and(Value::is_object)
                 && submission.pointer("/settlement_authority_requirement/authority_authentication").is_some_and(Value::is_object)
-                && json_bool_false(submission, "/settlement_authority_requirement/authority_authentication/ckb_enforceable")
-                && json_bool_false(submission, "/settlement_authority_requirement/authority_authentication/testnet_beta_ready")
-                && json_bool_false(submission, "/settlement_authority_requirement/authority_authentication/production_ready")
+                && final_l1_authority_authentication_preflight_ready(submission)
                 && json_bool_true(submission, "/settlement_authority_requirement/authority_authentication/signature_verified")
                 && json_array_has_hex_items(
                     submission,
@@ -10192,6 +10465,55 @@ mod tests {
     type SettlementIntentTamperCase = (&'static str, fn(&mut SessionSettlementIntentReport));
     type SettlementPackageTamperCase = (&'static str, fn(&mut SessionSettlementPackageReport));
 
+    fn settlement_package_fixture(
+        label: &str,
+    ) -> (SessionSettlementPackageReport, SessionSettlementIntentReport, PathBuf, PathBuf, PathBuf) {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = write_temp_json(&format!("{label}-open"), &open);
+        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
+        let _ = std::fs::remove_file(open_path);
+        let commit_path = write_temp_json(&format!("{label}-commit"), &commit);
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        let bundle_path = write_temp_json(&format!("{label}-court"), &bundle);
+        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest_path = write_temp_json(&format!("{label}-da"), &da_manifest);
+        let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
+            .expect("settlement intent");
+        let intent_path = write_temp_json(&format!("{label}-intent"), &intent);
+        let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
+            .expect("settlement package");
+        (package, intent, bundle_path, da_manifest_path, intent_path)
+    }
+
+    fn production_threshold_lock_deployment_fixture(
+        auth: &SessionAuthorityAuthenticationEvidence,
+    ) -> SessionThresholdLockDeploymentEvidence {
+        normalize_threshold_lock_deployment_evidence(
+            SessionThresholdLockDeploymentEvidence {
+                schema: "myelin-session-threshold-lock-deployment-v1".to_owned(),
+                network: "ckb-mainnet".to_owned(),
+                code_hash: format!("0x{}", "a1".repeat(32)),
+                hash_type: "data2".to_owned(),
+                code_dep_tx_hash: format!("0x{}", "b2".repeat(32)),
+                code_dep_index: "0x0".to_owned(),
+                audited_source_hash: format!("0x{}", "c3".repeat(32)),
+                audit_report_hash: format!("0x{}", "d4".repeat(32)),
+                deployment_policy: "mainnet-production-threshold-lock-v1".to_owned(),
+                ckb_lock_args_hash: auth.ckb_lock_args_hash.clone(),
+                threshold: auth.threshold,
+                signer_pubkey_hashes: auth.signer_pubkey_hashes.clone(),
+                ckb_enforceable_checked: true,
+                testnet_beta_ready: true,
+                production_ready: true,
+                evidence_commitment_algorithm: String::new(),
+                evidence_commitment: String::new(),
+            },
+            auth,
+        )
+        .expect("production threshold-lock deployment fixture")
+    }
+
     fn spawn_get_transaction_mock(
         expected_hash: String,
         status: String,
@@ -11104,6 +11426,7 @@ mod tests {
     fn write_readiness_live_final_settlement_submission(expected_hash: &str, authority_lock_matches: bool) -> PathBuf {
         let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
         let label_hash = &label_hash[..label_hash.len().min(8)];
+        let authority = settlement_authority_requirement([0x10; 32], [0x44; 32], [0x46; 32], [0x50; 32], [0x53; 32]);
         let submission = serde_json::json!({
             "schema": "myelin-session-ckb-final-script-submission-v1",
             "package_kind": "myelin-session-settlement-package-v1",
@@ -11118,37 +11441,7 @@ mod tests {
             "l1_court_submitted": true,
             "evidence_cell_dep_present": true,
             "authority_input_present": true,
-            "settlement_authority_requirement": {
-                "schema": "myelin-session-settlement-authority-v1",
-                "data": format!("0x{}", "11".repeat(32)),
-                "data_hash": format!("0x{}", "22".repeat(32)),
-                "data_semantics": "settlement-authority-lineage-v1",
-                "session_id": "44".repeat(32),
-                "authority_authentication": {
-                    "schema": "myelin-session-settlement-authority-auth-v1",
-                    "mode": "ckb-threshold-lock",
-                    "signature_domain": "myelin:session-settlement-authority-cell-auth:v1",
-                    "signature_scheme": "secp256k1-recoverable-blake3-pubkey-hash20",
-                    "participant_set_hash": "46".repeat(32),
-                    "threshold": 2,
-                    "signer_count": 2,
-                    "message_hash": "47".repeat(32),
-                    "signer_pubkey_hashes": ["4b".repeat(20), "4c".repeat(20)],
-                    "signatures": ["4d".repeat(65), "4e".repeat(65)],
-                    "attestation_hashes": ["48".repeat(32), "49".repeat(32)],
-                    "attestation_hash": "4a".repeat(32),
-                    "signature_verified": true,
-                    "ckb_lock_args_algorithm": "0x6d79656c696e2d617574682d7631 || threshold_le_u32 || signer_count_le_u32 || signer_pubkey_hash20[]",
-                    "ckb_lock_args": format!("0x{}", "51".repeat(61)),
-                    "ckb_lock_args_hash": "52".repeat(32),
-                    "ckb_lock_policy": "final DA publication and settlement authority cells must use these threshold-lock args",
-                    "ckb_enforceable": false,
-                    "testnet_beta_ready": false,
-                    "production_ready": false
-                },
-                "consumed_input_index": 1,
-                "required_lock_binding": "final-da-publication-lock-hash"
-            },
+            "settlement_authority_requirement": authority,
             "authority_threshold_lock_identity_checked": authority_lock_matches,
             "authority_threshold_lock_deployment_checked": authority_lock_matches,
             "authority_threshold_lock_deployment_mode": if authority_lock_matches {
@@ -12277,6 +12570,52 @@ mod tests {
         assert!(verification.checks.iter().any(|check| check.name == "settlement-celltx-recomputes"));
         assert!(verification.checks.iter().any(|check| check.name == "projection-profile"));
         assert!(verification.checks.iter().any(|check| check.name == "l1-court-script-marker"));
+    }
+
+    #[test]
+    fn session_settlement_package_accepts_bound_threshold_lock_deployment_evidence() {
+        let (base_package, _intent, bundle_path, da_manifest_path, intent_path) =
+            settlement_package_fixture("threshold-lock-deployment");
+        let deployment = production_threshold_lock_deployment_fixture(&base_package.settlement_authority.authority_authentication);
+        let deployment_path = write_temp_json("threshold-lock-deployment-evidence", &deployment);
+
+        let package = session_settlement_package_with_deployment(
+            intent_path.clone(),
+            bundle_path.clone(),
+            da_manifest_path.clone(),
+            Some(deployment_path.clone()),
+        )
+        .expect("settlement package with threshold-lock deployment evidence");
+        let auth = &package.settlement_authority.authority_authentication;
+        let bound_deployment = auth.threshold_lock_deployment.as_ref().expect("bound deployment evidence");
+        assert!(auth.ckb_enforceable);
+        assert!(auth.testnet_beta_ready);
+        assert!(auth.production_ready);
+        assert_eq!(bound_deployment.ckb_lock_args_hash, auth.ckb_lock_args_hash);
+        assert_eq!(bound_deployment.signer_pubkey_hashes, auth.signer_pubkey_hashes);
+        assert_eq!(bound_deployment.production_ready, auth.production_ready);
+        assert_eq!(authority_authentication_attestation_hash(auth).expect("authority auth hash"), auth.attestation_hash);
+
+        let package_path = write_temp_json("threshold-lock-deployment-package", &package);
+        let verification = verify_session_settlement_package(
+            package_path.clone(),
+            intent_path.clone(),
+            bundle_path.clone(),
+            da_manifest_path.clone(),
+        )
+        .expect("verify settlement package with threshold-lock deployment");
+        let _ = std::fs::remove_file(package_path);
+        let _ = std::fs::remove_file(deployment_path);
+        let _ = std::fs::remove_file(intent_path);
+        let _ = std::fs::remove_file(da_manifest_path);
+        let _ = std::fs::remove_file(bundle_path);
+
+        assert!(verification.valid);
+        assert!(verification
+            .checks
+            .iter()
+            .any(|check| check.name == "settlement-authority-threshold-lock-deployment-evidence" && check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "settlement-authority-authentication-ready" && check.ok));
     }
 
     #[test]
@@ -15276,7 +15615,7 @@ mod tests {
 
         let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
             .expect("settlement package");
-        let cases: [SettlementPackageTamperCase; 12] = [
+        let cases: [SettlementPackageTamperCase; 13] = [
             ("authority-auth-hash", |package| {
                 package.settlement_authority.authority_authentication.attestation_hash = "33".repeat(32)
             }),
@@ -15304,6 +15643,9 @@ mod tests {
             ("authority-auth-enforceable", |package| package.settlement_authority.authority_authentication.ckb_enforceable = true),
             ("authority-auth-testnet-ready", |package| {
                 package.settlement_authority.authority_authentication.testnet_beta_ready = true
+            }),
+            ("authority-auth-production-ready", |package| {
+                package.settlement_authority.authority_authentication.production_ready = true
             }),
         ];
         for (label, mutate) in cases {

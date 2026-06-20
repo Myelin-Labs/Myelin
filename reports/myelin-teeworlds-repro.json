@@ -21,7 +21,7 @@
       "valid": true
     },
     "fixture": {
-      "average_elapsed_ns": 11010458,
+      "average_elapsed_ns": 11047736,
       "block_hash": "c74f510a61e3e3f2684b1fc261313bdd7097a9a3f7f55e625d331a5b4f7ee13f",
       "chunk_bytes": 262144,
       "chunks": 1,
@@ -51,7 +51,7 @@
       "l1_court_implemented": false,
       "molecule_transaction_bytes": 2616,
       "tendermint_evidence": {
-        "block_hash": "153ced9fc596b80662b327bafa5b04494007fa17ad48a6ba92ca5f535bc66c3a",
+        "block_hash": "53eece380ddc1a809c7d0b38773830da3857e9d96bce8e84bb00dc77db00491a",
         "certificate_step": "precommit",
         "consensus_kind": "tendermint",
         "finalised": true,
@@ -60,13 +60,13 @@
         "round": 0,
         "signatures": [
           {
-            "signature": "16d2eea0d34b91b2a8081dcb8fc70779dab5597bff42f4e481f38056320d7b3d11c5f4def817022fc392a715eff98bf303cd6ea4f604f38f16fcd6dfd5fb75f4",
-            "signature_hash": "e50e811dcdd105da5e14b1b2874b160a6c951a53c69223b6053e052e7128ee04",
+            "signature": "878f1df926b802ec17318dd7f6332c719155f58beb2e62bbc9b36a5b56c310546e4b6cf5174f1df9d952f34d82cc58d98c14bd83a5de4d225d78fc14e23ddd04",
+            "signature_hash": "a2fb60b53643c8ed1294343bb2257a661a2170a231abf01676bf1212fca89436",
             "validator_id": "validator-0"
           },
           {
-            "signature": "535b3dc0752039181fd69af1f67ebd5295fbb10b551c7b2ed56c85164244c051e876b6988c9d43298e0e5baa607e596f90fa8a5c2064a655343c7977eaf4368a",
-            "signature_hash": "cfa72f886736e5d8792ce2573c48f203a1f1d97f2c03ddc86f217f2ca286c5cf",
+            "signature": "94bef011eee0630a830bbe3bf929fd288a9311cd4c70dd0791ac9406d4ecc784f975434adc5b536ab52b4c29b016ca9f4a9774efaf3d67de3b436c72d1424d2c",
+            "signature_hash": "7ea1a9afe4070e7bb2dc9486d2eef237443e71878b3e057dd7398b758ede616c",
             "validator_id": "validator-1"
           }
         ],

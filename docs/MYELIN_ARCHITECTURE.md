@@ -565,9 +565,12 @@ declared lock args and expose an
 `authority_threshold_lock_deployment_checked` readiness marker when the live
 lock code dep plus final DA and authority cells all match the declared
 threshold-lock args. The package-level authority evidence still keeps
-`ckb_enforceable = false`; canonical deployed CKB threshold-lock cryptographic
-enforcement, production key custody, and deployment policy remain separate
-operational work.
+`ckb_enforceable = false` unless `session settlement-package` is given
+`--threshold-lock-deployment-evidence`. That evidence is normalised, checked
+against the generated signer set, threshold, and threshold-lock args hash, and
+then bound into the authority attestation hash; only checked mainnet deployment
+evidence can set the package-level authority `production_ready` marker. Production
+key custody and court deployment policy remain separate operational work.
 Settlement intents carry a recomputable `court_economics` policy commitment
 over participant/escrow binding, locally signature-verified DA committee
 availability evidence, challenge timing, minimum dispute bond, slash/reward

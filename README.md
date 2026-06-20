@@ -386,8 +386,12 @@ must all be present. The report also carries
 `authority_threshold_lock_deployment_mode` for final settlement submissions,
 proving the live lock code-dep plus final DA and authority lock preflight used
 the declared threshold-lock args. It still leaves package-level
-`authority_authentication.ckb_enforceable = false` until the threshold-lock
-script itself is deployed and audited as the canonical authority lock.
+`authority_authentication.ckb_enforceable = false` by default. Production
+authority evidence is now an explicit opt-in on `session settlement-package` via
+`--threshold-lock-deployment-evidence`; the evidence must bind a checked CKB
+deployment, code dep, audited source/report hashes, signer set, threshold, and
+the generated threshold-lock args hash into the authority attestation before
+`ckb_enforceable` / `production_ready` can become true.
 The readiness report carries
 `operational_policy`, a public-chain operations commitment covering reorg
 confirmation depth, stability requery, fee floor/rate/max-fee policy, retry
