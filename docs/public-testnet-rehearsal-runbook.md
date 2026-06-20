@@ -116,6 +116,15 @@ threshold-lock-deployment.json
 authority-signature-evidence.json
 ```
 
+For a repeatable local fixture preparation run of Phases 1-3, use:
+
+```bash
+scripts/myelin_public_testnet_rehearsal_prepare.sh
+```
+
+This helper writes a rehearsal artefact directory and summary, but it does not
+submit to CKB and it does not prove public-testnet completion.
+
 ## Phase 1: Build Session Artefacts
 
 Use deterministic fixture session data for the first rehearsal unless real game
