@@ -22,6 +22,11 @@ __pycache__/
 /target/doc/
 .qoder/
 
+# Website
+/website/node_modules/
+/website/dist/
+/website/.astro/
+
 # Temporary files
 *.tmp
 *.bak

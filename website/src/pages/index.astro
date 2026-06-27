@@ -1,0 +1,288 @@
+---
+import "../styles/global.css";
+import {
+  ArrowRight,
+  Braces,
+  Boxes,
+  Check,
+  CircuitBoard,
+  Cpu,
+  DatabaseZap,
+  FileCheck2,
+  GitBranch,
+  Github,
+  Layers3,
+  LockKeyhole,
+  Network,
+  ShieldCheck,
+  TerminalSquare,
+  TimerReset,
+  Workflow,
+} from "lucide-astro";
+
+const mediaSlot = `${import.meta.env.BASE_URL}media/protocol-slot.png`;
+
+const flowSteps = [
+  {
+    title: "CellScript source",
+    body: "Application logic starts as typed CellScript, then lowers into metadata and VM artefacts.",
+    icon: Braces,
+  },
+  {
+    title: "Session execution",
+    body: "Participants run finite off-chain transitions under deterministic scheduling rules.",
+    icon: Cpu,
+  },
+  {
+    title: "Cell state root",
+    body: "Each commit produces a live Cell state root plus evidence for the transition.",
+    icon: DatabaseZap,
+  },
+  {
+    title: "Evidence bundle",
+    body: "DA manifests, court bundles, settlement packages, and submission checks stay inspectable.",
+    icon: FileCheck2,
+  },
+  {
+    title: "Future L1 court",
+    body: "The disputed path is designed around CKB-style transaction context and CKB-VM verification.",
+    icon: ShieldCheck,
+  },
+];
+
+const evidence = [
+  "Deterministic CellTx execution reports",
+  "CKB projection reports with explicit deviation flags",
+  "Session open, commit, DA, court, settlement, and package flows",
+  "Static committee and Tendermint-style precommit fixtures",
+  "Teeworlds replay evidence with per-chunk projection status",
+];
+
+const modules = [
+  ["CellScript fork", "typed-cell target profile and package evidence"],
+  ["exec", "Cell transactions, script verification, VM and scheduler glue"],
+  ["state", "live Cell roots and data-availability proof primitives"],
+  ["mempool", "deterministic conflict scoring for Cell transactions"],
+  ["consensus", "closed-validator session fast paths for benchmarking"],
+  ["cli", "fixture, report, package, and verification entry points"],
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="Myelin is a CKB-aligned off-chain Cell session runtime for deterministic, finite Cell execution and future single-chunk L1 adjudication."
+    />
+    <meta property="og:title" content="Myelin — CKB-aligned Cell session runtime" />
+    <meta
+      property="og:description"
+      content="Run high-frequency Cell transitions off-chain while keeping evidence, projection reports, and future court paths aligned with CKB semantics."
+    />
+    <title>Myelin — CKB-aligned Cell session runtime</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Myelin home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48" role="img">
+            <path d="M8 38 18 10l12 28L40 10" />
+            <path d="M15 29h18" />
+            <path d="M22 20h4" />
+          </svg>
+        </span>
+        <span>Myelin</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="#protocol">Protocol</a>
+        <a href="#evidence">Evidence</a>
+        <a href="#modules">Modules</a>
+        <a href="#readme">README</a>
+      </nav>
+      <a class="header-link" href="https://github.com/Myelin-Labs/Myelin">
+        <Github aria-hidden="true" />
+        <span>GitHub</span>
+      </a>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <h1 id="hero-title">Myelin</h1>
+          <p class="hero-lead">
+            A CKB-aligned off-chain Cell session runtime for high-frequency,
+            finite state transitions with evidence that can be inspected,
+            projected, and contested.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#protocol">
+              <span>Explore protocol</span>
+              <ArrowRight aria-hidden="true" />
+            </a>
+            <a class="button secondary" href="https://github.com/Myelin-Labs/Myelin#readme">Read README</a>
+          </div>
+          <div class="terminal-strip" aria-label="Current positioning">
+            <TerminalSquare aria-hidden="true" />
+            <span>not a CKB full node · not a new L1 · early closed-validator session fast paths</span>
+          </div>
+        </div>
+
+        <figure class="media-frame hero-media">
+          <img src={mediaSlot} alt="" loading="eager" decoding="async" />
+          <figcaption>
+            <span>Protocol / session imagery slot</span>
+            <strong>1280 x 720</strong>
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="section what-section" aria-labelledby="what-title">
+        <div class="section-copy">
+          <h2 id="what-title">What Myelin is</h2>
+          <p>
+            Myelin keeps the Cell model at the centre: transactions consume live
+            Cells, produce replacement Cells, and keep lock/type-script
+            semantics visible instead of turning the system into an account
+            ledger.
+          </p>
+        </div>
+        <div class="signal-grid">
+          <article>
+            <TimerReset aria-hidden="true" />
+            <h3>Fast sessions</h3>
+            <p>Run many finite state transitions off-chain before the L1 path matters.</p>
+          </article>
+          <article>
+            <LockKeyhole aria-hidden="true" />
+            <h3>Typed boundaries</h3>
+            <p>Keep CellScript metadata, scheduler witnesses, and VM verification explicit.</p>
+          </article>
+          <article>
+            <GitBranch aria-hidden="true" />
+            <h3>Contestable evidence</h3>
+            <p>Emit bundles that explain what changed and where a dispute should focus.</p>
+          </article>
+          <article>
+            <CircuitBoard aria-hidden="true" />
+            <h3>CKB aligned</h3>
+            <p>Optimise for CKB-style context and CKB-VM semantics, not an independent L1.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section protocol-section" id="protocol" aria-labelledby="protocol-title">
+        <div class="section-copy wide">
+          <h2 id="protocol-title">From CellScript to session state</h2>
+          <p>
+            The current implementation is a protocol seed. It proves the shape
+            of deterministic session execution and keeps the future court path
+            in view without claiming finished permissionless L2 security.
+          </p>
+        </div>
+        <div class="flow" aria-label="Protocol flow">
+          {flowSteps.map((step, index) => {
+            const Icon = step.icon;
+            return (
+              <article class="flow-card">
+                <span class="flow-index">{index + 1}</span>
+                <Icon aria-hidden="true" />
+                <h3>{step.title}</h3>
+                <p>{step.body}</p>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+
+      <section class="section split-section" id="evidence" aria-labelledby="evidence-title">
+        <div class="evidence-copy">
+          <h2 id="evidence-title">Evidence before claims</h2>
+          <p>
+            The repository is organised around executable evidence. The strongest
+            local claim is not marketing language; it is a passing report that
+            names the projection status, consensus mode, and verification path.
+          </p>
+          <ul class="check-list">
+            {evidence.map((item) => (
+              <li>
+                <Check aria-hidden="true" />
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+          <a class="button text-link" href="https://github.com/Myelin-Labs/Myelin/blob/main/MYELIN_PRODUCTION_GATE.md">View production gate notes</a>
+        </div>
+        <figure class="media-frame">
+          <img src={mediaSlot} alt="" loading="lazy" decoding="async" />
+          <figcaption>
+            <span>Session evidence screenshot slot</span>
+            <strong>1280 x 720</strong>
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="section modules-section" id="modules" aria-labelledby="modules-title">
+        <div class="section-copy">
+          <h2 id="modules-title">Module map</h2>
+          <p>
+            Myelin is intentionally smaller than the source-chain surface it
+            came from. The remaining crates form a finite Cell session kernel.
+          </p>
+        </div>
+        <div class="module-board">
+          <div class="module-map" aria-label="Myelin module flow">
+            <span class="node primary"><Workflow aria-hidden="true" /> Session core</span>
+            <span class="node"><Boxes aria-hidden="true" /> CellScript</span>
+            <span class="node"><Cpu aria-hidden="true" /> exec</span>
+            <span class="node"><DatabaseZap aria-hidden="true" /> state</span>
+            <span class="node"><Layers3 aria-hidden="true" /> mempool</span>
+            <span class="node"><Network aria-hidden="true" /> consensus</span>
+            <span class="node"><TerminalSquare aria-hidden="true" /> cli</span>
+          </div>
+          <div class="module-list">
+            {modules.map(([name, detail]) => (
+              <article>
+                <h3>{name}</h3>
+                <p>{detail}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section class="section cta-section" id="readme" aria-labelledby="cta-title">
+        <div>
+          <h2 id="cta-title">Start with a report, not a slogan</h2>
+          <p>
+            Read the repository overview, run the focused gates, then inspect
+            the generated evidence before deciding whether a Myelin session
+            fits your CKB-aligned application.
+          </p>
+        </div>
+        <div class="cta-actions">
+          <a class="button primary" href="https://github.com/Myelin-Labs/Myelin#readme">Open README</a>
+          <a class="button secondary" href="https://github.com/Myelin-Labs/Myelin">Star on GitHub</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div>
+        <strong>Myelin</strong>
+        <p>CKB-aligned off-chain Cell sessions for finite, contestable applications.</p>
+      </div>
+      <nav aria-label="Footer navigation">
+        <a href="#protocol">Protocol</a>
+        <a href="#evidence">Evidence</a>
+        <a href="#modules">Modules</a>
+        <a href="https://github.com/Myelin-Labs/Myelin">GitHub</a>
+      </nav>
+    </footer>
+  </body>
+</html>
