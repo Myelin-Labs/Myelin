@@ -37,8 +37,8 @@ ipc_abi = "cellscript-btc-bip340-ipc-v0"
 out_point = "0x6418f34fa16dc691febc1ce3870ff411c0bf6600f53ff27f57ca9723ae1d2c31:0"
 dep_type = "code"
 hash_type = "data1"
-data_hash = "0x918bf58554aaab5c082ba21f975eea70c2bf2330926b8b7a80d38fd1d9b7e598"
-artifact_hash = "0x54f26ee955ab3ecbbacc3f5eef20ad3ffee9125c14241e8ea44b382618af2391"
+data_hash = "0x39322c6dd19574fed96547ca122924b3feb468281a6f4473ef83483403a7929c"
+artifact_hash = "0xfb9093cd772873a992018cd2b357bf4e39884af5b48981c8fa65ebbf919f10c9"
 
 [metadata]
 protocol_family = "NovaSeal"

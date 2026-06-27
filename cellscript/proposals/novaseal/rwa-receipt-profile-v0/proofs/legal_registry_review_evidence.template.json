@@ -15,7 +15,7 @@
     "jurisdiction": "REPLACE_WITH_REAL_WORLD_JURISDICTION",
     "registry_report_hash": "0xREPLACE_WITH_64_HEX_REGISTRY_REVIEW_REPORT_HASH"
   },
-  "profile_source_tree_sha256": "0x3d96cc93541e5c2ef795f9ca7bd8d360190d38a7db54350fae0c73c5cf5f52a8",
+  "profile_source_tree_sha256": "0x1e860efaf286dc5739957aa7f42a4f1ec3160ced79b8ea6ea6c7db42472cf475",
   "report_uri": "REPLACE_WITH_EXTERNAL_LEGAL_OR_REGISTRY_REVIEW_REPORT_URI",
   "request_handoff": {
     "bundle": "target/novaseal-external-evidence-handoff-bundle.json",

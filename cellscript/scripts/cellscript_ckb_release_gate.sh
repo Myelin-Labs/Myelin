@@ -364,6 +364,16 @@ check_action_builder_toolchain() {
     printf 'CellScript generated builder tooling check passed: %s\n' "$output_dir"
 }
 
+run_vscode_extension_check() {
+    require_cmd npm
+
+    if [[ ! -d editors/vscode-cellscript/node_modules ]]; then
+        run npm --prefix editors/vscode-cellscript ci
+    fi
+    run npm --prefix editors/vscode-cellscript run validate
+    run npm --prefix editors/vscode-cellscript run publish:dry-run
+}
+
 run_common_gate() {
     require_cmd cargo
     require_cmd python3
@@ -381,8 +391,7 @@ run_common_gate() {
     run bash -n scripts/cellscript_cellfabric_bridge_smoke.sh
     run python3 -m py_compile scripts/cellscript_syntax_combo_audit.py
     run ./scripts/cellscript_syntax_combo_audit.sh quick
-    run npm --prefix editors/vscode-cellscript run validate
-    run npm --prefix editors/vscode-cellscript run publish:dry-run
+    run_vscode_extension_check
     check_action_builder_toolchain
     run git diff --check
     check_trailing_whitespace

@@ -27,6 +27,17 @@ run() {
     "$@"
 }
 
+default_ckb_repo() {
+    local parent grandparent
+    parent="$(cd "$ROOT_DIR/.." && pwd)"
+    grandparent="$(cd "$ROOT_DIR/../.." && pwd)"
+    if [[ -d "$parent/ckb" ]]; then
+        printf '%s\n' "$parent/ckb"
+    else
+        printf '%s\n' "$grandparent/ckb"
+    fi
+}
+
 cargo_fmt_workspace() {
     run cargo fmt \
         --manifest-path "$ROOT_DIR/Cargo.toml" \
@@ -138,6 +149,7 @@ check_novaseal_verifier_pinning() {
     python3 - <<'PY'
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -150,11 +162,12 @@ except ModuleNotFoundError:
 
 root = Path.cwd()
 core_root = root / "proposals/novaseal/v0-mvp-skeleton"
-release_elf = (
-    core_root
-    / "verifier/novaseal_btc_verifier_riscv/target/"
-    / "riscv64imac-unknown-none-elf/release/novaseal_btc_verifier_riscv"
-)
+target_suffix = Path("riscv64imac-unknown-none-elf/release/novaseal_btc_verifier_riscv")
+cargo_target_dir = os.environ.get("CARGO_TARGET_DIR")
+if cargo_target_dir:
+    release_elf = Path(cargo_target_dir) / target_suffix
+else:
+    release_elf = core_root / "verifier/novaseal_btc_verifier_riscv/target" / target_suffix
 if not release_elf.is_file():
     print(f"missing NovaSeal RISC-V verifier release ELF: {release_elf}", file=sys.stderr)
     sys.exit(1)
@@ -556,8 +569,18 @@ run_website_build_check() {
     run npm --prefix website run build
 }
 
+run_vscode_extension_check() {
+    require_cmd npm
+
+    if [[ ! -d editors/vscode-cellscript/node_modules ]]; then
+        run npm --prefix editors/vscode-cellscript ci
+    fi
+    run npm --prefix editors/vscode-cellscript run validate
+    run npm --prefix editors/vscode-cellscript run publish:dry-run
+}
+
 check_ckb_tx_measure_tool() {
-    local ckb_repo="$ROOT_DIR/../ckb"
+    local ckb_repo="${CKB_REPO:-$(default_ckb_repo)}"
     local toolchain=""
     if [[ -f "$ckb_repo/rust-toolchain.toml" ]]; then
         toolchain="$(python3 - "$ckb_repo/rust-toolchain.toml" <<'PY'
@@ -661,8 +684,7 @@ run_release_auxiliary_checks() {
     check_ckb_tx_measure_tool
     check_novaseal_rust_tooling
     check_novaseal_verifier_pinning
-    run npm --prefix editors/vscode-cellscript run validate
-    run npm --prefix editors/vscode-cellscript run publish:dry-run
+    run_vscode_extension_check
 }
 
 run_release_quick_gate() {

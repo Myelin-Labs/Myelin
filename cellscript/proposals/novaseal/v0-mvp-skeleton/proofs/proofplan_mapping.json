@@ -290,7 +290,7 @@
       "preflight_passed": true,
       "staged_matches_release": true,
       "staged_release_elf_size_bytes": 187816,
-      "staged_release_elf_sha256": "54f26ee955ab3ecbbacc3f5eef20ad3ffee9125c14241e8ea44b382618af2391",
+      "staged_release_elf_sha256": "fb9093cd772873a992018cd2b357bf4e39884af5b48981c8fa65ebbf919f10c9",
       "generated_spawn_visible": true,
       "strict_surface_clean": true,
       "lock_wiring_status": "wired_to_bip340_shell",
