@@ -1,0 +1,123 @@
+---
+import "../styles/global.css";
+import SiteHeader from "../components/SiteHeader.astro";
+import BrandMark from "../components/BrandMark.astro";
+import { ClientRouter } from "astro:transitions";
+import { links } from "../data/site";
+import { defaultLocale, translations } from "../i18n/translations";
+
+const locale = defaultLocale;
+const t = translations[locale];
+const title = `CellScript — ${t.notFound.eyebrow}`;
+---
+
+<!doctype html>
+<html lang={locale}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="robots" content="noindex" />
+    <link rel="icon" type="image/png" href={`${import.meta.env.BASE_URL}cellscript-logo.png`} />
+    <link rel="icon" type="image/png" media="(prefers-color-scheme: light)" href={`${import.meta.env.BASE_URL}cellscript-logo-light.png`} />
+    <link rel="icon" type="image/png" media="(prefers-color-scheme: dark)" href={`${import.meta.env.BASE_URL}cellscript-logo-dark.png`} />
+    <title>{title}</title>
+    <script is:inline>
+      (() => {
+        try {
+          const storedTheme = localStorage.getItem("cellscript-theme");
+          const storedLocale = localStorage.getItem("cellscript-locale");
+          document.documentElement.dataset.theme = storedTheme === "light" || storedTheme === "dark" ? storedTheme : "light";
+          document.documentElement.dataset.locale = storedLocale === "zh" ? "zh" : "en";
+          document.documentElement.lang = document.documentElement.dataset.locale;
+        } catch {
+          document.documentElement.dataset.theme = "light";
+          document.documentElement.dataset.locale = "en";
+          document.documentElement.lang = "en";
+        }
+      })();
+    </script>
+    <ClientRouter />
+  </head>
+  <body class="not-found-body">
+    <a class="skip-link" href="#not-found" data-i18n="a11y.skipToContent">{t.a11y.skipToContent}</a>
+    <SiteHeader />
+    <main id="not-found" class="not-found-page">
+      <section class="not-found-card spotlight-card">
+        <div class="not-found-brand"><BrandMark /></div>
+        <p class="registry-eyebrow" data-i18n="notFound.eyebrow">{t.notFound.eyebrow}</p>
+        <h1 class="not-found-title" data-i18n="notFound.title">{t.notFound.title}</h1>
+        <p class="not-found-lead" data-i18n="notFound.lead">{t.notFound.lead}</p>
+        <div class="not-found-actions">
+          <a class="button primary" href="/" data-i18n="notFound.ctaHome">{t.notFound.ctaHome}</a>
+          <a class="button ghost" href="/playground" data-i18n="notFound.ctaPlayground">{t.notFound.ctaPlayground}</a>
+          <a class="button ghost" href={links.docs} data-i18n="notFound.ctaDocs">{t.notFound.ctaDocs}</a>
+        </div>
+      </section>
+    </main>
+
+    <style is:global>
+      .not-found-body {
+        min-height: 100dvh;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .not-found-page {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: calc(100dvh - 64px);
+        padding: clamp(32px, 6vw, 80px) var(--site-gutter);
+      }
+
+      .not-found-card {
+        max-width: 560px;
+        text-align: center;
+        padding: clamp(28px, 5vw, 48px);
+        border: 1px solid var(--line-soft);
+        border-radius: var(--radius);
+        background: var(--panel);
+        box-shadow: 0 22px 80px var(--shadow-soft);
+      }
+
+      .not-found-brand .brand-mark {
+        width: 64px;
+        height: 64px;
+        margin: 0 auto 18px;
+        display: block;
+      }
+
+      .not-found-title {
+        margin: 8px 0 0;
+        font-family: var(--font-sans);
+        font-size: clamp(1.8rem, 4vw, 2.4rem);
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        line-height: 1.1;
+        color: var(--text);
+      }
+
+      .not-found-lead {
+        margin: 14px auto 0;
+        max-width: 420px;
+        color: var(--muted);
+        font-size: 1.02rem;
+        line-height: 1.6;
+      }
+
+      .not-found-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        justify-content: center;
+        margin-top: 26px;
+      }
+    </style>
+
+    <script is:inline define:vars={{ i18n: translations, initialLocale: locale }}>
+      window.__CELLSCRIPT_I18N__ = i18n;
+      window.__CELLSCRIPT_DEFAULT_LOCALE__ = initialLocale;
+    </script>
+  </body>
+</html>

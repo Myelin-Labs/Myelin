@@ -261,11 +261,6 @@ impl StdLib {
                 return_type: Some(IrType::Hash),
             },
             StdFunction {
-                name: "ckb_cell_exists".to_string(),
-                params: vec![("source_view".to_string(), IrType::U64)],
-                return_type: Some(IrType::Bool),
-            },
-            StdFunction {
                 name: "ckb_input_out_point_index".to_string(),
                 params: vec![("source_view".to_string(), IrType::U64)],
                 return_type: Some(IrType::U64),
@@ -603,7 +598,7 @@ impl StdLib {
         asm.push_str("    ret\n\n");
 
         let load_script_syscall = match target_profile {
-            TargetProfile::Ckb | TargetProfile::TypedCell => ckb_abi::syscall::LOAD_SCRIPT,
+            TargetProfile::Ckb => ckb_abi::syscall::LOAD_SCRIPT,
         };
         asm.push_str(&format!("# Syscall: load_script ({})\n", load_script_syscall));
         asm.push_str(".global __syscall_load_script\n");
@@ -878,16 +873,6 @@ pub struct SchedulerAccess {
     pub binding: String,
 }
 
-/// Scheduler-visible typed-cell access summary with live transaction hashes.
-#[derive(Debug, Clone)]
-pub struct TypedCellSchedulerAccess {
-    pub operation: String,
-    pub source: String,
-    pub index: u32,
-    pub conflict_hash: [u8; 32],
-    pub typed_data_hash: [u8; 32],
-}
-
 impl SchedulerMetadata {
     pub fn generate(
         effect_class: &str,
@@ -939,62 +924,6 @@ impl SchedulerMetadata {
             scheduler_molecule_encode_fixvec_access(&accesses),
         ])
     }
-
-    pub fn generate_typed_cell_molecule(
-        effect_class: &str,
-        parallelizable: bool,
-        estimated_cycles: u64,
-        accesses: Vec<SchedulerAccess>,
-    ) -> Vec<u8> {
-        let effect_class_id = match effect_class {
-            "Pure" => 0,
-            "ReadOnly" => 1,
-            "Mutating" => 2,
-            "Creating" => 3,
-            "Destroying" => 4,
-            _ => 0,
-        };
-
-        let accesses = accesses.iter().filter_map(typed_cell_access_record).collect::<Vec<_>>();
-
-        scheduler_molecule_encode_table(&[
-            0xCE11u16.to_le_bytes().to_vec(),
-            vec![1],
-            vec![effect_class_id],
-            vec![u8::from(parallelizable)],
-            estimated_cycles.to_le_bytes().to_vec(),
-            (accesses.len() as u32).to_le_bytes().to_vec(),
-            scheduler_molecule_encode_fixvec_access(&accesses),
-        ])
-    }
-
-    pub fn generate_typed_cell_molecule_with_hashes(
-        effect_class: &str,
-        parallelizable: bool,
-        estimated_cycles: u64,
-        accesses: Vec<TypedCellSchedulerAccess>,
-    ) -> Vec<u8> {
-        let effect_class_id = match effect_class {
-            "Pure" => 0,
-            "ReadOnly" => 1,
-            "Mutating" => 2,
-            "Creating" => 3,
-            "Destroying" => 4,
-            _ => 0,
-        };
-
-        let accesses = accesses.iter().filter_map(typed_cell_hashed_access_record).collect::<Vec<_>>();
-
-        scheduler_molecule_encode_table(&[
-            0xCE11u16.to_le_bytes().to_vec(),
-            vec![1],
-            vec![effect_class_id],
-            vec![u8::from(parallelizable)],
-            estimated_cycles.to_le_bytes().to_vec(),
-            (accesses.len() as u32).to_le_bytes().to_vec(),
-            scheduler_molecule_encode_fixvec_access(&accesses),
-        ])
-    }
 }
 
 fn scheduler_operation_id(operation: &str) -> u8 {
@@ -1019,77 +948,6 @@ fn scheduler_source_id(source: &str) -> u8 {
         "Output" => 3,
         _ => 0,
     }
-}
-
-fn typed_cell_access_record(access: &SchedulerAccess) -> Option<Vec<u8>> {
-    let operation = typed_cell_operation_id(&access.operation)?;
-    let source = typed_cell_source_id(&access.source)?;
-    if !typed_cell_operation_accepts_source(operation, source) {
-        return None;
-    }
-
-    let mut out = Vec::with_capacity(70);
-    out.push(operation);
-    out.push(source);
-    out.extend_from_slice(&access.index.to_le_bytes());
-    out.extend_from_slice(&typed_cell_access_hash(b"myelin-typed-cell/conflict-hash/v1", access));
-    out.extend_from_slice(&typed_cell_access_hash(b"myelin-typed-cell/typed-data-hash/v1", access));
-    Some(out)
-}
-
-fn typed_cell_hashed_access_record(access: &TypedCellSchedulerAccess) -> Option<Vec<u8>> {
-    let operation = typed_cell_operation_id(&access.operation)?;
-    let source = typed_cell_source_id(&access.source)?;
-    if !typed_cell_operation_accepts_source(operation, source) {
-        return None;
-    }
-
-    let mut out = Vec::with_capacity(70);
-    out.push(operation);
-    out.push(source);
-    out.extend_from_slice(&access.index.to_le_bytes());
-    out.extend_from_slice(&access.conflict_hash);
-    out.extend_from_slice(&access.typed_data_hash);
-    Some(out)
-}
-
-fn typed_cell_operation_id(operation: &str) -> Option<u8> {
-    match operation {
-        "consume" => Some(1),
-        "transfer" => Some(2),
-        "destroy" => Some(3),
-        "read_ref" => Some(6),
-        "create" => Some(7),
-        _ => None,
-    }
-}
-
-fn typed_cell_source_id(source: &str) -> Option<u8> {
-    match source {
-        "Input" => Some(1),
-        "CellDep" => Some(2),
-        "Output" => Some(3),
-        _ => None,
-    }
-}
-
-fn typed_cell_operation_accepts_source(operation: u8, source: u8) -> bool {
-    match operation {
-        1 | 2 | 3 => source == 1,
-        6 => matches!(source, 1 | 2),
-        7 => source == 3,
-        _ => false,
-    }
-}
-
-fn typed_cell_access_hash(domain: &[u8], access: &SchedulerAccess) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain);
-    hasher.update(&[typed_cell_operation_id(&access.operation).unwrap_or(0)]);
-    hasher.update(&[typed_cell_source_id(&access.source).unwrap_or(0)]);
-    hasher.update(&access.index.to_le_bytes());
-    hasher.update(access.binding.as_bytes());
-    *hasher.finalize().as_bytes()
 }
 
 fn scheduler_molecule_pack_number(value: usize) -> [u8; 4] {

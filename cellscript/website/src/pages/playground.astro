@@ -1,0 +1,2411 @@
+---
+/**
+ * Playground page — a focused CellScript compiler workbench.
+ *
+ * Loads the prebuilt WASM compiler bundle and live-compiles the user's
+ * source to typed-transition metadata. Three-column layout:
+ *   - Left: editable source (textarea + highlight overlay)
+ *   - Middle: compile output (Actions / Types / Metadata tabs)
+ *   - Right: provenance rail with live diagnostics
+ *
+ * The hero pseudo-console links here with ?example=<id> to preload an
+ * example. Users can edit freely; compile runs in a Web Worker 300ms
+ * after the last keystroke (debounced).
+ *
+ * Design constraints: keep the workbench size-conscious and browser-only.
+ * The editor stays textarea + highlight overlay for now; native import/export
+ * uses .cell and Cell.toml-backed .zip packages instead of playground JSON.
+ */
+import "../styles/global.css";
+import { playgroundExamples, exampleFullSources, exampleGroups } from "../data/site";
+import { translations } from "../i18n/translations";
+import SiteHeader from "../components/SiteHeader.astro";
+import { ClientRouter } from "astro:transitions";
+import { BookOpen, Check, ChevronDown, Copy, Download, FilePlus, RefreshCw, Trash2, Upload } from "lucide-astro";
+
+// The locale is resolved client-side from localStorage (see the inline
+// init script below), so the server renders the English fallback and
+// the client swaps strings at runtime via [data-i18n]. We render `en`
+// here only to satisfy Astro's SSR pass; the runtime i18n layer picks
+// up the stored/initial locale on load.
+const t = translations.en;
+const initialExample = playgroundExamples[0];
+const initialSource = exampleFullSources[initialExample.id] ?? "";
+const getPlaygroundExampleCopy = (id: string) =>
+  (t.playground.examples as Record<string, { title: string; summary: string }>)[id];
+const playgroundExampleMeta = playgroundExamples.map(({ id, label, file }) => ({ id, label, file }));
+type PlaygroundExample = (typeof playgroundExamples)[number];
+const playgroundExampleById = new Map<string, PlaygroundExample>(playgroundExamples.map((example) => [example.id, example]));
+const normaliseGroupExampleId = (id: string) => id === "ammPool" ? "amm" : id;
+const playgroundExampleGroupLabels = t.playground.exampleGroups as Record<string, string>;
+const groupedPlaygroundExampleIds = new Set<string>();
+const playgroundSelectGroups: Array<{ id: string; label: string; items: PlaygroundExample[] }> = exampleGroups.map((group) => {
+  const items = group.items
+    .map((item) => playgroundExampleById.get(normaliseGroupExampleId(item.id)))
+    .filter(Boolean) as PlaygroundExample[];
+  items.forEach((item) => groupedPlaygroundExampleIds.add(item.id));
+  return { id: group.id, label: playgroundExampleGroupLabels[group.id] ?? group.id, items };
+}).filter((group) => group.items.length > 0);
+const ungroupedPlaygroundExamples = playgroundExamples.filter((example) => !groupedPlaygroundExampleIds.has(example.id));
+if (ungroupedPlaygroundExamples.length > 0) {
+  playgroundSelectGroups.push({ id: "advanced", label: playgroundExampleGroupLabels.advanced ?? "advanced", items: ungroupedPlaygroundExamples });
+}
+---
+
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{t.playground.pageTitle}</title>
+    <link rel="icon" type="image/png" href={`${import.meta.env.BASE_URL}cellscript-logo.png`} />
+    <link rel="icon" type="image/png" media="(prefers-color-scheme: light)" href={`${import.meta.env.BASE_URL}cellscript-logo-light.png`} />
+    <link rel="icon" type="image/png" media="(prefers-color-scheme: dark)" href={`${import.meta.env.BASE_URL}cellscript-logo-dark.png`} />
+    <script is:inline>
+      (function () {
+        try {
+          var stored = localStorage.getItem("cellscript-theme");
+          var theme = stored || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+          document.documentElement.dataset.theme = theme;
+          var storedLocale = localStorage.getItem("cellscript-locale");
+          document.documentElement.dataset.locale = storedLocale === "zh" ? "zh" : "en";
+          document.documentElement.lang = document.documentElement.dataset.locale;
+        } catch (e) {}
+      })();
+    </script>
+    <ClientRouter />
+  </head>
+  <body class="playground-body">
+    <a class="skip-link" href="#playground-editor" data-i18n="playground.skipToEditor">{t.playground.skipToEditor}</a>
+    <SiteHeader page="playground" />
+    <template data-metadata-copy-template>
+      <button class="copy-btn metadata-copy" type="button" aria-live="polite">
+        <Copy class="copy-icon" aria-hidden="true" />
+        <Check class="check-icon" aria-hidden="true" />
+      </button>
+    </template>
+    <template data-file-delete-icon>
+      <Trash2 class="pg-file-delete-icon" aria-hidden="true" />
+    </template>
+    <div class="pg-toolbar">
+      <h1 class="pg-toolbar-title" data-i18n="playground.title">{t.playground.title}</h1>
+      <div class="pg-toolbar-actions">
+        <details class="pg-example-menu" data-example-menu>
+          <summary class="pg-action-btn pg-example-menu-trigger" data-i18n-aria-label="playground.examplesDrawer" aria-label={t.playground.examplesDrawer}>
+            <BookOpen aria-hidden="true" />
+            <span data-i18n="playground.examplesDrawer">{t.playground.examplesDrawer}</span>
+            <ChevronDown class="pg-example-menu-chevron" aria-hidden="true" />
+          </summary>
+          <div class="pg-example-menu-panel">
+            <aside class="pg-example-lesson" data-example-lesson aria-live="polite">
+              <span data-i18n="playground.lessonLabel">{t.playground.lessonLabel}</span>
+              <strong data-example-title data-i18n={`playground.examples.${initialExample.id}.title`}>
+                {getPlaygroundExampleCopy(initialExample.id)?.title ?? initialExample.label}
+              </strong>
+              <p data-example-summary data-i18n={`playground.examples.${initialExample.id}.summary`}>
+                {getPlaygroundExampleCopy(initialExample.id)?.summary}
+              </p>
+            </aside>
+            <div class="pg-example-list">
+              {playgroundSelectGroups.map((group) => (
+                <section class="pg-example-group">
+                  <h2 data-i18n={`playground.exampleGroups.${group.id}`}>{group.label}</h2>
+                  <div class="pg-example-buttons">
+                    {group.items.map((ex) => (
+                      <button class="pg-example-item" type="button" data-example-button data-example-id={ex.id} data-i18n-aria-label="playground.loadExample" aria-label={t.playground.loadExample.replace("{name}", getPlaygroundExampleCopy(ex.id)?.title ?? ex.label)}>
+                        <span data-i18n={`playground.examples.${ex.id}.title`}>{getPlaygroundExampleCopy(ex.id)?.title ?? ex.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </div>
+        </details>
+        <div class="pg-compile-control">
+          <span class="pg-compile-status" data-compile-status data-state="idle" role="status" aria-live="polite">
+            <span class="pg-compile-dot" aria-hidden="true"></span>
+            <span class="pg-compile-label" data-compile-label>{t.playground.compile}</span>
+          </span>
+          <button class="pg-icon-btn pg-compile-refresh" type="button" data-compile data-i18n-aria-label="playground.compileAria" data-i18n-title="playground.compileAria" aria-label={t.playground.compileAria} title={t.playground.compileAria}>
+            <RefreshCw class="pg-compile-icon" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <nav class="pg-mobile-switch" aria-label={t.playground.mobileSwitchAria}>
+      <button class="active" type="button" data-mobile-view-btn="source" aria-pressed="true" data-i18n="playground.source">{t.playground.source}</button>
+      <button type="button" data-mobile-view-btn="output" aria-pressed="false" data-i18n="playground.output">{t.playground.output}</button>
+      <button type="button" data-mobile-view-btn="rail" aria-pressed="false" data-i18n="playground.provenance">{t.playground.provenance}</button>
+    </nav>
+
+    <main class="pg-main" data-pg-main data-mobile-view="source">
+      <!-- Left: source editor -->
+      <section class="pg-col pg-source" id="playground-editor" aria-label={t.playground.source} data-i18n-aria-label="playground.source" tabindex="-1">
+        <div class="pg-col-head pg-source-head">
+          <span data-i18n="playground.source">{t.playground.source}</span>
+          <div class="pg-source-head-actions">
+            <code class="pg-active-file-chip" data-active-file-chip></code>
+            <button class="pg-entry-action" type="button" data-set-entry data-i18n-aria-label="playground.setEntry" data-i18n-title="playground.setEntry" aria-label={t.playground.setEntry} title={t.playground.setEntry}>
+              <Check aria-hidden="true" />
+              <span data-set-entry-label data-i18n="playground.setEntry">{t.playground.setEntry}</span>
+            </button>
+          </div>
+        </div>
+        <div class="pg-source-body">
+          <aside class="pg-workspace" data-workspace aria-label={t.playground.workspace} data-i18n-aria-label="playground.workspace">
+            <div class="pg-workspace-head">
+              <span data-i18n="playground.workspace">{t.playground.workspace}</span>
+              <span data-workspace-count></span>
+            </div>
+            <div class="pg-workspace-actions">
+              <button class="pg-icon-btn" type="button" data-new-file data-i18n-aria-label="playground.newFile" data-i18n-title="playground.newFile" aria-label={t.playground.newFile} title={t.playground.newFile}>
+                <FilePlus aria-hidden="true" />
+              </button>
+              <button class="pg-icon-btn" type="button" data-import-workspace data-i18n-aria-label="playground.importWorkspace" data-i18n-title="playground.importWorkspace" aria-label={t.playground.importWorkspace} title={t.playground.importWorkspace}>
+                <Upload aria-hidden="true" />
+              </button>
+              <button class="pg-icon-btn" type="button" data-export-workspace data-i18n-aria-label="playground.exportWorkspace" data-i18n-title="playground.exportWorkspace" aria-label={t.playground.exportWorkspace} title={t.playground.exportWorkspace}>
+                <Download aria-hidden="true" />
+              </button>
+              <input data-import-input type="file" accept=".cell,.zip,.json,.toml,text/plain,application/json,application/zip,application/x-zip-compressed" multiple hidden />
+            </div>
+            <div class="pg-file-tree" data-file-tree role="listbox" aria-label={t.playground.workspace} data-i18n-aria-label="playground.workspace"></div>
+          </aside>
+          <div class="pg-editor" data-editor>
+            <div class="pg-gutter" data-gutter></div>
+            <pre class="pg-highlight" aria-hidden="true" data-highlight></pre>
+            <div class="pg-diagnostic-layer" aria-hidden="true" data-diagnostic-layer></div>
+            <textarea
+              class="pg-textarea"
+              data-textarea
+              spellcheck="false"
+              autocapitalize="off"
+              autocomplete="off"
+              autocorrect="off"
+              aria-label={t.playground.source}
+              data-i18n-aria-label="playground.source"
+            >{initialSource}</textarea>
+            <div class="pg-completions" data-completions role="listbox" hidden></div>
+            <div class="pg-hover-card" data-hover-card hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <div
+        class="pg-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t.playground.resizeSourceOutput}
+        data-i18n-aria-label="playground.resizeSourceOutput"
+        tabindex="0"
+        data-column-resizer="source-output"
+      ></div>
+
+      <!-- Middle: compile output -->
+      <section class="pg-col pg-output" aria-label={t.playground.output} data-i18n-aria-label="playground.output">
+        <div class="pg-col-head pg-tabs" role="tablist">
+          <button class="pg-tab active" role="tab" id="pg-tab-actions" aria-selected="true" aria-controls="pg-panel-actions" data-output-tab="actions" tabindex="0">
+            <span data-i18n="playground.tabActions">{t.playground.tabActions}</span>
+          </button>
+          <button class="pg-tab" role="tab" id="pg-tab-types" aria-selected="false" aria-controls="pg-panel-types" data-output-tab="types" tabindex="-1">
+            <span data-i18n="playground.tabTypes">{t.playground.tabTypes}</span>
+          </button>
+          <button class="pg-tab" role="tab" id="pg-tab-metadata" aria-selected="false" aria-controls="pg-panel-metadata" data-output-tab="metadata" tabindex="-1">
+            <span data-i18n="playground.tabMetadata">{t.playground.tabMetadata}</span>
+          </button>
+        </div>
+        <div class="pg-output-body">
+          <div class="pg-output-panel active" id="pg-panel-actions" role="tabpanel" aria-labelledby="pg-tab-actions" data-output-panel="actions"></div>
+          <div class="pg-output-panel" id="pg-panel-types" role="tabpanel" aria-labelledby="pg-tab-types" data-output-panel="types" hidden></div>
+          <div class="pg-output-panel" id="pg-panel-metadata" role="tabpanel" aria-labelledby="pg-tab-metadata" data-output-panel="metadata" hidden></div>
+          <div class="pg-loading" data-loading>
+            <span class="pg-loading-dot"></span>
+            <span data-i18n="playground.loading">{t.playground.loading}</span>
+          </div>
+        </div>
+      </section>
+
+      <div
+        class="pg-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t.playground.resizeOutputProvenance}
+        data-i18n-aria-label="playground.resizeOutputProvenance"
+        tabindex="0"
+        data-column-resizer="output-rail"
+      ></div>
+
+      <!-- Right: provenance rail -->
+      <aside class="pg-col pg-rail" aria-label={t.playground.provenance} data-i18n-aria-label="playground.provenance">
+        <div class="pg-col-head">
+          <span data-i18n="playground.provenance">{t.playground.provenance}</span>
+        </div>
+        <div class="pg-rail-body" data-rail-body>
+          <section class="pg-rail-diagnostics" data-rail-diagnostics aria-live="polite">
+            <div class="pg-rail-diagnostics-head">
+              <h2 class="pg-rail-group-label" data-i18n="playground.tabDiagnostics">{t.playground.tabDiagnostics}</h2>
+              <span class="pg-rail-diagnostic-count" data-error-badge aria-label={t.playground.noErrorsBadge}>0</span>
+            </div>
+            <div data-rail-diagnostics-body>
+              <p class="pg-no-errors">{t.playground.noErrors}</p>
+            </div>
+          </section>
+          <div class="pg-rail-section" data-rail-view="loading">
+            <span class="pg-loading-dot"></span>
+            <span data-i18n="playground.loading">{t.playground.loading}</span>
+          </div>
+          <div class="pg-rail-section" data-rail-view="ready" hidden>
+            <dl class="pg-rail-facts">
+              <div class="pg-rail-fact">
+                <dt data-i18n="playground.module">{t.playground.module}</dt>
+                <dd class="substrate-value" data-rail-module></dd>
+              </div>
+              <div class="pg-rail-fact">
+                <dt data-i18n="playground.target">{t.playground.target}</dt>
+                <dd data-rail-target></dd>
+              </div>
+              <div class="pg-rail-fact">
+                <dt data-rail-size-label data-i18n="playground.size">{t.playground.size}</dt>
+                <dd class="substrate-value" data-rail-size></dd>
+              </div>
+              <div class="pg-rail-fact" data-rail-mode-fact hidden>
+                <dt data-i18n="playground.buildMode">{t.playground.buildMode}</dt>
+                <dd class="substrate-value" data-rail-mode></dd>
+              </div>
+            </dl>
+            <div class="pg-rail-group">
+              <h2 class="pg-rail-group-label" data-i18n="playground.actions">{t.playground.actions}</h2>
+              <ul class="pg-rail-actions" data-rail-actions></ul>
+            </div>
+            <div class="pg-rail-group">
+              <h2 class="pg-rail-group-label" data-i18n="playground.types">{t.playground.types}</h2>
+              <ul class="pg-rail-types" data-rail-types></ul>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="pg-statusbar">
+      <span class="pg-status" data-status role="status" aria-live="polite">{t.playground.loading}</span>
+      <span class="pg-version" data-version></span>
+    </footer>
+
+    <script is:inline type="application/json" data-example-sources set:html={JSON.stringify(exampleFullSources)} />
+    <script is:inline type="application/json" data-example-meta set:html={JSON.stringify(playgroundExampleMeta)} />
+
+    <!-- Full i18n message table, embedded so the language toggle can
+         swap every playground string at runtime without a reload. The
+         SiteHeader's language toggle reads window.__CELLSCRIPT_I18N__. -->
+    <script is:inline define:vars={{ i18n: translations }}>
+      window.__CELLSCRIPT_I18N__ = i18n;
+      window.__CELLSCRIPT_DEFAULT_LOCALE__ = "en";
+    </script>
+
+    <script>
+      import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
+      import { renderSource } from "../lib/highlight";
+
+      (window as any).__cellscriptInitPlayground = () => {
+      type CompileDiagnosticPosition = {
+        line: number;
+        column: number;
+        offset: number;
+      };
+
+      type CompileDiagnostic = {
+        message: string;
+        severity?: string | number;
+        code?: string | null;
+        file?: string | null;
+        range?: {
+          start: CompileDiagnosticPosition;
+          end: CompileDiagnosticPosition;
+        } | null;
+      };
+
+      type WorkerCompileResult = {
+        metadata?: any;
+        diagnostics?: CompileDiagnostic[];
+      };
+
+      type LanguageCompletion = {
+        label: string;
+        kind?: number | string;
+        detail?: string | null;
+        documentation?: string | null;
+        insert_text?: string | null;
+      };
+
+      type LanguageServicePayload = {
+        completions?: LanguageCompletion[];
+        hover?: {
+          contents: string;
+          range?: {
+            start: { line: number; character: number };
+            end: { line: number; character: number };
+          } | null;
+        } | null;
+        definition?: {
+          uri: string;
+          range: {
+            start: { line: number; character: number };
+            end: { line: number; character: number };
+          };
+        } | null;
+        diagnostics?: unknown[];
+      };
+
+      type LanguageIntent = "hover" | "completion" | "definition";
+
+      type WorkspaceFile = {
+        path: string;
+        source: string;
+        role?: string;
+      };
+
+      const compilerAssetVersion = "20260625-multi-workspace";
+      const workerUrl = new URL(`/playground-worker.js?v=${compilerAssetVersion}`, window.location.href);
+      const previousPlaygroundAbort = (window as any).__cellscriptPlaygroundAbort as AbortController | undefined;
+      previousPlaygroundAbort?.abort();
+      const playgroundAbort = new AbortController();
+      (window as any).__cellscriptPlaygroundAbort = playgroundAbort;
+      const { signal } = playgroundAbort;
+      const compileWorker = new Worker(workerUrl, { type: "module" });
+      let compileRequestId = 0;
+      let latestAppliedRequestId = 0;
+      let languageRequestId = 0;
+      const languageIntents = new Map<number, LanguageIntent>();
+      const latestLanguageRequestByIntent: Record<LanguageIntent, number> = {
+        hover: 0,
+        completion: 0,
+        definition: 0,
+      };
+      let workerReady = true;
+
+      // ---- Example sources (inline so no extra fetch needed) ----
+      const exampleSources: Record<string, string> = JSON.parse(
+        document.querySelector<HTMLScriptElement>("[data-example-sources]")?.textContent ?? "{}",
+      );
+      const exampleMeta: Array<{ id: string; label: string; file: string }> = JSON.parse(
+        document.querySelector<HTMLScriptElement>("[data-example-meta]")?.textContent ?? "[]",
+      );
+      const exampleIds = new Set(exampleMeta.map((example) => example.id));
+      const exampleFileById = new Map(exampleMeta.map((example) => [example.id, example.file]));
+      const i18nTable = (window as any).__CELLSCRIPT_I18N__ as any;
+      const defaultLocaleName = (window as any).__CELLSCRIPT_DEFAULT_LOCALE__ ?? "en";
+
+      // ---- i18n runtime layer (mirrors index.astro so the topbar's
+      //      language toggle works live instead of forcing a reload) ----
+      const readLocale = () =>
+        document.documentElement.dataset.locale === "zh" ? "zh" : defaultLocaleName;
+
+      const getMessage = (path: string, locale = readLocale()) => {
+        return path.split(".").reduce((value: any, segment: string) => value?.[segment], i18nTable?.[locale]);
+      };
+
+      // Look up a playground.* string in the current locale.
+      const pg = (key: string): string => getMessage(`playground.${key}`, readLocale()) ?? "";
+      const fmt = (template: string, vars: Record<string, string>) =>
+        template.replace(/\{(\w+)\}/g, (_m, k: string) => vars[k] ?? "");
+
+      // ---- Elements ----
+      const textarea = document.querySelector<HTMLTextAreaElement>("[data-textarea]");
+      const editor = document.querySelector<HTMLElement>("[data-editor]");
+      const highlight = document.querySelector<HTMLElement>("[data-highlight]");
+      const diagnosticLayer = document.querySelector<HTMLElement>("[data-diagnostic-layer]");
+      const gutter = document.querySelector<HTMLElement>("[data-gutter]");
+      const completionsEl = document.querySelector<HTMLElement>("[data-completions]");
+      const hoverCard = document.querySelector<HTMLElement>("[data-hover-card]");
+      const loading = document.querySelector<HTMLElement>("[data-loading]");
+      const status = document.querySelector<HTMLElement>("[data-status]");
+      const versionEl = document.querySelector<HTMLElement>("[data-version]");
+      const exampleTitle = document.querySelector<HTMLElement>("[data-example-title]");
+      const exampleSummary = document.querySelector<HTMLElement>("[data-example-summary]");
+      const exampleMenu = document.querySelector<HTMLDetailsElement>("[data-example-menu]");
+      const exampleButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-example-button]"));
+      const fileTree = document.querySelector<HTMLElement>("[data-file-tree]");
+      const deleteFileIconTemplate = document.querySelector<HTMLTemplateElement>("[data-file-delete-icon]");
+      const workspaceCount = document.querySelector<HTMLElement>("[data-workspace-count]");
+      const activeFileChip = document.querySelector<HTMLElement>("[data-active-file-chip]");
+      const setEntryBtn = document.querySelector<HTMLButtonElement>("[data-set-entry]");
+      const setEntryLabel = document.querySelector<HTMLElement>("[data-set-entry-label]");
+      const newFileBtn = document.querySelector<HTMLButtonElement>("[data-new-file]");
+      const importWorkspaceBtn = document.querySelector<HTMLButtonElement>("[data-import-workspace]");
+      const exportWorkspaceBtn = document.querySelector<HTMLButtonElement>("[data-export-workspace]");
+      const importInput = document.querySelector<HTMLInputElement>("[data-import-input]");
+      const pgMain = document.querySelector<HTMLElement>("[data-pg-main]");
+      const mobileViewBtns = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-mobile-view-btn]"));
+      const compileBtn = document.querySelector<HTMLButtonElement>("[data-compile]");
+      const compileStatus = document.querySelector<HTMLElement>("[data-compile-status]");
+      const compileLabel = document.querySelector<HTMLElement>("[data-compile-label]");
+      const railBody = document.querySelector<HTMLElement>("[data-rail-body]");
+      const railLoading = railBody?.querySelector<HTMLElement>('[data-rail-view="loading"]');
+      const railReady = railBody?.querySelector<HTMLElement>('[data-rail-view="ready"]');
+      const railModule = railBody?.querySelector<HTMLElement>("[data-rail-module]");
+      const railTarget = railBody?.querySelector<HTMLElement>("[data-rail-target]");
+      const railSize = railBody?.querySelector<HTMLElement>("[data-rail-size]");
+      const railSizeLabel = railBody?.querySelector<HTMLElement>("[data-rail-size-label]");
+      const railModeFact = railBody?.querySelector<HTMLElement>("[data-rail-mode-fact]");
+      const railMode = railBody?.querySelector<HTMLElement>("[data-rail-mode]");
+      const railActions = railBody?.querySelector<HTMLElement>("[data-rail-actions]");
+      const railTypes = railBody?.querySelector<HTMLElement>("[data-rail-types]");
+      const railDiagnosticsBody = railBody?.querySelector<HTMLElement>("[data-rail-diagnostics-body]");
+      const errorBadge = document.querySelector<HTMLElement>("[data-error-badge]");
+      let currentExampleId: string | null = exampleMeta[0]?.id ?? null;
+      const MAX_WORKSPACE_FILES = 16;
+      const MAX_WORKSPACE_BYTES = 300_000;
+      let workspaceFiles: WorkspaceFile[] = [];
+      let activePath = "";
+      let entryPath = "";
+
+      const outputPanels = new Map(
+        Array.from(document.querySelectorAll<HTMLElement>("[data-output-panel]")).map((p) => [
+          p.dataset.outputPanel ?? "",
+          p,
+        ]),
+      );
+      const outputTabs = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-output-tab]"));
+      let compileTimer: number | undefined;
+      let compileSpinnerTimer: number | undefined;
+      let currentDiagnostics: CompileDiagnostic[] = [];
+      let highlightFrame: number | undefined;
+      let repositionFloatingTools = () => {};
+      const columnResizers = Array.from(document.querySelectorAll<HTMLElement>("[data-column-resizer]"));
+      const panelColumnStorageKey = "cellscript-playground-columns";
+      const columnMinimums = { source: 420, output: 250, rail: 210 };
+
+      const readPanelWidths = () => {
+        const source = document.querySelector<HTMLElement>(".pg-source");
+        const output = document.querySelector<HTMLElement>(".pg-output");
+        const rail = document.querySelector<HTMLElement>(".pg-rail");
+        if (!source || !output || !rail) return null;
+        return {
+          source: source.getBoundingClientRect().width,
+          output: output.getBoundingClientRect().width,
+          rail: rail.getBoundingClientRect().width,
+        };
+      };
+
+      const visibleResizerWidth = () => {
+        if (!pgMain || window.innerWidth < 820) return 0;
+        return columnResizers.reduce((sum, resizer) => sum + resizer.getBoundingClientRect().width, 0);
+      };
+
+      const availablePanelWidth = () => Math.max(0, (pgMain?.clientWidth ?? 0) - visibleResizerWidth());
+
+      const fitPanelWidths = (widths: { source: number; output: number; rail: number }) => {
+        const available = availablePanelWidth();
+        if (!available) return widths;
+        const minimumTotal = columnMinimums.source + columnMinimums.output + columnMinimums.rail;
+        if (available <= minimumTotal) {
+          return {
+            source: Math.max(columnMinimums.source, available * 0.32),
+            output: Math.max(columnMinimums.output, available * 0.42),
+            rail: Math.max(columnMinimums.rail, available * 0.26),
+          };
+        }
+        const total = Math.max(1, widths.source + widths.output + widths.rail);
+        let source = Math.max(columnMinimums.source, widths.source * available / total);
+        let output = Math.max(columnMinimums.output, widths.output * available / total);
+        let rail = Math.max(columnMinimums.rail, widths.rail * available / total);
+        const fittedTotal = source + output + rail;
+        if (fittedTotal > available) {
+          const overflow = fittedTotal - available;
+          const flexible = Math.max(1, (source - columnMinimums.source) + (output - columnMinimums.output) + (rail - columnMinimums.rail));
+          source -= overflow * Math.max(0, source - columnMinimums.source) / flexible;
+          output -= overflow * Math.max(0, output - columnMinimums.output) / flexible;
+          rail -= overflow * Math.max(0, rail - columnMinimums.rail) / flexible;
+        }
+        return { source, output, rail };
+      };
+
+      const applyPanelWidths = (widths: { source: number; output: number; rail: number }, persist = true) => {
+        if (!pgMain || window.innerWidth < 820) return;
+        const fitted = fitPanelWidths(widths);
+        pgMain.style.setProperty("--pg-source-col", `${Math.round(fitted.source)}px`);
+        pgMain.style.setProperty("--pg-output-col", `${Math.round(fitted.output)}px`);
+        pgMain.style.setProperty("--pg-rail-col", `${Math.round(fitted.rail)}px`);
+        if (persist) {
+          try {
+            localStorage.setItem(panelColumnStorageKey, JSON.stringify(fitted));
+          } catch {
+            // Resizing still works when storage is unavailable.
+          }
+        }
+      };
+
+      const restorePanelWidths = () => {
+        if (!pgMain || window.innerWidth < 820) return;
+        try {
+          const stored = JSON.parse(localStorage.getItem(panelColumnStorageKey) ?? "null");
+          if (
+            stored &&
+            Number.isFinite(stored.source) &&
+            Number.isFinite(stored.output) &&
+            Number.isFinite(stored.rail)
+          ) {
+            applyPanelWidths(stored, false);
+          }
+        } catch {
+          // Ignore malformed persisted layout.
+        }
+      };
+
+      const resizePanelPair = (
+        kind: string,
+        delta: number,
+        widths: { source: number; output: number; rail: number },
+      ) => {
+        if (kind === "source-output") {
+          const pairTotal = widths.source + widths.output;
+          const source = Math.min(
+            pairTotal - columnMinimums.output,
+            Math.max(columnMinimums.source, widths.source + delta),
+          );
+          return { source, output: pairTotal - source, rail: widths.rail };
+        }
+        const pairTotal = widths.output + widths.rail;
+        const output = Math.min(
+          pairTotal - columnMinimums.rail,
+          Math.max(columnMinimums.output, widths.output + delta),
+        );
+        return { source: widths.source, output, rail: pairTotal - output };
+      };
+
+      restorePanelWidths();
+      if (typeof ResizeObserver !== "undefined" && pgMain) {
+        const observer = new ResizeObserver(() => {
+          const widths = readPanelWidths();
+          if (widths && window.innerWidth >= 820) applyPanelWidths(widths, false);
+        });
+        observer.observe(pgMain);
+        signal.addEventListener("abort", () => observer.disconnect(), { once: true });
+      }
+
+      columnResizers.forEach((resizer) => {
+        resizer.addEventListener("pointerdown", (event) => {
+          if (!pgMain || window.innerWidth < 820) return;
+          const kind = resizer.dataset.columnResizer ?? "";
+          const start = readPanelWidths();
+          if (!start) return;
+          event.preventDefault();
+          event.stopPropagation();
+          resizer.setPointerCapture(event.pointerId);
+          pgMain.dataset.resizing = "true";
+          const startX = event.clientX;
+
+          const onPointerMove = (moveEvent: PointerEvent) => {
+            moveEvent.preventDefault();
+            applyPanelWidths(resizePanelPair(kind, moveEvent.clientX - startX, start));
+          };
+          const onPointerUp = (upEvent: PointerEvent) => {
+            resizer.releasePointerCapture(upEvent.pointerId);
+            delete pgMain.dataset.resizing;
+            resizer.removeEventListener("pointermove", onPointerMove);
+            resizer.removeEventListener("pointerup", onPointerUp);
+            resizer.removeEventListener("pointercancel", onPointerUp);
+          };
+
+          resizer.addEventListener("pointermove", onPointerMove);
+          resizer.addEventListener("pointerup", onPointerUp);
+          resizer.addEventListener("pointercancel", onPointerUp);
+        }, { signal });
+
+        resizer.addEventListener("keydown", (event) => {
+          if (!pgMain || window.innerWidth < 820 || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+          const widths = readPanelWidths();
+          if (!widths) return;
+          event.preventDefault();
+          const amount = event.shiftKey ? 48 : 18;
+          const direction = event.key === "ArrowRight" ? 1 : -1;
+          applyPanelWidths(resizePanelPair(resizer.dataset.columnResizer ?? "", amount * direction, widths));
+        }, { signal });
+      });
+      const LARGE_SOURCE_HIGHLIGHT_LIMIT = 80_000;
+
+      const updateExampleLesson = (id: string | null) => {
+        currentExampleId = id && exampleIds.has(id) ? id : null;
+        const titleKey = currentExampleId
+          ? `playground.examples.${currentExampleId}.title`
+          : "playground.customExampleTitle";
+        const summaryKey = currentExampleId
+          ? `playground.examples.${currentExampleId}.summary`
+          : "playground.customExampleSummary";
+        if (exampleTitle) {
+          exampleTitle.dataset.i18n = titleKey;
+          exampleTitle.textContent = getMessage(titleKey, readLocale()) ?? "";
+        }
+        if (exampleSummary) {
+          exampleSummary.dataset.i18n = summaryKey;
+          exampleSummary.textContent = getMessage(summaryKey, readLocale()) ?? "";
+        }
+        exampleButtons.forEach((btn) => {
+          const id = btn.dataset.exampleId ?? "";
+          const active = !!currentExampleId && id === currentExampleId;
+          const title = getMessage(`playground.examples.${id}.title`, readLocale()) ?? id;
+          btn.classList.toggle("active", active);
+          btn.setAttribute("aria-pressed", String(active));
+          btn.setAttribute("aria-label", fmt(pg("loadExample"), { name: title }));
+        });
+      };
+
+      // ---- Highlight overlay + line-number gutter sync ----
+      const diagnosticSeverity = (diagnostic: CompileDiagnostic) => {
+        if (diagnostic.severity === 2) return "warning";
+        if (diagnostic.severity === 3) return "information";
+        if (diagnostic.severity === 4) return "hint";
+        return String(diagnostic.severity || "error").toLowerCase();
+      };
+
+      const isBlockingDiagnostic = (diagnostic: CompileDiagnostic) =>
+        !["warning", "information", "hint"].includes(diagnosticSeverity(diagnostic));
+
+      const diagnosticCounts = (diagnostics: CompileDiagnostic[]) => ({
+        errors: diagnostics.filter(isBlockingDiagnostic).length,
+        warnings: diagnostics.filter((diagnostic) => diagnosticSeverity(diagnostic) === "warning").length,
+      });
+
+      const currentLineNumber = () => {
+        if (!textarea) return 1;
+        return textarea.value.slice(0, textarea.selectionStart).split("\n").length;
+      };
+
+      const lineStartOffset = (source: string, lineNumber: number) => {
+        const targetLine = Math.max(1, lineNumber);
+        let offset = 0;
+        for (let line = 1; line < targetLine && offset < source.length; line++) {
+          const next = source.indexOf("\n", offset);
+          if (next === -1) return source.length;
+          offset = next + 1;
+        }
+        return offset;
+      };
+
+      const diagnosticBelongsToActiveFile = (diagnostic: CompileDiagnostic) =>
+        !diagnostic.file || diagnostic.file === activePath;
+
+      const measureTextareaCharWidth = () => {
+        if (!textarea) return 8;
+        const style = getComputedStyle(textarea);
+        if (!textMeasureContext) return Number.parseFloat(style.fontSize) * 0.6 || 8;
+        textMeasureContext.font = `${style.fontStyle} ${style.fontVariant} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+        return textMeasureContext.measureText("M").width || Number.parseFloat(style.fontSize) * 0.6 || 8;
+      };
+
+      const renderDiagnosticLayer = () => {
+        if (!diagnosticLayer || !textarea) return;
+        const diagnostics = currentDiagnostics
+          .filter(diagnosticBelongsToActiveFile)
+          .filter((diagnostic) => !!diagnostic.range);
+        if (!diagnostics.length) {
+          diagnosticLayer.innerHTML = "";
+          return;
+        }
+        const style = getComputedStyle(textarea);
+        const lineHeight = Number.parseFloat(style.lineHeight) || 20;
+        const paddingTop = Number.parseFloat(style.paddingTop) || 0;
+        const paddingLeft = Number.parseFloat(style.paddingLeft) || 0;
+        const charWidth = measureTextareaCharWidth();
+        const lines = textarea.value.split("\n");
+        diagnosticLayer.innerHTML = diagnostics.map((diagnostic) => {
+          const range = diagnostic.range!;
+          const line = Math.max(1, range.start.line);
+          const lineText = lines[line - 1] ?? "";
+          const startColumn = Math.max(1, range.start.column || 1);
+          const fallbackEndColumn = Math.max(startColumn + 1, lineText.length + 1);
+          const endColumn = range.end.line === range.start.line
+            ? Math.max(startColumn + 1, range.end.column || fallbackEndColumn)
+            : fallbackEndColumn;
+          const left = paddingLeft + (startColumn - 1) * charWidth - textarea.scrollLeft;
+          const top = paddingTop + (line - 1) * lineHeight + Math.max(0, lineHeight - 5) - textarea.scrollTop;
+          const width = Math.max(charWidth * 2, (endColumn - startColumn) * charWidth);
+          const severity = isBlockingDiagnostic(diagnostic) ? "error" : "warning";
+          return `<span class="pg-squiggle pg-squiggle-${severity}" style="left:${left.toFixed(2)}px;top:${top.toFixed(2)}px;width:${width.toFixed(2)}px"></span>`;
+        }).join("");
+      };
+
+      const focusLine = (lineNumber: number) => {
+        if (!textarea) return;
+        const offset = lineStartOffset(textarea.value, lineNumber);
+        textarea.focus();
+        textarea.setSelectionRange(offset, offset);
+        scheduleHighlight();
+        syncScroll();
+      };
+
+      const updateHighlight = () => {
+        if (!textarea) return;
+        const source = textarea.value;
+        // Pad so the last line's highlight extends to the textarea height.
+        if (highlight) {
+          highlight.innerHTML =
+            (source.length > LARGE_SOURCE_HIGHLIGHT_LIMIT ? escapeHtml(source) : renderSource(source)) + "\n";
+        }
+        if (gutter) {
+          const lineCount = source.split("\n").length;
+          const activeLine = currentLineNumber();
+          const diagnosticLines = new Map<number, "error" | "warning">();
+          currentDiagnostics.filter(diagnosticBelongsToActiveFile).forEach((diagnostic) => {
+            const line = diagnostic.range?.start.line;
+            if (typeof line !== "number" || line <= 0) return;
+            const previous = diagnosticLines.get(line);
+            if (previous === "error") return;
+            diagnosticLines.set(line, isBlockingDiagnostic(diagnostic) ? "error" : "warning");
+          });
+          let nums = "";
+          for (let i = 1; i <= lineCount; i++) {
+            const classes = [
+              diagnosticLines.get(i) === "error" ? "has-diagnostic" : "",
+              diagnosticLines.get(i) === "warning" ? "has-warning" : "",
+              i === activeLine ? "current-line" : "",
+            ].filter(Boolean).join(" ");
+            const label = escapeHtml(fmt(pg("lineAria"), { n: String(i) }) || `${pg("line")} ${i}`);
+            nums += `<span${classes ? ` class="${classes}"` : ""} data-gutter-line="${i}" title="${label}">${i}</span>`;
+          }
+          if (gutter.innerHTML !== nums) gutter.innerHTML = nums;
+        }
+        renderDiagnosticLayer();
+      };
+
+      const scheduleHighlight = () => {
+        if (highlightFrame !== undefined) return;
+        highlightFrame = window.requestAnimationFrame(() => {
+          highlightFrame = undefined;
+          updateHighlight();
+          syncScroll();
+        });
+      };
+
+      const syncScroll = () => {
+        if (!textarea) return;
+        if (highlight) {
+          highlight.scrollTop = textarea.scrollTop;
+          highlight.scrollLeft = textarea.scrollLeft;
+        }
+        if (gutter) gutter.scrollTop = textarea.scrollTop;
+        if (editor) {
+          if (textarea.scrollWidth > textarea.clientWidth + 2) {
+            editor.dataset.overflowX = "";
+          } else {
+            delete editor.dataset.overflowX;
+          }
+        }
+        renderDiagnosticLayer();
+        repositionFloatingTools();
+      };
+
+      const formatBytes = (bytes: number): string => {
+        if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${bytes} B`;
+      };
+
+      const totalWorkspaceBytes = (files = workspaceFiles) =>
+        files.reduce((sum, file) => sum + new TextEncoder().encode(file.source).length, 0);
+
+      const normalizePortablePath = (raw: string, fallback = "main.cell") => {
+        const cleaned = (raw || fallback)
+          .replace(/\\/g, "/")
+          .replace(/^\/+/, "")
+          .split("/")
+          .map((part) => part.replace(/[<>"'`]/g, "").trim())
+          .filter((part) => part && part !== "." && part !== "..")
+          .join("/");
+        return cleaned || fallback;
+      };
+
+      const normalizeWorkspacePath = (raw: string, fallback = "main.cell") => {
+        const path = normalizePortablePath(raw, fallback);
+        return path.toLowerCase().endsWith(".cell") ? path : `${path}.cell`;
+      };
+
+      const uniqueWorkspacePath = (path: string, used: Set<string>) => {
+        if (!used.has(path)) {
+          used.add(path);
+          return path;
+        }
+        const base = path.replace(/\.cell$/i, "");
+        let index = 2;
+        let nextPath = `${base}_${index}.cell`;
+        while (used.has(nextPath)) {
+          index += 1;
+          nextPath = `${base}_${index}.cell`;
+        }
+        used.add(nextPath);
+        return nextPath;
+      };
+
+      const ensureWorkspaceLimits = (files: WorkspaceFile[]) => {
+        if (!files.length) throw new Error(pg("workspaceJsonInvalid"));
+        if (files.length > MAX_WORKSPACE_FILES) {
+          throw new Error(fmt(pg("workspaceFileLimit"), { n: String(MAX_WORKSPACE_FILES) }));
+        }
+        if (totalWorkspaceBytes(files) > MAX_WORKSPACE_BYTES) {
+          throw new Error(fmt(pg("workspaceByteLimit"), { size: formatBytes(MAX_WORKSPACE_BYTES) }));
+        }
+      };
+
+      const makeExampleWorkspace = (id: string): WorkspaceFile[] => [{
+        path: normalizeWorkspacePath(exampleFileById.get(id) ?? `${id}.cell`),
+        source: exampleSources[id] ?? "",
+        role: "entry",
+      }];
+
+      const currentFile = () => workspaceFiles.find((file) => file.path === activePath) ?? workspaceFiles[0];
+
+      const syncActiveFileFromEditor = () => {
+        if (!textarea || !activePath) return;
+        const file = workspaceFiles.find((item) => item.path === activePath);
+        if (file) file.source = textarea.value;
+      };
+
+      const updateWorkspaceChrome = () => {
+        if (workspaceCount) {
+          workspaceCount.textContent = fmt(pg("workspaceCount"), {
+            files: String(workspaceFiles.length),
+            size: formatBytes(totalWorkspaceBytes()),
+          });
+        }
+        if (activeFileChip) {
+          activeFileChip.textContent = activePath || "";
+          activeFileChip.title = activePath ? fmt(pg("activeFile"), { file: activePath }) : "";
+        }
+        if (setEntryBtn && setEntryLabel) {
+          const isEntry = !!activePath && activePath === entryPath;
+          setEntryBtn.disabled = isEntry;
+          const label = isEntry ? pg("entryReady") : pg("setEntry");
+          setEntryBtn.setAttribute("aria-label", label);
+          setEntryBtn.title = label;
+          setEntryLabel.textContent = label;
+        }
+      };
+
+      const renderFileTree = () => {
+        if (!fileTree) return;
+        const deleteIcon = deleteFileIconTemplate?.innerHTML.trim() ?? "";
+        fileTree.innerHTML = workspaceFiles.map((file) => {
+          const active = file.path === activePath;
+          const entry = file.path === entryPath;
+          const deleteLabel = fmt(pg("deleteFile"), { file: file.path });
+          return `<div class="pg-file-row${active ? " active" : ""}${entry ? " is-entry" : ""}">
+            <button type="button" role="option" class="pg-file-item" aria-selected="${active}" data-file-path="${escapeAttr(file.path)}">
+              <span class="pg-file-name">${escapeHtml(file.path)}</span>
+              ${entry ? `<span class="pg-file-entry">${escapeHtml(pg("entry"))}</span>` : ""}
+            </button>
+            <button type="button" class="pg-file-delete" data-delete-file="${escapeAttr(file.path)}" aria-label="${escapeAttr(deleteLabel)}" title="${escapeAttr(deleteLabel)}"${workspaceFiles.length <= 1 ? " disabled" : ""}>
+              ${deleteIcon}
+            </button>
+          </div>`;
+        }).join("");
+        updateWorkspaceChrome();
+      };
+
+      const setWorkspace = (files: WorkspaceFile[], nextActivePath?: string, nextEntryPath?: string) => {
+        const usedPaths = new Set<string>();
+        workspaceFiles = files.map((file, index) => ({
+          path: uniqueWorkspacePath(normalizeWorkspacePath(file.path, `source_${index + 1}.cell`), usedPaths),
+          source: file.source ?? "",
+          role: file.role,
+        }));
+        ensureWorkspaceLimits(workspaceFiles);
+        const firstPath = workspaceFiles[0]?.path ?? "main.cell";
+        const requestedActivePath = nextActivePath ? normalizeWorkspacePath(nextActivePath) : "";
+        const requestedEntryPath = nextEntryPath ? normalizeWorkspacePath(nextEntryPath) : "";
+        const roleEntryPath = workspaceFiles.find((file) => file.role === "entry")?.path ?? "";
+        activePath = requestedActivePath && workspaceFiles.some((file) => file.path === requestedActivePath) ? requestedActivePath : firstPath;
+        entryPath = requestedEntryPath && workspaceFiles.some((file) => file.path === requestedEntryPath)
+          ? requestedEntryPath
+          : (roleEntryPath || activePath);
+        workspaceFiles.forEach((file) => {
+          file.role = file.path === entryPath ? "entry" : "memory";
+        });
+        if (textarea) textarea.value = currentFile()?.source ?? "";
+        renderFileTree();
+        hideCompletions();
+        hideHover();
+        scheduleHighlight();
+        scheduleCompile();
+      };
+
+      const markWorkspaceEntry = (path = activePath) => {
+        if (!workspaceFiles.some((file) => file.path === path)) return;
+        syncActiveFileFromEditor();
+        entryPath = path;
+        workspaceFiles.forEach((file) => {
+          file.role = file.path === entryPath ? "entry" : "memory";
+        });
+        renderFileTree();
+        updateExampleLesson(null);
+        scheduleCompile();
+      };
+
+      const deleteWorkspaceFile = (path: string) => {
+        if (!workspaceFiles.some((file) => file.path === path)) return;
+        if (workspaceFiles.length <= 1) {
+          if (status) status.textContent = pg("deleteLastFile");
+          return;
+        }
+        syncActiveFileFromEditor();
+        const deleteIndex = workspaceFiles.findIndex((file) => file.path === path);
+        workspaceFiles = workspaceFiles.filter((file) => file.path !== path);
+        if (activePath === path) {
+          activePath = workspaceFiles[Math.min(deleteIndex, workspaceFiles.length - 1)]?.path ?? workspaceFiles[0]?.path ?? "";
+          if (textarea) textarea.value = currentFile()?.source ?? "";
+        }
+        if (entryPath === path) entryPath = activePath || workspaceFiles[0]?.path || "";
+        workspaceFiles.forEach((file) => {
+          file.role = file.path === entryPath ? "entry" : "memory";
+        });
+        renderFileTree();
+        updateExampleLesson(null);
+        scheduleHighlight();
+        scheduleCompile();
+        if (status) status.textContent = fmt(pg("fileDeleted"), { file: path });
+      };
+
+      const switchWorkspaceFile = (path: string, setEntry = false) => {
+        if (!workspaceFiles.some((file) => file.path === path)) return;
+        syncActiveFileFromEditor();
+        activePath = path;
+        if (setEntry) entryPath = path;
+        workspaceFiles.forEach((file) => {
+          file.role = file.path === entryPath ? "entry" : "memory";
+        });
+        if (textarea) textarea.value = currentFile()?.source ?? "";
+        renderFileTree();
+        updateExampleLesson(null);
+        scheduleHighlight();
+        scheduleCompile();
+      };
+
+      const makeScratchSource = (index: number) => `module playground::scratch_${index}
+
+action inspect() -> u64 {
+    verification
+        ${index}
+}
+`;
+
+      const addScratchFile = () => {
+        syncActiveFileFromEditor();
+        let index = workspaceFiles.length + 1;
+        let path = `scratch_${index}.cell`;
+        while (workspaceFiles.some((file) => file.path === path)) {
+          index += 1;
+          path = `scratch_${index}.cell`;
+        }
+        setWorkspace([...workspaceFiles, { path, source: makeScratchSource(index) }], path, entryPath || path);
+        updateExampleLesson(null);
+      };
+
+      const downloadBlob = (blob: Blob, filename: string) => {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        link.click();
+        URL.revokeObjectURL(url);
+      };
+
+      const basename = (path: string, fallback = "main.cell") =>
+        normalizePortablePath(path, fallback).split("/").filter(Boolean).pop() || fallback;
+
+      const toZipSourcePath = (path: string, usedPaths: Set<string>) => {
+        const workspacePath = normalizeWorkspacePath(path);
+        const sourcePath = workspacePath.startsWith("src/") ? workspacePath : `src/${workspacePath}`;
+        return uniqueWorkspacePath(sourcePath, usedPaths);
+      };
+
+      const buildCellToml = (entry: string) => `[package]
+name = "playground"
+version = "0.1.0"
+cellscript_version = "0.20.0-rc.1"
+entry = "${entry.replace(/"/g, "")}"
+source_roots = ["src"]
+`;
+
+      const parseCellTomlEntry = (text: string) => {
+        const match = text.match(/^\s*entry\s*=\s*["']([^"']+)["']/m);
+        return match?.[1] ? normalizeWorkspacePath(match[1]) : "";
+      };
+
+      const resolveImportedEntry = (files: WorkspaceFile[], requestedEntry?: string) => {
+        if (!files.length) return "";
+        const normalized = requestedEntry ? normalizeWorkspacePath(requestedEntry) : "";
+        if (normalized && files.some((file) => file.path === normalized)) return normalized;
+        const withoutSrc = normalized.replace(/^src\//, "");
+        if (withoutSrc && files.some((file) => file.path === withoutSrc)) return withoutSrc;
+        const requestedBasename = normalized ? basename(normalized) : "";
+        const basenameMatches = requestedBasename
+          ? files.filter((file) => basename(file.path) === requestedBasename)
+          : [];
+        if (basenameMatches.length === 1) return basenameMatches[0].path;
+        return files.find((file) => file.role === "entry")?.path ?? files[0].path;
+      };
+
+      const workspaceExportPayload = () => {
+        syncActiveFileFromEditor();
+        return {
+          format: "cellscript-playground-workspace-v1",
+          version: 1,
+          entryPath,
+          files: workspaceFiles.map((file) => ({
+            path: file.path,
+            source: file.source,
+            role: file.path === entryPath ? "entry" : "memory",
+          })),
+        };
+      };
+
+      const exportWorkspace = () => {
+        const payload = workspaceExportPayload();
+        if (payload.files.length <= 1) {
+          const file = payload.files[0] ?? { path: "main.cell", source: "" };
+          downloadBlob(new Blob([file.source], { type: "text/plain;charset=utf-8" }), basename(file.path));
+          if (status) status.textContent = pg("workspaceExported");
+          return;
+        }
+        const usedZipPaths = new Set<string>();
+        const zipEntries: Record<string, Uint8Array> = {};
+        const exportedFiles = payload.files.map((file) => {
+          const zipPath = toZipSourcePath(file.path, usedZipPaths);
+          zipEntries[zipPath] = strToU8(file.source);
+          return { originalPath: file.path, zipPath };
+        });
+        const entryZipPath =
+          exportedFiles.find((file) => file.originalPath === payload.entryPath)?.zipPath ??
+          exportedFiles[0]?.zipPath ??
+          "src/main.cell";
+        zipEntries["Cell.toml"] = strToU8(buildCellToml(entryZipPath));
+        const zipBytes = zipSync(zipEntries, { level: 9 });
+        downloadBlob(new Blob([zipBytes], { type: "application/zip" }), "cellscript-playground-project.zip");
+        if (status) status.textContent = pg("workspaceExported");
+      };
+
+      const parseWorkspaceJson = (text: string) => {
+        const parsed = JSON.parse(text);
+        const rawFiles = Array.isArray(parsed) ? parsed : parsed.files;
+        if (!Array.isArray(rawFiles)) throw new Error(pg("workspaceJsonInvalid"));
+        const files = rawFiles.map((file: any, index: number) => ({
+          path: normalizeWorkspacePath(String(file.path || file.name || `source_${index + 1}.cell`)),
+          source: String(file.source ?? file.content ?? ""),
+          role: file.role,
+        }));
+        const entry = resolveImportedEntry(files, String(parsed.entryPath || files.find((file: WorkspaceFile) => file.role === "entry")?.path || files[0]?.path || ""));
+        return { files, entry };
+      };
+
+      const importZipWorkspace = async (file: File) => {
+        const unzipped = unzipSync(new Uint8Array(await file.arrayBuffer()));
+        const zipPaths = Object.keys(unzipped)
+          .map((path) => normalizePortablePath(path, ""))
+          .filter((path) => path && !path.split("/").some((part) => part.startsWith(".") || part === "__MACOSX"));
+        const firstSegments = zipPaths.map((path) => path.split("/")[0]).filter(Boolean);
+        const commonRoot =
+          firstSegments.length > 0 &&
+          firstSegments.every((segment) => segment === firstSegments[0]) &&
+          zipPaths.some((path) => path.toLowerCase().endsWith("/cell.toml"))
+            ? `${firstSegments[0]}/`
+            : "";
+        let manifestEntry = "";
+        const imported: WorkspaceFile[] = [];
+        Object.entries(unzipped).forEach(([rawPath, bytes]) => {
+          const normalizedPath = normalizePortablePath(rawPath, "");
+          const path = commonRoot && normalizedPath.startsWith(commonRoot)
+            ? normalizedPath.slice(commonRoot.length)
+            : normalizedPath;
+          if (!path || path.endsWith("/")) return;
+          if (path.split("/").some((part) => part.startsWith(".") || part === "__MACOSX")) return;
+          if (path.toLowerCase() === "cell.toml" || path.toLowerCase().endsWith("/cell.toml")) {
+            manifestEntry = parseCellTomlEntry(strFromU8(bytes));
+            return;
+          }
+          if (!path.toLowerCase().endsWith(".cell")) return;
+          imported.push({
+            path: normalizeWorkspacePath(path),
+            source: strFromU8(bytes),
+          });
+        });
+        if (!imported.length) throw new Error(pg("workspaceNoCellFiles"));
+        const entry = resolveImportedEntry(imported, manifestEntry);
+        return { files: imported, entry };
+      };
+
+      const importNativeWorkspaceFiles = async (files: File[]) => {
+        const manifest = files.find((file) => {
+          const path = normalizePortablePath((file as any).webkitRelativePath || file.name, "");
+          return path.toLowerCase() === "cell.toml" || path.toLowerCase().endsWith("/cell.toml");
+        });
+        const manifestEntry = manifest ? parseCellTomlEntry(await manifest.text()) : "";
+        const cellFiles = files.filter((file) => {
+          const path = normalizePortablePath((file as any).webkitRelativePath || file.name, "");
+          return path.toLowerCase().endsWith(".cell");
+        });
+        if (!cellFiles.length) throw new Error(pg("workspaceNoCellFiles"));
+        const imported = await Promise.all(cellFiles.map(async (file) => ({
+          path: normalizeWorkspacePath((file as any).webkitRelativePath || file.name),
+          source: await file.text(),
+        })));
+        const entry = resolveImportedEntry(imported, manifestEntry || imported[0]?.path);
+        return { files: imported, entry };
+      };
+
+      const importWorkspaceFiles = async (fileList: FileList | null) => {
+        if (!fileList?.length) return;
+        try {
+          const files = Array.from(fileList);
+          const zipFiles = files.filter((file) => file.name.toLowerCase().endsWith(".zip"));
+          if (zipFiles.length > 1 || (zipFiles.length === 1 && files.length > 1)) throw new Error(pg("workspaceOneZipOnly"));
+          const imported = zipFiles.length === 1
+            ? await importZipWorkspace(zipFiles[0])
+            : files.length === 1 && files[0].name.toLowerCase().endsWith(".json")
+              ? parseWorkspaceJson(await files[0].text())
+              : await importNativeWorkspaceFiles(files);
+          setWorkspace(imported.files, imported.entry, imported.entry);
+          updateExampleLesson(null);
+          if (status) status.textContent = pg("workspaceImported");
+        } catch (error) {
+          const message = fmt(pg("workspaceImportFailed"), { error: error instanceof Error ? error.message : String(error) });
+          if (status) status.textContent = message;
+          renderErrors([{ message, severity: "error" }]);
+        } finally {
+          if (importInput) importInput.value = "";
+        }
+      };
+
+      const escapeHtml = (s: string): string =>
+        s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+      const escapeAttr = (s: string): string =>
+        escapeHtml(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+      const renderJson = (json: string): string =>
+        escapeHtml(json).replace(
+          /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g,
+          (match, stringToken: string | undefined, colon: string | undefined) => {
+            if (stringToken) {
+              const cls = colon ? "pg-json-key" : "pg-json-string";
+              return `<span class="${cls}">${stringToken}</span>${colon ?? ""}`;
+            }
+            const cls = /^-?\d/.test(match) ? "pg-json-number" : "pg-json-literal";
+            return `<span class="${cls}">${match}</span>`;
+          },
+        );
+
+      const summariseError = (message: string): string =>
+        message.length > 80 ? `${message.slice(0, 77)}...` : message;
+
+      const sourceMatchesExample = (id: string | null | undefined, src = textarea?.value ?? ""): boolean =>
+        workspaceFiles.length === 1 && !!id && exampleSources[id] !== undefined && exampleSources[id] === src;
+
+      const selectMobileView = (target: string) => {
+        if (!pgMain || !["source", "output", "rail"].includes(target)) return;
+        pgMain.dataset.mobileView = target;
+        mobileViewBtns.forEach((btn) => {
+          const active = btn.dataset.mobileViewBtn === target;
+          btn.classList.toggle("active", active);
+          btn.setAttribute("aria-pressed", String(active));
+        });
+      };
+
+      mobileViewBtns.forEach((btn) => {
+        btn.addEventListener("click", () => selectMobileView(btn.dataset.mobileViewBtn ?? "source"), { signal });
+      });
+
+      fileTree?.addEventListener("click", (event) => {
+        const deleteBtn = (event.target as HTMLElement)?.closest<HTMLButtonElement>("[data-delete-file]");
+        if (deleteBtn) {
+          event.preventDefault();
+          deleteWorkspaceFile(deleteBtn.dataset.deleteFile ?? "");
+          return;
+        }
+        const btn = (event.target as HTMLElement)?.closest<HTMLButtonElement>("[data-file-path]");
+        if (!btn) return;
+        event.preventDefault();
+        switchWorkspaceFile(btn.dataset.filePath ?? "");
+      }, { signal });
+
+      setEntryBtn?.addEventListener("click", () => markWorkspaceEntry(activePath), { signal });
+      newFileBtn?.addEventListener("click", addScratchFile, { signal });
+      importWorkspaceBtn?.addEventListener("click", () => importInput?.click(), { signal });
+      exportWorkspaceBtn?.addEventListener("click", exportWorkspace, { signal });
+      importInput?.addEventListener("change", () => {
+        void importWorkspaceFiles(importInput.files);
+      }, { signal });
+
+      // Effect class -> localized label. Falls back to the raw class
+      // name lowercased if it isn't one of the known classes.
+      const effectLabel = (effectClass: unknown): string => {
+        const key = String(effectClass);
+        const localized = getMessage(`playground.effects.${key}`, readLocale());
+        if (typeof localized === "string" && localized) return localized;
+        return key.toLowerCase();
+      };
+
+      const buildHashToName = (types: any[] = []) => {
+        const hashToName = new Map<string, string>();
+        for (const ty of types) {
+          for (const key of ["hash", "hash_type_source"]) {
+            const h = ty[key];
+            if (h && h !== "target-default") hashToName.set(h, ty.name);
+          }
+        }
+        hashToName.set("a2fb2f9b3990cd9b473352ff466d94a720c6a8c56ce9e014536872ea71c808d1", "Token");
+        return hashToName;
+      };
+
+      const actionRuntimeFeatures = (action: any): string[] => {
+        const raw =
+          action.ckb_runtime_features ||
+          action.runtime_features ||
+          action.target_features ||
+          action.runtime?.features ||
+          [];
+        if (Array.isArray(raw)) return raw.map(String).filter(Boolean);
+        if (raw && typeof raw === "object") return Object.keys(raw).filter((key) => Boolean(raw[key]));
+        if (typeof raw === "string" && raw.trim()) return [raw.trim()];
+        return [];
+      };
+
+      const formatSetEntries = (entries: any[] = [], paramsByBinding = new Map<string, string>(), hashToName = new Map<string, string>()) =>
+        entries.map((entry: any) => {
+          const binding = escapeHtml(entry.binding || "?");
+          const ty = escapeHtml(
+            entry.ty ||
+            paramsByBinding.get(entry.binding) ||
+            hashToName.get(entry.type_hash) ||
+            "Cell",
+          );
+          return `<span class="pg-set-entry">${binding}: <span class="pg-set-type">${ty}</span></span>`;
+        }).join("");
+
+      const actionParamsByBinding = (action: any) => {
+        const paramsByBinding = new Map<string, string>();
+        for (const p of action.params || []) {
+          if (p.name && p.ty) paramsByBinding.set(p.name, p.ty);
+        }
+        return paramsByBinding;
+      };
+
+      const byteOffsetToJsOffset = (source: string, byteOffset: number): number => {
+        const capped = Math.max(0, Math.min(byteOffset, new TextEncoder().encode(source).length));
+        let byteCount = 0;
+        for (let i = 0; i < source.length; i++) {
+          const bytes = new TextEncoder().encode(source[i]).length;
+          if (byteCount + bytes > capped) return i;
+          byteCount += bytes;
+        }
+        return source.length;
+      };
+
+      const focusDiagnostic = (diagnostic: CompileDiagnostic) => {
+        if (!textarea || !diagnostic.range) return;
+        if (diagnostic.file && diagnostic.file !== activePath) switchWorkspaceFile(diagnostic.file, false);
+        const source = currentFile()?.source ?? textarea.value;
+        const start = byteOffsetToJsOffset(source, diagnostic.range.start.offset);
+        const end = Math.max(start, byteOffsetToJsOffset(source, diagnostic.range.end.offset));
+        textarea.focus();
+        textarea.setSelectionRange(start, end || start);
+        const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight) || 20;
+        textarea.scrollTop = Math.max(0, (diagnostic.range.start.line - 3) * lineHeight);
+        syncScroll();
+        scheduleHighlight();
+        window.setTimeout(() => textarea.focus({ preventScroll: true }), 0);
+      };
+
+      const offsetToLspPosition = (source: string, offset: number) => {
+        const before = source.slice(0, Math.max(0, Math.min(offset, source.length)));
+        const lines = before.split("\n");
+        return {
+          line: lines.length - 1,
+          character: lines.at(-1)?.length ?? 0,
+        };
+      };
+
+      const lspPositionToOffset = (source: string, position: { line: number; character: number }) => {
+        const lines = source.split("\n");
+        let offset = 0;
+        for (let i = 0; i < Math.min(position.line, lines.length); i++) {
+          offset += lines[i].length + 1;
+        }
+        return Math.min(source.length, offset + Math.min(position.character, lines[position.line]?.length ?? 0));
+      };
+
+      const wordRangeAtCursor = () => {
+        if (!textarea) return { start: 0, end: 0, prefix: "" };
+        const value = textarea.value;
+        const cursor = textarea.selectionStart;
+        let start = cursor;
+        let end = cursor;
+        while (start > 0 && /[A-Za-z0-9_]/.test(value[start - 1])) start--;
+        while (end < value.length && /[A-Za-z0-9_]/.test(value[end])) end++;
+        return { start, end, prefix: value.slice(start, cursor) };
+      };
+
+      const clamp = (value: number, min: number, max: number) =>
+        Math.max(min, Math.min(max, value));
+
+      const textMeasureCanvas = document.createElement("canvas");
+      const textMeasureContext = textMeasureCanvas.getContext("2d");
+
+      const expandTabs = (text: string, tabSize: number) => {
+        let column = 0;
+        let output = "";
+        for (const char of text) {
+          if (char === "\t") {
+            const spacesToNextStop = tabSize - (column % tabSize);
+            const count = spacesToNextStop || tabSize;
+            output += " ".repeat(count);
+            column += count;
+          } else {
+            output += char;
+            column += 1;
+          }
+        }
+        return output;
+      };
+
+      const cursorOverlayCoordinates = () => {
+        if (!textarea || !editor) return null;
+        const value = textarea.value;
+        const cursor = clamp(textarea.selectionStart, 0, value.length);
+        const before = value.slice(0, cursor);
+        const lineStart = before.lastIndexOf("\n") + 1;
+        const lineIndex = before.split("\n").length - 1;
+        const linePrefix = before.slice(lineStart);
+        const style = getComputedStyle(textarea);
+        const lineHeight = Number.parseFloat(style.lineHeight) || 20;
+        const paddingLeft = Number.parseFloat(style.paddingLeft) || 60;
+        const paddingTop = Number.parseFloat(style.paddingTop) || 14;
+        const tabSize = Number.parseInt(style.tabSize || "2", 10) || 2;
+        const font = [style.fontStyle, style.fontVariant, style.fontWeight, style.fontSize, style.fontFamily].join(" ");
+        let textWidth = linePrefix.length * 8;
+        if (textMeasureContext) {
+          textMeasureContext.font = font;
+          textWidth = textMeasureContext.measureText(expandTabs(linePrefix, tabSize)).width;
+        }
+        return {
+          x: paddingLeft + textWidth - textarea.scrollLeft,
+          y: paddingTop + lineIndex * lineHeight - textarea.scrollTop,
+          lineHeight,
+        };
+      };
+
+      const positionOverlayAtCursor = (el: HTMLElement, kind: "completion" | "hover") => {
+        if (!editor) return;
+        const coords = cursorOverlayCoordinates();
+        if (!coords) return;
+        const preferredWidth = kind === "completion" ? 520 : 620;
+        const minWidth = kind === "completion" ? 260 : 300;
+        const overlayWidth = Math.max(minWidth, Math.min(preferredWidth, editor.clientWidth - 76));
+        const left = clamp(coords.x, 52, Math.max(52, editor.clientWidth - overlayWidth - 16));
+        const estimatedHeight = kind === "completion"
+          ? Math.min(260, editor.clientHeight * 0.46)
+          : Math.min(190, editor.clientHeight * 0.42);
+        const belowTop = coords.y + coords.lineHeight + 8;
+        const aboveTop = Math.max(12, coords.y - estimatedHeight - 8);
+        const openAbove = belowTop + estimatedHeight > editor.clientHeight - 12 && aboveTop < belowTop;
+        const top = openAbove ? aboveTop : clamp(belowTop, 12, Math.max(12, editor.clientHeight - 64));
+
+        el.style.setProperty("--overlay-left", `${Math.round(left)}px`);
+        el.style.setProperty("--overlay-top", `${Math.round(top)}px`);
+        el.style.setProperty("--overlay-width", `${Math.round(overlayWidth)}px`);
+        el.style.setProperty("--overlay-max-height", `${Math.round(estimatedHeight)}px`);
+      };
+
+      repositionFloatingTools = () => {
+        if (completionsEl && !completionsEl.hidden) positionOverlayAtCursor(completionsEl, "completion");
+        if (hoverCard && !hoverCard.hidden) positionOverlayAtCursor(hoverCard, "hover");
+      };
+
+      const hideCompletions = () => {
+        if (completionsEl) {
+          completionsEl.hidden = true;
+          (completionsEl as any).__items = [];
+          (completionsEl as any).__activeIndex = 0;
+        }
+      };
+
+      const hideHover = () => {
+        if (hoverCard) hoverCard.hidden = true;
+      };
+
+      const markdownToText = (value: string) =>
+        value
+          .replace(/```[a-zA-Z0-9_-]*\n?/g, "")
+          .replace(/```/g, "")
+          .trim();
+
+      const normalizeSnippetInsert = (value: string) =>
+        value
+          .replace(/\$\{\d+:([^}]+)\}/g, "$1")
+          .replace(/\$\d+/g, "");
+
+      const applyCompletion = (completion: LanguageCompletion) => {
+        if (!textarea) return;
+        const { start, end } = wordRangeAtCursor();
+        const value = textarea.value;
+        const lineStart = value.lastIndexOf("\n", start > 0 ? start - 1 : -1) + 1;
+        const indent = value.slice(lineStart, start).match(/^[ \t]*/)?.[0] ?? "";
+        const insert = normalizeSnippetInsert(completion.insert_text || completion.label)
+          .replace(/\n(?!$)/g, `\n${indent}`);
+        textarea.value = value.slice(0, start) + insert + value.slice(end);
+        textarea.selectionStart = textarea.selectionEnd = start + insert.length;
+        hideCompletions();
+        markEditorChanged();
+        textarea.focus();
+      };
+
+      const setActiveCompletion = (index: number) => {
+        if (!completionsEl) return;
+        const items = (completionsEl as any).__items as LanguageCompletion[] | undefined;
+        if (!items?.length) return;
+        const next = (index + items.length) % items.length;
+        (completionsEl as any).__activeIndex = next;
+        completionsEl.querySelectorAll<HTMLButtonElement>("[data-completion-index]").forEach((btn) => {
+          const active = Number(btn.dataset.completionIndex) === next;
+          btn.classList.toggle("is-active", active);
+          btn.setAttribute("aria-selected", String(active));
+          if (active) btn.scrollIntoView({ block: "nearest" });
+        });
+      };
+
+      const moveActiveCompletion = (delta: number) => {
+        const current = Number((completionsEl as any)?.__activeIndex ?? 0);
+        setActiveCompletion(current + delta);
+      };
+
+      const applyActiveCompletion = () => {
+        const items = (completionsEl as any)?.__items as LanguageCompletion[] | undefined;
+        if (!items?.length) return false;
+        const active = Number((completionsEl as any)?.__activeIndex ?? 0);
+        const item = items[clamp(active, 0, items.length - 1)];
+        if (!item) return false;
+        applyCompletion(item);
+        return true;
+      };
+
+      const renderCompletions = (items: LanguageCompletion[] = []) => {
+        if (!completionsEl || !textarea) return;
+        const { prefix } = wordRangeAtCursor();
+        const filtered = items
+          .filter((item) => !prefix || item.label.toLowerCase().startsWith(prefix.toLowerCase()))
+          .slice(0, 8);
+        if (!filtered.length) {
+          hideCompletions();
+          return;
+        }
+        completionsEl.innerHTML = filtered.map((item, index) => `
+          <button type="button" role="option" aria-selected="${index === 0 ? "true" : "false"}" class="${index === 0 ? "is-active" : ""}" data-completion-index="${index}">
+            <strong>${escapeHtml(item.label)}</strong>
+            ${item.detail ? `<span>${escapeHtml(item.detail)}</span>` : ""}
+          </button>
+        `).join("");
+        (completionsEl as any).__items = filtered;
+        (completionsEl as any).__activeIndex = 0;
+        positionOverlayAtCursor(completionsEl, "completion");
+        completionsEl.hidden = false;
+      };
+
+      const renderHover = (hover: LanguageServicePayload["hover"]) => {
+        if (!hoverCard || !hover?.contents) {
+          hideHover();
+          return;
+        }
+        hoverCard.innerHTML = `<pre>${escapeHtml(markdownToText(hover.contents))}</pre>`;
+        positionOverlayAtCursor(hoverCard, "hover");
+        hoverCard.hidden = false;
+      };
+
+      const jumpToDefinition = (definition: LanguageServicePayload["definition"]) => {
+        if (!textarea || !definition?.range) return false;
+        const start = lspPositionToOffset(textarea.value, definition.range.start);
+        const end = Math.max(start, lspPositionToOffset(textarea.value, definition.range.end));
+        textarea.focus();
+        textarea.setSelectionRange(start, end || start);
+        const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight) || 20;
+        textarea.scrollTop = Math.max(0, (definition.range.start.line - 3) * lineHeight);
+        syncScroll();
+        scheduleHighlight();
+        if (status) status.textContent = pg("definitionReady");
+        return true;
+      };
+
+      let hoverTimer: number | undefined;
+      const cleanupPlayground = () => {
+        window.clearTimeout(compileTimer);
+        window.clearTimeout(compileSpinnerTimer);
+        window.clearTimeout(hoverTimer);
+        if (highlightFrame !== undefined) {
+          window.cancelAnimationFrame(highlightFrame);
+          highlightFrame = undefined;
+        }
+        compileWorker.terminate();
+        if ((window as any).__cellscriptPlaygroundAbort === playgroundAbort) {
+          delete (window as any).__cellscriptPlaygroundAbort;
+        }
+        playgroundAbort.abort();
+      };
+      document.addEventListener("astro:before-swap", cleanupPlayground, { once: true, signal });
+
+      const requestLanguage = (intent: LanguageIntent) => {
+        if (!workerReady || !textarea) return;
+        syncActiveFileFromEditor();
+        const position = offsetToLspPosition(textarea.value, textarea.selectionStart);
+        const id = ++languageRequestId;
+        languageIntents.set(id, intent);
+        latestLanguageRequestByIntent[intent] = id;
+        if (intent === "definition" && status) status.textContent = pg("definitionLooking");
+        compileWorker.postMessage({
+          id,
+          type: "language",
+          source: textarea.value,
+          line: position.line,
+          character: position.character,
+        });
+      };
+
+      const scheduleHover = () => {
+        window.clearTimeout(hoverTimer);
+        hoverTimer = window.setTimeout(() => requestLanguage("hover"), 260);
+      };
+
+      // ---- Live compile status ----
+      type CompileState = "idle" | "stale" | "compiling" | "ready" | "error";
+      let lastElapsed = 0;
+      const clearCompileSpinner = () => {
+        window.clearTimeout(compileSpinnerTimer);
+        compileSpinnerTimer = undefined;
+        compileStatus?.removeAttribute("data-waiting");
+        compileBtn?.removeAttribute("data-waiting");
+      };
+
+      const setCompileState = (state: CompileState) => {
+        if (!compileLabel) return;
+        compileStatus?.setAttribute("data-state", state);
+        compileBtn?.setAttribute("data-state", state);
+        if (state === "compiling") {
+          clearCompileSpinner();
+          compileSpinnerTimer = window.setTimeout(() => {
+            compileStatus?.setAttribute("data-waiting", "true");
+            compileBtn?.setAttribute("data-waiting", "true");
+          }, 150);
+        } else {
+          clearCompileSpinner();
+        }
+        if (state === "idle") compileLabel.textContent = pg("compile");
+        else if (state === "stale") compileLabel.textContent = pg("stale");
+        else if (state === "compiling") compileLabel.textContent = pg("compiling");
+        else if (state === "ready") compileLabel.textContent = fmt(pg("compiledIn"), { ms: String(lastElapsed) });
+        else if (state === "error") {
+          const counts = diagnosticCounts(currentDiagnostics);
+          const total = counts.errors || currentDiagnostics.length;
+          compileLabel.textContent = total > 0 ? fmt(pg("errorsBadge"), { n: String(total) }) : pg("failed");
+        }
+      };
+
+      const renderMetadata = (data: any) => {
+        const panel = outputPanels.get("metadata");
+        if (!panel) return;
+        // A compile failure invalidates the previous metadata; render a
+        // muted empty-state rather than stale or fake JSON.
+        if (!data || data.__empty) {
+          panel.innerHTML = `<p class="pg-empty">${escapeHtml(pg("noMetadata"))}</p>`;
+          return;
+        }
+        const json = JSON.stringify(data, null, 2);
+        // Wrap in .metadata-block so the existing .copy-btn.metadata-copy
+        // absolute positioning (global.css) pins the button to the
+        // top-right corner. The button itself is cloned from an Astro
+        // template so icon markup stays in the shared component system.
+        const copyAria = getMessage("a11y.copyAria", readLocale()) ?? "Copy";
+        panel.innerHTML = `<div class="metadata-block pg-metadata-block">
+          <pre class="pg-json">${renderJson(json)}</pre>
+        </div>`;
+        const copyTemplate = document.querySelector<HTMLTemplateElement>("[data-metadata-copy-template]");
+        const copyButton = copyTemplate?.content.firstElementChild?.cloneNode(true) as HTMLButtonElement | undefined;
+        const block = panel.querySelector<HTMLElement>(".pg-metadata-block");
+        if (copyButton && block) {
+          copyButton.setAttribute("aria-label", copyAria);
+          block.prepend(copyButton);
+        }
+      };
+
+      const renderActions = (data: any) => {
+        const panel = outputPanels.get("actions");
+        if (!panel) return;
+        const actions = data.actions || [];
+        if (!actions.length) {
+          panel.innerHTML = `<p class="pg-empty">${escapeHtml(pg("noActions"))}</p>`;
+          return;
+        }
+
+        // Build a type-hash -> name map so consume entries (which carry
+        // only a hash) can be resolved to a human-readable type name.
+        // create entries already carry a friendly ty field.
+        const hashToName = buildHashToName(data.types || []);
+
+        panel.innerHTML = `<ul class="pg-action-list">${actions.map((a: any) => {
+          // Build a binding -> type name map from the action's own
+          // params, which carry the declared type name for every
+          // binding (both consume inputs and create outputs).
+          const paramsByBinding = actionParamsByBinding(a);
+          const consume = formatSetEntries(a.consume_set || [], paramsByBinding, hashToName);
+          const create = formatSetEntries(a.create_set || [], paramsByBinding, hashToName);
+          const mutate = formatSetEntries(a.mutate_set || [], paramsByBinding, hashToName);
+          const runtimeFeatures = actionRuntimeFeatures(a);
+          const cyclesLabel = a.estimated_cycles != null
+            ? `<div class="pg-action-cycles">${a.estimated_cycles.toLocaleString()} ${escapeHtml(pg("cycles"))}</div>`
+            : "";
+          const runtimeLabel = runtimeFeatures.length
+            ? `<div class="pg-action-features"><span>${escapeHtml(pg("runtimeFeatures"))}</span><div>${runtimeFeatures.map((feature) => `<code>${escapeHtml(feature)}</code>`).join("")}</div></div>`
+            : "";
+          return `<li class="pg-action-item">
+            <div class="pg-action-head">
+              <code class="pg-action-name">${escapeHtml(a.name)}</code>
+              <span class="pg-action-effect pg-effect-${String(a.effect_class).toLowerCase()}">${escapeHtml(effectLabel(a.effect_class))}</span>
+            </div>
+            <div class="pg-action-sets">
+              <div class="pg-set"><span class="pg-set-label">${escapeHtml(pg("consume"))}</span><div class="pg-set-items">${consume || "<span class=\"pg-set-empty\">—</span>"}</div></div>
+              <div class="pg-set"><span class="pg-set-label">${escapeHtml(pg("create"))}</span><div class="pg-set-items">${create || "<span class=\"pg-set-empty\">—</span>"}</div></div>
+              ${mutate ? `<div class="pg-set"><span class="pg-set-label">${escapeHtml(pg("effect"))}</span><div class="pg-set-items">${mutate}</div></div>` : ""}
+            </div>
+            ${cyclesLabel}
+            ${runtimeLabel}
+          </li>`;
+        }).join("")}</ul>`;
+      };
+
+      const renderTypes = (data: any) => {
+        const panel = outputPanels.get("types");
+        if (!panel) return;
+        const types = data.types || [];
+        if (!types.length) {
+          panel.innerHTML = `<p class="pg-empty">${escapeHtml(pg("noTypes"))}</p>`;
+          return;
+        }
+        panel.innerHTML = `<ul class="pg-type-list">${types.map((ty: any) => {
+          const caps = (ty.capabilities || []).map((c: string) => `<span class="pg-cap">${escapeHtml(c)}</span>`).join("");
+          return `<li class="pg-type-item">
+            <div class="pg-type-head">
+              <code class="pg-type-name">${escapeHtml(ty.name)}</code>
+              <span class="pg-type-kind">${escapeHtml(ty.kind)}</span>
+            </div>
+            <div class="pg-type-caps">${caps}</div>
+            ${ty.encoded_size != null ? `<div class="pg-type-size">${ty.encoded_size} bytes</div>` : ""}
+          </li>`;
+        }).join("")}</ul>`;
+      };
+
+      const updateErrorBadge = (diagnostics: CompileDiagnostic[]) => {
+        if (!errorBadge) return;
+        if (!diagnostics.length) {
+          errorBadge.classList.remove("is-visible");
+          errorBadge.classList.remove("has-errors", "has-warnings");
+          errorBadge.textContent = "0";
+          errorBadge.setAttribute("aria-label", pg("noErrorsBadge"));
+          return;
+        }
+        const counts = diagnosticCounts(diagnostics);
+        errorBadge.textContent = String(counts.errors || counts.warnings || diagnostics.length);
+        errorBadge.setAttribute(
+          "aria-label",
+          fmt(pg("diagnosticsBadge"), { errors: String(counts.errors), warnings: String(counts.warnings) }),
+        );
+        errorBadge.hidden = false;
+        errorBadge.classList.add("is-visible");
+        errorBadge.classList.toggle("has-errors", counts.errors > 0);
+        errorBadge.classList.toggle("has-warnings", counts.errors === 0 && counts.warnings > 0);
+      };
+
+      const renderErrors = (diagnostics: CompileDiagnostic[]) => {
+        currentDiagnostics = diagnostics;
+        updateErrorBadge(diagnostics);
+        scheduleHighlight();
+        if (!railDiagnosticsBody) return;
+        if (!diagnostics.length) {
+          railDiagnosticsBody.innerHTML = `<p class="pg-no-errors">${escapeHtml(pg("noErrors"))}</p>`;
+          return;
+        }
+        railDiagnosticsBody.innerHTML = `<ul class="pg-diagnostic-list">${diagnostics.map((diagnostic, index) => {
+          const range = diagnostic.range;
+          const fileLabel = diagnostic.file && diagnostic.file !== activePath ? `${diagnostic.file} · ` : "";
+          const location = range
+            ? `${escapeHtml(fileLabel)}${escapeHtml(pg("line"))} ${range.start.line}:${range.start.column}`
+            : escapeHtml(pg("sourceLevel"));
+          const severity = diagnosticSeverity(diagnostic);
+          const severityText = severity === "warning" ? pg("warningLabel") : pg("errorLabel");
+          return `<li>
+            <button class="pg-diagnostic pg-diagnostic-${escapeHtml(severity)}" type="button" data-diagnostic-index="${index}">
+              <span class="pg-diagnostic-location">${escapeHtml(severityText)} · ${location}</span>
+              <span class="pg-diagnostic-message">${escapeHtml(diagnostic.message)}</span>
+            </button>
+          </li>`;
+        }).join("")}</ul>`;
+      };
+
+      const renderRail = (data: any) => {
+        if (!railReady || !railLoading) return;
+        railLoading.hidden = true;
+        railLoading.innerHTML = `<span class="pg-loading-dot"></span><span>${escapeHtml(pg("loading"))}</span>`;
+        railReady.hidden = false;
+        if (railModule) railModule.textContent = data.module || "—";
+        if (railTarget) railTarget.textContent = data.target_profile?.name || "ckb";
+        // Third fact: show byte size when we have it, else fall back to
+        // the artifact format string. The label must follow the value
+        // (size vs format) so the two never contradict.
+        const hasSize = data.artifact_size_bytes != null;
+        if (railSize) {
+          railSize.textContent = hasSize
+            ? formatBytes(data.artifact_size_bytes)
+            : (data.artifact_format || "—");
+        }
+        if (railSizeLabel) {
+          const labelKey = hasSize ? "playground.size" : "playground.artifactFormat";
+          railSizeLabel.dataset.i18n = labelKey;
+          railSizeLabel.textContent = getMessage(labelKey, readLocale()) ?? "";
+        }
+        if (railModeFact) railModeFact.hidden = hasSize;
+        if (railMode) railMode.textContent = hasSize ? "" : pg("metadataOnly");
+        if (railActions) {
+          const hashToName = buildHashToName(data.types || []);
+          railActions.innerHTML = (data.actions || []).map((a: any) => {
+            const paramsByBinding = actionParamsByBinding(a);
+            const consume = formatSetEntries(a.consume_set || [], paramsByBinding, hashToName);
+            const create = formatSetEntries(a.create_set || [], paramsByBinding, hashToName);
+            const mutate = formatSetEntries(a.mutate_set || [], paramsByBinding, hashToName);
+            const runtimeFeatures = actionRuntimeFeatures(a);
+            const cyclesLabel = a.estimated_cycles != null
+              ? `<div class="pg-rail-detail-row"><span>${escapeHtml(pg("cycles"))}</span><code>${escapeHtml(a.estimated_cycles.toLocaleString())}</code></div>`
+              : "";
+            const runtimeLabel = runtimeFeatures.length
+              ? `<div class="pg-rail-feature-row"><span>${escapeHtml(pg("runtimeFeatures"))}</span><div>${runtimeFeatures.map((feature) => `<code>${escapeHtml(feature)}</code>`).join("")}</div></div>`
+              : "";
+            return `<li class="pg-rail-action">
+              <details>
+                <summary>
+                  <code>${escapeHtml(a.name)}</code>
+                  <span class="pg-action-effect pg-effect-${String(a.effect_class).toLowerCase()}">${escapeHtml(effectLabel(a.effect_class))}</span>
+                </summary>
+                <div class="pg-rail-action-detail">
+                  <div class="pg-rail-detail-row"><span>${escapeHtml(pg("consume"))}</span><div>${consume || "<span class=\"pg-set-empty\">—</span>"}</div></div>
+                  <div class="pg-rail-detail-row"><span>${escapeHtml(pg("create"))}</span><div>${create || "<span class=\"pg-set-empty\">—</span>"}</div></div>
+                  ${mutate ? `<div class="pg-rail-detail-row"><span>${escapeHtml(pg("effect"))}</span><div>${mutate}</div></div>` : ""}
+                  ${cyclesLabel}
+                  ${runtimeLabel}
+                </div>
+              </details>
+            </li>`;
+          }).join("") || `<li class="pg-rail-empty">${escapeHtml(pg("noActions"))}</li>`;
+        }
+        if (railTypes) {
+          railTypes.innerHTML = (data.types || []).map((ty: any) =>
+            `<li class="pg-rail-type"><code>${escapeHtml(ty.name)}</code> <span class="pg-rail-type-kind">${escapeHtml(ty.kind)}</span></li>`
+          ).join("") || `<li class="pg-rail-empty">${escapeHtml(pg("noTypes"))}</li>`;
+        }
+      };
+
+      const clearRailReady = () => {
+        if (railModule) railModule.textContent = "";
+        if (railTarget) railTarget.textContent = "";
+        if (railSize) railSize.textContent = "";
+        if (railMode) railMode.textContent = "";
+        if (railModeFact) railModeFact.hidden = true;
+        if (railActions) railActions.replaceChildren();
+        if (railTypes) railTypes.replaceChildren();
+      };
+
+      const renderRailError = () => {
+        if (!railReady || !railLoading) return;
+        clearRailReady();
+        railReady.hidden = true;
+        railLoading.hidden = true;
+      };
+
+      const applyCompileResult = (requestId: number, result: WorkerCompileResult, elapsed: number, versionText = "") => {
+        if (requestId < latestAppliedRequestId) return;
+        latestAppliedRequestId = requestId;
+        lastElapsed = elapsed;
+        if (versionEl && versionText) versionEl.textContent = `cellc v${versionText}`;
+        if (loading) loading.hidden = true;
+
+        const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : [];
+        const data = result.metadata;
+        const blockingDiagnostics = diagnostics.filter(isBlockingDiagnostic);
+
+        if (blockingDiagnostics.length || !data) {
+          const message = blockingDiagnostics[0]?.message || diagnostics[0]?.message || pg("invalidOutput");
+          renderErrors(diagnostics.length ? diagnostics : [{ message, severity: "error" }]);
+          renderMetadata({ __empty: true });
+          renderActions({ actions: [] });
+          renderTypes({ types: [] });
+          selectTab("actions");
+          selectMobileView("rail");
+          if (status) {
+            status.textContent = summariseError(message);
+            status.title = diagnostics.map((diagnostic) => diagnostic.message).join("\n");
+          }
+          setCompileState("error");
+          renderRailError();
+          return;
+        }
+
+        renderMetadata(data);
+        renderActions(data);
+        renderTypes(data);
+        renderErrors(diagnostics);
+        renderRail(data);
+        if (status) {
+          status.textContent = diagnostics.length
+            ? fmt(pg("compiledWithWarnings"), { ms: String(lastElapsed), n: String(diagnostics.length) })
+            : fmt(pg("ready"), { ms: String(lastElapsed) });
+          if (diagnostics.length) status.title = diagnostics.map((diagnostic) => diagnostic.message).join("\n");
+          else status.removeAttribute("title");
+        }
+        setCompileState("ready");
+      };
+
+      const doCompile = () => {
+        if (!workerReady || !textarea) return;
+        syncActiveFileFromEditor();
+        setCompileState("compiling");
+        const id = ++compileRequestId;
+        const sources = workspaceFiles.map((file) => ({
+          path: file.path,
+          source: file.source,
+          role: file.path === entryPath ? "entry" : "memory",
+        }));
+        compileWorker.postMessage({
+          id,
+          type: "compile",
+          source: currentFile()?.source ?? textarea.value,
+          sources,
+          entryPath,
+          target: null,
+        });
+      };
+
+      const runCompileNow = () => {
+        window.clearTimeout(compileTimer);
+        doCompile();
+      };
+
+      compileWorker.addEventListener("message", (event) => {
+        const { id, type, payload, elapsed, version } = event.data || {};
+        if (type === "language-result" && typeof id === "number") {
+          const intent = languageIntents.get(id);
+          languageIntents.delete(id);
+          if (!intent || id !== latestLanguageRequestByIntent[intent]) return;
+          const result = (payload || {}) as LanguageServicePayload;
+          if (intent === "completion") {
+            hideHover();
+            renderCompletions(result.completions ?? []);
+          } else if (intent === "definition") {
+            hideCompletions();
+            hideHover();
+            if (!jumpToDefinition(result.definition ?? null) && status) {
+              status.textContent = pg("definitionMissing");
+            }
+          } else {
+            hideCompletions();
+            renderHover(result.hover ?? null);
+          }
+          return;
+        }
+        if (type !== "result" || typeof id !== "number") return;
+        applyCompileResult(id, payload || { metadata: null, diagnostics: [{ message: pg("invalidOutput"), severity: "error" }] }, elapsed || 0, version || "");
+      }, { signal });
+
+      compileWorker.addEventListener("error", (event) => {
+        workerReady = false;
+        const message = fmt(pg("loadFailed"), { error: event.message || "worker error" });
+        if (status) status.textContent = message;
+        if (loading) {
+          loading.hidden = false;
+          loading.innerHTML = `<span class="pg-error-inline">${escapeHtml(message)}</span>`;
+        }
+        renderRailError();
+        renderErrors([{ message, severity: "error" }]);
+        setCompileState("error");
+      }, { signal });
+
+      const scheduleCompile = () => {
+        setCompileState("stale");
+        window.clearTimeout(compileTimer);
+        compileTimer = window.setTimeout(doCompile, 150);
+      };
+
+      const markEditorChanged = () => {
+        syncActiveFileFromEditor();
+        renderFileTree();
+        scheduleHighlight();
+        updateExampleLesson(sourceMatchesExample(currentExampleId) ? currentExampleId : null);
+        scheduleCompile();
+      };
+
+      const autoPairs = new Map<string, string>([
+        ["(", ")"],
+        ["[", "]"],
+        ["{", "}"],
+        ['"', '"'],
+        ["'", "'"],
+      ]);
+      const autoPairClosers = new Set(Array.from(autoPairs.values()));
+      const indentUnit = "  ";
+
+      const leadingWhitespace = (value: string) =>
+        value.match(/^[ \t]*/)?.[0] ?? "";
+
+      const outdentWidth = (line: string) => {
+        if (line.startsWith(indentUnit)) return indentUnit.length;
+        if (line.startsWith("\t")) return 1;
+        if (line.startsWith(" ")) return 1;
+        return 0;
+      };
+
+      const selectedLineBounds = (value: string, start: number, end: number) => {
+        const from = Math.min(start, end);
+        const to = Math.max(start, end);
+        const adjustedTo = to > from && value[to - 1] === "\n" ? to - 1 : to;
+        const lineStart = value.lastIndexOf("\n", from > 0 ? from - 1 : -1) + 1;
+        const nextLineBreak = value.indexOf("\n", adjustedTo);
+        const lineEnd = nextLineBreak === -1 ? value.length : nextLineBreak;
+        return { lineStart, lineEnd };
+      };
+
+      const insertedLinePrefixesBefore = (lineStarts: number[], position: number) =>
+        lineStarts.filter((lineStart) => lineStart < position).length * indentUnit.length;
+
+      const removedIndentBefore = (
+        removals: Array<{ lineStart: number; remove: number }>,
+        position: number,
+      ) =>
+        removals.reduce((total, item) => {
+          if (position <= item.lineStart) return total;
+          return total + Math.min(item.remove, position - item.lineStart);
+        }, 0);
+
+      const indentSelection = () => {
+        if (!textarea) return;
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const direction = textarea.selectionDirection || "none";
+        const value = textarea.value;
+
+        if (start === end) {
+          textarea.value = value.slice(0, start) + indentUnit + value.slice(end);
+          textarea.setSelectionRange(start + indentUnit.length, start + indentUnit.length, direction);
+          markEditorChanged();
+          return;
+        }
+
+        const { lineStart, lineEnd } = selectedLineBounds(value, start, end);
+        const block = value.slice(lineStart, lineEnd);
+        const lines = block.split("\n");
+        let offset = lineStart;
+        const lineStarts = lines.map((line) => {
+          const current = offset;
+          offset += line.length + 1;
+          return current;
+        });
+        const indented = lines.map((line) => `${indentUnit}${line}`).join("\n");
+        textarea.value = value.slice(0, lineStart) + indented + value.slice(lineEnd);
+        const nextStart = start + insertedLinePrefixesBefore(lineStarts, start);
+        const nextEnd = end + insertedLinePrefixesBefore(lineStarts, end);
+        textarea.setSelectionRange(nextStart, Math.max(nextStart, nextEnd), direction);
+        markEditorChanged();
+      };
+
+      const outdentSelection = () => {
+        if (!textarea) return;
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const direction = textarea.selectionDirection || "none";
+        const value = textarea.value;
+        const { lineStart, lineEnd } = selectedLineBounds(value, start, end);
+        const block = value.slice(lineStart, lineEnd);
+        const lines = block.split("\n");
+        let offset = lineStart;
+        const removals: Array<{ lineStart: number; remove: number }> = [];
+        const outdented = lines.map((line) => {
+          const current = offset;
+          offset += line.length + 1;
+          const remove = outdentWidth(line);
+          if (remove) removals.push({ lineStart: current, remove });
+          return line.slice(remove);
+        }).join("\n");
+        if (!removals.length) return;
+        textarea.value = value.slice(0, lineStart) + outdented + value.slice(lineEnd);
+        const nextStart = Math.max(lineStart, start - removedIndentBefore(removals, start));
+        const nextEnd = Math.max(nextStart, end - removedIndentBefore(removals, end));
+        textarea.setSelectionRange(nextStart, nextEnd, direction);
+        markEditorChanged();
+      };
+
+      const handleEnterKey = () => {
+        if (!textarea) return;
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const value = textarea.value;
+        const lineStart = value.lastIndexOf("\n", start > 0 ? start - 1 : -1) + 1;
+        const lineEnd = value.indexOf("\n", end);
+        const currentLineEnd = lineEnd === -1 ? value.length : lineEnd;
+        const beforeCursor = value.slice(lineStart, start);
+        const afterCursor = value.slice(end, currentLineEnd);
+        const indent = leadingWhitespace(beforeCursor);
+        const trimmedBefore = beforeCursor.trimEnd();
+        const trimmedAfter = afterCursor.trimStart();
+        const open = trimmedBefore.at(-1) ?? "";
+        const close = ["{", "[", "("].includes(open) ? autoPairs.get(open) : undefined;
+        const extraIndent = close ? indentUnit : "";
+        const splitPair = !!close && trimmedAfter.startsWith(close);
+        const insert = splitPair
+          ? `\n${indent}${extraIndent}\n${indent}`
+          : `\n${indent}${extraIndent}`;
+        textarea.value = value.slice(0, start) + insert + value.slice(end);
+        const cursor = splitPair
+          ? start + 1 + indent.length + extraIndent.length
+          : start + insert.length;
+        textarea.setSelectionRange(cursor, cursor);
+        markEditorChanged();
+      };
+
+      const handleClosingOutdentKey = (e: KeyboardEvent) => {
+        if (!textarea || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return false;
+        if (!["}", "]", ")"].includes(e.key)) return false;
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        if (start !== end) return false;
+        const value = textarea.value;
+        const lineStart = value.lastIndexOf("\n", start > 0 ? start - 1 : -1) + 1;
+        const beforeCursor = value.slice(lineStart, start);
+        if (!/^[ \t]+$/.test(beforeCursor)) return false;
+        const remove = beforeCursor.endsWith(indentUnit)
+          ? indentUnit.length
+          : beforeCursor.endsWith("\t") || beforeCursor.endsWith(" ")
+            ? 1
+            : 0;
+        if (!remove) return false;
+        e.preventDefault();
+        const insertAt = start - remove;
+        textarea.value = value.slice(0, insertAt) + e.key + value.slice(start);
+        textarea.setSelectionRange(insertAt + 1, insertAt + 1);
+        markEditorChanged();
+        return true;
+      };
+
+      const handleAutoPairKey = (e: KeyboardEvent) => {
+        if (!textarea || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return false;
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const value = textarea.value;
+
+        if (e.key === "Backspace" && start === end) {
+          const previous = value[start - 1];
+          const next = value[start];
+          if (autoPairs.get(previous) === next) {
+            e.preventDefault();
+            textarea.value = value.slice(0, start - 1) + value.slice(start + 1);
+            textarea.selectionStart = textarea.selectionEnd = start - 1;
+            markEditorChanged();
+            return true;
+          }
+          return false;
+        }
+
+        if (start === end && autoPairClosers.has(e.key) && value[start] === e.key) {
+          e.preventDefault();
+          textarea.selectionStart = textarea.selectionEnd = start + 1;
+          scheduleHighlight();
+          return true;
+        }
+
+        const close = autoPairs.get(e.key);
+        if (!close) return false;
+        e.preventDefault();
+        const selected = value.slice(start, end);
+        textarea.value = value.slice(0, start) + e.key + selected + close + value.slice(end);
+        if (start === end) {
+          textarea.selectionStart = textarea.selectionEnd = start + e.key.length;
+        } else {
+          textarea.selectionStart = start + e.key.length;
+          textarea.selectionEnd = end + e.key.length;
+        }
+        markEditorChanged();
+        return true;
+      };
+
+      // ---- Tab switching ----
+      // Extracted so compile success/failure can keep output panels in a
+      // consistent state while diagnostics live in the rail.
+      const selectTab = (target: string) => {
+        if (!target) return;
+        outputTabs.forEach((tab) => {
+          const active = tab.dataset.outputTab === target;
+          tab.classList.toggle("active", active);
+          tab.setAttribute("aria-selected", String(active));
+          tab.tabIndex = active ? 0 : -1;
+        });
+        outputPanels.forEach((panel, key) => {
+          panel.hidden = key !== target;
+          panel.classList.toggle("active", key === target);
+        });
+      };
+
+      outputTabs.forEach((tab) => {
+        tab.addEventListener("click", () => selectTab(tab.dataset.outputTab ?? ""), { signal });
+        tab.addEventListener("keydown", (e) => {
+          const current = outputTabs.indexOf(tab);
+          if (current < 0) return;
+          let next = current;
+          if (e.key === "ArrowRight" || e.key === "ArrowDown") next = (current + 1) % outputTabs.length;
+          else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = (current - 1 + outputTabs.length) % outputTabs.length;
+          else if (e.key === "Home") next = 0;
+          else if (e.key === "End") next = outputTabs.length - 1;
+          else return;
+          e.preventDefault();
+          const nextTab = outputTabs[next];
+          nextTab.focus();
+          selectTab(nextTab.dataset.outputTab ?? "");
+        }, { signal });
+      });
+
+      // ---- Editor events ----
+      if (textarea) {
+        textarea.addEventListener("input", () => {
+          hideCompletions();
+          hideHover();
+          markEditorChanged();
+        }, { signal });
+        textarea.addEventListener("scroll", syncScroll, { signal });
+        // Tab indents with two spaces; Shift+Tab outdents the current line or
+        // selected block.
+        textarea.addEventListener("keydown", (e) => {
+          const completionItems = (completionsEl as any)?.__items as LanguageCompletion[] | undefined;
+          if (!completionsEl?.hidden && completionItems?.length) {
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              moveActiveCompletion(1);
+              return;
+            }
+            if (e.key === "ArrowUp") {
+              e.preventDefault();
+              moveActiveCompletion(-1);
+              return;
+            }
+            if (e.key === "Enter" || e.key === "Tab") {
+              e.preventDefault();
+              applyActiveCompletion();
+              return;
+            }
+          }
+          if (e.key === "Escape") {
+            hideCompletions();
+            hideHover();
+            return;
+          }
+          if ((e.ctrlKey || e.metaKey) && (e.key === " " || e.code === "Space")) {
+            e.preventDefault();
+            requestLanguage("completion");
+            return;
+          }
+          if (e.key === "F12") {
+            e.preventDefault();
+            requestLanguage("definition");
+            return;
+          }
+          if (handleAutoPairKey(e)) return;
+          if (handleClosingOutdentKey(e)) return;
+          if (e.key === "Enter") {
+            e.preventDefault();
+            handleEnterKey();
+          } else if (e.key === "Tab") {
+            e.preventDefault();
+            if (e.shiftKey) outdentSelection();
+            else indentSelection();
+          } else if (e.key === "." || e.key === ":") {
+            window.setTimeout(() => requestLanguage("completion"), 0);
+          }
+        }, { signal });
+        textarea.addEventListener("keyup", (e) => {
+          scheduleHighlight();
+          if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) {
+            scheduleHover();
+          }
+        }, { signal });
+        textarea.addEventListener("click", () => {
+          scheduleHighlight();
+          scheduleHover();
+        }, { signal });
+        textarea.addEventListener("select", scheduleHighlight, { signal });
+      }
+
+      // ---- Compile button: manual trigger + keyboard shortcut ----
+      compileBtn?.addEventListener("click", () => {
+        runCompileNow();
+      }, { signal });
+
+      // Ctrl/Cmd+Enter forces a compile from anywhere on the page.
+      window.addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+          e.preventDefault();
+          runCompileNow();
+        }
+      }, { signal });
+
+      // ---- Copy buttons (.copy-btn) ----
+      // Delegated so it covers the metadata panel's copy button even
+      // though that DOM is rebuilt on every successful compile. Mirrors
+      // the landing page's flashCopied: write to clipboard, toggle the
+      // is-copied class for the copied-state icon, then revert after 1.6s.
+      const flashCopyBtn = (btn: HTMLButtonElement, text: string) => {
+        navigator.clipboard.writeText(text).then(
+          () => {
+            btn.classList.add("is-copied");
+            const copiedAria = getMessage("a11y.copiedAria", readLocale()) ?? "Copied";
+            btn.setAttribute("aria-label", copiedAria);
+            window.setTimeout(() => {
+              btn.classList.remove("is-copied");
+              const copyAria = getMessage("a11y.copyAria", readLocale()) ?? "Copy";
+              btn.setAttribute("aria-label", copyAria);
+            }, 1600);
+          },
+          () => {
+            // Clipboard unavailable (permissions / non-secure context); ignore.
+          },
+        );
+      };
+
+      document.addEventListener("click", (e: MouseEvent) => {
+        const btn = (e.target as HTMLElement)?.closest<HTMLButtonElement>(".copy-btn");
+        if (!btn) return;
+        const text = btn.dataset.copyText ?? btn.closest(".metadata-block")?.querySelector<HTMLElement>(".pg-json")?.textContent ?? "";
+        if (text) flashCopyBtn(btn, text);
+      }, { signal });
+
+      document.addEventListener("click", (e: MouseEvent) => {
+        const completionBtn = (e.target as HTMLElement)?.closest<HTMLButtonElement>("[data-completion-index]");
+        if (!completionBtn) return;
+        e.preventDefault();
+        const index = Number(completionBtn.dataset.completionIndex);
+        const items = (completionsEl as any)?.__items as LanguageCompletion[] | undefined;
+        const item = Number.isFinite(index) ? items?.[index] : undefined;
+        if (item) applyCompletion(item);
+      }, { signal });
+
+      document.addEventListener("mouseover", (e: MouseEvent) => {
+        const completionBtn = (e.target as HTMLElement)?.closest<HTMLButtonElement>("[data-completion-index]");
+        if (!completionBtn || completionsEl?.hidden) return;
+        const index = Number(completionBtn.dataset.completionIndex);
+        if (Number.isFinite(index)) setActiveCompletion(index);
+      }, { signal });
+
+      gutter?.addEventListener("click", (e: MouseEvent) => {
+        const lineEl = (e.target as HTMLElement)?.closest<HTMLElement>("[data-gutter-line]");
+        if (!lineEl) return;
+        e.preventDefault();
+        const line = Number(lineEl.dataset.gutterLine);
+        if (Number.isFinite(line)) focusLine(line);
+      }, { signal });
+
+      document.addEventListener("pointerdown", (e: PointerEvent) => {
+        const target = e.target as HTMLElement | null;
+        if (exampleMenu?.open && !target?.closest("[data-example-menu]")) exampleMenu.removeAttribute("open");
+        if (target?.closest("[data-completions], [data-hover-card], [data-textarea]")) return;
+        hideCompletions();
+        hideHover();
+      }, { signal });
+
+      document.addEventListener("click", (e: MouseEvent) => {
+        const btn = (e.target as HTMLElement)?.closest<HTMLButtonElement>("[data-diagnostic-index]");
+        if (!btn) return;
+        e.preventDefault();
+        btn.blur();
+        const index = Number(btn.dataset.diagnosticIndex);
+        const diagnostic = Number.isFinite(index) ? currentDiagnostics[index] : undefined;
+        if (diagnostic) focusDiagnostic(diagnostic);
+      }, { signal });
+
+      // ---- Example drawer ----
+      exampleButtons.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.dataset.exampleId ?? "";
+          const src = exampleSources[id];
+          if (src !== undefined) {
+            const path = normalizeWorkspacePath(exampleFileById.get(id) ?? `${id}.cell`);
+            setWorkspace(makeExampleWorkspace(id), path, path);
+            updateExampleLesson(id);
+            exampleMenu?.removeAttribute("open");
+            runCompileNow();
+          }
+        }, { signal });
+      });
+
+      // ---- URL example preload ----
+      const params = new URLSearchParams(window.location.search);
+      const paramExample = params.get("example");
+      const initialWorkspaceExample =
+        paramExample && exampleSources[paramExample] !== undefined
+          ? paramExample
+          : (exampleMeta[0]?.id ?? Object.keys(exampleSources)[0] ?? "token");
+      const initialWorkspacePath = normalizeWorkspacePath(exampleFileById.get(initialWorkspaceExample) ?? `${initialWorkspaceExample}.cell`);
+      setWorkspace(makeExampleWorkspace(initialWorkspaceExample), initialWorkspacePath, initialWorkspacePath);
+      updateExampleLesson(initialWorkspaceExample);
+
+      // ---- Runtime i18n: re-apply localized strings when the locale
+      //      changes (the topbar toggle updates <html data-locale>
+      //      then dispatches this event). Re-render the parts of the
+      //      output that embed localized labels (effect/cycle text). ----
+      const applyLocaleStrings = () => {
+        // Static [data-i18n] elements.
+        document.querySelectorAll<HTMLElement>("[data-i18n]").forEach((el) => {
+          const v = getMessage(el.dataset.i18n ?? "", readLocale());
+          if (typeof v === "string") el.textContent = v;
+        });
+        document.querySelectorAll<HTMLElement>("[data-i18n-aria-label]").forEach((el) => {
+          const v = getMessage(el.dataset.i18nAriaLabel ?? "", readLocale());
+          if (typeof v === "string") el.setAttribute("aria-label", v);
+        });
+        document.querySelectorAll<HTMLElement>("[data-i18n-title]").forEach((el) => {
+          const v = getMessage(el.dataset.i18nTitle ?? "", readLocale());
+          if (typeof v === "string") el.setAttribute("title", v);
+        });
+        document.querySelectorAll<HTMLElement>("[data-i18n-label]").forEach((el) => {
+          const v = getMessage(el.dataset.i18nLabel ?? "", readLocale());
+          if (typeof v === "string") el.setAttribute("label", v);
+        });
+        const pageTitle = pg("pageTitle");
+        if (pageTitle) document.title = pageTitle;
+        renderFileTree();
+        updateWorkspaceChrome();
+        updateExampleLesson(currentExampleId);
+        // Refresh compile status for the current state, and the
+        // status bar text (re-render the last result if any).
+        const state = (compileStatus?.dataset.state ?? "idle") as CompileState;
+        if (state === "ready") compileLabel && (compileLabel.textContent = fmt(pg("compiledIn"), { ms: String(lastElapsed) }));
+        else setCompileState(state);
+        if (workerReady) runCompileNow();
+      };
+      window.addEventListener("cellscript:locale-change", applyLocaleStrings, { signal });
+      applyLocaleStrings();
+
+      updateHighlight();
+      runCompileNow();
+      };
+    </script>
+    <script is:inline type="module" data-astro-rerun>
+      let attempts = 0;
+      const runPlaygroundInit = () => {
+        if (typeof window.__cellscriptInitPlayground === "function") {
+          window.__cellscriptInitPlayground();
+          return;
+        }
+        attempts += 1;
+        if (attempts < 60) window.setTimeout(runPlaygroundInit, 0);
+      };
+      runPlaygroundInit();
+    </script>
+  </body>
+</html>

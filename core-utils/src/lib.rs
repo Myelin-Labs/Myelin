@@ -10,15 +10,13 @@
 //   - serde_bytes, serde_bytes_fixed, serde_bytes_fixed_ref
 //              (serde helpers used by the kernel types)
 //
-// Anything heavier (networking, system, async-adjacent helpers)
-// lives in `myelin-utils`, not here. The hot-path crate graph
-// pulls only from this crate.
+// Anything heavier is historical code outside the active kernel workspace. The
+// hot-path crate graph pulls only from this crate.
 
 //! Myelin core utility surface (hot-path crate boundary).
 //!
-//! The hot-path crates (`myelin-hashes`, `myelin-math`) depend on
-//! this crate instead of the wider `myelin-utils`, so they don't
-//! pull in networking / system / async-adjacent helpers.
+//! The hot-path crates (`myelin-hashes`, `myelin-math`) depend on this crate so
+//! they do not pull in broad legacy helper surfaces.
 
 pub mod hex;
 pub mod mem_size;

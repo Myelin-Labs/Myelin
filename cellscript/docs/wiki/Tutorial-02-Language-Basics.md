@@ -1,3 +1,5 @@
+# Tutorial 02: Language Basics
+
 CellScript source reads best when you treat it as a small Cell story. First you
 name the module. Then you describe the state that can exist on chain. Finally
 you write the actions and locks that say how that state may change or be spent.
@@ -75,11 +77,24 @@ module cellscript::timelock
 Module names are not decoration. They are part of source identity and appear in
 metadata, so use names you are willing to keep stable.
 
+CellScript does not have a Rust-style `mod` item. In packages, the module graph
+is formed by discovering `.cell` files from `Cell.toml` `source_roots`, reading
+each file's `module` declaration, and resolving explicit `use path::Symbol`
+imports. A wrong import path is an error even if another loaded module happens
+to define a symbol with the same basename.
+
+The current production boundary supports cross-file type and schema imports
+end-to-end: resources, shared cells, receipts, structs, enums, and constants can
+be imported into the entry module for metadata and artifact generation.
+Cross-file function-style linking remains fail-closed. Keep executable business
+logic in the compiled entry module unless a future release explicitly documents
+that call surface.
+
 ## Scalar and Fixed Types
 
 Common field and parameter types include:
 
-```cellscript
+```text
 u8
 u16
 u32
@@ -99,7 +114,7 @@ schema or CKB data layout.
 CellScript supports expression-local primitive unsigned integer widening for
 arithmetic and numeric comparison:
 
-```cellscript
+```text
 let total: u64 = amount_u64 + fee_u16
 let under_limit: bool = fee_u16 < amount_u64
 ```
@@ -111,13 +126,13 @@ boundaries.
 
 Integer literals may be context-typed by an expected primitive integer type:
 
-```cellscript
+```text
 let byte: u8 = 1
 ```
 
 Non-literal numeric values must keep their actual width at boundaries:
 
-```cellscript
+```text
 let amount64: u64 = amount16        // rejected
 let explicit: u64 = amount16 as u64 // accepted
 ```
@@ -164,7 +179,7 @@ A struct is a shape. It does not create on-chain storage by itself. A local
 Struct literals and Cell `create` literals both support field shorthand when the
 field name and local variable name match:
 
-```cellscript
+```text
 let config = Config { threshold }
 
 create token = Token {
@@ -180,7 +195,7 @@ The shorthand is exactly `field: field`; it does not infer or rename fields.
 Use `[]` and `[x, y]` for local `Vec<T>` construction only where the expected
 type is already known:
 
-```cellscript
+```text
 let mut keys: Vec<Hash> = []
 let mut owners: Vec<Address> = [primary_owner, backup_owner]
 
@@ -229,7 +244,8 @@ Supported spellings are `Data`, `Data1`, `Data2`, and `Type`. The lowercase CKB
 forms are accepted too. Unknown hash types are compile errors, not deployment
 warnings.
 
-CellScript 0.15 resets `has ...` clauses from protocol verbs to kernel effects.
+The current syntax inherits the 0.15 reset of `has ...` clauses from protocol
+verbs to kernel effects.
 New strict-mode declarations should use capabilities such as `create`,
 `consume`, `replace`, `burn`, `relock`, `retarget_type`, and `read_ref`.
 The older `transfer` and `destroy` capability words are accepted only through
@@ -353,9 +369,9 @@ transaction; it does not allocate Cells inside CKB-VM.
 
 ## Scoped Invariants
 
-CellScript 0.15 adds top-level invariant declarations. They are deliberately
-explicit about the verifier trigger, the protected scope, and the CKB views
-they read:
+The current authoring surface includes top-level invariant declarations. They
+are deliberately explicit about the verifier trigger, the protected scope, and
+the CKB views they read:
 
 ```cellscript
 invariant token_conservation {
@@ -371,8 +387,7 @@ Supported triggers are `explicit_entry`, `lock_group`, and `type_group`.
 Supported scopes are `selected_cells`, `group`, and `transaction`.
 Aggregate primitives such as `assert_sum`, `assert_conserved`,
 `assert_delta`, `assert_distinct`, and `assert_singleton` are recorded in
-ProofPlan metadata in 0.15; executable aggregate lowering is still a later
-milestone.
+ProofPlan metadata; executable aggregate lowering is still a later milestone.
 
 ## Locks
 
@@ -499,5 +514,5 @@ ordinary line comments and block comments are not retained by `cellc fmt`.
 ## Next
 
 With the source shape in mind, continue with
-[Resources and Cell Effects](https://github.com/a19q3/CellScript/wiki/Tutorial-03-Resources-and-Cell-Effects). If a
-CKB term is unclear, use the [CKB Glossary](https://github.com/a19q3/CellScript/wiki/CKB-Glossary).
+[Resources and Cell Effects](https://github.com/CellScript-Labs/CellScript/wiki/Tutorial-03-Resources-and-Cell-Effects). If a
+CKB term is unclear, use the [CKB Glossary](https://github.com/CellScript-Labs/CellScript/wiki/CKB-Glossary).

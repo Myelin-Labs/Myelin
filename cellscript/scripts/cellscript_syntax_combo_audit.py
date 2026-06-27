@@ -42,7 +42,7 @@ GOVERNANCE_RELEASE_MATRIX: tuple[dict[str, str], ...] = (
         "layer": "parser_formatter_lsp_docs",
         "status": "covered_by_gate",
         "evidence": "action and lock cases parse, format, and use the verification section",
-        "gate": "syntax-combo accepted action/lock cases in release gate",
+        "gate": "syntax-combo accepted action/lock cases plus VS Code validate/dry-run in release gate",
     },
     {
         "track": "local_explicit_sugar",

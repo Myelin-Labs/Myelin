@@ -1,0 +1,760 @@
+---
+import "../styles/global.css";
+import { heroExamples, links, workflowSteps } from "../data/site";
+import { defaultLocale, translations } from "../i18n/translations";
+import { renderLine } from "../lib/highlight";
+import { provenanceForExample, effectsSummary, formatBytes, shortHash } from "../lib/provenance";
+import HeroStatus from "../components/HeroStatus.astro";
+import SiteHeader from "../components/SiteHeader.astro";
+import BrandMark from "../components/BrandMark.astro";
+import { ClientRouter } from "astro:transitions";
+import { ArrowRight, Box, Check, ClipboardList, Copy, Cpu, FileArchive, FileCode2 } from "lucide-astro";
+
+const locale = defaultLocale;
+const t = translations[locale];
+const heroProvenance = heroExamples.map((example) => ({
+  id: example.id,
+  view: provenanceForExample(example.id),
+}));
+const valueCardImages = [
+  {
+    light: "feature-cards/light-01-state-changes-explicit.png",
+    dark: "feature-cards/dark-01-state-changes-explicit.png",
+    width: 1480,
+    height: 1063,
+  },
+  {
+    light: "feature-cards/light-02-compiler-checks-catch-drift.png",
+    dark: "feature-cards/dark-02-compiler-checks-catch-drift.png",
+    width: 1971,
+    height: 798,
+  },
+  {
+    light: "feature-cards/light-03-build-evidence-inspectable.png",
+    dark: "feature-cards/dark-03-build-evidence-inspectable.png",
+    width: 1968,
+    height: 799,
+  },
+];
+const exampleCardImages = {
+  token: {
+    light: "contract-cards/light-token.webp",
+    dark: "contract-cards/dark-token.webp",
+    width: 1254,
+    height: 1254,
+  },
+  nft: {
+    light: "contract-cards/light-nft.webp",
+    dark: "contract-cards/dark-nft.webp",
+    width: 1254,
+    height: 1254,
+  },
+  amm: {
+    light: "contract-cards/light-amm.webp",
+    dark: "contract-cards/dark-amm.webp",
+    width: 1254,
+    height: 1254,
+  },
+  vesting: {
+    light: "contract-cards/light-vesting.webp",
+    dark: "contract-cards/dark-vesting.webp",
+    width: 1254,
+    height: 1254,
+  },
+} as const;
+const workflowIconComponents = {
+  source: FileCode2,
+  parse: Box,
+  metadata: ClipboardList,
+  riscv: Cpu,
+  elf: FileArchive,
+} as const;
+---
+
+<!doctype html>
+<html lang={locale}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content={t.meta.description} data-i18n-meta="meta.description" />
+    <meta property="og:title" content={t.meta.title} />
+    <meta property="og:description" content={t.meta.ogDescription} data-i18n-meta="meta.ogDescription" data-i18n-meta-attr="content" />
+    <link rel="icon" type="image/png" href={`${import.meta.env.BASE_URL}cellscript-logo.png`} />
+    <link rel="icon" type="image/png" media="(prefers-color-scheme: light)" href={`${import.meta.env.BASE_URL}cellscript-logo-light.png`} />
+    <link rel="icon" type="image/png" media="(prefers-color-scheme: dark)" href={`${import.meta.env.BASE_URL}cellscript-logo-dark.png`} />
+    <title data-i18n-meta="meta.titleLong">{t.meta.titleLong}</title>
+    <script is:inline>
+      (() => {
+        try {
+          const storedTheme = localStorage.getItem("cellscript-theme");
+          const storedLocale = localStorage.getItem("cellscript-locale");
+          document.documentElement.dataset.theme = storedTheme === "light" || storedTheme === "dark" ? storedTheme : "light";
+          document.documentElement.dataset.locale = storedLocale === "zh" ? "zh" : "en";
+          document.documentElement.lang = document.documentElement.dataset.locale;
+        } catch {
+          document.documentElement.dataset.theme = "light";
+          document.documentElement.dataset.locale = "en";
+          document.documentElement.lang = "en";
+        }
+      })();
+    </script>
+    <ClientRouter />
+  </head>
+  <body class="home-body">
+    <a class="skip-link" href="#top" data-i18n="a11y.skipToContent">{t.a11y.skipToContent}</a>
+    <SiteHeader page="home" />
+
+    <main id="top" class="page landing-page">
+      <section class="hero landing-hero" aria-labelledby="hero-title">
+        <div class="hero-aurora" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+        <div class="hero-field" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+
+        <div class="hero-copy">
+          <div class="hero-brand-lockup">
+            <span class="hero-orbit" aria-hidden="true">
+              <i></i>
+              <i></i>
+              <i></i>
+            </span>
+            <BrandMark />
+          </div>
+          <h1 id="hero-title" data-i18n="hero.headline" aria-label={t.hero.headline}>{t.hero.headline}</h1>
+          <p data-i18n="hero.subtitle">{t.hero.subtitle}</p>
+          <HeroStatus compact />
+          <div class="hero-actions">
+            <a class="button primary" href={`/playground?example=${heroExamples[0].id}`} data-i18n="hero.playground.cta">{t.hero.playground.cta}</a>
+            <a class="button ghost" href={links.docs} data-i18n="hero.getStarted">{t.hero.getStarted}</a>
+          </div>
+        </div>
+
+        <div class="code-shell spotlight-card" data-code-tabs>
+          <script is:inline type="application/json" data-hero-provenance set:html={JSON.stringify(
+            Object.fromEntries(
+              heroProvenance
+                .filter(({ view }) => view)
+                .map(({ id, view }) => [id, {
+                  meta: `${view!.types.length} types · ${view!.actions.length} actions · ${effectsSummary(view!)}`,
+                  readout: `artifact: 0x${shortHash(view!.artifactHash)}… · ${formatBytes(view!.artifactSizeBytes)}`,
+                }]),
+            ),
+          )} />
+          <div class="code-head">
+            <span><span class="code-dot"></span><span data-file-label>{heroExamples[0].file}</span></span>
+            <span class="compile-meta" data-compile-meta aria-hidden="true">
+              {(() => {
+                const v = heroProvenance[0].view;
+                return v ? `${v.types.length} types · ${v.actions.length} actions · ${effectsSummary(v)}` : "";
+              })()}
+            </span>
+            <button class="copy-btn code-copy" type="button" data-copy-source data-i18n-aria-label="a11y.copyAria" aria-label={t.a11y.copyAria} aria-live="polite">
+              <Copy class="copy-icon" aria-hidden="true" />
+              <Check class="check-icon" aria-hidden="true" />
+            </button>
+          </div>
+          <div class="tabbar" role="tablist" aria-label={t.hero.examplesLabel} data-i18n-aria-label="hero.examplesLabel">
+            {heroExamples.map((example, index) => (
+              <button type="button" role="tab" aria-selected={index === 0 ? "true" : "false"} aria-controls={`panel-${example.id}`} id={`tab-${example.id}`} data-tab={example.id}>
+                <span data-i18n={`hero.exampleLabels.${example.id}`}>{t.hero.exampleLabels[example.id]}</span>
+              </button>
+            ))}
+          </div>
+          <select class="mobile-tabs" aria-label={t.hero.chooseExample} data-i18n-aria-label="hero.chooseExample" data-mobile-tabs>
+            {heroExamples.map((example) => <option value={example.id} data-i18n={`hero.exampleLabels.${example.id}`}>{t.hero.exampleLabels[example.id]}</option>)}
+          </select>
+          <div class="code-stage">
+            {heroExamples.map((example, index) => (
+              <pre class:list={["code-panel", index === 0 && "active"]} id={`panel-${example.id}`} role="tabpanel" aria-labelledby={`tab-${example.id}`} data-panel={example.id} data-file={example.file} data-command={example.command}>{example.lines.map((line, lineIndex) => (
+                <span class="line"><span class="ln">{lineIndex + 1}</span><span class="src" set:html={renderLine(line)} /></span>
+              ))}</pre>
+            ))}
+          </div>
+          <div class="shell-line"><span class="prompt">$</span><span data-command-label>{heroExamples[0].command}</span></div>
+          <div class="console-footer">
+            <span class="substrate-readout" data-substrate-readout>
+              {(() => {
+                const v = heroProvenance[0].view;
+                return v
+                  ? `artifact: 0x${shortHash(v.artifactHash)}… · ${formatBytes(v.artifactSizeBytes)}`
+                  : "";
+              })()}
+            </span>
+            <a class="playground-link" href={`/playground?example=${heroExamples[0].id}`} data-playground-link>
+              <span data-i18n="hero.playground.editLive">{t.hero.playground.editLive}</span>
+              <ArrowRight aria-hidden="true" />
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section value-section" aria-labelledby="value-props">
+        <div class="section-copy landing-section-copy">
+          <h2 class="section-title" id="value-props" data-i18n="landing.valueTitle">{t.landing.valueTitle}</h2>
+          <p class="lead" data-i18n="landing.valueLead">{t.landing.valueLead}</p>
+        </div>
+        <div class="value-grid">
+          {t.landing.valueProps.map(([title, body], index) => (
+            <article class="value-card" aria-labelledby={`value-card-${index}-title`} aria-describedby={`value-card-${index}-body`}>
+              <picture class="value-card-art" aria-hidden="true">
+                <img
+                  class="value-card-image value-card-image-light"
+                  src={`${import.meta.env.BASE_URL}${valueCardImages[index].light}`}
+                  width={valueCardImages[index].width}
+                  height={valueCardImages[index].height}
+                  alt=""
+                  loading={index === 0 ? "eager" : "lazy"}
+                  decoding="async"
+                />
+                <img
+                  class="value-card-image value-card-image-dark"
+                  src={`${import.meta.env.BASE_URL}${valueCardImages[index].dark}`}
+                  width={index === 0 ? 943 : 803}
+                  height={index === 0 ? 677 : index === 1 ? 325 : 326}
+                  alt=""
+                  loading={index === 0 ? "eager" : "lazy"}
+                  decoding="async"
+                />
+              </picture>
+              <div class="value-card-copy">
+                <h3 id={`value-card-${index}-title`} data-i18n={`landing.valueProps.${index}.0`}>{title}</h3>
+                <p id={`value-card-${index}-body`} data-i18n={`landing.valueProps.${index}.1`}>{body}</p>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section class="section workflow-section" aria-labelledby="workflow">
+        <div class="section-copy landing-section-copy">
+          <h2 class="section-title" id="workflow" data-i18n="sections.workflow">{t.sections.workflow}</h2>
+          <p class="lead" data-i18n="landing.workflowLead">{t.landing.workflowLead}</p>
+        </div>
+        <div class="workflow-board">
+          <div class="workflow-flow" aria-label={t.workflow.aria} data-i18n-aria-label="workflow.aria">
+            {workflowSteps.map(({ id, icon }, index) => {
+              const StepIcon = workflowIconComponents[icon as keyof typeof workflowIconComponents];
+              return (
+                <>
+                  <article class="workflow-step">
+                    <div class:list={["workflow-icon", `workflow-icon-${icon}`]} aria-hidden="true">
+                      <StepIcon />
+                    </div>
+                    <h3 data-i18n={`workflow.steps.${id}.0`}>{t.workflow.steps[id][0]}</h3>
+                    {t.workflow.steps[id][1] && <p data-i18n={`workflow.steps.${id}.1`}>{t.workflow.steps[id][1]}</p>}
+                  </article>
+                  {index < workflowSteps.length - 1 && (
+                    <span class="workflow-arrow" aria-hidden="true">
+                      <ArrowRight />
+                    </span>
+                  )}
+                </>
+              );
+            })}
+          </div>
+          <aside class="workflow-checks" aria-label={t.workflow.buildAria} data-i18n-aria-label="workflow.buildAria">
+            <h3 data-i18n="workflow.buildForCkb">{t.workflow.buildForCkb}</h3>
+            <ul>
+              {t.workflow.checks.map((check, index) => (
+                <li>
+                  <Check aria-hidden="true" />
+                  <span data-i18n={`workflow.checks.${index}`}>{check}</span>
+                </li>
+              ))}
+            </ul>
+          </aside>
+        </div>
+      </section>
+
+      <section class="section playground-section" aria-labelledby="playground-examples">
+        <div class="section-copy landing-section-copy">
+          <h2 class="section-title" id="playground-examples" data-i18n="landing.playgroundTitle">{t.landing.playgroundTitle}</h2>
+          <p class="lead" data-i18n="landing.playgroundLead">{t.landing.playgroundLead}</p>
+        </div>
+        <div class="landing-example-grid">
+          {heroExamples.map((example) => {
+            const cardImage = exampleCardImages[example.id as keyof typeof exampleCardImages];
+            return (
+              <a class="landing-example-card" href={`/playground?example=${example.id}`}>
+                <picture class="landing-example-art" aria-hidden="true">
+                  <img
+                    class="landing-example-image landing-example-image-light"
+                    src={`${import.meta.env.BASE_URL}${cardImage.light}`}
+                    width={cardImage.width}
+                    height={cardImage.height}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <img
+                    class="landing-example-image landing-example-image-dark"
+                    src={`${import.meta.env.BASE_URL}${cardImage.dark}`}
+                    width={cardImage.width}
+                    height={cardImage.height}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </picture>
+                <div class="landing-example-copy">
+                  <h3 data-i18n={`hero.exampleLabels.${example.id}`}>{t.hero.exampleLabels[example.id]}</h3>
+                </div>
+              </a>
+            );
+          })}
+        </div>
+      </section>
+
+      <section class="section start-section" aria-labelledby="getting-started">
+        <div class="section-copy landing-section-copy">
+          <h2 class="section-title" id="getting-started" data-i18n="sections.gettingStarted">{t.sections.gettingStarted}</h2>
+          <p class="lead" data-i18n="landing.quickstartLead">{t.landing.quickstartLead}</p>
+        </div>
+        <div class="steps">
+          {t.start.steps.map(([label, command], index) => (
+            <article class="step">
+              <span class="step-num">{index + 1}</span>
+              <h3 data-i18n={`start.steps.${index}.0`}>{label}</h3>
+              <p>
+                <code data-i18n={`start.steps.${index}.1`}>{command}</code>
+                <button class="copy-btn" type="button" data-copy-text={command} data-i18n-aria-label="a11y.copyAria" aria-label={t.a11y.copyAria} aria-live="polite">
+                  <Copy class="copy-icon" aria-hidden="true" />
+                  <Check class="check-icon" aria-hidden="true" />
+                </button>
+              </p>
+            </article>
+          ))}
+        </div>
+        <div class="start-actions">
+          <a class="button primary" href="/playground" data-i18n="hero.playground.cta">{t.hero.playground.cta}</a>
+          <a class="button" href={links.docs} target="_blank" rel="noopener noreferrer" data-i18n="nav.docs">{t.nav.docs}</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="footer-inner">
+        <div class="footer-copy">
+          <a class="brand" href="#top"><BrandMark /><span>CellScript</span></a>
+          <p data-i18n="footer.copy">{t.footer.copy}</p>
+        </div>
+        <div class="footer-links">
+          <a href={links.docs} target="_blank" rel="noopener noreferrer" data-i18n="footer.docs">{t.footer.docs}</a>
+          <a href="/playground" data-i18n="nav.playground">{t.nav.playground}</a>
+          <a href="/registry" data-i18n="nav.registryBrowse">{t.nav.registryBrowse}</a>
+          <a href={links.source} target="_blank" rel="noopener noreferrer" data-i18n="footer.source">{t.footer.source}</a>
+          <a href={links.discussion} target="_blank" rel="noopener noreferrer" data-i18n="footer.discussion">{t.footer.discussion}</a>
+        </div>
+      </div>
+    </footer>
+
+    <script is:inline define:vars={{ i18n: translations, initialLocale: locale }}>
+      window.__CELLSCRIPT_I18N__ = i18n;
+      window.__CELLSCRIPT_DEFAULT_LOCALE__ = initialLocale;
+    </script>
+
+    <script>
+      const i18nMessages = (window as any).__CELLSCRIPT_I18N__;
+      const defaultLocaleName = (window as any).__CELLSCRIPT_DEFAULT_LOCALE__ ?? "en";
+
+      const readLocale = () => document.documentElement.dataset.locale === "zh" ? "zh" : defaultLocaleName;
+      const getMessage = (path: string, locale = readLocale()) => {
+        return path.split(".").reduce((value, segment) => value?.[segment], i18nMessages?.[locale]);
+      };
+
+      const readTheme = () => document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+      const syncThemeToggle = () => {
+        const themeToggle = document.querySelector<HTMLButtonElement>("[data-theme-toggle]");
+        if (!themeToggle) return;
+        const isLight = readTheme() === "light";
+        themeToggle.setAttribute("aria-pressed", String(isLight));
+        themeToggle.setAttribute("aria-label", getMessage(isLight ? "theme.switchToDark" : "theme.switchToLight") ?? "");
+      };
+
+      const applyLocale = (locale: string) => {
+        const nextLocale = locale === "zh" ? "zh" : "en";
+        document.documentElement.dataset.locale = nextLocale;
+        document.documentElement.lang = nextLocale;
+        document.querySelectorAll<HTMLElement>("[data-i18n]").forEach((element) => {
+          const value = getMessage(element.dataset.i18n ?? "", nextLocale);
+          if (typeof value === "string") element.textContent = value;
+        });
+        document.querySelectorAll<HTMLElement>("[data-i18n-aria-label]").forEach((element) => {
+          const value = getMessage(element.dataset.i18nAriaLabel ?? "", nextLocale);
+          if (typeof value === "string") element.setAttribute("aria-label", value);
+        });
+        document.querySelectorAll<HTMLMetaElement>("[data-i18n-content]").forEach((element) => {
+          const value = getMessage(element.dataset.i18nContent ?? "", nextLocale);
+          if (typeof value === "string") element.setAttribute("content", value);
+        });
+        document.querySelectorAll<HTMLElement>("[data-i18n-meta]").forEach((element) => {
+          const value = getMessage(element.dataset.i18nMeta ?? "", nextLocale);
+          if (typeof value !== "string") return;
+          if (element.tagName === "TITLE") document.title = value;
+          else element.setAttribute(element.dataset.i18nMetaAttr ?? "content", value);
+        });
+        const languageLabel = document.querySelector<HTMLElement>("[data-language-label]");
+        const languageToggle = document.querySelector<HTMLButtonElement>("[data-language-toggle]");
+        if (languageLabel) languageLabel.textContent = getMessage("language.switchTo", nextLocale) ?? "";
+        if (languageToggle) languageToggle.setAttribute("aria-label", getMessage("language.aria", nextLocale) ?? "");
+        try {
+          localStorage.setItem("cellscript-locale", nextLocale);
+        } catch {
+          // Language switching still works even when storage is unavailable.
+        }
+        syncThemeToggle();
+      };
+
+      const root = document.querySelector("[data-code-tabs]");
+      if (root) {
+        (root as HTMLElement).dataset.homeTabsBound = "true";
+        const tabs = Array.from(root.querySelectorAll("[data-tab]"));
+        const panels = Array.from(root.querySelectorAll("[data-panel]"));
+        const mobile = root.querySelector("[data-mobile-tabs]");
+        const fileLabel = root.querySelector("[data-file-label]");
+        const commandLabel = root.querySelector("[data-command-label]");
+        const compileMeta = root.querySelector("[data-compile-meta]");
+        const substrateReadout = root.querySelector("[data-substrate-readout]");
+        const playgroundLink = root.querySelector<HTMLAnchorElement>("[data-playground-link]");
+        let provenanceMap: Record<string, { meta: string; readout: string }> = {};
+        const provenanceScript = root.querySelector<HTMLScriptElement>("[data-hero-provenance]");
+        if (provenanceScript?.textContent) {
+          try { provenanceMap = JSON.parse(provenanceScript.textContent); } catch { /* malformed; leave empty */ }
+        }
+
+        const activate = (id: string) => {
+          tabs.forEach((tab) => {
+            const tabElement = tab as HTMLElement;
+            const active = tabElement.dataset.tab === id;
+            tabElement.setAttribute("aria-selected", String(active));
+            tabElement.tabIndex = active ? 0 : -1;
+          });
+          panels.forEach((panel) => {
+            const panelElement = panel as HTMLElement;
+            const active = panelElement.dataset.panel === id;
+            panelElement.classList.toggle("active", active);
+            if (active && fileLabel && commandLabel && mobile instanceof HTMLSelectElement) {
+              fileLabel.textContent = panelElement.dataset.file ?? "";
+              commandLabel.textContent = panelElement.dataset.command ?? "";
+              mobile.value = id;
+            }
+          });
+          const summary = provenanceMap[id];
+          if (summary) {
+            if (compileMeta) {
+              compileMeta.textContent = summary.meta;
+              compileMeta.removeAttribute("aria-hidden");
+            }
+            if (substrateReadout) substrateReadout.textContent = summary.readout;
+          } else if (compileMeta) {
+            compileMeta.textContent = "";
+            compileMeta.setAttribute("aria-hidden", "true");
+          }
+          if (playgroundLink) {
+            const url = new URL(playgroundLink.href);
+            url.searchParams.set("example", id);
+            playgroundLink.href = url.pathname + url.search;
+          }
+        };
+
+        tabs.forEach((tab, index) => {
+          const tabEl = tab as HTMLButtonElement;
+          tabEl.tabIndex = index === 0 ? 0 : -1;
+          tabEl.addEventListener("click", () => activate(tabEl.dataset.tab ?? ""));
+          tabEl.addEventListener("keydown", (event) => {
+            if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+            event.preventDefault();
+            const direction = event.key === "ArrowRight" ? 1 : -1;
+            const nextIndex = (index + direction + tabs.length) % tabs.length;
+            const nextTab = tabs[nextIndex] as HTMLButtonElement;
+            activate(nextTab?.dataset.tab ?? "");
+            nextTab?.focus();
+          });
+        });
+        if (mobile instanceof HTMLSelectElement) {
+          mobile.addEventListener("change", () => activate(mobile.value));
+        }
+      }
+
+      const spotlightTargets = document.querySelectorAll<HTMLElement>(
+        ".spotlight-card, .value-card, .landing-example-card, .step, .workflow-checks",
+      );
+      spotlightTargets.forEach((target) => {
+        target.dataset.homeSpotlightBound = "true";
+        target.classList.add("spotlight-card");
+        target.addEventListener("pointermove", (event) => {
+          const rect = target.getBoundingClientRect();
+          const x = ((event.clientX - rect.left) / rect.width) * 100;
+          const y = ((event.clientY - rect.top) / rect.height) * 100;
+          target.style.setProperty("--spot-x", `${x}%`);
+          target.style.setProperty("--spot-y", `${y}%`);
+        });
+      });
+
+      applyLocale(readLocale());
+      syncThemeToggle();
+
+      const themeToggle = document.querySelector<HTMLButtonElement>("[data-theme-toggle]");
+      themeToggle?.addEventListener("click", () => {
+        const nextTheme = readTheme() === "light" ? "dark" : "light";
+        document.documentElement.dataset.theme = nextTheme;
+        try {
+          localStorage.setItem("cellscript-theme", nextTheme);
+        } catch {
+          // Theme changes still work even when storage is unavailable.
+        }
+        syncThemeToggle();
+      });
+      if (themeToggle) themeToggle.dataset.homeBound = "true";
+
+      const languageToggle = document.querySelector<HTMLButtonElement>("[data-language-toggle]");
+      languageToggle?.addEventListener("click", () => {
+        applyLocale(readLocale() === "en" ? "zh" : "en");
+      });
+      if (languageToggle) languageToggle.dataset.homeBound = "true";
+
+      const flashCopied = (btn: HTMLButtonElement) => {
+        btn.classList.add("is-copied");
+        btn.setAttribute("aria-label", getMessage("a11y.copiedAria") ?? "Copied to clipboard");
+        window.setTimeout(() => {
+          btn.classList.remove("is-copied");
+          btn.setAttribute("aria-label", getMessage("a11y.copyAria") ?? "Copy to clipboard");
+        }, 1600);
+      };
+
+      const writeClipboard = async (text: string) => {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      const copyButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".copy-btn"));
+      const heroCodeTabs = document.querySelector("[data-code-tabs]");
+      copyButtons.forEach((btn) => {
+        btn.dataset.homeCopyBound = "true";
+        btn.addEventListener("click", async () => {
+          let text = btn.dataset.copyText ?? "";
+          if (btn.hasAttribute("data-copy-source") && heroCodeTabs) {
+            const activePanel = heroCodeTabs.querySelector<HTMLElement>(".code-panel.active");
+            text = activePanel?.textContent?.replace(/\n/g, "\n").trim() ?? "";
+          }
+          if (!text) return;
+          const ok = await writeClipboard(text);
+          if (ok) flashCopied(btn);
+        });
+      });
+
+      const readStoredTheme = () => {
+        try {
+          const storedTheme = localStorage.getItem("cellscript-theme");
+          return storedTheme === "light" || storedTheme === "dark" ? storedTheme : "light";
+        } catch {
+          return "light";
+        }
+      };
+
+      const readStoredLocale = () => {
+        try {
+          return localStorage.getItem("cellscript-locale") === "zh" ? "zh" : "en";
+        } catch {
+          return "en";
+        }
+      };
+
+      const bindHomeThemeToggle = () => {
+        const currentThemeToggle = document.querySelector<HTMLButtonElement>("[data-theme-toggle]");
+        if (!currentThemeToggle) return;
+        const nextThemeToggle = currentThemeToggle.cloneNode(true) as HTMLButtonElement;
+        nextThemeToggle.dataset.homeBound = "true";
+        currentThemeToggle.replaceWith(nextThemeToggle);
+        nextThemeToggle.addEventListener("click", () => {
+          const nextTheme = readTheme() === "light" ? "dark" : "light";
+          document.documentElement.dataset.theme = nextTheme;
+          try {
+            localStorage.setItem("cellscript-theme", nextTheme);
+          } catch {
+            // Theme changes still work even when storage is unavailable.
+          }
+          syncThemeToggle();
+        });
+      };
+
+      const bindHomeLanguageToggle = () => {
+        const currentLanguageToggle = document.querySelector<HTMLButtonElement>("[data-language-toggle]");
+        if (!currentLanguageToggle) return;
+        const nextLanguageToggle = currentLanguageToggle.cloneNode(true) as HTMLButtonElement;
+        nextLanguageToggle.dataset.homeBound = "true";
+        currentLanguageToggle.replaceWith(nextLanguageToggle);
+        nextLanguageToggle.addEventListener("click", () => {
+          applyLocale(readLocale() === "en" ? "zh" : "en");
+        });
+      };
+
+      const toggleHomeTheme = () => {
+        const nextTheme = readTheme() === "light" ? "dark" : "light";
+        document.documentElement.dataset.theme = nextTheme;
+        try {
+          localStorage.setItem("cellscript-theme", nextTheme);
+        } catch {
+          // Theme changes still work even when storage is unavailable.
+        }
+        syncThemeToggle();
+      };
+
+      const toggleHomeLanguage = () => {
+        applyLocale(readLocale() === "en" ? "zh" : "en");
+      };
+
+      if (!(window as any).__cellscriptHomeToggleDelegationBound) {
+        document.addEventListener("click", (event) => {
+          if (!document.body.classList.contains("home-body")) return;
+          if (!(event.target instanceof Element)) return;
+          const themeButton = event.target.closest<HTMLButtonElement>("[data-theme-toggle]");
+          if (themeButton) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            toggleHomeTheme();
+            return;
+          }
+          const languageButton = event.target.closest<HTMLButtonElement>("[data-language-toggle]");
+          if (languageButton) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            toggleHomeLanguage();
+          }
+        }, true);
+        (window as any).__cellscriptHomeToggleDelegationBound = true;
+      }
+
+      const bindHomeSpotlights = () => {
+        document.querySelectorAll<HTMLElement>(".spotlight-card, .value-card, .landing-example-card, .step, .workflow-checks").forEach((target) => {
+          if (target.dataset.homeSpotlightBound === "true") return;
+          target.dataset.homeSpotlightBound = "true";
+          target.classList.add("spotlight-card");
+          target.addEventListener("pointermove", (event) => {
+            const rect = target.getBoundingClientRect();
+            const x = ((event.clientX - rect.left) / rect.width) * 100;
+            const y = ((event.clientY - rect.top) / rect.height) * 100;
+            target.style.setProperty("--spot-x", `${x}%`);
+            target.style.setProperty("--spot-y", `${y}%`);
+          });
+        });
+      };
+
+      const bindHomeCopyButtons = () => {
+        const nextHeroCodeTabs = document.querySelector("[data-code-tabs]");
+        document.querySelectorAll<HTMLButtonElement>(".copy-btn").forEach((btn) => {
+          if (btn.dataset.homeCopyBound === "true") return;
+          btn.dataset.homeCopyBound = "true";
+          btn.addEventListener("click", async () => {
+            let text = btn.dataset.copyText ?? "";
+            if (btn.hasAttribute("data-copy-source") && nextHeroCodeTabs) {
+              const activePanel = nextHeroCodeTabs.querySelector<HTMLElement>(".code-panel.active");
+              text = activePanel?.textContent?.replace(/\n/g, "\n").trim() ?? "";
+            }
+            if (!text) return;
+            const ok = await writeClipboard(text);
+            if (ok) flashCopied(btn);
+          });
+        });
+      };
+
+      const bindHomeCodeTabs = () => {
+        const nextRoot = document.querySelector<HTMLElement>("[data-code-tabs]");
+        if (!nextRoot || nextRoot.dataset.homeTabsBound === "true") return;
+        nextRoot.dataset.homeTabsBound = "true";
+        const tabs = Array.from(nextRoot.querySelectorAll<HTMLButtonElement>("[data-tab]"));
+        const panels = Array.from(nextRoot.querySelectorAll<HTMLElement>("[data-panel]"));
+        const mobile = nextRoot.querySelector<HTMLSelectElement>("[data-mobile-tabs]");
+        const fileLabel = nextRoot.querySelector<HTMLElement>("[data-file-label]");
+        const commandLabel = nextRoot.querySelector<HTMLElement>("[data-command-label]");
+        const compileMeta = nextRoot.querySelector<HTMLElement>("[data-compile-meta]");
+        const substrateReadout = nextRoot.querySelector<HTMLElement>("[data-substrate-readout]");
+        const playgroundLink = nextRoot.querySelector<HTMLAnchorElement>("[data-playground-link]");
+        let provenanceMap: Record<string, { meta: string; readout: string }> = {};
+        const provenanceScript = nextRoot.querySelector<HTMLScriptElement>("[data-hero-provenance]");
+        if (provenanceScript?.textContent) {
+          try { provenanceMap = JSON.parse(provenanceScript.textContent); } catch { /* malformed; leave empty */ }
+        }
+        const activate = (id: string) => {
+          tabs.forEach((tab) => {
+            const active = tab.dataset.tab === id;
+            tab.setAttribute("aria-selected", String(active));
+            tab.tabIndex = active ? 0 : -1;
+          });
+          panels.forEach((panel) => {
+            const active = panel.dataset.panel === id;
+            panel.classList.toggle("active", active);
+            if (active && fileLabel && commandLabel && mobile) {
+              fileLabel.textContent = panel.dataset.file ?? "";
+              commandLabel.textContent = panel.dataset.command ?? "";
+              mobile.value = id;
+            }
+          });
+          const summary = provenanceMap[id];
+          if (summary) {
+            if (compileMeta) {
+              compileMeta.textContent = summary.meta;
+              compileMeta.removeAttribute("aria-hidden");
+            }
+            if (substrateReadout) substrateReadout.textContent = summary.readout;
+          } else if (compileMeta) {
+            compileMeta.textContent = "";
+            compileMeta.setAttribute("aria-hidden", "true");
+          }
+          if (playgroundLink) {
+            const url = new URL(playgroundLink.href);
+            url.searchParams.set("example", id);
+            playgroundLink.href = url.pathname + url.search;
+          }
+        };
+        tabs.forEach((tab, index) => {
+          tab.tabIndex = index === 0 ? 0 : -1;
+          tab.addEventListener("click", () => activate(tab.dataset.tab ?? ""));
+          tab.addEventListener("keydown", (event) => {
+            if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+            event.preventDefault();
+            const direction = event.key === "ArrowRight" ? 1 : -1;
+            const nextIndex = (index + direction + tabs.length) % tabs.length;
+            const nextTab = tabs[nextIndex];
+            activate(nextTab?.dataset.tab ?? "");
+            nextTab?.focus();
+          });
+        });
+        mobile?.addEventListener("change", () => activate(mobile.value));
+      };
+
+      const hydrateHomePage = () => {
+        if (!document.body.classList.contains("home-body")) return;
+        document.documentElement.dataset.theme = readStoredTheme();
+        const nextLocale = readStoredLocale();
+        document.documentElement.dataset.locale = nextLocale;
+        document.documentElement.lang = nextLocale;
+        bindHomeThemeToggle();
+        bindHomeLanguageToggle();
+        bindHomeSpotlights();
+        bindHomeCopyButtons();
+        bindHomeCodeTabs();
+        applyLocale(nextLocale);
+        syncThemeToggle();
+      };
+
+      if (!(window as any).__cellscriptHomePageLoadBound) {
+        document.addEventListener("astro:page-load", hydrateHomePage);
+        (window as any).__cellscriptHomePageLoadBound = true;
+      }
+    </script>
+  </body>
+</html>

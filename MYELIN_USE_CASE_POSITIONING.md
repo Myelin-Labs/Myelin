@@ -228,7 +228,7 @@ demonstrates:
   and non-zero chunk `session commit` paths, covered by unit tests.
 - The CKB projection path produces `semantic_profile =
   "ckb-compatible"` for the Teeworlds workload.
-- The Teeworlds acceptance shows 16 court-bundle data-binding
+- The Teeworlds acceptance shows 22 court-bundle data-binding
   checks, 15,139,695 VM cycles, and a single 2162-byte tape
   chunk (one block, one chunk).
 - The state root mutates between `state_root_before` and
@@ -282,7 +282,7 @@ tendermint}` is now a release-gate step. It locks down:
 `scripts/myelin_teeworlds_acceptance.sh` plus
 `scripts/build_myelin_teeworlds_repro.py` lock down the
 game-session reference workload: tape bytes 2162, VM cycles
-15,139,695, court-bundle 16 checks, semantic profile
+15,139,695, court-bundle 22 checks, semantic profile
 `ckb-compatible`.
 
 ### 7.3 IoT metering acceptance (proposed)

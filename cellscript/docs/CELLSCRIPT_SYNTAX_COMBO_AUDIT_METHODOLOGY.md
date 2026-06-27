@@ -71,9 +71,9 @@ The audit must run without an LLM in the loop.
 Recommended command surface:
 
 ```bash
-cargo check --locked -p cellscript --all-targets
-scripts/cellscript_ckb_release_gate.sh quick
-scripts/cellscript_strict_backend_audit.sh full
+scripts/cellscript_gate.sh dev
+scripts/cellscript_gate.sh ci
+scripts/cellscript_gate.sh backend
 scripts/cellscript_syntax_combo_audit.sh quick
 scripts/cellscript_syntax_combo_audit.sh ci
 scripts/cellscript_syntax_combo_audit.sh deep --seed 20260503 --budget 5000
@@ -100,10 +100,10 @@ To reuse it for a new syntax feature:
    riskiest accepted or rejected shape;
 3. update the mode contract if the new origin should be required in `quick`,
    `ci`, or `deep`;
-4. run `cargo check --locked -p cellscript --all-targets` while developing, or
+4. run `scripts/cellscript_gate.sh dev` while developing, or
    `scripts/cellscript_syntax_combo_audit.sh quick` for a focused syntax-only
    check;
-5. run `scripts/cellscript_ckb_release_gate.sh quick` before merge, or
+5. run `scripts/cellscript_gate.sh ci` before merge, or
    `scripts/cellscript_syntax_combo_audit.sh ci` when you only need the syntax
    component;
 6. keep reports under `target/syntax-combo-audit/` instead of pasting artifacts
@@ -138,7 +138,7 @@ updated.
 ## Acceptance Integration
 
 The syntax-combination audit is a release acceptance preflight. It runs before
-builder-backed CKB acceptance through `scripts/cellscript_ckb_release_gate.sh full`.
+builder-backed CKB acceptance through `scripts/cellscript_gate.sh release`.
 
 Keep this layering strict:
 

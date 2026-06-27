@@ -10,6 +10,8 @@ use parking_lot::RwLock;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+const DETERMINISTIC_POOL_TIMESTAMP: u64 = 0;
+
 /// Pool entry metadata
 #[derive(Clone, Debug)]
 pub struct PoolEntry {
@@ -50,7 +52,9 @@ impl ConflictKey {
     /// Create conflict key from pool entry
     pub fn from_entry(entry: &PoolEntry) -> Self {
         // Convert fee_density to fixed-point u64 (multiply by 10^9)
-        let fee_density_fp = (entry.score.fee_density * 1_000_000_000.0) as u64;
+        let fee_density =
+            if entry.score.fee_density.is_finite() && entry.score.fee_density > 0.0 { entry.score.fee_density } else { 0.0 };
+        let fee_density_fp = (fee_density * 1_000_000_000.0).min(u64::MAX as f64) as u64;
 
         Self {
             neg_fee_density: u64::MAX - fee_density_fp, // Negate for descending order
@@ -149,7 +153,7 @@ impl CellPool {
             tx: tx.clone(),
             wtxid,
             score,
-            timestamp: Self::current_timestamp(),
+            timestamp: Self::deterministic_timestamp(),
             fee,
             cycles,
             dependencies: dependencies.clone(),
@@ -232,7 +236,7 @@ impl CellPool {
         let mut entries: Vec<_> = txs.values().cloned().collect();
 
         // Sort by score (descending)
-        entries.sort_by(|a, b| b.score.total.partial_cmp(&a.score.total).unwrap());
+        entries.sort_by(|a, b| b.score.total.total_cmp(&a.score.total).then_with(|| a.wtxid.cmp(&b.wtxid)));
 
         entries.into_iter().take(limit).collect()
     }
@@ -273,7 +277,7 @@ impl CellPool {
             tx: tx.clone(),
             wtxid,
             score: new_score,
-            timestamp: Self::current_timestamp(),
+            timestamp: Self::deterministic_timestamp(),
             fee,
             cycles,
             dependencies: Vec::new(),
@@ -326,9 +330,9 @@ impl CellPool {
         deps.into_iter().collect()
     }
 
-    /// Get current Unix timestamp
-    fn current_timestamp() -> u64 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    /// Deterministic timestamp placeholder.
+    fn deterministic_timestamp() -> u64 {
+        DETERMINISTIC_POOL_TIMESTAMP
     }
 }
 
@@ -423,6 +427,35 @@ mod tests {
         // Should be sorted by score (fee density)
         assert!(sorted[0].fee >= sorted[1].fee);
         assert!(sorted[1].fee >= sorted[2].fee);
+    }
+
+    #[test]
+    fn test_cellpool_sorted_handles_non_finite_scores() {
+        let pool = CellPool::new(100);
+
+        let tx1 = create_test_tx(vec![], 1000);
+        let tx2 = create_test_tx(vec![], 2000);
+
+        let wtxid1 = pool.add(tx1, 100, 1000).unwrap();
+        let wtxid2 = pool.add(tx2, 200, 1000).unwrap();
+
+        pool.txs.write().get_mut(&wtxid1).unwrap().score.total = f64::NAN;
+
+        let sorted = pool.get_sorted(10);
+
+        assert_eq!(sorted.len(), 2);
+        assert!(sorted.iter().any(|entry| entry.wtxid == wtxid1));
+        assert!(sorted.iter().any(|entry| entry.wtxid == wtxid2));
+    }
+
+    #[test]
+    fn test_cellpool_entry_timestamp_is_deterministic() {
+        let pool = CellPool::new(100);
+
+        let tx = create_test_tx(vec![], 1000);
+        let wtxid = pool.add(tx, 100, 1000).unwrap();
+
+        assert_eq!(pool.get(&wtxid).unwrap().timestamp, DETERMINISTIC_POOL_TIMESTAMP);
     }
 
     #[test]

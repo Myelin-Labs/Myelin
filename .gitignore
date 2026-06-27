@@ -15,7 +15,8 @@
 __pycache__/
 
 # Cargo
-Cargo.lock
+!Cargo.lock
+!cellscript/**/Cargo.lock
 
 # Documentation
 /target/doc/
@@ -30,3 +31,4 @@ utxo_hotspots.txt
 
 # Local evidence reports
 /reports/myelin-teeworlds-repro.json
+AGENTS.md

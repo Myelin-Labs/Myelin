@@ -1,0 +1,15 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import { getDocsNeighbors, getDocsPageBySlug, getDocsPages } from "../../lib/docs";
+
+const pages = getDocsPages();
+const page = getDocsPageBySlug("") ?? pages[0];
+
+if (!page) {
+  throw new Error("No docs pages found under docs/wiki");
+}
+
+const { previous, next } = getDocsNeighbors(page, pages);
+---
+
+<DocsLayout page={page} pages={pages} previous={previous} next={next} />

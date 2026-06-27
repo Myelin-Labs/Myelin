@@ -413,6 +413,16 @@ impl<'a> TypeChecker<'a> {
     }
 
     pub fn check_module(&mut self, module: &Module) -> Result<()> {
+        let diagnostics = self.check_module_diagnostics(module);
+        if let Some(error) = diagnostics.into_iter().next() {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn check_module_diagnostics(&mut self, module: &Module) -> Vec<CompileError> {
+        let mut diagnostics = Vec::new();
         if self.current_module.is_none() {
             self.current_module = Some(module.name.clone());
         }
@@ -421,17 +431,21 @@ impl<'a> TypeChecker<'a> {
         for item in &module.items {
             if let Some((symbol, span)) = item_symbol_name_and_span(item) {
                 if !seen_symbols.insert(symbol.to_string()) {
-                    return Err(CompileError::new(format!("duplicate symbol '{}'", symbol), span));
+                    diagnostics.push(CompileError::new(format!("duplicate symbol '{}'", symbol), span));
                 }
             }
             match item {
                 Item::Const(const_def) => {
-                    self.validate_type(&const_def.ty)?;
+                    if let Err(error) = self.validate_type(&const_def.ty) {
+                        diagnostics.push(error);
+                    }
                     self.env.insert(const_def.name.clone(), const_def.ty.clone(), false, false);
                     self.constants.insert(const_def.name.clone(), const_def.clone());
                 }
                 Item::Resource(resource) => {
-                    register_type_id(&mut seen_type_ids, &resource.name, resource.type_id.as_ref())?;
+                    if let Err(error) = register_type_id(&mut seen_type_ids, &resource.name, resource.type_id.as_ref()) {
+                        diagnostics.push(error);
+                    }
                     self.linear_types.insert(resource.name.clone());
                     self.cell_type_kinds.insert(resource.name.clone(), CellTypeKind::Resource);
                     self.type_capabilities.insert(resource.name.clone(), resource.capabilities.iter().copied().collect());
@@ -441,7 +455,9 @@ impl<'a> TypeChecker<'a> {
                     );
                 }
                 Item::Shared(shared) => {
-                    register_type_id(&mut seen_type_ids, &shared.name, shared.type_id.as_ref())?;
+                    if let Err(error) = register_type_id(&mut seen_type_ids, &shared.name, shared.type_id.as_ref()) {
+                        diagnostics.push(error);
+                    }
                     self.linear_types.insert(shared.name.clone());
                     self.cell_type_kinds.insert(shared.name.clone(), CellTypeKind::Shared);
                     self.type_capabilities.insert(shared.name.clone(), shared.capabilities.iter().copied().collect());
@@ -451,7 +467,9 @@ impl<'a> TypeChecker<'a> {
                     );
                 }
                 Item::Receipt(receipt) => {
-                    register_type_id(&mut seen_type_ids, &receipt.name, receipt.type_id.as_ref())?;
+                    if let Err(error) = register_type_id(&mut seen_type_ids, &receipt.name, receipt.type_id.as_ref()) {
+                        diagnostics.push(error);
+                    }
                     self.linear_types.insert(receipt.name.clone());
                     self.cell_type_kinds.insert(receipt.name.clone(), CellTypeKind::Receipt);
                     self.type_capabilities.insert(receipt.name.clone(), receipt.capabilities.iter().copied().collect());
@@ -462,7 +480,9 @@ impl<'a> TypeChecker<'a> {
                     );
                 }
                 Item::Struct(struct_def) => {
-                    register_type_id(&mut seen_type_ids, &struct_def.name, struct_def.type_id.as_ref())?;
+                    if let Err(error) = register_type_id(&mut seen_type_ids, &struct_def.name, struct_def.type_id.as_ref()) {
+                        diagnostics.push(error);
+                    }
                     self.type_fields.insert(
                         struct_def.name.clone(),
                         struct_def.fields.iter().map(|field| (field.name.clone(), field.ty.clone())).collect(),
@@ -517,14 +537,20 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
-        self.register_imported_type_ids(&mut seen_type_ids)?;
-        self.register_flows(module)?;
-        self.validate_flow_action_edges(module)?;
+        if let Err(error) = self.register_imported_type_ids(&mut seen_type_ids) {
+            diagnostics.push(error);
+        }
+        if let Err(error) = self.register_flows(module) {
+            diagnostics.push(error);
+        }
+        if let Err(error) = self.validate_flow_action_edges(module) {
+            diagnostics.push(error);
+        }
 
         for item in &module.items {
-            self.check_item(item)?;
+            diagnostics.extend(self.check_item_diagnostics(item));
         }
-        Ok(())
+        diagnostics
     }
 
     fn register_imported_type_ids(&self, seen_type_ids: &mut HashMap<String, Span>) -> Result<()> {
@@ -796,6 +822,15 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    fn check_item_diagnostics(&mut self, item: &Item) -> Vec<CompileError> {
+        match item {
+            Item::Action(action) => self.check_action_diagnostics(action),
+            Item::Function(function) => self.check_function_diagnostics(function),
+            Item::Lock(lock) => self.check_lock_diagnostics(lock),
+            _ => self.check_item(item).err().into_iter().collect(),
+        }
+    }
+
     fn check_resource(&mut self, resource: &ResourceDef) -> Result<()> {
         self.validate_schema_fields(&resource.fields, "resource", &resource.name)
     }
@@ -1060,7 +1095,7 @@ impl<'a> TypeChecker<'a> {
 
     fn check_const(&mut self, const_def: &ConstDef) -> Result<()> {
         let mut env = self.env.clone();
-        let value_ty = self.infer_expr(&mut env, &const_def.value)?;
+        let value_ty = self.infer_expr_with_expected_type(&mut env, &const_def.value, &const_def.ty, const_def.span)?;
         if !self.types_equal(&value_ty, &const_def.ty) {
             return Err(CompileError::new(
                 format!("const '{}' has type mismatch: expected {:?}, found {:?}", const_def.name, const_def.ty, value_ty),
@@ -1104,6 +1139,50 @@ impl<'a> TypeChecker<'a> {
         self.current_callable = previous_callable;
         self.current_return_type = previous_return_type;
         result
+    }
+
+    fn check_action_diagnostics(&mut self, action: &ActionDef) -> Vec<CompileError> {
+        let previous_callable = self.current_callable.replace(CallableKind::Action);
+        let previous_return_type = self.current_return_type.replace(action.return_type.clone());
+        let mut diagnostics = Vec::new();
+        let mut env = self.env.child();
+        let core_evidence_bindings = action_core_evidence_binding_names(action);
+
+        push_diagnostic(
+            &mut diagnostics,
+            self.bind_callable_params_with_non_linear(&mut env, &action.params, "action", &action.name, &core_evidence_bindings),
+        );
+        push_diagnostic(&mut diagnostics, self.bind_action_outputs(&mut env, action));
+        push_diagnostic(&mut diagnostics, self.validate_action_state_edges(action, &env));
+        push_diagnostic(&mut diagnostics, self.validate_action_create_targets(action));
+        push_diagnostic(&mut diagnostics, self.validate_action_branch_obligations(action));
+        if let Some(return_type) = &action.return_type {
+            push_diagnostic(&mut diagnostics, self.validate_callable_return_type("action", &action.name, return_type, action.span));
+        }
+        let return_env = env.clone();
+        push_diagnostic(&mut diagnostics, self.check_no_unreachable_stmts(&action.body));
+        push_diagnostic(&mut diagnostics, self.validate_spawn_ipc_fd_usage(&action.body));
+
+        let body_error_start = diagnostics.len();
+        let tail = self.check_body_statements_diagnostics(&mut env, &action.body, &mut diagnostics);
+        let body_had_errors = diagnostics.len() > body_error_start;
+
+        if !body_had_errors {
+            if let Some(return_type) = &action.return_type {
+                push_diagnostic(
+                    &mut diagnostics,
+                    self.check_body_returns_or_tail_expr("action", &action.name, &action.body, return_type, action.span, &return_env),
+                );
+            }
+            if let Some((tail_base, stmt)) = tail {
+                push_diagnostic(&mut diagnostics, self.mark_stmt_as_returned(&mut env, &tail_base, stmt));
+            }
+            push_diagnostic(&mut diagnostics, env.check_linear_complete());
+        }
+
+        self.current_callable = previous_callable;
+        self.current_return_type = previous_return_type;
+        diagnostics
     }
 
     fn bind_action_outputs(&self, env: &mut TypeEnv, action: &ActionDef) -> Result<()> {
@@ -1169,10 +1248,10 @@ impl<'a> TypeChecker<'a> {
                 Stmt::Let(let_stmt) => {
                     guaranteed = self.validate_branch_obligations_in_expr(&let_stmt.value, outputs, guaranteed)?;
                 }
-                Stmt::Expr(expr) | Stmt::Return(Some(expr)) => {
+                Stmt::Expr(expr) | Stmt::Return(ReturnStmt { value: Some(expr), .. }) => {
                     guaranteed = self.validate_branch_obligations_in_expr(expr, outputs, guaranteed)?;
                 }
-                Stmt::Return(None) => {}
+                Stmt::Return(ReturnStmt { value: None, .. }) => {}
                 Stmt::If(if_stmt) => {
                     self.validate_branch_obligations_in_expr(&if_stmt.condition, outputs, guaranteed.clone())?;
                     let then_guaranteed =
@@ -1373,8 +1452,10 @@ impl<'a> TypeChecker<'a> {
         for stmt in stmts {
             match stmt {
                 Stmt::Let(let_stmt) => self.validate_create_targets_in_expr(&let_stmt.value, outputs)?,
-                Stmt::Expr(expr) | Stmt::Return(Some(expr)) => self.validate_create_targets_in_expr(expr, outputs)?,
-                Stmt::Return(None) => {}
+                Stmt::Expr(expr) | Stmt::Return(ReturnStmt { value: Some(expr), .. }) => {
+                    self.validate_create_targets_in_expr(expr, outputs)?
+                }
+                Stmt::Return(ReturnStmt { value: None, .. }) => {}
                 Stmt::If(if_stmt) => {
                     self.validate_create_targets_in_expr(&if_stmt.condition, outputs)?;
                     self.validate_create_targets_in_stmts(&if_stmt.then_branch, outputs)?;
@@ -1681,6 +1762,51 @@ impl<'a> TypeChecker<'a> {
         result
     }
 
+    fn check_function_diagnostics(&mut self, function: &FnDef) -> Vec<CompileError> {
+        let previous_callable = self.current_callable.replace(CallableKind::Function);
+        let previous_return_type = self.current_return_type.replace(function.return_type.clone());
+        let mut diagnostics = Vec::new();
+        let mut env = self.env.child();
+
+        push_diagnostic(&mut diagnostics, self.bind_callable_params(&mut env, &function.params, "function", &function.name));
+        if let Some(return_type) = &function.return_type {
+            push_diagnostic(
+                &mut diagnostics,
+                self.validate_callable_return_type("function", &function.name, return_type, function.span),
+            );
+        }
+        let return_env = env.clone();
+        push_diagnostic(&mut diagnostics, self.check_no_unreachable_stmts(&function.body));
+
+        let body_error_start = diagnostics.len();
+        let tail = self.check_body_statements_diagnostics(&mut env, &function.body, &mut diagnostics);
+        let body_had_errors = diagnostics.len() > body_error_start;
+
+        if !body_had_errors {
+            if let Some(return_type) = &function.return_type {
+                push_diagnostic(
+                    &mut diagnostics,
+                    self.check_body_returns_or_tail_expr(
+                        "function",
+                        &function.name,
+                        &function.body,
+                        return_type,
+                        function.span,
+                        &return_env,
+                    ),
+                );
+            }
+            if let Some((tail_base, stmt)) = tail {
+                push_diagnostic(&mut diagnostics, self.mark_stmt_as_returned(&mut env, &tail_base, stmt));
+            }
+            push_diagnostic(&mut diagnostics, env.check_linear_complete());
+        }
+
+        self.current_callable = previous_callable;
+        self.current_return_type = previous_return_type;
+        diagnostics
+    }
+
     fn check_lock(&mut self, lock: &LockDef) -> Result<()> {
         let previous_callable = self.current_callable.replace(CallableKind::Lock);
         let previous_return_type = self.current_return_type.replace(Some(Type::Bool));
@@ -1713,6 +1839,47 @@ impl<'a> TypeChecker<'a> {
         self.current_callable = previous_callable;
         self.current_return_type = previous_return_type;
         result
+    }
+
+    fn check_lock_diagnostics(&mut self, lock: &LockDef) -> Vec<CompileError> {
+        let previous_callable = self.current_callable.replace(CallableKind::Lock);
+        let previous_return_type = self.current_return_type.replace(Some(Type::Bool));
+        let mut diagnostics = Vec::new();
+
+        if lock.return_type != Type::Bool {
+            diagnostics.push(CompileError::new("lock definitions must return bool", lock.span));
+        }
+
+        let mut env = self.env.child();
+        push_diagnostic(&mut diagnostics, self.bind_callable_params(&mut env, &lock.params, "lock", &lock.name));
+        push_diagnostic(&mut diagnostics, self.check_no_unreachable_stmts(&lock.body));
+        push_diagnostic(&mut diagnostics, self.validate_spawn_ipc_fd_usage(&lock.body));
+
+        let body_error_start = diagnostics.len();
+        let tail = self.check_body_statements_diagnostics(&mut env, &lock.body, &mut diagnostics);
+        let body_had_errors = diagnostics.len() > body_error_start;
+
+        if !body_had_errors {
+            if let Some(stmt) = lock.body.last() {
+                match self.infer_lock_terminal_stmt(&mut env, stmt) {
+                    Ok(return_ty) if !self.is_bool_type(&return_ty) => {
+                        diagnostics.push(CompileError::new("lock body must evaluate to bool", lock.span));
+                    }
+                    Ok(_) => {}
+                    Err(error) => diagnostics.push(error),
+                }
+            } else {
+                diagnostics.push(CompileError::new("lock body must return a bool value", lock.span));
+            }
+            if let Some((tail_base, stmt)) = tail {
+                push_diagnostic(&mut diagnostics, self.mark_stmt_as_returned(&mut env, &tail_base, stmt));
+            }
+            push_diagnostic(&mut diagnostics, env.check_linear_complete());
+        }
+
+        self.current_callable = previous_callable;
+        self.current_return_type = previous_return_type;
+        diagnostics
     }
 
     fn validate_callable_return_type(&self, callable_kind: &str, callable_name: &str, return_type: &Type, span: Span) -> Result<()> {
@@ -2150,6 +2317,111 @@ impl<'a> TypeChecker<'a> {
         Ok(Some((tail_base, last)))
     }
 
+    fn check_body_statements_diagnostics<'body>(
+        &mut self,
+        env: &mut TypeEnv,
+        body: &'body [Stmt],
+        diagnostics: &mut Vec<CompileError>,
+    ) -> Option<(TypeEnv, &'body Stmt)> {
+        let (last, prefix) = body.split_last()?;
+        for stmt in prefix {
+            self.check_stmt_diagnostics(env, stmt, diagnostics);
+        }
+        let tail_base = env.clone();
+        self.check_stmt_diagnostics(env, last, diagnostics);
+        Some((tail_base, last))
+    }
+
+    fn check_stmt_diagnostics(&mut self, env: &mut TypeEnv, stmt: &Stmt, diagnostics: &mut Vec<CompileError>) {
+        match stmt {
+            Stmt::If(if_stmt) => {
+                let condition_ok = match self.infer_expr(env, &if_stmt.condition) {
+                    Ok(cond_ty) if self.is_bool_type(&cond_ty) => true,
+                    Ok(_) => {
+                        diagnostics.push(CompileError::new("if condition must be boolean", if_stmt.span));
+                        false
+                    }
+                    Err(error) => {
+                        diagnostics.push(error);
+                        false
+                    }
+                };
+
+                let mut then_env = env.child();
+                let then_error_start = diagnostics.len();
+                self.check_body_statements_diagnostics(&mut then_env, &if_stmt.then_branch, diagnostics);
+                let then_had_errors = diagnostics.len() > then_error_start;
+                let then_returns = self.stmts_always_return(&if_stmt.then_branch);
+
+                if let Some(else_branch) = &if_stmt.else_branch {
+                    let mut else_env = env.child();
+                    let else_error_start = diagnostics.len();
+                    self.check_body_statements_diagnostics(&mut else_env, else_branch, diagnostics);
+                    let else_had_errors = diagnostics.len() > else_error_start;
+                    let else_returns = self.stmts_always_return(else_branch);
+                    if condition_ok && !then_had_errors && !else_had_errors {
+                        push_diagnostic(
+                            diagnostics,
+                            env.merge_branch_linear_states(&then_env, then_returns, Some(&else_env), else_returns, if_stmt.span),
+                        );
+                    }
+                } else if condition_ok && !then_had_errors {
+                    push_diagnostic(diagnostics, env.merge_branch_linear_states(&then_env, then_returns, None, false, if_stmt.span));
+                }
+            }
+            Stmt::For(for_stmt) => {
+                let iter_ty = match self.infer_expr(env, &for_stmt.iterable) {
+                    Ok(iter_ty) => iter_ty,
+                    Err(error) => {
+                        diagnostics.push(error);
+                        return;
+                    }
+                };
+                let item_ty = match self.iter_item_type(&iter_ty, for_stmt.span) {
+                    Ok(item_ty) => item_ty,
+                    Err(error) => {
+                        diagnostics.push(error);
+                        return;
+                    }
+                };
+                let mut loop_env = env.child();
+                if let Err(error) = self.bind_pattern(&mut loop_env, &for_stmt.pattern, &item_ty, false, for_stmt.span) {
+                    diagnostics.push(error);
+                    return;
+                }
+                let body_error_start = diagnostics.len();
+                self.check_body_statements_diagnostics(&mut loop_env, &for_stmt.body, diagnostics);
+                if diagnostics.len() == body_error_start {
+                    push_diagnostic(diagnostics, loop_env.check_linear_complete());
+                    push_diagnostic(diagnostics, env.reject_loop_linear_state_changes(&loop_env, for_stmt.span));
+                    env.merge_existing_type_refinements_from(&loop_env);
+                }
+            }
+            Stmt::While(while_stmt) => {
+                let condition_ok = match self.infer_expr(env, &while_stmt.condition) {
+                    Ok(cond_ty) if self.is_bool_type(&cond_ty) => true,
+                    Ok(_) => {
+                        diagnostics.push(CompileError::new("while condition must be boolean", while_stmt.span));
+                        false
+                    }
+                    Err(error) => {
+                        diagnostics.push(error);
+                        false
+                    }
+                };
+                let mut while_env = env.child();
+                let body_error_start = diagnostics.len();
+                self.check_body_statements_diagnostics(&mut while_env, &while_stmt.body, diagnostics);
+                if condition_ok && diagnostics.len() == body_error_start {
+                    push_diagnostic(diagnostics, while_env.check_linear_complete());
+                    push_diagnostic(diagnostics, env.reject_loop_linear_state_changes(&while_env, while_stmt.span));
+                    env.merge_existing_type_refinements_from(&while_env);
+                }
+            }
+            _ => push_diagnostic(diagnostics, self.check_stmt(env, stmt)),
+        }
+    }
+
     fn validate_spawn_ipc_fd_usage(&self, body: &[Stmt]) -> Result<()> {
         let mut state = SpawnIpcFdState::default();
         self.validate_spawn_ipc_fd_usage_statements(body, &mut state)?;
@@ -2169,10 +2441,10 @@ impl<'a> TypeChecker<'a> {
                 self.validate_spawn_ipc_fd_usage_expr(&let_stmt.value, state)?;
                 self.bind_spawn_ipc_fd_pattern(let_stmt, state);
             }
-            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => {
+            Stmt::Expr(expr) | Stmt::Return(ReturnStmt { value: Some(expr), .. }) => {
                 self.validate_spawn_ipc_fd_usage_expr(expr, state)?;
             }
-            Stmt::Return(None) => {}
+            Stmt::Return(ReturnStmt { value: None, .. }) => {}
             Stmt::If(if_stmt) => {
                 self.validate_spawn_ipc_fd_usage_expr(&if_stmt.condition, state)?;
                 let mut then_state = state.clone();
@@ -2452,7 +2724,7 @@ impl<'a> TypeChecker<'a> {
                 self.infer_expr(env, expr)?;
                 Ok(())
             }
-            Stmt::Return(None) => {
+            Stmt::Return(ReturnStmt { value: None, .. }) => {
                 if let Some(Some(expected)) = &self.current_return_type {
                     return Err(CompileError::new(
                         format!("return without value in function returning {:?}", expected),
@@ -2461,20 +2733,21 @@ impl<'a> TypeChecker<'a> {
                 }
                 Ok(())
             }
-            Stmt::Return(Some(expr)) => {
-                let ty = self.infer_expr(env, expr)?;
+            Stmt::Return(ReturnStmt { value: Some(expr), .. }) => {
+                let return_span = stmt_span(stmt);
+                let ty = match self.current_return_type.clone() {
+                    Some(Some(expected)) => self.infer_expr_with_expected_type(env, expr, &expected, return_span)?,
+                    _ => self.infer_expr(env, expr)?,
+                };
                 match &self.current_return_type {
-                    Some(Some(expected)) if !self.types_equal(expected, &ty) => {
+                    Some(Some(expected)) if !self.expr_type_compatible_with_expected(expr, &ty, expected, return_span)? => {
                         return Err(CompileError::new(
                             format!("return type mismatch: expected {:?}, found {:?}", expected, ty),
-                            expr_span(expr),
+                            return_span,
                         ));
                     }
                     Some(None) => {
-                        return Err(CompileError::new(
-                            "return value is not allowed in a function without a return type",
-                            expr_span(expr),
-                        ));
+                        return Err(CompileError::new("return value is not allowed in a function without a return type", return_span));
                     }
                     _ => {}
                 }
@@ -2563,9 +2836,7 @@ impl<'a> TypeChecker<'a> {
 
     fn infer_let_value_type(&mut self, env: &mut TypeEnv, let_stmt: &LetStmt) -> Result<Type> {
         if let Some(declared_ty) = &let_stmt.ty {
-            if matches!(let_stmt.value, Expr::Array(_)) {
-                return self.infer_expr_with_expected_type(env, &let_stmt.value, declared_ty, let_stmt.span);
-            }
+            return self.infer_expr_with_expected_type(env, &let_stmt.value, declared_ty, let_stmt.span);
         }
         if let Expr::Array(elems) = &let_stmt.value {
             if elems.is_empty() {
@@ -2585,7 +2856,46 @@ impl<'a> TypeChecker<'a> {
 
     fn infer_expr_with_expected_type(&mut self, env: &mut TypeEnv, expr: &Expr, expected_ty: &Type, span: Span) -> Result<Type> {
         match expr {
+            Expr::Integer(value) => {
+                if let Some(ty) = Self::integer_literal_type_for_expected(*value, expected_ty, span)? {
+                    Ok(ty)
+                } else {
+                    self.infer_expr(env, expr)
+                }
+            }
             Expr::Array(elems) => self.infer_array_literal_with_expected_type(env, elems, expected_ty, span),
+            Expr::Block(stmts) => self.infer_tail_block_value_with_expected_type(env, stmts, expected_ty, span),
+            Expr::If(if_expr) => {
+                let cond_ty = self.infer_expr(env, &if_expr.condition)?;
+                if !self.is_bool_type(&cond_ty) {
+                    return Err(CompileError::new("if expression condition must be boolean", if_expr.span));
+                }
+                let mut then_env = env.child();
+                let then_ty = self.infer_expr_with_expected_type(
+                    &mut then_env,
+                    &if_expr.then_branch,
+                    expected_ty,
+                    expr_span(&if_expr.then_branch),
+                )?;
+                then_env.check_linear_complete()?;
+                let mut else_env = env.child();
+                let else_ty = self.infer_expr_with_expected_type(
+                    &mut else_env,
+                    &if_expr.else_branch,
+                    expected_ty,
+                    expr_span(&if_expr.else_branch),
+                )?;
+                else_env.check_linear_complete()?;
+                if self.types_equal(&then_ty, &else_ty) && self.initializer_types_equal(&then_ty, expected_ty) {
+                    env.merge_branch_linear_states(&then_env, false, Some(&else_env), false, if_expr.span)?;
+                    Ok(expected_ty.clone())
+                } else {
+                    Err(CompileError::new(
+                        format!("if expression branches must have matching types, got {:?} and {:?}", then_ty, else_ty),
+                        if_expr.span,
+                    ))
+                }
+            }
             _ => self.infer_expr(env, expr),
         }
     }
@@ -2600,7 +2910,7 @@ impl<'a> TypeChecker<'a> {
         if let Type::Named(name) = expected_ty {
             if let Some(item_ty) = self.parse_named_collection_item_type(name) {
                 for elem in elems {
-                    let actual_ty = self.infer_expr(env, elem)?;
+                    let actual_ty = self.infer_expr_with_expected_type(env, elem, &item_ty, expr_span(elem))?;
                     if self.type_contains_reference(&actual_ty) {
                         return Err(CompileError::new(
                             format!(
@@ -2635,7 +2945,7 @@ impl<'a> TypeChecker<'a> {
                 ));
             }
             for elem in elems {
-                let actual_ty = self.infer_expr(env, elem)?;
+                let actual_ty = self.infer_expr_with_expected_type(env, elem, item_ty, expr_span(elem))?;
                 if !self.types_equal(&actual_ty, item_ty) {
                     return Err(CompileError::new(
                         format!("array literal type mismatch: expected {:?}, found {:?}", item_ty, actual_ty),
@@ -2681,10 +2991,10 @@ impl<'a> TypeChecker<'a> {
                         if !self.is_numeric_type(&left_ty) || !self.is_numeric_type(&right_ty) {
                             return Err(CompileError::new("arithmetic operations require numeric types", bin.span));
                         }
-                        Ok(left_ty)
+                        self.numeric_binary_result_type(&bin.left, &left_ty, &bin.right, &right_ty, bin.span)
                     }
                     BinaryOp::Eq | BinaryOp::Ne => {
-                        if !self.types_equal(&left_ty, &right_ty) {
+                        if !self.binary_operand_types_compatible(&bin.left, &left_ty, &bin.right, &right_ty, bin.span)? {
                             return Err(CompileError::new("comparison requires matching types", bin.span));
                         }
                         Ok(Type::Bool)
@@ -2692,6 +3002,12 @@ impl<'a> TypeChecker<'a> {
                     BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
                         if !self.is_numeric_type(&left_ty) || !self.is_numeric_type(&right_ty) {
                             return Err(CompileError::new("ordering comparison requires numeric types", bin.span));
+                        }
+                        if let Err(err) = self.numeric_binary_result_type(&bin.left, &left_ty, &bin.right, &right_ty, bin.span) {
+                            if err.message.starts_with("integer literal") {
+                                return Err(err);
+                            }
+                            return Err(CompileError::new("ordering comparison requires matching numeric types", bin.span));
                         }
                         Ok(Type::Bool)
                     }
@@ -3299,6 +3615,43 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    fn infer_tail_block_value_with_expected_type(
+        &mut self,
+        env: &mut TypeEnv,
+        stmts: &[Stmt],
+        expected_ty: &Type,
+        span: Span,
+    ) -> Result<Type> {
+        let Some((last, prefix)) = stmts.split_last() else {
+            return Ok(Type::Unit);
+        };
+        for stmt in prefix {
+            self.check_stmt(env, stmt)?;
+        }
+        match last {
+            Stmt::Expr(expr) => {
+                let ty = self.infer_expr_with_expected_type(env, expr, expected_ty, expr_span(expr))?;
+                if !self.initializer_types_equal(&ty, expected_ty) {
+                    return Err(CompileError::new(
+                        format!("block expression type mismatch: expected {:?}, found {:?}", expected_ty, ty),
+                        span,
+                    ));
+                }
+                if self.is_linear_type(&ty) {
+                    self.mark_expr_as_moved(env, expr)?;
+                }
+                Ok(expected_ty.clone())
+            }
+            Stmt::If(if_stmt) if if_stmt.else_branch.is_some() => {
+                self.infer_tail_if_stmt_value_with_expected_type(env, if_stmt, expected_ty)
+            }
+            stmt => {
+                self.check_stmt(env, stmt)?;
+                Ok(Type::Unit)
+            }
+        }
+    }
+
     fn infer_tail_if_stmt_value(&mut self, env: &mut TypeEnv, if_stmt: &IfStmt) -> Result<Type> {
         let cond_ty = self.infer_expr(env, &if_stmt.condition)?;
         if !self.is_bool_type(&cond_ty) {
@@ -3325,6 +3678,40 @@ impl<'a> TypeChecker<'a> {
 
         env.merge_branch_linear_states(&then_env, false, Some(&else_env), false, if_stmt.span)?;
         Ok(then_ty)
+    }
+
+    fn infer_tail_if_stmt_value_with_expected_type(
+        &mut self,
+        env: &mut TypeEnv,
+        if_stmt: &IfStmt,
+        expected_ty: &Type,
+    ) -> Result<Type> {
+        let cond_ty = self.infer_expr(env, &if_stmt.condition)?;
+        if !self.is_bool_type(&cond_ty) {
+            return Err(CompileError::new("if condition must be boolean", if_stmt.span));
+        }
+        let Some(else_branch) = &if_stmt.else_branch else {
+            return Ok(Type::Unit);
+        };
+
+        let mut then_env = env.child();
+        let then_ty =
+            self.infer_tail_block_value_with_expected_type(&mut then_env, &if_stmt.then_branch, expected_ty, if_stmt.span)?;
+        then_env.check_linear_complete()?;
+
+        let mut else_env = env.child();
+        let else_ty = self.infer_tail_block_value_with_expected_type(&mut else_env, else_branch, expected_ty, if_stmt.span)?;
+        else_env.check_linear_complete()?;
+
+        if !self.initializer_types_equal(&then_ty, expected_ty) || !self.initializer_types_equal(&else_ty, expected_ty) {
+            return Err(CompileError::new(
+                format!("if expression branches must have matching types, got {:?} and {:?}", then_ty, else_ty),
+                if_stmt.span,
+            ));
+        }
+
+        env.merge_branch_linear_states(&then_env, false, Some(&else_env), false, if_stmt.span)?;
+        Ok(expected_ty.clone())
     }
 
     fn check_match_patterns(&self, scrutinee_ty: &Type, match_expr: &MatchExpr) -> Result<()> {
@@ -3513,9 +3900,14 @@ impl<'a> TypeChecker<'a> {
             if let Some(spec) = self.flows.get(type_name).and_then(|spec| spec.field_enum_type.as_ref()) {
                 return Ok(Some(Type::Named(spec.clone())));
             }
-            return Ok(Some(Type::U64));
+            return Ok(Some(self.flow_state_field_type(type_name).unwrap_or(Type::U64)));
         }
         Err(CompileError::new(format!("unknown flow state '{}::{}'", type_name, state_name), span))
+    }
+
+    fn flow_state_field_type(&self, type_name: &str) -> Option<Type> {
+        let field_name = self.flow_state_fields.get(type_name)?;
+        self.resolve_named_type_fields(type_name)?.get(field_name).cloned()
     }
 
     fn flow_state_index(&self, type_name: &str, name: &str) -> Option<usize> {
@@ -3716,6 +4108,115 @@ impl<'a> TypeChecker<'a> {
             || matches!((actual, expected), (Type::Named(actual), Type::Named(expected)) if actual == "Vec" && expected.starts_with("Vec<"))
     }
 
+    fn integer_literal_type_for_expected(value: u64, expected_ty: &Type, span: Span) -> Result<Option<Type>> {
+        if !Self::is_integer_literal_target_type(expected_ty) {
+            return Ok(None);
+        }
+        if Self::integer_literal_fits_expected_type(value, expected_ty) {
+            Ok(Some(expected_ty.clone()))
+        } else {
+            Err(CompileError::new(format!("integer literal {} does not fit expected type {}", value, type_repr(expected_ty)), span))
+        }
+    }
+
+    fn is_integer_literal_target_type(ty: &Type) -> bool {
+        match ty {
+            Type::U8 | Type::U16 | Type::U32 | Type::I32 | Type::U64 | Type::U128 => true,
+            Type::Named(name) => name == "usize" || name == "isize",
+            _ => false,
+        }
+    }
+
+    fn integer_literal_fits_expected_type(value: u64, expected_ty: &Type) -> bool {
+        match expected_ty {
+            Type::U8 => value <= u8::MAX as u64,
+            Type::U16 => value <= u16::MAX as u64,
+            Type::U32 => value <= u32::MAX as u64,
+            Type::I32 => value <= i32::MAX as u64,
+            Type::U64 | Type::U128 => true,
+            Type::Named(name) if name == "usize" => true,
+            Type::Named(name) if name == "isize" => value <= i64::MAX as u64,
+            _ => false,
+        }
+    }
+
+    fn unsigned_widening_rank(ty: &Type) -> Option<u8> {
+        match ty {
+            Type::U8 => Some(0),
+            Type::U16 => Some(1),
+            Type::U32 => Some(2),
+            Type::U64 => Some(3),
+            Type::U128 => Some(4),
+            Type::Named(name) if name == "usize" => Some(3),
+            _ => None,
+        }
+    }
+
+    fn unsigned_type_for_rank(rank: u8) -> Type {
+        match rank {
+            0 => Type::U8,
+            1 => Type::U16,
+            2 => Type::U32,
+            3 => Type::U64,
+            _ => Type::U128,
+        }
+    }
+
+    fn unsigned_widening_result_type(left_ty: &Type, right_ty: &Type) -> Option<Type> {
+        let left_rank = Self::unsigned_widening_rank(left_ty)?;
+        let right_rank = Self::unsigned_widening_rank(right_ty)?;
+        Some(Self::unsigned_type_for_rank(left_rank.max(right_rank)))
+    }
+
+    fn expr_type_compatible_with_expected(&self, expr: &Expr, actual_ty: &Type, expected_ty: &Type, span: Span) -> Result<bool> {
+        if self.types_equal(actual_ty, expected_ty) {
+            return Ok(true);
+        }
+        if let Expr::Integer(value) = expr {
+            return Self::integer_literal_type_for_expected(*value, expected_ty, span).map(|ty| ty.is_some());
+        }
+        Ok(false)
+    }
+
+    fn binary_operand_types_compatible(&self, left: &Expr, left_ty: &Type, right: &Expr, right_ty: &Type, span: Span) -> Result<bool> {
+        if self.types_equal(left_ty, right_ty) {
+            return Ok(true);
+        }
+        if let Expr::Integer(value) = left {
+            if Self::is_integer_literal_target_type(right_ty) {
+                return Self::integer_literal_type_for_expected(*value, right_ty, span).map(|ty| ty.is_some());
+            }
+        }
+        if let Expr::Integer(value) = right {
+            if Self::is_integer_literal_target_type(left_ty) {
+                return Self::integer_literal_type_for_expected(*value, left_ty, span).map(|ty| ty.is_some());
+            }
+        }
+        Ok(false)
+    }
+
+    fn numeric_binary_result_type(&self, left: &Expr, left_ty: &Type, right: &Expr, right_ty: &Type, span: Span) -> Result<Type> {
+        if self.types_equal(left_ty, right_ty) {
+            return Ok(left_ty.clone());
+        }
+        if let Expr::Integer(value) = left {
+            if Self::is_integer_literal_target_type(right_ty) {
+                Self::integer_literal_type_for_expected(*value, right_ty, span)?;
+                return Ok(right_ty.clone());
+            }
+        }
+        if let Expr::Integer(value) = right {
+            if Self::is_integer_literal_target_type(left_ty) {
+                Self::integer_literal_type_for_expected(*value, left_ty, span)?;
+                return Ok(left_ty.clone());
+            }
+        }
+        if let Some(ty) = Self::unsigned_widening_result_type(left_ty, right_ty) {
+            return Ok(ty);
+        }
+        Err(CompileError::new("arithmetic operations require matching numeric types", span))
+    }
+
     fn bind_pattern(&self, env: &mut TypeEnv, pattern: &BindingPattern, ty: &Type, is_mut: bool, span: Span) -> Result<()> {
         match pattern {
             BindingPattern::Name(name) => {
@@ -3756,7 +4257,7 @@ impl<'a> TypeChecker<'a> {
     fn mark_stmt_as_returned(&mut self, env: &mut TypeEnv, tail_base: &TypeEnv, stmt: &Stmt) -> Result<()> {
         match stmt {
             Stmt::Expr(expr) => self.mark_expr_as_moved(env, expr),
-            Stmt::Return(Some(_)) => Ok(()),
+            Stmt::Return(ReturnStmt { value: Some(_), .. }) => Ok(()),
             Stmt::If(if_stmt) if matches!(self.current_return_type, Some(Some(_))) => {
                 let Some(else_branch) = &if_stmt.else_branch else {
                     return Ok(());
@@ -3834,8 +4335,8 @@ impl<'a> TypeChecker<'a> {
         }
 
         if let Stmt::Expr(expr) = last {
-            let tail_ty = self.infer_expr(&mut tail_env, expr)?;
-            if self.types_equal(&tail_ty, return_type) {
+            let tail_ty = self.infer_expr_with_expected_type(&mut tail_env, expr, return_type, expr_span(expr))?;
+            if self.initializer_types_equal(&tail_ty, return_type) {
                 return Ok(true);
             }
             return Err(CompileError::new(
@@ -3859,7 +4360,7 @@ impl<'a> TypeChecker<'a> {
     fn infer_lock_terminal_stmt(&mut self, env: &mut TypeEnv, stmt: &Stmt) -> Result<Type> {
         match stmt {
             Stmt::Expr(expr) => self.infer_expr(env, expr),
-            Stmt::Return(Some(expr)) => self.infer_expr(env, expr),
+            Stmt::Return(ReturnStmt { value: Some(expr), .. }) => self.infer_expr(env, expr),
             Stmt::If(if_stmt) => {
                 let cond_ty = self.infer_expr(env, &if_stmt.condition)?;
                 if !self.is_bool_type(&cond_ty) {
@@ -3998,7 +4499,9 @@ impl<'a> TypeChecker<'a> {
             return Ok(());
         };
         match last {
-            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => self.reject_stored_linear_reference_alias(env, expr, span),
+            Stmt::Expr(expr) | Stmt::Return(ReturnStmt { value: Some(expr), .. }) => {
+                self.reject_stored_linear_reference_alias(env, expr, span)
+            }
             Stmt::If(if_stmt) => {
                 self.reject_stored_linear_reference_alias_in_tail_stmt(env, &if_stmt.then_branch, span)?;
                 if let Some(else_branch) = &if_stmt.else_branch {
@@ -4036,15 +4539,14 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn infer_assign_expr(&mut self, env: &mut TypeEnv, assign: &AssignExpr) -> Result<Type> {
-        let value_ty = self.infer_expr(env, &assign.value)?;
-        self.reject_assignment_reference_to_linear_root(env, &assign.value, assign.span)?;
-        self.reject_assignment_mutable_reference_alias(&value_ty, assign.span)?;
-
         match assign.target.as_ref() {
             Expr::Identifier(name) => {
                 let Some(target_ty) = env.lookup(name).cloned() else {
                     return Err(CompileError::new(format!("undefined variable '{}'", name), assign.span));
                 };
+                let value_ty = self.infer_expr_with_expected_type(env, &assign.value, &target_ty, expr_span(&assign.value))?;
+                self.reject_assignment_reference_to_linear_root(env, &assign.value, assign.span)?;
+                self.reject_assignment_mutable_reference_alias(&value_ty, assign.span)?;
                 if self.is_linear_type(&target_ty) {
                     return Err(CompileError::new("assignment to linear/resource variables is not supported yet", assign.span));
                 }
@@ -4053,13 +4555,16 @@ impl<'a> TypeChecker<'a> {
                 }
                 match assign.op {
                     AssignOp::Assign => {
-                        if !self.types_equal(&target_ty, &value_ty) {
+                        if !self.expr_type_compatible_with_expected(&assign.value, &value_ty, &target_ty, assign.span)? {
                             return Err(CompileError::new("assignment requires matching types", assign.span));
                         }
                     }
                     AssignOp::AddAssign => {
                         if !self.is_numeric_type(&target_ty) || !self.is_numeric_type(&value_ty) {
                             return Err(CompileError::new("'+=' requires numeric types", assign.span));
+                        }
+                        if !self.expr_type_compatible_with_expected(&assign.value, &value_ty, &target_ty, assign.span)? {
+                            return Err(CompileError::new("'+=' requires matching numeric types", assign.span));
                         }
                     }
                 }
@@ -4092,15 +4597,21 @@ impl<'a> TypeChecker<'a> {
                     return Err(CompileError::new(format!("assignment target rooted at '{}' is not mutable", root), assign.span));
                 }
                 let target_ty = self.infer_expr(env, &assign.target)?;
+                let value_ty = self.infer_expr_with_expected_type(env, &assign.value, &target_ty, expr_span(&assign.value))?;
+                self.reject_assignment_reference_to_linear_root(env, &assign.value, assign.span)?;
+                self.reject_assignment_mutable_reference_alias(&value_ty, assign.span)?;
                 match assign.op {
                     AssignOp::Assign => {
-                        if !self.types_equal(&target_ty, &value_ty) {
+                        if !self.expr_type_compatible_with_expected(&assign.value, &value_ty, &target_ty, assign.span)? {
                             return Err(CompileError::new("assignment requires matching types", assign.span));
                         }
                     }
                     AssignOp::AddAssign => {
                         if !self.is_numeric_type(&target_ty) || !self.is_numeric_type(&value_ty) {
                             return Err(CompileError::new("'+=' requires numeric types", assign.span));
+                        }
+                        if !self.expr_type_compatible_with_expected(&assign.value, &value_ty, &target_ty, assign.span)? {
+                            return Err(CompileError::new("'+=' requires matching numeric types", assign.span));
                         }
                     }
                 }
@@ -4442,6 +4953,8 @@ impl<'a> TypeChecker<'a> {
                             | "cell_data_hash"
                             | "cell_lock_code_hash"
                             | "cell_type_code_hash"
+                            | "cell_lock_args32"
+                            | "cell_type_args32"
                             | "cell_lock_args_hash"
                             | "cell_type_args_hash",
                         ) => {
@@ -4454,7 +4967,7 @@ impl<'a> TypeChecker<'a> {
                             }
                             Type::Hash
                         }
-                        ("ckb", "cell_lock_args_empty" | "cell_type_args_empty" | "cell_exists") => {
+                        ("ckb", "cell_lock_args_empty" | "cell_type_args_empty") => {
                             self.validate_builtin_arity(name, 1, arg_types, call.span)?;
                             if arg_types[0] != Type::U64 {
                                 return Err(CompileError::new(
@@ -4883,6 +5396,13 @@ impl<'a> TypeChecker<'a> {
                         }
                         return Ok(Type::Hash);
                     }
+                    "hash_blake2b_packed" => {
+                        self.validate_builtin_arity(name, 1, arg_types, call.span)?;
+                        if matches!(arg_types[0], Type::Unit) {
+                            return Err(CompileError::new("hash_blake2b_packed expects packed data", call.span));
+                        }
+                        return Ok(Type::Hash);
+                    }
                     _ => {}
                 }
                 Err(CompileError::new(format!("unknown function '{}'", name), call.span))
@@ -4959,7 +5479,7 @@ impl<'a> TypeChecker<'a> {
                                 return Ok(Type::Unit);
                             }
                             if let Some(item_ty) = self.parse_named_collection_item_type(name) {
-                                if !self.types_equal(&item_ty, arg_ty) {
+                                if !self.expr_type_compatible_with_expected(&call.args[0], arg_ty, &item_ty, call.span)? {
                                     return Err(CompileError::new(
                                         format!("Vec.push type mismatch: expected {:?}, found {:?}", item_ty, arg_ty),
                                         call.span,
@@ -5026,7 +5546,7 @@ impl<'a> TypeChecker<'a> {
                                 let Some(item_ty) = self.parse_named_collection_item_type(name) else {
                                     return Err(CompileError::new("contains is only supported on Vec values", call.span));
                                 };
-                                if !self.types_equal(&item_ty, arg_ty) {
+                                if !self.expr_type_compatible_with_expected(&call.args[0], arg_ty, &item_ty, call.span)? {
                                     return Err(CompileError::new(
                                         format!("Vec.contains type mismatch: expected {:?}, found {:?}", item_ty, arg_ty),
                                         call.span,
@@ -5096,7 +5616,7 @@ impl<'a> TypeChecker<'a> {
                                 let Some(item_ty) = self.parse_named_collection_item_type(name) else {
                                     return Err(CompileError::new("insert is only supported on Vec values", call.span));
                                 };
-                                if !self.types_equal(&item_ty, arg_ty) {
+                                if !self.expr_type_compatible_with_expected(&call.args[1], arg_ty, &item_ty, call.span)? {
                                     return Err(CompileError::new(
                                         format!("Vec.insert type mismatch: expected {:?}, found {:?}", item_ty, arg_ty),
                                         call.span,
@@ -5133,7 +5653,7 @@ impl<'a> TypeChecker<'a> {
                                 let Some(item_ty) = self.parse_named_collection_item_type(name) else {
                                     return Err(CompileError::new("set is only supported on Vec values", call.span));
                                 };
-                                if !self.types_equal(&item_ty, arg_ty) {
+                                if !self.expr_type_compatible_with_expected(&call.args[1], arg_ty, &item_ty, call.span)? {
                                     return Err(CompileError::new(
                                         format!("Vec.set type mismatch: expected {:?}, found {:?}", item_ty, arg_ty),
                                         call.span,
@@ -5212,8 +5732,10 @@ impl<'a> TypeChecker<'a> {
             ));
         }
 
-        for (index, (expected_ty, actual_ty)) in expected.iter().zip(actual.iter()).enumerate() {
-            if !self.call_argument_type_compatible(expected_ty, actual_ty) {
+        for (index, ((expected_ty, actual_ty), arg)) in expected.iter().zip(actual.iter()).zip(args.iter()).enumerate() {
+            if !self.call_argument_type_compatible(expected_ty, actual_ty)
+                && !self.expr_type_compatible_with_expected(arg, actual_ty, expected_ty, span)?
+            {
                 return Err(CompileError::new(
                     format!(
                         "function '{}' argument {} type mismatch: expected {}, found {}",
@@ -5425,9 +5947,6 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn types_equal(&self, a: &Type, b: &Type) -> bool {
-        if self.is_numeric_type(a) && self.is_numeric_type(b) {
-            return true;
-        }
         match (a, b) {
             (Type::U8, Type::U8) => true,
             (Type::U16, Type::U16) => true,
@@ -5593,11 +6112,25 @@ fn stmt_span(stmt: &Stmt) -> Span {
     match stmt {
         Stmt::Let(let_stmt) => let_stmt.span,
         Stmt::Expr(expr) => expr_span(expr),
-        Stmt::Return(Some(expr)) => expr_span(expr),
-        Stmt::Return(None) => Span::default(),
+        Stmt::Return(ReturnStmt { value: Some(expr), span }) => non_default_span(expr_span(expr), *span),
+        Stmt::Return(ReturnStmt { value: None, span }) => *span,
         Stmt::If(if_stmt) => if_stmt.span,
         Stmt::For(for_stmt) => for_stmt.span,
         Stmt::While(while_stmt) => while_stmt.span,
+    }
+}
+
+fn non_default_span(preferred: Span, fallback: Span) -> Span {
+    if preferred.line == 0 || preferred.column == 0 {
+        fallback
+    } else {
+        preferred
+    }
+}
+
+fn push_diagnostic(diagnostics: &mut Vec<CompileError>, result: Result<()>) {
+    if let Err(error) = result {
+        diagnostics.push(error);
     }
 }
 
@@ -5751,8 +6284,8 @@ fn collect_required_output_fields(expr: &Expr, outputs: &HashSet<String>, fields
 fn collect_required_output_fields_from_stmt(stmt: &Stmt, outputs: &HashSet<String>, fields: &mut HashSet<String>) {
     match stmt {
         Stmt::Let(let_stmt) => collect_required_output_fields(&let_stmt.value, outputs, fields),
-        Stmt::Expr(expr) | Stmt::Return(Some(expr)) => collect_required_output_fields(expr, outputs, fields),
-        Stmt::Return(None) => {}
+        Stmt::Expr(expr) | Stmt::Return(ReturnStmt { value: Some(expr), .. }) => collect_required_output_fields(expr, outputs, fields),
+        Stmt::Return(ReturnStmt { value: None, .. }) => {}
         Stmt::If(if_stmt) => {
             collect_required_output_fields(&if_stmt.condition, outputs, fields);
             for stmt in &if_stmt.then_branch {
@@ -5979,8 +6512,10 @@ fn collect_consumed_bindings_from_stmts(stmts: &[Stmt], bindings: &mut HashSet<S
     for stmt in stmts {
         match stmt {
             Stmt::Let(let_stmt) => collect_consumed_bindings_from_expr(&let_stmt.value, bindings),
-            Stmt::Expr(expr) | Stmt::Return(Some(expr)) => collect_consumed_bindings_from_expr(expr, bindings),
-            Stmt::Return(None) => {}
+            Stmt::Expr(expr) | Stmt::Return(ReturnStmt { value: Some(expr), .. }) => {
+                collect_consumed_bindings_from_expr(expr, bindings)
+            }
+            Stmt::Return(ReturnStmt { value: None, .. }) => {}
             Stmt::If(if_stmt) => {
                 collect_consumed_bindings_from_expr(&if_stmt.condition, bindings);
                 collect_consumed_bindings_from_stmts(&if_stmt.then_branch, bindings);
@@ -6180,7 +6715,7 @@ fn collect_mutable_reference_root_names_from_tail_stmts<'a>(stmts: &'a [Stmt], r
         return;
     };
     match last {
-        Stmt::Expr(expr) | Stmt::Return(Some(expr)) => collect_mutable_reference_root_names(expr, roots),
+        Stmt::Expr(expr) | Stmt::Return(ReturnStmt { value: Some(expr), .. }) => collect_mutable_reference_root_names(expr, roots),
         Stmt::If(if_stmt) => {
             collect_mutable_reference_root_names_from_tail_stmts(&if_stmt.then_branch, roots);
             if let Some(else_branch) = &if_stmt.else_branch {
@@ -6220,9 +6755,19 @@ pub fn check(module: &Module) -> Result<()> {
     checker.check_module(module)
 }
 
+pub fn diagnostics(module: &Module) -> Vec<CompileError> {
+    let mut checker = TypeChecker::new();
+    checker.check_module_diagnostics(module)
+}
+
 pub fn check_with_resolver(module: &Module, resolver: &ModuleResolver, current_module: &str) -> Result<()> {
     let mut checker = TypeChecker::with_resolver(resolver, current_module);
     checker.check_module(module)
+}
+
+pub fn diagnostics_with_resolver(module: &Module, resolver: &ModuleResolver, current_module: &str) -> Vec<CompileError> {
+    let mut checker = TypeChecker::with_resolver(resolver, current_module);
+    checker.check_module_diagnostics(module)
 }
 
 #[cfg(test)]
@@ -6241,6 +6786,71 @@ mod tests {
     fn source_module(source: &str) -> Module {
         let tokens = lexer::lex(source).unwrap();
         parser::parse(&tokens).unwrap()
+    }
+
+    #[test]
+    fn diagnostics_collect_independent_callable_errors() {
+        let module = source_module(
+            r#"
+module multi_errors
+
+action bad_one() -> u64 {
+    verification
+        return true
+}
+
+action bad_two() -> bool {
+    verification
+        return 1
+}
+"#,
+        );
+        let diagnostics = super::diagnostics(&module);
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics.iter().any(|error| error.message.contains("expected U64, found Bool")));
+        assert!(diagnostics.iter().any(|error| error.message.contains("expected Bool, found U64")));
+    }
+
+    #[test]
+    fn diagnostics_collect_independent_statement_errors_in_callable() {
+        let module = source_module(
+            r#"
+module multi_errors
+
+action bad() -> bool {
+    verification
+        let first: u64 = true
+        let second: bool = 1
+        return true
+}
+"#,
+        );
+        let diagnostics = super::diagnostics(&module);
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics.iter().any(|error| error.message.contains("expected U64, found Bool")));
+        assert!(diagnostics.iter().any(|error| error.message.contains("expected Bool, found U64")));
+    }
+
+    #[test]
+    fn diagnostics_collect_nested_statement_errors() {
+        let module = source_module(
+            r#"
+module multi_errors
+
+action bad() -> bool {
+    verification
+        if true {
+            let first: u64 = true
+            let second: bool = 1
+        }
+        return true
+}
+"#,
+        );
+        let diagnostics = super::diagnostics(&module);
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics.iter().any(|error| error.message.contains("expected U64, found Bool")));
+        assert!(diagnostics.iter().any(|error| error.message.contains("expected Bool, found U64")));
     }
 
     #[test]
@@ -6446,6 +7056,207 @@ action hidden_mutation(flag: bool) {
 
         let err = check(&module).unwrap_err();
         assert!(err.message.contains("require block contains assignment"), "unexpected error: {}", err.message);
+    }
+
+    #[test]
+    fn numeric_equality_requires_exact_non_literal_types() {
+        let module = source_module(
+            r#"
+module test
+
+action compare(left: u8, right: u128) -> bool {
+    verification
+        return left == right
+}
+"#,
+        );
+
+        let err = check(&module).unwrap_err();
+        assert!(err.message.contains("comparison requires matching types"), "unexpected error: {}", err.message);
+    }
+
+    #[test]
+    fn typed_integer_literals_keep_declared_numeric_widths() {
+        let module = source_module(
+            r#"
+module test
+
+const SMALL: u8 = 2
+
+action literal_widths(flag: bool) -> u8 {
+    verification
+        let left: u8 = 1
+        let right: u8 = if flag { SMALL } else { 3 }
+        return left + right
+}
+"#,
+        );
+
+        check(&module).unwrap();
+    }
+
+    #[test]
+    fn explicit_return_integer_literals_use_declared_return_widths() {
+        let module = source_module(
+            r#"
+module test
+
+fn as_u8() -> u8 {
+    return 5
+}
+
+fn as_u32() -> u32 {
+    return 5
+}
+
+fn as_i32() -> i32 {
+    return 5
+}
+
+fn as_u128() -> u128 {
+    return 5
+}
+"#,
+        );
+
+        check(&module).unwrap();
+    }
+
+    #[test]
+    fn i32_arithmetic_accepts_matching_i32_values() {
+        let module = source_module(
+            r#"
+module test
+
+fn add(left: i32, right: i32) -> i32 {
+    return left + right
+}
+"#,
+        );
+
+        check(&module).unwrap();
+    }
+
+    #[test]
+    fn mixed_i32_u32_arithmetic_is_rejected() {
+        let module = source_module(
+            r#"
+module test
+
+fn add(left: i32, right: u32) -> i32 {
+    return left + right
+}
+"#,
+        );
+
+        let err = check(&module).unwrap_err();
+        assert!(err.message.contains("arithmetic operations require matching numeric types"), "unexpected error: {}", err.message);
+    }
+
+    #[test]
+    fn unsigned_arithmetic_widens_to_declared_result_type() {
+        let module = source_module(
+            r#"
+module test
+
+fn add(left: u8, right: u16) -> u16 {
+    return left + right
+}
+"#,
+        );
+
+        check(&module).unwrap();
+    }
+
+    #[test]
+    fn vec_push_integer_literal_uses_item_width() {
+        let module = source_module(
+            r#"
+module test
+
+action collect() -> u8 {
+    verification
+        let mut values: Vec<u8> = []
+        values.push(5)
+        return values.first()
+}
+"#,
+        );
+
+        check(&module).unwrap();
+    }
+
+    #[test]
+    fn struct_field_integer_literal_uses_field_width() {
+        let module = source_module(
+            r#"
+module test
+
+struct Narrow {
+    amount: u8,
+}
+
+action make() -> Narrow {
+    verification
+        return Narrow { amount: 5 }
+}
+"#,
+        );
+
+        check(&module).unwrap();
+    }
+
+    #[test]
+    fn unsigned_ordering_comparison_accepts_widening() {
+        let module = source_module(
+            r#"
+module test
+
+action compare(left: u8, right: u16) -> bool {
+    verification
+        return left < right
+}
+"#,
+        );
+
+        check(&module).unwrap();
+    }
+
+    #[test]
+    fn add_assign_integer_literal_uses_target_width() {
+        let module = source_module(
+            r#"
+module test
+
+action increment() -> u8 {
+    verification
+        let mut value: u8 = 1
+        value += 2
+        return value
+}
+"#,
+        );
+
+        check(&module).unwrap();
+    }
+
+    #[test]
+    fn typed_integer_literals_must_fit_expected_numeric_type() {
+        let module = source_module(
+            r#"
+module test
+
+const TOO_BIG: u8 = 256
+
+action bad() -> u8 {
+    verification
+        return TOO_BIG
+}
+"#,
+        );
+
+        let err = check(&module).unwrap_err();
+        assert!(err.message.contains("integer literal 256 does not fit expected type u8"), "unexpected error: {}", err.message);
     }
 
     #[test]

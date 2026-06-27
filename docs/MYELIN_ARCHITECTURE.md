@@ -84,8 +84,8 @@ Keep and harden:
   tracking.
 - `myelin-consensus`: explicit consensus selection with static closed-committee
   and Tendermint-style weighted precommit finality.
-- `myelin-hashes`, `myelin-math`, `myelin-muhash`, `myelin-utils`: deterministic
-  hashing, integer, accumulator, and support code.
+- `myelin-core-utils`, `myelin-hashes`, `myelin-math`, `myelin-muhash`:
+  deterministic hot-path, hashing, integer, and accumulator support code.
 
 Extend:
 
@@ -783,7 +783,7 @@ Completed in this preparation pass:
 - Native `myelin-exec` has no direct or transitive legacy serializer
   dependency, and no legacy serializer API usage in its execution, CellTx,
   typed metadata, scheduler-witness, VM ABI, or serialization code.
-  `myelin-hashes`, `myelin-math`, and `myelin-utils` no longer carry that
+  `myelin-hashes` and `myelin-math` no longer carry that
   legacy serializer for native builds;
   the hash crate's wasm bindings are gated to `wasm32` so workflow wasm support
   does not enter the native execution graph.

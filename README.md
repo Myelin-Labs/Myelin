@@ -29,7 +29,7 @@ off-chain finite Cell ledger:
 - `consensus/` - selectable finality engines: static closed committee and
   Tendermint-style weighted precommit finality over canonical session block
   hashes.
-- `crypto/`, `math/`, `utils/` - local support crates retained by the execution
+- `core-utils/`, `crypto/`, `math/` - local support crates retained by the execution
   and state kernel.
 
 ## Protocol Shape

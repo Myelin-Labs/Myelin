@@ -25,16 +25,9 @@ parking_lot = "0.12"
 
 # Errors
 thiserror = "1.0"
-anyhow = "1.0"
-
-# Collections (deterministic)
-indexmap = "=2.2.6"
-
-# I/O
-memmap2 = "0.9"
 
 # Cache
-lru = "0.12"
+lru = "0.18"
 
 [dev-dependencies]
 tempfile = "3.10"

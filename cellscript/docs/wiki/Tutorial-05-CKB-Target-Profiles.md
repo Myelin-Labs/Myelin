@@ -1,3 +1,5 @@
+# Tutorial 05: CKB Target Profiles
+
 A target profile answers a practical question: which runtime are you preparing
 this source for?
 
@@ -122,4 +124,4 @@ You can think of the layers like this:
 ## Next
 
 After choosing a profile, continue with
-[Metadata, Verification, and Production Gates](https://github.com/a19q3/CellScript/wiki/Tutorial-06-Metadata-Verification-and-Production-Gates).
+[Metadata, Verification, and Production Gates](https://github.com/CellScript-Labs/CellScript/wiki/Tutorial-06-Metadata-Verification-and-Production-Gates).

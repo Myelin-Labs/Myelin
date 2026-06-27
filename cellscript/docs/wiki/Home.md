@@ -1,10 +1,12 @@
+# Home
+
 CellScript is a small language for writing Cell-based contracts on CKB. You
 describe the Cells your protocol cares about, the actions that move those Cells,
 and the locks that decide whether a Cell may be spent. The compiler then turns
 that `.cell` source into ckb-vm compatible RISC-V assembly or ELF artifacts, and
 writes metadata that explains what was built.
 
-Last updated: 2026-06-15.
+Last updated: 2026-06-22.
 
 This wiki is a guided path. It starts with one compiled example, then slowly
 builds the mental model: source files, Cell effects, packages, the CKB profile,
@@ -14,11 +16,11 @@ learn what each layer proves, and what it does not prove yet.
 
 ## How to Read This Wiki
 
-If CellScript is new to you, read the tutorials in order. The first four
-language chapters explain how a `.cell` file is shaped, how resources move, why
-effects such as `consume` and `create` are explicit, and how the canonical
-action model expresses input-to-output verification with `transition` and
-`verification`.
+If CellScript is new to you, read the numbered tutorials in order. The sequence
+starts with source shape, Cell movement, packages, CKB profiles, metadata, and
+tooling, then continues into bundled examples and the deeper language chapters.
+Those later chapters explain how the canonical action model expresses
+input-to-output verification with `transition` and `verification`.
 The v0.15 material then extends that model with identity policies, scoped
 invariants, ProofPlan metadata, and primitive capability boundaries.
 
@@ -54,28 +56,31 @@ If you already know what you need, jump directly:
    `.cell` file.
 3. [Resources and Cell Effects](Tutorial-03-Resources-and-Cell-Effects.md):
    understand how values move through a Cell transaction.
-4. [Action Model and Canonical Syntax](Tutorial-09-Action-Model-and-0-13-Syntax.md):
-   learn the signature-direction action model, `verification`, `transition`,
-   named outputs, and source qualifiers.
-5. [Standard Library](Tutorial-10-Standard-Library.md):
-   use stdlib lifecycle, Cell metadata, accounting, runtime, and collection
-   helpers without hiding verifier obligations.
-6. [Scoped Invariants and ProofPlan](Tutorial-11-Scoped-Invariants-and-ProofPlan.md):
-   inspect 0.15 invariant trigger/scope/read metadata and understand
-   metadata-only ProofPlan gaps.
-7. [Cookbook Recipes](Cookbook-Recipes.md): copy small patterns once the basic
-   vocabulary is familiar.
-8. [Packages and CLI Workflow](Tutorial-04-Packages-and-CLI-Workflow.md):
+4. [Packages and CLI Workflow](Tutorial-04-Packages-and-CLI-Workflow.md):
    create a package, build it, check it, and inspect reports.
-9. [CKB Target Profiles](Tutorial-05-CKB-Target-Profiles.md): choose the CKB
+5. [CKB Target Profiles](Tutorial-05-CKB-Target-Profiles.md): choose the CKB
    runtime assumptions before compiling.
-10. [Metadata, Verification, and Production Gates](Tutorial-06-Metadata-Verification-and-Production-Gates.md):
+6. [Metadata, Verification, and Production Gates](Tutorial-06-Metadata-Verification-and-Production-Gates.md):
    learn what artifact verification proves, and what still needs chain
    evidence.
-11. [LSP and Tooling](Tutorial-07-LSP-and-Tooling.md): use editor feedback and
+7. [LSP and Tooling](Tutorial-07-LSP-and-Tooling.md): use editor feedback and
    command-backed reports.
-12. [Bundled Example Contracts](Tutorial-08-Bundled-Example-Contracts.md): study
+8. [Bundled Example Contracts](Tutorial-08-Bundled-Example-Contracts.md): study
    the examples in a useful order.
+9. [Action Model and Canonical Syntax](Tutorial-09-Action-Model-and-0-13-Syntax.md):
+   learn the signature-direction action model, `verification`, `transition`,
+   named outputs, and source qualifiers.
+10. [Standard Library](Tutorial-10-Standard-Library.md):
+   use stdlib lifecycle, Cell metadata, accounting, runtime, and collection
+   helpers without hiding verifier obligations.
+11. [Scoped Invariants and ProofPlan](Tutorial-11-Scoped-Invariants-and-ProofPlan.md):
+   inspect 0.15 invariant trigger/scope/read metadata and understand
+   metadata-only ProofPlan gaps.
+12. [Phase 1 Registry: End-to-End](Tutorial-12-Phase1-Registry-End-to-End.md):
+   follow the registry package flow from init through verification.
+
+After the numbered path, use [Cookbook Recipes](Cookbook-Recipes.md) for small
+patterns and keep [CKB Glossary](CKB-Glossary.md) nearby for terminology.
 
 ## The Core Idea
 
@@ -112,9 +117,9 @@ transaction, the wiki says so.
 The fastest way to get oriented is to compile the token example:
 
 ```bash
-git clone https://github.com/a19q3/CellScript.git
+git clone https://github.com/CellScript-Labs/CellScript.git
 cd CellScript
-cargo check --locked -p cellscript --all-targets
+./scripts/cellscript_gate.sh dev
 cargo run --locked --bin cellc -- examples/token.cell --target riscv64-elf --target-profile ckb --primitive-strict 0.16 -o /tmp/token.elf
 cargo run --locked --bin cellc -- verify-artifact /tmp/token.elf --expect-target-profile ckb
 ```
@@ -148,10 +153,15 @@ Keep two levels separate:
 Release-facing CKB evidence comes from the repository root:
 
 ```bash
-./scripts/cellscript_ckb_release_gate.sh full
+./scripts/cellscript_gate.sh release
 ```
 
 The bundled examples are covered by the current local production evidence suite.
+The NovaSeal core, Agreement, six planned NovaSeal profiles, and Evolving DOB
+profile now have current local devnet/source-package readiness evidence. Public
+or mainnet deployment claims still need their own CellDep, verifier TCB, BTC
+SPV, RWA/legal, or other external attestations where a profile depends on those
+facts.
 The 0.16.1 patch line also closes the token/AMM/launch and NFT first-cell
 bootstrap examples used by external builders.
 New external contracts still need their own metadata review, builder evidence,
@@ -160,7 +170,7 @@ production-ready.
 
 ## Reference Examples
 
-- [CKB hashing workflow](https://github.com/a19q3/CellScript/blob/main/docs/examples/ckb_hashing.md)
-- [Collections matrix](https://github.com/a19q3/CellScript/blob/main/docs/examples/collections_matrix.md)
-- [Deployment manifest](https://github.com/a19q3/CellScript/blob/main/docs/examples/deployment_manifest.md)
-- [Output append](https://github.com/a19q3/CellScript/blob/main/docs/examples/output_append.md)
+- [CKB hashing workflow](https://github.com/CellScript-Labs/CellScript/blob/main/docs/examples/ckb_hashing.md)
+- [Collections matrix](https://github.com/CellScript-Labs/CellScript/blob/main/docs/examples/collections_matrix.md)
+- [Deployment manifest](https://github.com/CellScript-Labs/CellScript/blob/main/docs/examples/deployment_manifest.md)
+- [Output append](https://github.com/CellScript-Labs/CellScript/blob/main/docs/examples/output_append.md)

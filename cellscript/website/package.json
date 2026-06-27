@@ -1,0 +1,24 @@
+{
+  "name": "cellscript-website",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare:registry": "python3 scripts/generate-registry-data.py",
+    "dev": "npm run prepare:registry && astro dev --host 127.0.0.1",
+    "build": "npm run prepare:registry && astro check && astro build",
+    "check:docs": "node scripts/check-doc-links.mjs",
+    "preview": "astro preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@astrojs/check": "^0.9.4",
+    "@ckb-ccc/connector": "^1.1.0",
+    "astro": "^5.9.2",
+    "buffer": "^6.0.3",
+    "fflate": "^0.8.3",
+    "lucide-astro": "^0.556.0",
+    "marked": "^18.0.5",
+    "mermaid": "^11.15.0",
+    "typescript": "^5.8.3"
+  }
+}

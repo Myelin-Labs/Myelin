@@ -1,0 +1,25 @@
+---
+import githubActivity from "../data/github-activity.json";
+import { defaultLocale, translations } from "../i18n/translations";
+import { Radio } from "lucide-astro";
+
+interface Props {
+  compact?: boolean;
+}
+
+const { compact = false } = Astro.props;
+const t = translations[defaultLocale];
+const releases = (githubActivity as { releases: any[] }).releases;
+const release = releases[0];
+---
+
+<aside class:list={["hero-status", compact && "hero-status-compact"]} aria-label={t.heroStatus.activity}>
+  {release && (
+    <a class="hero-release-tag" href={release.url} target="_blank" rel="noopener noreferrer" aria-label={`${t.heroStatus.release} ${release.tag}`}>
+      <Radio aria-hidden="true" />
+      <small data-i18n="heroStatus.release">{t.heroStatus.release}</small>
+      <strong>{release.tag}</strong>
+      <time>{release.date}</time>
+    </a>
+  )}
+</aside>

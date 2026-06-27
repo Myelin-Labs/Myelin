@@ -30,7 +30,6 @@ keccak.workspace = true
 criterion.workspace = true
 insta.workspace = true
 rand.workspace = true
-sha3.workspace = true
 
 [build-dependencies]
 cc.workspace = true

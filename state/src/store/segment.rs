@@ -20,6 +20,10 @@ const SEGMENT_SIZE: u64 = 1024 * 1024 * 1024;
 /// Maximum segments in memory before forcing seal
 const MAX_OPEN_SEGMENTS: usize = 8;
 
+/// Sealed segment metadata is consensus material; wall-clock evidence belongs
+/// in external reports, not in the committed bytes.
+const DETERMINISTIC_SEGMENT_TIMESTAMP: u64 = 0;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AppendRecord {
     offset: u64,
@@ -39,9 +43,9 @@ pub struct SegmentMeta {
     pub merkle_root: [u8; 32],
     /// Is sealed?
     pub sealed: bool,
-    /// Creation timestamp
+    /// Deterministic creation marker
     pub created_at: u64,
-    /// Sealed timestamp
+    /// Deterministic sealed marker
     pub sealed_at: Option<u64>,
 }
 
@@ -199,8 +203,8 @@ impl SegmentWriter {
             cell_count: self.current_chunks.lock().len() as u32,
             merkle_root,
             sealed: true,
-            created_at: Self::current_timestamp(),
-            sealed_at: Some(Self::current_timestamp()),
+            created_at: Self::deterministic_timestamp(),
+            sealed_at: Some(Self::deterministic_timestamp()),
         };
 
         // Save metadata
@@ -335,9 +339,8 @@ impl SegmentWriter {
         }
     }
 
-    /// Get current Unix timestamp
-    fn current_timestamp() -> u64 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    fn deterministic_timestamp() -> u64 {
+        DETERMINISTIC_SEGMENT_TIMESTAMP
     }
 }
 
@@ -501,6 +504,23 @@ mod tests {
         assert_eq!(meta.segment_id, 0);
         assert_eq!(meta.size, 2048);
         assert!(meta.sealed);
+    }
+
+    #[test]
+    fn test_segment_seal_uses_deterministic_metadata_time() {
+        let tmp = TempDir::new().unwrap();
+        let writer = SegmentWriter::new(tmp.path()).unwrap();
+
+        writer.append(&[0x42; 32]).unwrap();
+
+        let meta = writer.seal().unwrap();
+        let encoded = encode_segment_meta(&meta);
+        let decoded = decode_segment_meta(&encoded).unwrap();
+
+        assert_eq!(meta.created_at, DETERMINISTIC_SEGMENT_TIMESTAMP);
+        assert_eq!(meta.sealed_at, Some(DETERMINISTIC_SEGMENT_TIMESTAMP));
+        assert_eq!(decoded.created_at, DETERMINISTIC_SEGMENT_TIMESTAMP);
+        assert_eq!(decoded.sealed_at, Some(DETERMINISTIC_SEGMENT_TIMESTAMP));
     }
 
     #[test]

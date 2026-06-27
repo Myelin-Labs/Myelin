@@ -1,0 +1,181 @@
+---
+import "../styles/global.css";
+import SiteHeader from "../components/SiteHeader.astro";
+import { ClientRouter } from "astro:transitions";
+import { defaultLocale, translations } from "../i18n/translations";
+import type { DocsNeighbor, DocsPage } from "../lib/docs";
+import { ArrowLeft, ArrowRight, ListTree, Search } from "lucide-astro";
+
+interface Props {
+  page: DocsPage;
+  pages: DocsPage[];
+  previous?: DocsNeighbor;
+  next?: DocsNeighbor;
+}
+
+const { page, pages, previous, next } = Astro.props;
+const locale = defaultLocale;
+const t = translations[locale];
+const title = `${page.title} — CellScript Docs`;
+---
+
+<!doctype html>
+<html lang={locale}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content={page.description || t.navRail.docsDesc} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={page.description || t.navRail.docsDesc} />
+    <link rel="icon" type="image/png" href={`${import.meta.env.BASE_URL}cellscript-logo.png`} />
+    <link rel="icon" type="image/png" media="(prefers-color-scheme: light)" href={`${import.meta.env.BASE_URL}cellscript-logo-light.png`} />
+    <link rel="icon" type="image/png" media="(prefers-color-scheme: dark)" href={`${import.meta.env.BASE_URL}cellscript-logo-dark.png`} />
+    <title>{title}</title>
+    <script is:inline>
+      (() => {
+        try {
+          const storedTheme = localStorage.getItem("cellscript-theme");
+          const storedLocale = localStorage.getItem("cellscript-locale");
+          document.documentElement.dataset.theme = storedTheme === "light" || storedTheme === "dark" ? storedTheme : "light";
+          document.documentElement.dataset.locale = storedLocale === "zh" ? "zh" : "en";
+          document.documentElement.lang = document.documentElement.dataset.locale;
+        } catch {
+          document.documentElement.dataset.theme = "light";
+          document.documentElement.dataset.locale = "en";
+          document.documentElement.lang = "en";
+        }
+      })();
+    </script>
+    <ClientRouter />
+  </head>
+  <body class="docs-body">
+    <a class="skip-link" href="#docs-content" data-i18n="a11y.skipToContent">{t.a11y.skipToContent}</a>
+    <SiteHeader page="docs" />
+
+    <main class="docs-shell" id="docs-content">
+      <aside class="docs-sidebar" aria-label="Docs pages">
+        <div class="docs-sidebar-head">
+          <ListTree aria-hidden="true" />
+          <span>Docs</span>
+        </div>
+        <div class="docs-search-box">
+          <Search class="docs-search-icon" aria-hidden="true" />
+          <input
+            type="search"
+            class="docs-search-input"
+            placeholder="Search docs…"
+            aria-label="Search docs"
+            data-docs-search
+            autocomplete="off"
+          />
+        </div>
+        <nav class="docs-nav" data-docs-nav>
+          {pages.map((item) => (
+            <a href={item.href} class:list={["docs-nav-link", item.slug === page.slug && "active"]} data-docs-title={item.title.toLowerCase()}>
+              <span>{item.title}</span>
+            </a>
+          ))}
+        </nav>
+      </aside>
+
+      <article class="docs-article">
+        <header class="docs-hero">
+          <p class="docs-eyebrow">CellScript Wiki</p>
+          <h1>{page.title}</h1>
+        </header>
+
+        <div class="docs-content" set:html={page.html} />
+
+        <nav class="docs-pagination" aria-label="Docs pagination">
+          {previous ? (
+            <a class="docs-page-card" href={previous.href}>
+              <ArrowLeft aria-hidden="true" />
+              <span>
+                <small>Previous</small>
+                <strong>{previous.title}</strong>
+              </span>
+            </a>
+          ) : <span></span>}
+          {next && (
+            <a class="docs-page-card docs-page-card-next" href={next.href}>
+              <span>
+                <small>Next</small>
+                <strong>{next.title}</strong>
+              </span>
+              <ArrowRight aria-hidden="true" />
+            </a>
+          )}
+        </nav>
+
+        <details class="docs-toc-mobile" data-docs-toc-mobile>
+          <summary>On this page</summary>
+          <nav>
+            {page.headings.filter((heading) => heading.depth > 1).map((heading) => (
+              <a href={`#${heading.id}`} class={`depth-${heading.depth}`}>{heading.text}</a>
+            ))}
+          </nav>
+        </details>
+      </article>
+
+      <aside class="docs-toc" aria-label="On this page">
+        <span class="docs-toc-title">On this page</span>
+        <nav>
+          {page.headings.filter((heading) => heading.depth > 1).map((heading) => (
+            <a href={`#${heading.id}`} class={`depth-${heading.depth}`}>{heading.text}</a>
+          ))}
+        </nav>
+      </aside>
+    </main>
+
+    <script>
+      // ---- Docs sidebar search ----
+      const searchInput = document.querySelector<HTMLInputElement>("[data-docs-search]");
+      const navLinks = Array.from(document.querySelectorAll<HTMLAnchorElement>(".docs-nav-link"));
+      searchInput?.addEventListener("input", () => {
+        const query = (searchInput.value || "").toLowerCase().trim();
+        navLinks.forEach((link) => {
+          const title = link.dataset.docsTitle ?? "";
+          const visible = !query || title.includes(query);
+          link.style.display = visible ? "" : "none";
+        });
+      });
+    </script>
+
+    <script>
+      let mermaidModule: typeof import("mermaid") | undefined;
+
+      const renderMermaid = async () => {
+        if (!document.querySelector(".docs-content pre.mermaid")) return;
+        mermaidModule ??= await import("mermaid");
+        const mermaid = mermaidModule.default;
+        const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "default";
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: "strict",
+          theme,
+          themeVariables: {
+            primaryColor: theme === "dark" ? "#0f1d18" : "#eef8f3",
+            primaryTextColor: theme === "dark" ? "#eff8f4" : "#13231e",
+            primaryBorderColor: "#0a8f63",
+            lineColor: theme === "dark" ? "#74d8ad" : "#087c57",
+            fontFamily: "Outfit, system-ui, sans-serif",
+          },
+        });
+        document.querySelectorAll<HTMLElement>(".docs-content pre.mermaid").forEach((block) => {
+          block.removeAttribute("data-processed");
+        });
+        mermaid.run({ querySelector: ".docs-content pre.mermaid" }).catch(() => {});
+      };
+
+      renderMermaid().catch(() => {});
+      document.addEventListener("astro:page-load", () => renderMermaid().catch(() => {}));
+      const observer = new MutationObserver((records) => {
+        if (records.some((record) => record.type === "attributes" && record.attributeName === "data-theme")) {
+          renderMermaid().catch(() => {});
+        }
+      });
+      observer.observe(document.documentElement, { attributes: true });
+    </script>
+  </body>
+</html>

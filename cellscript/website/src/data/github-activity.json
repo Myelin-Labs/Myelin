@@ -1,0 +1,62 @@
+{
+  "releases": [
+    {
+      "tag": "v0.20.0-rc.2",
+      "name": "CellScript 0.20.0-rc.2",
+      "date": "2026-06-25",
+      "body": "## Installation\r\n\r\n### One-line install (Global)\r\n\r\n```bash\r\ncurl -fsSL https://raw.githubusercontent.com/CellScript-Labs/CellScript/main/s\u2026",
+      "url": "https://github.com/CellScript-Labs/CellScript/releases/tag/v0.20.0-rc.2"
+    },
+    {
+      "tag": "v0.20.0-rc.1",
+      "name": "CellScript 0.20.0-rc.1",
+      "date": "2026-06-24",
+      "body": "## Installation\r\n\r\n### One-line install (Global)\r\n\r\n```bash\r\ncurl -fsSL https://raw.githubusercontent.com/CellScript-Labs/CellScript/main/s\u2026",
+      "url": "https://github.com/CellScript-Labs/CellScript/releases/tag/v0.20.0-rc.1"
+    },
+    {
+      "tag": "v0.16.2",
+      "name": "CellScript 0.16.2",
+      "date": "2026-06-21",
+      "body": "CellScript 0.16.2 is a builder-ergonomics patch for CKB resource identity\r\nhandoff. It keeps the 0.16 compiler/runtime scope, while making\u2026",
+      "url": "https://github.com/CellScript-Labs/CellScript/releases/tag/v0.16.2"
+    }
+  ],
+  "commits": [
+    {
+      "sha": "535cbc1",
+      "message": "Improve multi-diagnostic recovery and reporting",
+      "author": "Arthur",
+      "date": "2026-06-26",
+      "url": "https://github.com/CellScript-Labs/CellScript/commit/535cbc1d4de307a5e25e72b41cfdc46f9baeb358"
+    },
+    {
+      "sha": "875436f",
+      "message": "Improve cellc multi-diagnostic CLI output",
+      "author": "Arthur",
+      "date": "2026-06-25",
+      "url": "https://github.com/CellScript-Labs/CellScript/commit/875436ffc1e2468072fb30c52ccfa287d645a697"
+    },
+    {
+      "sha": "2a35070",
+      "message": "Improve cellc CLI diagnostics",
+      "author": "Arthur",
+      "date": "2026-06-25",
+      "url": "https://github.com/CellScript-Labs/CellScript/commit/2a3507055af7a6a2de19671d528b4bf234f654e4"
+    },
+    {
+      "sha": "32a967c",
+      "message": "Fix wiki tutorial accuracy",
+      "author": "Arthur",
+      "date": "2026-06-25",
+      "url": "https://github.com/CellScript-Labs/CellScript/commit/32a967cc3218a273d5236bb2d93c828960e733d2"
+    },
+    {
+      "sha": "0bca9ab",
+      "message": "Update website highlighting audit",
+      "author": "Arthur",
+      "date": "2026-06-25",
+      "url": "https://github.com/CellScript-Labs/CellScript/commit/0bca9ab2f8d22a2c19f8d53b4efec50807a00cfe"
+    }
+  ]
+}

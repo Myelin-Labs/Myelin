@@ -1,3 +1,5 @@
+# Tutorial 08: Bundled Example Contracts
+
 The repository includes seven bundled examples. Treat them as guided reading,
 not just files to compile. Each one teaches a different part of the language:
 linear resources, shared state, receipts, locks, proposal flows, time checks,
@@ -15,14 +17,27 @@ example.
 | `examples/timelock.cell` | Time-gated release checks, release requests, and approval flow. |
 | `examples/multisig.cell` | Threshold policy, proposal records, signatures-as-data, and lock-boundary predicates. |
 | `examples/vesting.cell` | Vesting grants, receipts, claim flow, and admin-boundary comments. |
-| `examples/amm_pool.cell` | Shared pool state, swap logic, liquidity receipts, and settlement effects. |
+| `examples/amm_pool.cell` | Shared pool state, bounded swap logic, liquidity receipts, LP ownership checks, and settlement effects. |
 | `examples/launch.cell` | Mint-authority bootstrap and launch/pool composition patterns. |
 
-The top-level `examples/*.cell` files are the canonical bundled business
-source. They are both the clean reading surface and the source compiled by the
-CKB acceptance runner. There are no checked-in `examples/business` or
-`examples/acceptance` mirrors; acceptance-only profile/effect/scheduler
-metadata belongs in runner configuration or generated files under `target/`.
+The top-level `examples/*.cell` files are the clean reading surface and remain
+the CKB acceptance runner's business-source mirror. The package directories under
+`examples/<name>/` are the package workflow version of the same examples. Use
+them when you want to exercise `Cell.toml`, path dependencies, source hashing,
+and cross-package type/schema imports.
+
+The package examples deliberately show the current multi-file boundary:
+
+- `examples/amm_pool` imports `Token` from `examples/token`;
+- `examples/vesting` imports `Token` from `examples/token`;
+- `examples/launch` imports `Token` and `MintAuthority` from `examples/token`,
+  plus `Pool` and `LPReceipt` from `examples/amm_pool`.
+
+Those imports reuse Cell schemas across packages. They do not link CKB scripts
+into one deployed program; each package entry still compiles to its own artifact.
+There are no checked-in `examples/business` or `examples/acceptance` mirrors;
+acceptance-only profile/effect/scheduler metadata belongs in runner
+configuration or generated files under `target/`.
 
 `examples/registry.cell` and every checked-in `examples/language/*.cell` file
 are intentionally outside the bundled production matrix. They are language
@@ -32,11 +47,11 @@ dynamic BLAKE2b. They are covered by compiler/tooling tests rather than CKB
 production action acceptance.
 
 For a visual business-flow map of every bundled example, see
-[`CELLSCRIPT_EXAMPLE_BUSINESS_FLOWS.md`](https://github.com/a19q3/CellScript/blob/main/docs/CELLSCRIPT_EXAMPLE_BUSINESS_FLOWS.md).
+[`CELLSCRIPT_EXAMPLE_BUSINESS_FLOWS.md`](https://github.com/CellScript-Labs/CellScript/blob/main/docs/CELLSCRIPT_EXAMPLE_BUSINESS_FLOWS.md).
 For a concrete token-to-AMM builder path with entry witness commands, see
-[`token_amm_bootstrap.md`](https://github.com/a19q3/CellScript/blob/main/docs/examples/token_amm_bootstrap.md).
+[`token_amm_bootstrap.md`](https://github.com/CellScript-Labs/CellScript/blob/main/docs/examples/token_amm_bootstrap.md).
 For small reusable patterns drawn from the same ideas, see
-[Cookbook Recipes](https://github.com/a19q3/CellScript/wiki/Cookbook-Recipes).
+[Cookbook Recipes](https://github.com/CellScript-Labs/CellScript/wiki/Cookbook-Recipes).
 
 ## A Good Reading Order
 
@@ -71,6 +86,23 @@ Use `--primitive-strict 0.16` for the pre-production ProofPlan gate. The token,
 AMM, and launch examples now compile their bundled business actions as original
 scoped entries under that strict gate; keep the matching chain evidence before
 calling the artifacts production-ready.
+
+To exercise the package form and dependency graph from the examples workspace:
+
+```bash
+cd examples
+cellc build --package token --target riscv64-elf --target-profile ckb --json
+cellc build --package amm_pool --target riscv64-elf --target-profile ckb --json
+cellc build --package launch --target riscv64-elf --target-profile ckb --json
+```
+
+Do not treat `cellc build --workspace` as the canonical compile-all command for
+this checked-in examples tree. Some folders under `examples/` are compiler and
+tooling fixtures rather than packages with a `src/main.cell` entry.
+
+Package metadata includes source-unit hashes for the entry package and local
+path dependencies, so reviewers can see which `.cell` files participated in the
+compile.
 
 ## Token Walkthrough
 
@@ -210,13 +242,14 @@ cellc check --target-profile ckb --production
 cellc build --target riscv64-elf --target-profile ckb --production
 cellc verify-artifact build/main.elf --verify-sources --expect-target-profile ckb --production
 cellc examples/nft.cell --entry-action transfer --target riscv64-elf --target-profile ckb --primitive-strict 0.16 --production
-# --entry-action selects a single action entry point for targeted inspection
 ```
+
+`--entry-action` selects a single action entry point for targeted inspection.
 
 For release-facing CKB evidence, run the CellScript acceptance gate:
 
 ```bash
-./scripts/cellscript_ckb_release_gate.sh full
+./scripts/cellscript_gate.sh release
 ```
 
 This wrapper runs compiler/backend evidence and the syntax-combination CI

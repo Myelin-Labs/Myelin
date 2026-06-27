@@ -1,0 +1,163 @@
+---
+import "../styles/global.css";
+import "../styles/registry.css";
+import SiteHeader from "../components/SiteHeader.astro";
+import { ClientRouter } from "astro:transitions";
+import { defaultLocale, translations } from "../i18n/translations";
+import { Check, CircleDot, Mail } from "lucide-astro";
+
+const locale = defaultLocale;
+const t = translations[locale];
+const phases = t.comingSoon.phases;
+const phaseIcons = [Check, CircleDot, CircleDot];
+const title = `CellScript Registry — ${t.comingSoon.title}`;
+---
+
+<!doctype html>
+<html lang={locale}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content={t.comingSoon.lead} data-i18n-content="comingSoon.lead" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={t.comingSoon.lead} data-i18n-content="comingSoon.lead" />
+    <link rel="icon" type="image/png" href={`${import.meta.env.BASE_URL}cellscript-logo.png`} />
+    <link rel="icon" type="image/png" media="(prefers-color-scheme: light)" href={`${import.meta.env.BASE_URL}cellscript-logo-light.png`} />
+    <link rel="icon" type="image/png" media="(prefers-color-scheme: dark)" href={`${import.meta.env.BASE_URL}cellscript-logo-dark.png`} />
+    <title>{title}</title>
+    <script is:inline>
+      (() => {
+        try {
+          const storedTheme = localStorage.getItem("cellscript-theme");
+          const storedLocale = localStorage.getItem("cellscript-locale");
+          document.documentElement.dataset.theme = storedTheme === "light" || storedTheme === "dark" ? storedTheme : "light";
+          document.documentElement.dataset.locale = storedLocale === "zh" ? "zh" : "en";
+          document.documentElement.lang = document.documentElement.dataset.locale;
+        } catch {
+          document.documentElement.dataset.theme = "light";
+          document.documentElement.dataset.locale = "en";
+          document.documentElement.lang = "en";
+        }
+      })();
+    </script>
+    <ClientRouter />
+  </head>
+  <body>
+    <a class="skip-link" href="#registry-coming-soon" data-i18n="a11y.skipToContent">{t.a11y.skipToContent}</a>
+    <SiteHeader page="registry" />
+
+    <main id="registry-coming-soon" class="registry-coming-soon-page">
+      <section class="registry-coming-soon" aria-label={t.comingSoon.title} data-i18n-aria-label="comingSoon.title">
+        <div class="registry-coming-soon-card">
+          <p class="registry-eyebrow" data-i18n="comingSoon.eyebrow">{t.comingSoon.eyebrow}</p>
+          <h1 class="registry-coming-soon-title" data-i18n="comingSoon.title">{t.comingSoon.title}</h1>
+          <p class="registry-coming-soon-lead" data-i18n="comingSoon.lead">{t.comingSoon.lead}</p>
+
+          <div class="registry-phase-track" aria-label={t.comingSoon.phaseCaption}>
+            {phases.map((phase, index) => {
+              const PhaseIcon = phaseIcons[index];
+              const state = index === 0 ? "done" : index === 1 ? "active" : "pending";
+              return (
+                <div class:list={["registry-phase", `registry-phase-${state}`]}>
+                  <span class="registry-phase-dot"><PhaseIcon aria-hidden="true" /></span>
+                  <span class="registry-phase-label" data-i18n={`comingSoon.phases.${index}.label`}>{phase.label}</span>
+                  <strong class="registry-phase-title" data-i18n={`comingSoon.phases.${index}.title`}>{phase.title}</strong>
+                  <p class="registry-phase-caption" data-i18n={`comingSoon.phases.${index}.caption`}>{phase.caption}</p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div class="registry-notify-card">
+          <span class="registry-notify-icon"><Mail aria-hidden="true" /></span>
+          <div class="registry-notify-body">
+            <label class="registry-notify-label" for="registry-notify-input" data-i18n="comingSoon.notifyLabel">{t.comingSoon.notifyLabel}</label>
+            <div class="registry-notify-form">
+              <input
+                id="registry-notify-input"
+                type="email"
+                class="registry-notify-input"
+                data-i18n-placeholder="comingSoon.notifyPlaceholder"
+                placeholder={t.comingSoon.notifyPlaceholder}
+              />
+              <button class="registry-button primary" type="button" data-registry-notify data-i18n="comingSoon.notifyButton">{t.comingSoon.notifyButton}</button>
+            </div>
+            <p class="registry-notify-done" data-registry-notify-done hidden data-i18n="comingSoon.notifyDone">{t.comingSoon.notifyDone}</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script is:inline define:vars={{ i18n: translations }}>
+      window.__CELLSCRIPT_I18N__ = i18n;
+      window.__CELLSCRIPT_DEFAULT_LOCALE__ = "en";
+    </script>
+
+    <script>
+      const i18nMessages = (window as any).__CELLSCRIPT_I18N__ as any;
+      const defaultLocaleName = (window as any).__CELLSCRIPT_DEFAULT_LOCALE__ ?? "en";
+
+      const readLocale = () =>
+        document.documentElement.dataset.locale === "zh" ? "zh" : defaultLocaleName;
+
+      const getMessage = (path: string, locale = readLocale()) =>
+        path.split(".").reduce((value: any, segment: string) => value?.[segment], i18nMessages?.[locale]);
+
+      const applyLocale = (locale: string) => {
+        const nextLocale = locale === "zh" ? "zh" : "en";
+        document.documentElement.dataset.locale = nextLocale;
+        document.documentElement.lang = nextLocale;
+        if (!i18nMessages) return;
+        document.querySelectorAll<HTMLElement>("[data-i18n]").forEach((element) => {
+          const value = getMessage(element.dataset.i18n ?? "", nextLocale);
+          if (typeof value === "string") element.textContent = value;
+        });
+        document.querySelectorAll<HTMLElement>("[data-i18n-aria-label]").forEach((element) => {
+          const value = getMessage(element.dataset.i18nAriaLabel ?? "", nextLocale);
+          if (typeof value === "string") element.setAttribute("aria-label", value);
+        });
+        document.querySelectorAll<HTMLElement>("[data-i18n-content]").forEach((element) => {
+          const value = getMessage(element.dataset.i18nContent ?? "", nextLocale);
+          if (typeof value === "string") element.setAttribute("content", value);
+        });
+        const comingSoonTitle = getMessage("comingSoon.title", nextLocale);
+        if (typeof comingSoonTitle === "string") document.title = `CellScript Registry — ${comingSoonTitle}`;
+        try {
+          localStorage.setItem("cellscript-locale", nextLocale);
+        } catch {
+          // Locale switching still works even when storage is unavailable.
+        }
+      };
+
+      const reapplyRegistryLocale = () => {
+        if (!document.querySelector("#registry-coming-soon.registry-coming-soon-page")) return;
+        applyLocale(readLocale());
+      };
+
+      if (!(window as any).__cellscriptRegistryIndexLocaleBound) {
+        window.addEventListener("cellscript:locale-change", reapplyRegistryLocale);
+        document.addEventListener("astro:page-load", reapplyRegistryLocale);
+        (window as any).__cellscriptRegistryIndexLocaleBound = true;
+      }
+      reapplyRegistryLocale();
+    </script>
+
+    <script>
+      const notifyBtn = document.querySelector<HTMLButtonElement>("[data-registry-notify]");
+      const notifyDone = document.querySelector<HTMLElement>("[data-registry-notify-done]");
+      const notifyInput = document.querySelector<HTMLInputElement>("#registry-notify-input");
+      notifyBtn?.addEventListener("click", () => {
+        if (!notifyInput?.value.trim()) {
+          notifyInput?.focus();
+          return;
+        }
+        notifyBtn.hidden = true;
+        if (notifyInput) notifyInput.hidden = true;
+        notifyDone?.removeAttribute("hidden");
+      });
+    </script>
+
+  </body>
+</html>

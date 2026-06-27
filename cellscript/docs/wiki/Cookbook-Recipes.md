@@ -1,3 +1,5 @@
+# Cookbook Recipes
+
 This page is a practical companion to the tutorials. Each recipe gives you a
 small goal, the code or command to start from, and the boundary you should keep
 in mind.
@@ -209,7 +211,7 @@ Use ABI and entry-witness reports before building transaction code.
 
 ```bash
 cellc abi . --target-profile ckb --action transfer
-cellc entry-witness . --target-profile ckb --action transfer --json
+cellc entry-witness . --target-profile ckb --action transfer
 ```
 
 These reports tell builders and reviewers what data the entry expects. They do
@@ -233,7 +235,7 @@ This is a compiler/package gate. Use it before asking for deeper CKB evidence.
 Use this only from the CellScript repository root:
 
 ```bash
-./scripts/cellscript_ckb_release_gate.sh full
+./scripts/cellscript_gate.sh release
 ```
 
 This is the boundary where compiler evidence becomes builder-backed local CKB

@@ -5,6 +5,27 @@
 
 use myelin_exec::CellTx;
 
+const DEFAULT_ALPHA: f64 = 0.6;
+const DEFAULT_BETA: f64 = 0.3;
+const DEFAULT_GAMMA: f64 = 0.1;
+const DEFAULT_CYCLES_PER_BYTE: f64 = 100.0;
+
+fn finite_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn positive_finite_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
 /// Transaction score components
 #[derive(Clone, Debug, PartialEq)]
 pub struct TransactionScore {
@@ -48,14 +69,19 @@ pub struct TransactionScorer {
 
 impl Default for TransactionScorer {
     fn default() -> Self {
-        Self { alpha: 0.6, beta: 0.3, gamma: 0.1, cycles_per_byte: 100.0 }
+        Self { alpha: DEFAULT_ALPHA, beta: DEFAULT_BETA, gamma: DEFAULT_GAMMA, cycles_per_byte: DEFAULT_CYCLES_PER_BYTE }
     }
 }
 
 impl TransactionScorer {
     /// Create a new scorer
     pub fn new(alpha: f64, beta: f64, gamma: f64, cycles_per_byte: f64) -> Self {
-        Self { alpha, beta, gamma, cycles_per_byte }
+        Self {
+            alpha: finite_or(alpha, DEFAULT_ALPHA),
+            beta: finite_or(beta, DEFAULT_BETA),
+            gamma: finite_or(gamma, DEFAULT_GAMMA),
+            cycles_per_byte: positive_finite_or(cycles_per_byte, DEFAULT_CYCLES_PER_BYTE),
+        }
     }
 
     /// Compute transaction score
@@ -64,7 +90,7 @@ impl TransactionScorer {
         let unlockability = self.compute_unlockability(tx);
         let deps_width = tx.cell_deps.len() as f64;
 
-        let total = self.alpha * fee_density + self.beta * unlockability - self.gamma * deps_width;
+        let total = finite_or(self.alpha * fee_density + self.beta * unlockability - self.gamma * deps_width, 0.0);
 
         TransactionScore { fee_density, unlockability, deps_width, total }
     }
@@ -75,8 +101,8 @@ impl TransactionScorer {
         let cycles_size = cycles as f64 / self.cycles_per_byte;
         let effective_size = size.max(cycles_size);
 
-        if effective_size > 0.0 {
-            fee as f64 / effective_size
+        if effective_size.is_finite() && effective_size > 0.0 {
+            finite_or(fee as f64 / effective_size, 0.0)
         } else {
             0.0
         }
@@ -191,5 +217,18 @@ mod tests {
 
         // Higher cycles → lower fee density (larger effective size)
         assert!(score_low_cycles.fee_density > score_high_cycles.fee_density);
+    }
+
+    #[test]
+    fn test_non_finite_scorer_config_falls_back_to_finite_score() {
+        let scorer = TransactionScorer::new(f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::NAN);
+        let tx = create_test_tx(1, 1);
+
+        let score = scorer.compute_score(&tx, 1000, 1000);
+
+        assert!(score.fee_density.is_finite());
+        assert!(score.unlockability.is_finite());
+        assert!(score.deps_width.is_finite());
+        assert!(score.total.is_finite());
     }
 }

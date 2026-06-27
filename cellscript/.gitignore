@@ -1,9 +1,15 @@
 /target/
+node_modules/
+dist/
+services/registry-api/dist/
 editors/vscode-cellscript/dist/
 
 .DS_Store
+.idea/
 .vscode/
 .cap/
+.playwright-mcp/
+.wrangler/
 __pycache__/
 *.py[cod]
 *.swp
@@ -12,6 +18,10 @@ __pycache__/
 *.s
 *.elf
 *.wasm
+# The prebuilt WASM bundle for the website playground is a committed
+# build artifact (rebuilt via website/scripts/build-wasm.sh), so it
+# must be tracked despite the global *.wasm ignore above.
+!website/public/wasm/*.wasm
 *.meta.json
 
 .cell/
@@ -20,6 +30,10 @@ Cell.lock
 proposals/*
 !proposals/novaseal/
 proposals/novaseal/*
+!proposals/novaseal/.gitignore
+!proposals/novaseal/*.md
+!proposals/novaseal/scripts/
+!proposals/novaseal/scripts/**
 !proposals/novaseal/v0-mvp-skeleton/
 !proposals/novaseal/v0-mvp-skeleton/**
 !proposals/novaseal/agreement-profile-v0/
@@ -42,6 +56,7 @@ proposals/evolving-dob/*
 !proposals/evolving-dob/evolving-dob-profile-v1/**
 !proposals/evolving-dob/evolving-dob-profile-v1/Cell.lock
 proposals/novaseal/v0-mvp-skeleton/build/
+proposals/novaseal/**/.cell/
 proposals/novaseal/v0-mvp-skeleton/target/
 proposals/novaseal/v0-mvp-skeleton/src/.cell/
 proposals/novaseal/v0-mvp-skeleton/scripts/__pycache__/
@@ -91,3 +106,4 @@ docs/**/*_CN.md
 docs/**/*_ZH.md
 docs/**/*_CH.md
 !README_CH.md
+AGENTS.md

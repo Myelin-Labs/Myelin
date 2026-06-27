@@ -25,17 +25,115 @@ impl fmt::Display for Span {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiagnosticSeverity {
+    #[default]
+    Error,
+    Warning,
+}
+
+impl DiagnosticSeverity {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+        }
+    }
+
+    fn colour(self) -> &'static str {
+        match self {
+            Self::Error => "\x1b[31m",
+            Self::Warning => "\x1b[33m",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RelatedDiagnostics(Option<Box<RelatedDiagnosticList>>);
+
+#[derive(Debug, Clone)]
+struct RelatedDiagnosticList(Vec<CompileError>);
+
+impl RelatedDiagnostics {
+    pub fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, CompileError> {
+        self.as_slice().iter()
+    }
+
+    pub fn as_slice(&self) -> &[CompileError] {
+        self.0.as_deref().map(RelatedDiagnosticList::as_slice).unwrap_or(&[])
+    }
+}
+
+impl From<Vec<CompileError>> for RelatedDiagnostics {
+    fn from(diagnostics: Vec<CompileError>) -> Self {
+        if diagnostics.is_empty() {
+            Self::default()
+        } else {
+            Self(Some(Box::new(RelatedDiagnosticList(diagnostics))))
+        }
+    }
+}
+
+impl std::ops::Deref for RelatedDiagnostics {
+    type Target = [CompileError];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a RelatedDiagnostics {
+    type Item = &'a CompileError;
+    type IntoIter = std::slice::Iter<'a, CompileError>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl RelatedDiagnosticList {
+    fn as_slice(&self) -> &[CompileError] {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CompileError {
     pub message: String,
     pub span: Span,
     pub file: Option<Utf8PathBuf>,
     pub code: Option<String>,
+    pub severity: DiagnosticSeverity,
+    pub related: RelatedDiagnostics,
 }
 
 impl CompileError {
     pub fn new(message: impl Into<String>, span: Span) -> Self {
-        Self { message: message.into(), span, file: None, code: None }
+        Self {
+            message: message.into(),
+            span,
+            file: None,
+            code: None,
+            severity: DiagnosticSeverity::Error,
+            related: RelatedDiagnostics::default(),
+        }
+    }
+
+    pub fn warning(message: impl Into<String>, span: Span) -> Self {
+        Self::new(message, span).with_severity(DiagnosticSeverity::Warning)
+    }
+
+    pub fn with_severity(mut self, severity: DiagnosticSeverity) -> Self {
+        self.severity = severity;
+        self
     }
 
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
@@ -49,6 +147,11 @@ impl CompileError {
 
     pub fn with_file(mut self, file: Utf8PathBuf) -> Self {
         self.file = Some(file);
+        self
+    }
+
+    pub fn with_related(mut self, related: Vec<CompileError>) -> Self {
+        self.related = related.into();
         self
     }
 }
@@ -180,44 +283,91 @@ impl MigrationDiagnostic {
     pub fn full_message(self) -> String {
         format!("{}: {}\n  hint: {}", self.code(), self.message(), self.hint())
     }
+
+    pub fn warning(self, span: Span) -> CompileError {
+        CompileError::warning(self.full_message(), span).with_code(self.code())
+    }
+
+    pub fn error(self, span: Span) -> CompileError {
+        CompileError::new(self.full_message(), span).with_code(self.code())
+    }
 }
 
 pub struct ErrorReporter {
-    errors: Vec<CompileError>,
+    diagnostics: Vec<CompileError>,
     source: String,
     filename: Option<Utf8PathBuf>,
 }
 
 impl ErrorReporter {
     pub fn new(source: String, filename: Option<Utf8PathBuf>) -> Self {
-        Self { errors: Vec::new(), source, filename }
+        Self { diagnostics: Vec::new(), source, filename }
     }
 
     pub fn report(&mut self, message: impl Into<String>, span: Span) {
-        let mut error = CompileError::new(message, span);
+        self.push(CompileError::new(message, span));
+    }
+
+    pub fn report_warning(&mut self, message: impl Into<String>, span: Span) {
+        self.push(CompileError::warning(message, span));
+    }
+
+    fn push(&mut self, diagnostic: CompileError) {
+        let mut diagnostic = diagnostic;
         if let Some(ref file) = self.filename {
-            error = error.with_file(file.clone());
+            diagnostic = diagnostic.with_file(file.clone());
         }
-        self.errors.push(error);
+        self.diagnostics.push(diagnostic);
     }
 
     pub fn has_errors(&self) -> bool {
-        !self.errors.is_empty()
+        self.diagnostics.iter().any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
     }
 
     pub fn errors(&self) -> &[CompileError] {
-        &self.errors
+        &self.diagnostics
     }
 
     pub fn print_errors(&self) {
-        for error in &self.errors {
-            eprintln!("\x1b[31merror\x1b[0m: {}", error);
-            if let Some(line) = self.source.lines().nth(error.span.line.saturating_sub(1)) {
-                eprintln!("  \x1b[34m{}\x1b[0m | {}", error.span.line, line);
-                let spaces = " ".repeat(error.span.line.to_string().len() + 3);
-                let carets = "^".repeat(error.span.end.saturating_sub(error.span.start).max(1));
+        for diagnostic in &self.diagnostics {
+            eprintln!("{}{}\x1b[0m: {}", diagnostic.severity.colour(), diagnostic.severity.label(), diagnostic);
+            if let Some(line) = self.source.lines().nth(diagnostic.span.line.saturating_sub(1)) {
+                eprintln!("  \x1b[34m{}\x1b[0m | {}", diagnostic.span.line, line);
+                let spaces = " ".repeat(diagnostic.span.line.to_string().len() + 3);
+                let carets = "^".repeat(diagnostic.span.end.saturating_sub(diagnostic.span.start).max(1));
                 eprintln!("{}  \x1b[32m{}\x1b[0m", spaces, carets);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compile_error_defaults_to_error_severity() {
+        let error = CompileError::new("boom", Span::default());
+        assert_eq!(error.severity, DiagnosticSeverity::Error);
+    }
+
+    #[test]
+    fn error_reporter_distinguishes_warnings_from_errors() {
+        let mut reporter = ErrorReporter::new("let x = 1".to_string(), None);
+        reporter.report_warning("compatibility note", Span::new(0, 3, 1, 1));
+        assert!(!reporter.has_errors());
+        assert_eq!(reporter.errors()[0].severity, DiagnosticSeverity::Warning);
+
+        reporter.report("hard failure", Span::new(4, 5, 1, 5));
+        assert!(reporter.has_errors());
+        assert_eq!(reporter.errors()[1].severity, DiagnosticSeverity::Error);
+    }
+
+    #[test]
+    fn migration_diagnostic_can_build_typed_warning() {
+        let warning = MigrationDiagnostic::Cs0151.warning(Span::new(0, 3, 1, 1));
+        assert_eq!(warning.severity, DiagnosticSeverity::Warning);
+        assert_eq!(warning.code.as_deref(), Some("CS0151"));
+        assert!(warning.message.contains("legacy destroy capability"));
     }
 }

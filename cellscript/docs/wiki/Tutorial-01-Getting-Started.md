@@ -1,3 +1,5 @@
+# Tutorial 01: Getting Started
+
 This chapter gets you from a fresh checkout to one compiled CellScript artifact.
 Do not worry about learning the whole language yet. The goal is smaller: build
 the compiler, compile one example, and see how the executable artifact and its
@@ -17,7 +19,7 @@ need an external RISC-V toolchain for the built-in assembler path used here.
 Start by cloning the repository and running the test suite:
 
 ```bash
-git clone https://github.com/a19q3/CellScript.git
+git clone https://github.com/CellScript-Labs/CellScript.git
 cd CellScript
 cargo test --locked
 ```
@@ -48,6 +50,30 @@ Or call the built binary directly:
 
 Both forms are useful. `cargo run` is convenient while developing the compiler.
 The direct binary is closer to how users call `cellc` after installation.
+The top-level help shows both direct source mode and the package command surface.
+Package commands have their own help pages:
+
+```bash
+./target/debug/cellc build --help
+./target/debug/cellc check --help
+./target/debug/cellc init --help
+```
+
+To list every package command without the direct source options, use:
+
+```bash
+./target/debug/cellc --list
+```
+
+Runtime error explanations are available from the top level, matching the
+compiler-style flow of reading an error and asking for the code behind it:
+
+```bash
+./target/debug/cellc --explain E0001
+```
+
+When `cellc check` finds several independent frontend errors, it prints each
+one with its own `file:line:column` source snippet before the final summary.
 
 ## Compile One Source File
 
@@ -113,5 +139,5 @@ That fail-closed behavior is intentional.
 ## Next
 
 Once you can compile and verify one file, continue with
-[Language Basics](https://github.com/a19q3/CellScript/wiki/Tutorial-02-Language-Basics). The next chapter explains
+[Language Basics](https://github.com/CellScript-Labs/CellScript/wiki/Tutorial-02-Language-Basics). The next chapter explains
 what you are looking at inside a `.cell` file.

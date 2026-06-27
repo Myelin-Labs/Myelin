@@ -30,8 +30,8 @@ future work:
 
 - `myelin-cli runtime smoke` wires `myelin-mempool`, `myelin-state`,
   `myelin-muhash`, `myelin-math`, and both consensus engines through the CLI.
-- `myelin-core-utils` is already split from broader `myelin-utils`, and hot-path
-  crates now depend on the smaller surface.
+- `myelin-core-utils` is already split into the active kernel workspace, and
+  hot-path crates now depend on the smaller surface.
 - Teeworlds fixture support already covers inspect, benchmark, VM probe,
   court-bundle emission, and court-bundle verification.
 - The production gate already runs runtime smoke, dependency-tree checks, and

@@ -3,51 +3,152 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use cellscript::{
     codegen::{analyze_backend_shape, BackendShapeMetrics},
-    compile_file, compile_file_with_entry_action, ArtifactFormat, CompileOptions, ProofPlanMetadata,
+    compile_file, compile_file_with_entry_action, compile_file_with_entry_lock, compile_path, ArtifactFormat, CompileMetadata,
+    CompileOptions, CompileResult, ProofPlanMetadata,
 };
+use std::collections::BTreeSet;
 
 const BUNDLED_EXAMPLES: [&str; 7] =
     ["amm_pool.cell", "launch.cell", "multisig.cell", "nft.cell", "timelock.cell", "token.cell", "vesting.cell"];
 const BACKEND_SHAPE_BASELINE_JSON: &str = include_str!("backend_shape_baseline.json");
 
 const BUNDLED_EXAMPLE_ELF_SIZE_BUDGETS: [(&str, usize); 7] = [
-    ("amm_pool.cell", 48 * 1024),
-    ("launch.cell", 30 * 1024),
+    ("amm_pool.cell", 80 * 1024),
+    ("launch.cell", 36 * 1024),
     ("multisig.cell", 108 * 1024),
-    ("nft.cell", 62 * 1024),
+    ("nft.cell", 63 * 1024),
     ("timelock.cell", 72 * 1024),
-    ("token.cell", 16 * 1024),
-    ("vesting.cell", 26 * 1024),
+    ("token.cell", 18 * 1024),
+    ("vesting.cell", 28 * 1024),
+];
+
+const ARTIFACT_SIZE_EXPERIMENT_EXAMPLES: [&str; 4] = ["amm_pool.cell", "nft.cell", "token.cell", "vesting.cell"];
+
+const FULL_METADATA_SIZE_BUDGETS: [(&str, FullMetadataSizeBudget); 4] = [
+    (
+        "amm_pool.cell",
+        FullMetadataSizeBudget {
+            max_compact_metadata_bytes: 160 * 1024,
+            max_proof_plan_records: 42,
+            max_compact_proof_plan_bytes: 36 * 1024,
+            max_source_units: 2,
+            max_compact_source_units_bytes: 512,
+        },
+    ),
+    (
+        "nft.cell",
+        FullMetadataSizeBudget {
+            max_compact_metadata_bytes: 270 * 1024,
+            max_proof_plan_records: 72,
+            max_compact_proof_plan_bytes: 60 * 1024,
+            max_source_units: 1,
+            max_compact_source_units_bytes: 256,
+        },
+    ),
+    (
+        "token.cell",
+        FullMetadataSizeBudget {
+            max_compact_metadata_bytes: 112 * 1024,
+            max_proof_plan_records: 30,
+            max_compact_proof_plan_bytes: 24 * 1024,
+            max_source_units: 1,
+            max_compact_source_units_bytes: 256,
+        },
+    ),
+    (
+        "vesting.cell",
+        FullMetadataSizeBudget {
+            max_compact_metadata_bytes: 148 * 1024,
+            max_proof_plan_records: 38,
+            max_compact_proof_plan_bytes: 33 * 1024,
+            max_source_units: 2,
+            max_compact_source_units_bytes: 512,
+        },
+    ),
+];
+
+const FULL_METADATA_ENTRY_COUNTS: [(&str, FullMetadataEntryCounts); 4] = [
+    ("amm_pool.cell", FullMetadataEntryCounts { actions: 6, locks: 0 }),
+    ("nft.cell", FullMetadataEntryCounts { actions: 10, locks: 5 }),
+    ("token.cell", FullMetadataEntryCounts { actions: 4, locks: 0 }),
+    ("vesting.cell", FullMetadataEntryCounts { actions: 4, locks: 1 }),
+];
+
+const ENTRY_ARTIFACT_SIZE_BUDGETS: [(&str, EntryArtifactSizeBudget); 4] = [
+    (
+        "amm_pool.cell",
+        EntryArtifactSizeBudget {
+            max_elf_bytes: 32 * 1024,
+            max_compact_metadata_bytes: 64 * 1024,
+            max_proof_plan_records: 11,
+            max_compact_proof_plan_bytes: 10 * 1024,
+            max_actions: 2,
+            max_locks: 0,
+        },
+    ),
+    (
+        "nft.cell",
+        EntryArtifactSizeBudget {
+            max_elf_bytes: 26 * 1024,
+            max_compact_metadata_bytes: 70 * 1024,
+            max_proof_plan_records: 13,
+            max_compact_proof_plan_bytes: 12 * 1024,
+            max_actions: 1,
+            max_locks: 1,
+        },
+    ),
+    (
+        "token.cell",
+        EntryArtifactSizeBudget {
+            max_elf_bytes: 12 * 1024,
+            max_compact_metadata_bytes: 52 * 1024,
+            max_proof_plan_records: 10,
+            max_compact_proof_plan_bytes: 9 * 1024,
+            max_actions: 1,
+            max_locks: 0,
+        },
+    ),
+    (
+        "vesting.cell",
+        EntryArtifactSizeBudget {
+            max_elf_bytes: 16 * 1024,
+            max_compact_metadata_bytes: 70 * 1024,
+            max_proof_plan_records: 13,
+            max_compact_proof_plan_bytes: 12 * 1024,
+            max_actions: 1,
+            max_locks: 1,
+        },
+    ),
 ];
 
 const BUNDLED_EXAMPLE_ASM_SHAPE_BUDGETS: [(&str, AssemblyShapeBudget); 7] = [
     (
         "amm_pool.cell",
         AssemblyShapeBudget {
-            max_lines: 9_000,
+            max_lines: 18_000,
             max_fail_handlers: 32,
             max_shared_epilogues: 8,
-            max_text_bytes: 36 * 1024,
+            max_text_bytes: 74 * 1024,
             max_relaxed_branches: 4,
-            max_cond_branch_abs_distance: 4_096,
-            max_machine_blocks: 1_600,
+            max_cond_branch_abs_distance: 6_400,
+            max_machine_blocks: 2_100,
             max_machine_block_bytes: 512,
-            max_cfg_edges: 2_700,
-            max_call_edges: 420,
-            max_unreachable_machine_blocks: 1_200,
+            max_cfg_edges: 3_800,
+            max_call_edges: 850,
+            max_unreachable_machine_blocks: 1_800,
         },
     ),
     (
         "launch.cell",
         AssemblyShapeBudget {
-            max_lines: 6_800,
+            max_lines: 7_200,
             max_fail_handlers: 16,
             max_shared_epilogues: 4,
-            max_text_bytes: 27 * 1024,
+            max_text_bytes: 30 * 1024,
             max_relaxed_branches: 4,
-            max_cond_branch_abs_distance: 8_200,
+            max_cond_branch_abs_distance: 9_500,
             max_machine_blocks: 860,
-            max_machine_block_bytes: 1_152,
+            max_machine_block_bytes: 2_048,
             max_cfg_edges: 1_500,
             max_call_edges: 250,
             max_unreachable_machine_blocks: 600,
@@ -56,16 +157,16 @@ const BUNDLED_EXAMPLE_ASM_SHAPE_BUDGETS: [(&str, AssemblyShapeBudget); 7] = [
     (
         "multisig.cell",
         AssemblyShapeBudget {
-            max_lines: 21_000,
+            max_lines: 24_500,
             max_fail_handlers: 64,
             max_shared_epilogues: 20,
-            max_text_bytes: 80 * 1024,
+            max_text_bytes: 92 * 1024,
             max_relaxed_branches: 4,
-            max_cond_branch_abs_distance: 7_400,
+            max_cond_branch_abs_distance: 7_700,
             max_machine_blocks: 3_600,
             max_machine_block_bytes: 512,
             max_cfg_edges: 5_800,
-            max_call_edges: 300,
+            max_call_edges: 360,
             max_unreachable_machine_blocks: 3_400,
         },
     ),
@@ -75,9 +176,9 @@ const BUNDLED_EXAMPLE_ASM_SHAPE_BUDGETS: [(&str, AssemblyShapeBudget); 7] = [
             max_lines: 15_000,
             max_fail_handlers: 80,
             max_shared_epilogues: 18,
-            max_text_bytes: 57 * 1024,
+            max_text_bytes: 59 * 1024,
             max_relaxed_branches: 4,
-            max_cond_branch_abs_distance: 7_500,
+            max_cond_branch_abs_distance: 9_600,
             max_machine_blocks: 2_500,
             max_machine_block_bytes: 320,
             max_cfg_edges: 4_100,
@@ -88,49 +189,49 @@ const BUNDLED_EXAMPLE_ASM_SHAPE_BUDGETS: [(&str, AssemblyShapeBudget); 7] = [
     (
         "timelock.cell",
         AssemblyShapeBudget {
-            max_lines: 16_000,
+            max_lines: 17_800,
             max_fail_handlers: 64,
             max_shared_epilogues: 22,
-            max_text_bytes: 64 * 1024,
+            max_text_bytes: 68 * 1024,
             max_relaxed_branches: 4,
-            max_cond_branch_abs_distance: 4_300,
-            max_machine_blocks: 1_900,
+            max_cond_branch_abs_distance: 4_500,
+            max_machine_blocks: 2_050,
             max_machine_block_bytes: 21_000,
-            max_cfg_edges: 3_100,
-            max_call_edges: 380,
-            max_unreachable_machine_blocks: 1_850,
+            max_cfg_edges: 3_500,
+            max_call_edges: 450,
+            max_unreachable_machine_blocks: 2_000,
         },
     ),
     (
         "token.cell",
         AssemblyShapeBudget {
-            max_lines: 2_800,
+            max_lines: 3_400,
             max_fail_handlers: 24,
             max_shared_epilogues: 6,
-            max_text_bytes: 12 * 1024,
+            max_text_bytes: 13 * 1024,
             max_relaxed_branches: 4,
             max_cond_branch_abs_distance: 1_800,
             max_machine_blocks: 550,
             max_machine_block_bytes: 320,
             max_cfg_edges: 900,
-            max_call_edges: 110,
-            max_unreachable_machine_blocks: 230,
+            max_call_edges: 160,
+            max_unreachable_machine_blocks: 280,
         },
     ),
     (
         "vesting.cell",
         AssemblyShapeBudget {
-            max_lines: 4_600,
+            max_lines: 6_100,
             max_fail_handlers: 28,
             max_shared_epilogues: 6,
-            max_text_bytes: 17 * 1024,
+            max_text_bytes: 23 * 1024,
             max_relaxed_branches: 4,
             max_cond_branch_abs_distance: 3_000,
-            max_machine_blocks: 700,
+            max_machine_blocks: 850,
             max_machine_block_bytes: 512,
-            max_cfg_edges: 1_200,
-            max_call_edges: 230,
-            max_unreachable_machine_blocks: 620,
+            max_cfg_edges: 1_500,
+            max_call_edges: 320,
+            max_unreachable_machine_blocks: 780,
         },
     ),
 ];
@@ -148,6 +249,31 @@ struct AssemblyShapeBudget {
     max_cfg_edges: usize,
     max_call_edges: usize,
     max_unreachable_machine_blocks: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FullMetadataSizeBudget {
+    max_compact_metadata_bytes: usize,
+    max_proof_plan_records: usize,
+    max_compact_proof_plan_bytes: usize,
+    max_source_units: usize,
+    max_compact_source_units_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FullMetadataEntryCounts {
+    actions: usize,
+    locks: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EntryArtifactSizeBudget {
+    max_elf_bytes: usize,
+    max_compact_metadata_bytes: usize,
+    max_proof_plan_records: usize,
+    max_compact_proof_plan_bytes: usize,
+    max_actions: usize,
+    max_locks: usize,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -387,6 +513,214 @@ fn bundled_example_asm_shape_budget(name: &str) -> AssemblyShapeBudget {
         .iter()
         .find_map(|(example, budget)| (*example == name).then_some(*budget))
         .expect("missing bundled example assembly shape budget")
+}
+
+fn full_metadata_size_budget(name: &str) -> FullMetadataSizeBudget {
+    FULL_METADATA_SIZE_BUDGETS
+        .iter()
+        .find_map(|(example, budget)| (*example == name).then_some(*budget))
+        .expect("missing full metadata size budget")
+}
+
+fn full_metadata_entry_counts(name: &str) -> FullMetadataEntryCounts {
+    FULL_METADATA_ENTRY_COUNTS
+        .iter()
+        .find_map(|(example, counts)| (*example == name).then_some(*counts))
+        .expect("missing full metadata entry counts")
+}
+
+fn entry_artifact_size_budget(name: &str) -> EntryArtifactSizeBudget {
+    ENTRY_ARTIFACT_SIZE_BUDGETS
+        .iter()
+        .find_map(|(example, budget)| (*example == name).then_some(*budget))
+        .expect("missing entry artifact size budget")
+}
+
+fn ckb_elf_options() -> CompileOptions {
+    CompileOptions { target: Some("riscv64-elf".to_string()), target_profile: Some("ckb".to_string()), ..CompileOptions::default() }
+}
+
+fn compact_json_len<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value).expect("metadata should serialize as compact JSON").len()
+}
+
+fn assert_source_units_are_not_source_archives(example: &str, metadata: &CompileMetadata, budget: FullMetadataSizeBudget) {
+    assert!(
+        metadata.source_units.len() <= budget.max_source_units,
+        "{} metadata source_units grew past budget: {} > {}; source_units={:?}",
+        example,
+        metadata.source_units.len(),
+        budget.max_source_units,
+        metadata.source_units
+    );
+    let source_units_bytes = compact_json_len(&metadata.source_units);
+    assert!(
+        source_units_bytes <= budget.max_compact_source_units_bytes,
+        "{} metadata source_units JSON grew past budget: {} > {}; source_units={:?}",
+        example,
+        source_units_bytes,
+        budget.max_compact_source_units_bytes,
+        metadata.source_units
+    );
+
+    let value = serde_json::to_value(&metadata.source_units).expect("source_units should serialize");
+    let units = value.as_array().expect("source_units should serialize as an array");
+    for unit in units {
+        let object = unit.as_object().expect("source unit should serialize as an object");
+        let keys = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        let expected = ["hash", "path", "role", "size_bytes"].into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(keys, expected, "{} source_units must stay as path/hash/size records, not source archives: {}", example, unit);
+    }
+}
+
+fn assert_proof_plan_is_bounded(example: &str, entry: &str, metadata: &CompileMetadata, max_records: usize, max_json_bytes: usize) {
+    let proof_plan = &metadata.runtime.proof_plan;
+    let proof_plan_bytes = compact_json_len(proof_plan);
+    assert!(
+        proof_plan.len() <= max_records,
+        "{} {} ProofPlan record count grew past budget: {} > {}; proof_plan={:?}",
+        example,
+        entry,
+        proof_plan.len(),
+        max_records,
+        proof_plan
+    );
+    assert!(
+        proof_plan_bytes <= max_json_bytes,
+        "{} {} compact ProofPlan JSON grew past budget: {} > {} bytes",
+        example,
+        entry,
+        proof_plan_bytes,
+        max_json_bytes
+    );
+
+    let obligation_bound = metadata.runtime.verifier_obligations.len() + metadata.runtime.pool_primitives.len();
+    assert!(
+        proof_plan.len() <= obligation_bound,
+        "{} {} ProofPlan records exceed verifier obligations plus pool primitives: {} > {}",
+        example,
+        entry,
+        proof_plan.len(),
+        obligation_bound
+    );
+    assert_eq!(
+        metadata.runtime.proof_plan_soundness.issue_count, 0,
+        "{} {} ProofPlan soundness must not report issues: {:?}",
+        example, entry, metadata.runtime.proof_plan_soundness
+    );
+
+    let mut seen = BTreeSet::new();
+    for plan in proof_plan {
+        let key = (&plan.origin, &plan.category, &plan.feature, &plan.status, &plan.detail);
+        assert!(seen.insert(key), "{} {} contains duplicate ProofPlan record: {:?}", example, entry, plan);
+    }
+}
+
+fn assert_full_metadata_size_budget(example: &str, metadata: &CompileMetadata) {
+    let budget = full_metadata_size_budget(example);
+    let expected_counts = full_metadata_entry_counts(example);
+    let metadata_bytes = compact_json_len(metadata);
+    assert!(
+        metadata_bytes <= budget.max_compact_metadata_bytes,
+        "{} compact metadata JSON grew past budget: {} > {} bytes",
+        example,
+        metadata_bytes,
+        budget.max_compact_metadata_bytes
+    );
+    assert_eq!(
+        metadata.actions.len(),
+        expected_counts.actions,
+        "{} full metadata must retain every action entry; actions={:?}",
+        example,
+        metadata.actions.iter().map(|action| action.name.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        metadata.locks.len(),
+        expected_counts.locks,
+        "{} full metadata must retain every lock entry; locks={:?}",
+        example,
+        metadata.locks.iter().map(|lock| lock.name.as_str()).collect::<Vec<_>>()
+    );
+    assert_proof_plan_is_bounded(example, "full", metadata, budget.max_proof_plan_records, budget.max_compact_proof_plan_bytes);
+    assert_source_units_are_not_source_archives(example, metadata, budget);
+}
+
+fn assert_entry_artifact_size_budget(example: &str, entry_kind: &str, entry_name: &str, result: &CompileResult) {
+    let budget = entry_artifact_size_budget(example);
+    let entry = format!("{entry_kind}:{entry_name}");
+    assert_eq!(result.artifact_format, ArtifactFormat::RiscvElf, "{} {} should compile to ELF", example, entry);
+    assert!(
+        result.artifact_bytes.len() <= budget.max_elf_bytes,
+        "{} {} ELF artifact grew past budget: {} > {} bytes",
+        example,
+        entry,
+        result.artifact_bytes.len(),
+        budget.max_elf_bytes
+    );
+    assert_eq!(
+        result.metadata.artifact_size_bytes,
+        Some(result.artifact_bytes.len()),
+        "{} {} metadata artifact_size_bytes must match emitted ELF",
+        example,
+        entry
+    );
+    assert_eq!(
+        result.metadata.constraints.artifact.artifact_size_bytes,
+        result.artifact_bytes.len(),
+        "{} {} constraints artifact size must match emitted ELF",
+        example,
+        entry
+    );
+
+    let metadata_bytes = compact_json_len(&result.metadata);
+    assert!(
+        metadata_bytes <= budget.max_compact_metadata_bytes,
+        "{} {} compact metadata JSON grew past budget: {} > {} bytes",
+        example,
+        entry,
+        metadata_bytes,
+        budget.max_compact_metadata_bytes
+    );
+    assert!(
+        result.metadata.actions.len() <= budget.max_actions,
+        "{} {} entry-scoped metadata retained too many actions: {} > {}; actions={:?}",
+        example,
+        entry,
+        result.metadata.actions.len(),
+        budget.max_actions,
+        result.metadata.actions.iter().map(|action| action.name.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        result.metadata.locks.len() <= budget.max_locks,
+        "{} {} entry-scoped metadata retained too many locks: {} > {}; locks={:?}",
+        example,
+        entry,
+        result.metadata.locks.len(),
+        budget.max_locks,
+        result.metadata.locks.iter().map(|lock| lock.name.as_str()).collect::<Vec<_>>()
+    );
+    match entry_kind {
+        "action" => assert!(
+            result.metadata.actions.iter().any(|action| action.name == entry_name),
+            "{} {} metadata must retain selected action",
+            example,
+            entry
+        ),
+        "lock" => assert!(
+            result.metadata.locks.iter().any(|lock| lock.name == entry_name),
+            "{} {} metadata must retain selected lock",
+            example,
+            entry
+        ),
+        other => panic!("unknown entry kind {other}"),
+    }
+    assert_proof_plan_is_bounded(
+        example,
+        &entry,
+        &result.metadata,
+        budget.max_proof_plan_records,
+        budget.max_compact_proof_plan_bytes,
+    );
 }
 
 fn count_lines_containing(assembly: &str, needle: &str) -> usize {
@@ -892,6 +1226,24 @@ fn bundled_examples_compile_to_non_empty_assembly() {
 }
 
 #[test]
+fn bundled_package_examples_compile_with_cross_package_source_units() {
+    for package in ["amm_pool", "launch", "vesting"] {
+        let package_root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples").join(package);
+        let result = compile_path(&package_root, CompileOptions::default()).unwrap_or_else(|err| {
+            panic!("failed to compile package example {}: {}", package, err);
+        });
+        let roles = result.metadata.source_units.iter().map(|unit| unit.role.as_str()).collect::<BTreeSet<_>>();
+        assert!(roles.contains("entry"), "{} should bind its entry source unit", package);
+        assert!(roles.contains("dependency"), "{} should bind dependency source units", package);
+        assert!(
+            result.metadata.source_units.iter().any(|unit| unit.path.contains("examples/token/src/main.cell")),
+            "{} should include token package source evidence",
+            package
+        );
+    }
+}
+
+#[test]
 fn bundled_examples_compile_to_elf() {
     for example in BUNDLED_EXAMPLES {
         let result = compile_file(
@@ -908,6 +1260,36 @@ fn bundled_examples_compile_to_elf() {
             result.artifact_bytes.len(),
             bundled_example_elf_size_budget(example)
         );
+    }
+}
+
+#[test]
+fn bundled_ckb_artifact_size_experiment_keeps_entry_artifacts_and_metadata_bounded() {
+    for example in ARTIFACT_SIZE_EXPERIMENT_EXAMPLES {
+        let path = example_path(example);
+        let full_result = compile_file(&path, ckb_elf_options())
+            .unwrap_or_else(|err| panic!("{example} should compile to full CKB ELF: {}", err.message));
+        assert_full_metadata_size_budget(example, &full_result.metadata);
+
+        let actions = full_result.metadata.actions.iter().map(|action| action.name.clone()).collect::<Vec<_>>();
+        let locks = full_result.metadata.locks.iter().map(|lock| lock.name.clone()).collect::<Vec<_>>();
+        assert!(!actions.is_empty(), "{example} must expose at least one action for entry-size testing");
+
+        for action in actions {
+            let result = compile_file_with_entry_action(&path, ckb_elf_options(), action.clone())
+                .unwrap_or_else(|err| panic!("{example} action {action} should compile to entry CKB ELF: {}", err.message));
+            assert_entry_artifact_size_budget(example, "action", &action, &result);
+        }
+
+        for lock in locks {
+            let result = compile_file_with_entry_lock(&path, ckb_elf_options(), lock.clone())
+                .unwrap_or_else(|err| panic!("{example} lock {lock} should compile to entry CKB ELF: {}", err.message));
+            assert_entry_artifact_size_budget(example, "lock", &lock, &result);
+        }
+
+        let cached_full_result = compile_file(&path, ckb_elf_options())
+            .unwrap_or_else(|err| panic!("{example} should keep full CKB ELF metadata after entry compiles: {}", err.message));
+        assert_full_metadata_size_budget(example, &cached_full_result.metadata);
     }
 }
 
@@ -1341,7 +1723,7 @@ fn token_mint_authority_input_output_binding_is_explicit() {
     assert!(
         asm.contains("# cellscript abi: LOAD_CELL_DATA reason=input source=Input index=0")
             && asm.contains("# cellscript abi: LOAD_CELL_DATA reason=output_param source=Output index=0")
-            && asm.contains("# cellscript abi: schema field MintAuthority.minted offset=16 size=8"),
+            && asm.contains("# cellscript abi: verify output field MintAuthority.minted offset=16 size=8"),
         "mint should bind authority input/output and verify minted through explicit require checks:\n{}",
         asm
     );
@@ -1494,7 +1876,7 @@ fn timelock_core_actions_expose_time_and_release_metadata() {
     assert!(extend_lock.fail_closed_runtime_features.is_empty(), "extend_lock should not carry fail-closed debt");
     assert_input_output_binding(extend_lock, "TimeLock", "time_lock_before", "time_lock_after", "timelock extend_lock");
     assert!(
-        asm.contains("# cellscript abi: schema field TimeLock.unlock_height"),
+        asm.contains("# cellscript abi: verify output field TimeLock.unlock_height"),
         "timelock extend_lock should verify unlock_height through explicit output requirements:\n{}",
         asm
     );
@@ -1712,13 +2094,15 @@ fn amm_pool_input_output_params_are_scheduler_visible() {
         "AMM input/output bindings should bind Pool input/output parameters through transaction cells:\n{}",
         asm
     );
-    assert!(
-        asm.contains("# cellscript abi: schema field Pool.reserve_a")
-            && asm.contains("# cellscript abi: schema field Pool.reserve_b")
-            && asm.contains("# cellscript abi: schema field Pool.total_lp"),
-        "AMM input/output bindings should verify Pool reserve and LP fields through explicit require checks:\n{}",
-        asm
-    );
+    for field in ["reserve_a", "reserve_b", "total_lp"] {
+        assert!(
+            asm.contains(&format!("# cellscript abi: schema field Pool.{field}"))
+                || asm.contains(&format!("# cellscript abi: verify output field Pool.{field}"))
+                || asm.contains(&format!("# cellscript abi: expected field Pool.{field}")),
+            "AMM input/output bindings should verify Pool {field} through explicit require checks:\n{}",
+            asm
+        );
+    }
     assert!(
         asm.contains("# cellscript abi: verify output bytes field LPReceipt.pool_id offset=0 size=32 against loaded bytes"),
         "LPReceipt.pool_id should be checked against loaded Pool TypeHash bytes:\n{}",

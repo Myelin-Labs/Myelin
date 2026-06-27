@@ -60,7 +60,6 @@ run_step "Run focused Myelin protocol tests" \
     -p myelin-consensus \
     -p myelin-state \
     -p myelin-mempool \
-    -p myelin-utils \
     -p myelin-cli
 
 # 5b. run full workspace tests for state and mempool
@@ -1411,7 +1410,7 @@ import sys
 
 paths = [
     "README.md", "docs", "scripts", "cli", "consensus", "exec", "state", "mempool",
-    "crypto", "math", "utils",
+    "crypto", "math", "core-utils",
 ]
 # The production gate is allowed to name the patterns it scans for; the scan
 # itself is not subject to the scan. We exclude the gate and the audit doc
@@ -1459,7 +1458,7 @@ import sys
 
 paths = [
     "README.md", "docs", "scripts", "cli", "consensus", "exec", "state", "mempool",
-    "crypto", "math", "utils", "Cargo.toml", "Cargo.lock",
+    "crypto", "math", "core-utils", "Cargo.toml", "Cargo.lock",
 ]
 exclude = ("scripts/myelin_production_gate.sh", "MYELIN_CKB_SEMANTIC_DEVIATIONS.md")
 patterns = [

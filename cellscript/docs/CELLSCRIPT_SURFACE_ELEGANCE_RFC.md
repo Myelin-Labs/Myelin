@@ -89,7 +89,7 @@ authorization semantics:
 - the `protected`, `witness`, and `require` lock-boundary classification syntax;
 - single-source bundled examples at top-level `examples/*.cell`, with
   acceptance-only metadata kept in runner configuration or generated evidence;
-- LSP, parser, formatter, docs, and examples updates for the new syntax.
+- LSP and VS Code grammar/snippet updates for the new syntax.
 
 The security-sensitive boundary remains deliberately narrow:
 

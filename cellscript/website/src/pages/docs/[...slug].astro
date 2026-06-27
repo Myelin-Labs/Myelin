@@ -1,0 +1,24 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import { getDocsNeighbors, getDocsPageBySlug, getDocsPages } from "../../lib/docs";
+
+export function getStaticPaths() {
+  return getDocsPages()
+    .filter((page) => page.slug)
+    .map((page) => ({
+      params: { slug: page.slug },
+      props: { slug: page.slug },
+    }));
+}
+
+const pages = getDocsPages();
+const page = getDocsPageBySlug(Astro.props.slug);
+
+if (!page) {
+  return Astro.redirect("/docs/");
+}
+
+const { previous, next } = getDocsNeighbors(page, pages);
+---
+
+<DocsLayout page={page} pages={pages} previous={previous} next={next} />

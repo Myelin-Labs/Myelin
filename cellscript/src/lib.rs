@@ -6,13 +6,21 @@
 pub mod assumptions;
 pub mod ast;
 pub mod ckb_abi;
+// CLI, LSP, REPL, incremental, and debug tooling are gated out of the
+// wasm build: they depend on tokio/tower-lsp/clap/colored/env_logger,
+// which pull native I/O (mio/std::net) that wasm32 cannot link. The
+// pure compiler core (lexer/parser/types/flow/ir/codegen/proof_plan)
+// stays ungated and is what the browser playground calls.
+#[cfg(not(feature = "wasm"))]
 pub mod cli;
 pub mod codegen;
+#[cfg(not(feature = "wasm"))]
 pub mod debug;
 pub mod docgen;
 pub mod error;
 pub mod flow;
 pub mod fmt;
+#[cfg(not(feature = "wasm"))]
 pub mod incremental;
 pub mod ir;
 pub mod lexer;
@@ -21,6 +29,7 @@ pub mod optimize;
 pub mod package;
 pub mod parser;
 pub mod proof_plan;
+#[cfg(not(feature = "wasm"))]
 pub mod repl;
 pub mod resolve;
 pub mod runtime_errors;
@@ -34,7 +43,8 @@ pub use proof_plan::soundness::{ProofPlanSoundnessIssue, ProofPlanSoundnessRepor
 pub use proof_plan::{ProofPlanDiagnosticMetadata, ProofPlanMetadata, ProofPlanSourceSpanMetadata};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use error::{CompileError, Result};
+use error::{CompileError, DiagnosticSeverity, Result};
+use package::{BuildConfig, CkbCellDepConfig, PackageManifest, WorkspaceManifest};
 use resolve::ModuleResolver;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -238,7 +248,11 @@ fn strict_capability_name(capability: ast::Capability) -> &'static str {
 
 const DEFAULT_TARGET: &str = "riscv64-asm";
 const DEFAULT_TARGET_PROFILE: &str = "ckb";
+const ARTIFACT_CACHE_VERSION: &str = "project-source-set-v5";
 pub const METADATA_SCHEMA_VERSION: u32 = 43;
+pub const SOURCE_METADATA_SCHEMA_VERSION: u32 = 1;
+pub const ARTIFACT_METADATA_SCHEMA_VERSION: u32 = 1;
+pub const CONSTRAINTS_METADATA_SCHEMA_VERSION: u32 = 1;
 const STACK_COLLECTION_BACKING_BYTES: usize = 256;
 pub const ENTRY_WITNESS_ABI: &str = "cellscript-entry-witness-v1";
 pub(crate) const ENTRY_WITNESS_ABI_MAGIC: &[u8; 8] = b"CSARGv1\0";
@@ -260,31 +274,21 @@ const CKB_TYPE_ID_VERIFIER: &str = "ckb_verify_type_id_script_molecule";
 const CKB_TYPE_ID_OUTPUT_SOURCE: &str = "Output";
 const CKB_TYPE_ID_GENERATOR_SETTING: &str = "ckb_type_id_output_indexes";
 const CKB_TYPE_ID_WASM_SETTING: &str = "ckbTypeIdOutputs";
-const TYPED_CELL_TYPE_ABI: &str = "myelin-typed-cell-type-v1";
-const TYPED_CELL_SCHEDULER_PLAN_ABI: &str = "myelin-typed-cell-scheduler-plan-v1";
-const TYPED_CELL_CONFLICT_HASH_DOMAIN: &str = "myelin-typed-cell/conflict-hash/v1";
-const TYPED_CELL_TYPED_DATA_HASH_DOMAIN: &str = "myelin-typed-cell/typed-data-hash/v1";
-const TYPED_CELL_SINGLE_FIELD_CONFLICT_KEY_ENCODING: &str = "single-field-fixed-bytes-v1";
-const TYPED_CELL_COMPOSITE_CONFLICT_KEY_ENCODING: &str = "myelin-typed-cell-composite-len-prefixed-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetProfile {
     Ckb,
-    TypedCell,
 }
 
 impl TargetProfile {
     pub fn from_name(name: &str) -> Result<Self> {
         match name {
             "ckb" => Ok(Self::Ckb),
-            "typed-cell" => Ok(Self::TypedCell),
-            other => {
-                Err(CompileError::without_span(format!("unsupported target profile '{}'; supported profiles: ckb, typed-cell", other)))
-            }
+            other => Err(CompileError::without_span(format!("unsupported target profile '{}'; supported profile: ckb", other))),
         }
     }
 
-    fn from_options(options: &CompileOptions, build: Option<&CellBuildConfig>) -> Result<Self> {
+    fn from_options(options: &CompileOptions, build: Option<&BuildConfig>) -> Result<Self> {
         let profile = options
             .target_profile
             .as_deref()
@@ -296,7 +300,6 @@ impl TargetProfile {
     pub fn name(self) -> &'static str {
         match self {
             Self::Ckb => "ckb",
-            Self::TypedCell => "typed-cell",
         }
     }
 
@@ -304,8 +307,8 @@ impl TargetProfile {
         Ok(())
     }
 
-    fn embeds_vm_abi_trailer(self, artifact_format: ArtifactFormat) -> bool {
-        matches!(self, Self::TypedCell) && artifact_format == ArtifactFormat::RiscvElf
+    fn embeds_vm_abi_trailer(self, _artifact_format: ArtifactFormat) -> bool {
+        false
     }
 
     fn metadata(self, artifact_format: ArtifactFormat) -> TargetProfileMetadata {
@@ -332,30 +335,6 @@ impl TargetProfile {
                 output_data_abi: "ckb-outputs-and-outputs-data-index-aligned".to_string(),
                 capacity_floor_abi: "ckb-output-capacity-floor-shannons".to_string(),
                 type_id_abi: CKB_TYPE_ID_ABI.to_string(),
-                tx_version: 0,
-            },
-            Self::TypedCell => TargetProfileMetadata {
-                name: self.name().to_string(),
-                target_chain: "myelin".to_string(),
-                vm_abi: format!("molecule-0x{:04x}", MOLECULE_VM_ABI_VERSION),
-                hash_domain: "myelin-typed-cell-blake3".to_string(),
-                syscall_set: "myelin-ckb-style-load-syscalls".to_string(),
-                artifact_packaging: match artifact_format {
-                    ArtifactFormat::RiscvAssembly => "myelin-typed-cell-asm-sidecar".to_string(),
-                    ArtifactFormat::RiscvElf => "myelin-typed-cell-elf-vm-abi-trailer".to_string(),
-                },
-                header_abi: "myelin-typed-cell-header".to_string(),
-                scheduler_abi: "myelin-typed-cell-scheduler-witness-v1-molecule".to_string(),
-                witness_abi: "myelin-typed-cell-molecule-witness+cellscript-entry-witness-v1".to_string(),
-                lock_args_abi: "myelin-typed-cell-script-args-typed-fixed-bytes".to_string(),
-                source_encoding: "myelin-typed-cell-source-input-cell-dep-output".to_string(),
-                spawn_ipc_abi: "unsupported".to_string(),
-                since_abi: "none".to_string(),
-                cell_dep_abi: "myelin-typed-cell-dep-outpoint".to_string(),
-                script_ref_abi: "myelin-typed-cell-script-code-hash-hash-type-args".to_string(),
-                output_data_abi: "myelin-typed-cell-outputs-and-data-index-aligned".to_string(),
-                capacity_floor_abi: "none".to_string(),
-                type_id_abi: "myelin-typed-cell-type-id-advisory".to_string(),
                 tx_version: 0,
             },
         }
@@ -439,6 +418,12 @@ pub struct ValidatedArtifact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompileMetadata {
     pub metadata_schema_version: u32,
+    #[serde(default = "missing_metadata_component_schema_version")]
+    pub source_metadata_schema_version: u32,
+    #[serde(default = "missing_metadata_component_schema_version")]
+    pub artifact_metadata_schema_version: u32,
+    #[serde(default = "missing_metadata_component_schema_version")]
+    pub constraints_metadata_schema_version: u32,
     pub compiler_version: String,
     pub module: String,
     pub artifact_format: String,
@@ -459,6 +444,8 @@ pub struct CompileMetadata {
     pub constraints: ConstraintsMetadata,
     #[serde(default)]
     pub molecule_schema_manifest: MoleculeSchemaManifestMetadata,
+    #[serde(default)]
+    pub cell_data_codec_manifest: CellDataCodecManifestMetadata,
     pub types: Vec<TypeMetadata>,
     pub actions: Vec<ActionMetadata>,
     pub functions: Vec<FunctionMetadata>,
@@ -466,6 +453,10 @@ pub struct CompileMetadata {
     /// Embedded DWARF debug section names (non-empty when debug mode is enabled for ELF artifacts)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub debug_info_sections: Vec<String>,
+}
+
+fn missing_metadata_component_schema_version() -> u32 {
+    0
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -504,6 +495,43 @@ pub struct MoleculeSchemaManifestFieldMetadata {
     pub offset: usize,
     pub encoded_size: Option<usize>,
     pub fixed_width: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CellDataCodecManifestMetadata {
+    pub schema: String,
+    pub version: u32,
+    pub target_profile: String,
+    pub abi: String,
+    pub default_codec: String,
+    pub molecule_schema_manifest_hash: String,
+    pub raw_bytes_required: bool,
+    pub raw_runtime_access_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_runtime_accesses: Vec<CellDataCodecRuntimeAccessMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_codec_adapters: Vec<ExternalCodecAdapterMetadata>,
+    pub manifest_hash: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CellDataCodecRuntimeAccessMetadata {
+    pub operation: String,
+    pub syscall: String,
+    pub source: String,
+    pub index: usize,
+    pub binding: String,
+    pub codec: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalCodecAdapterMetadata {
+    pub name: String,
+    pub version: String,
+    pub package: String,
+    pub content_hash: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_vector_hashes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -574,12 +602,19 @@ pub struct ArtifactConstraintsMetadata {
     pub artifact_size_bytes: usize,
     pub text_bytes: Option<usize>,
     pub rodata_bytes: Option<usize>,
+    pub executable_text_op_count: Option<usize>,
+    pub covered_text_op_count: Option<usize>,
     pub relaxed_branch_count: Option<usize>,
     pub max_cond_branch_abs_distance: Option<u64>,
     pub machine_block_count: Option<usize>,
+    pub max_machine_block_size: Option<usize>,
+    pub conditional_branch_block_count: Option<usize>,
+    pub labeled_machine_block_count: Option<usize>,
     pub machine_cfg_edge_count: Option<usize>,
     pub machine_call_edge_count: Option<usize>,
     pub unreachable_machine_block_count: Option<usize>,
+    pub layout_order_block_count: Option<usize>,
+    pub layout_order_text_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -889,6 +924,21 @@ pub fn validate_compile_metadata(metadata: &CompileMetadata, artifact_format: Ar
             metadata.metadata_schema_version, METADATA_SCHEMA_VERSION
         )));
     }
+    validate_metadata_component_schema_version(
+        "source_metadata_schema_version",
+        metadata.source_metadata_schema_version,
+        SOURCE_METADATA_SCHEMA_VERSION,
+    )?;
+    validate_metadata_component_schema_version(
+        "artifact_metadata_schema_version",
+        metadata.artifact_metadata_schema_version,
+        ARTIFACT_METADATA_SCHEMA_VERSION,
+    )?;
+    validate_metadata_component_schema_version(
+        "constraints_metadata_schema_version",
+        metadata.constraints_metadata_schema_version,
+        CONSTRAINTS_METADATA_SCHEMA_VERSION,
+    )?;
     if metadata.compiler_version != VERSION {
         return Err(CompileError::without_span(format!(
             "metadata compiler_version '{}' does not match current compiler '{}'",
@@ -935,8 +985,6 @@ pub fn validate_compile_metadata(metadata: &CompileMetadata, artifact_format: Ar
         ));
     }
     validate_type_identity_metadata(metadata)?;
-    validate_typed_cell_type_metadata(metadata)?;
-    validate_typed_cell_scheduler_plan_metadata(metadata)?;
     validate_capacity_floor_metadata(metadata)?;
     validate_ckb_constraints_summary_metadata(metadata)?;
     validate_ckb_output_data_binding_metadata(metadata)?;
@@ -946,9 +994,17 @@ pub fn validate_compile_metadata(metadata: &CompileMetadata, artifact_format: Ar
     validate_ckb_script_reference_metadata(metadata)?;
     validate_molecule_schema_metadata(metadata)?;
     validate_molecule_schema_manifest_metadata(metadata)?;
+    validate_cell_data_codec_manifest_metadata(metadata)?;
     validate_source_metadata(metadata)?;
     crate::proof_plan::soundness::validate_metadata(metadata, false)?;
 
+    Ok(())
+}
+
+fn validate_metadata_component_schema_version(field: &str, actual: u32, expected: u32) -> Result<()> {
+    if actual != expected {
+        return Err(CompileError::without_span(format!("unsupported {field} {actual}; expected {expected}")));
+    }
     Ok(())
 }
 
@@ -1004,7 +1060,6 @@ fn validate_target_profile_metadata(metadata: &CompileMetadata, artifact_format:
 fn target_profile_artifact_policy_violations(_metadata: &CompileMetadata, profile: TargetProfile) -> Vec<String> {
     match profile {
         TargetProfile::Ckb => Vec::new(),
-        TargetProfile::TypedCell => Vec::new(),
     }
 }
 
@@ -1208,21 +1263,22 @@ fn constraints_metadata(
         artifact_size_bytes,
         text_bytes: backend_shape.map(|shape| shape.text_size),
         rodata_bytes: backend_shape.map(|shape| shape.rodata_size),
+        executable_text_op_count: backend_shape.map(|shape| shape.executable_text_op_count),
+        covered_text_op_count: backend_shape.map(|shape| shape.covered_text_op_count),
         relaxed_branch_count: backend_shape.map(|shape| shape.relaxed_branch_count),
         max_cond_branch_abs_distance: backend_shape.map(|shape| shape.max_cond_branch_abs_distance),
         machine_block_count: backend_shape.map(|shape| shape.machine_block_count),
+        max_machine_block_size: backend_shape.map(|shape| shape.max_machine_block_size),
+        conditional_branch_block_count: backend_shape.map(|shape| shape.conditional_branch_block_count),
+        labeled_machine_block_count: backend_shape.map(|shape| shape.labeled_machine_block_count),
         machine_cfg_edge_count: backend_shape.map(|shape| shape.machine_cfg_edge_count),
         machine_call_edge_count: backend_shape.map(|shape| shape.machine_call_edge_count),
         unreachable_machine_block_count: backend_shape.map(|shape| shape.unreachable_machine_block_count),
+        layout_order_block_count: backend_shape.map(|shape| shape.layout_order_block_count),
+        layout_order_text_size: backend_shape.map(|shape| shape.layout_order_text_size),
     };
     if backend_shape.is_none() {
         warnings.push("backend shape metrics were not available for this artifact".to_string());
-    }
-    if target_profile == TargetProfile::TypedCell {
-        warnings.push(
-            "typed-cell profile emits Myelin scheduler witness metadata; production admission must validate witness hashes against live typed cells"
-                .to_string(),
-        );
     }
     let runtime_errors = runtime_errors::ALL_RUNTIME_ERRORS
         .iter()
@@ -1597,7 +1653,7 @@ fn collect_ckb_entry_script_references(
     }
 }
 
-fn apply_manifest_deploy_metadata(metadata: &mut CompileMetadata, manifest: &CellManifest) -> Result<()> {
+fn apply_manifest_deploy_metadata(metadata: &mut CompileMetadata, manifest: &PackageManifest) -> Result<()> {
     let Some(ckb_manifest) = manifest.deploy.ckb.as_ref() else {
         return Ok(());
     };
@@ -1687,7 +1743,7 @@ fn validate_ckb_dep_type(dep_type: &str) -> Result<()> {
     }
 }
 
-fn parse_ckb_cell_dep_location(dep: &CellCkbCellDepConfig) -> Result<(Option<String>, Option<u32>)> {
+fn parse_ckb_cell_dep_location(dep: &CkbCellDepConfig) -> Result<(Option<String>, Option<u32>)> {
     if let Some(out_point) = dep.out_point.as_deref() {
         if dep.tx_hash.is_some() || dep.index.is_some() {
             return Err(CompileError::without_span("CKB cell_dep location must use either out_point or tx_hash/index, not both"));
@@ -1757,12 +1813,20 @@ fn ckb_limits_source() -> String {
 }
 
 /// Extract the span from an AST statement, for debug info line table generation.
+#[cfg_attr(feature = "wasm", allow(dead_code))]
 fn stmt_span(stmt: &ast::Stmt) -> error::Span {
     match stmt {
         ast::Stmt::Let(let_stmt) => let_stmt.span,
         ast::Stmt::Expr(expr) => expr_span(expr),
-        ast::Stmt::Return(Some(expr)) => expr_span(expr),
-        ast::Stmt::Return(None) => error::Span::default(),
+        ast::Stmt::Return(ast::ReturnStmt { value: Some(expr), span }) => {
+            let expr_span = expr_span(expr);
+            if expr_span.line == 0 || expr_span.column == 0 {
+                *span
+            } else {
+                expr_span
+            }
+        }
+        ast::Stmt::Return(ast::ReturnStmt { value: None, span }) => *span,
         ast::Stmt::If(if_stmt) => if_stmt.span,
         ast::Stmt::For(for_stmt) => for_stmt.span,
         ast::Stmt::While(while_stmt) => while_stmt.span,
@@ -1770,6 +1834,7 @@ fn stmt_span(stmt: &ast::Stmt) -> error::Span {
 }
 
 /// Extract span from an expression.
+#[cfg_attr(feature = "wasm", allow(dead_code))]
 fn expr_span(expr: &ast::Expr) -> error::Span {
     // AST expressions don't carry their own Span in the current definition,
     // so we fall back to a default span.
@@ -2162,145 +2227,6 @@ fn validate_ckb_type_id_metadata(metadata: &CompileMetadata, ty: &TypeMetadata, 
                 "metadata type '{}' ckb_type_id.{} '{}' does not match expected '{}'",
                 ty.name, field, actual, expected
             )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_typed_cell_type_metadata(metadata: &CompileMetadata) -> Result<()> {
-    let profile_is_typed_cell = metadata.target_profile.name == TargetProfile::TypedCell.name();
-    for ty in &metadata.types {
-        let Some(typed_cell) = &ty.typed_cell else {
-            continue;
-        };
-        if !profile_is_typed_cell {
-            return Err(CompileError::without_span(format!(
-                "metadata type '{}' has typed_cell metadata outside the typed-cell target profile",
-                ty.name
-            )));
-        }
-        if typed_cell.abi != TYPED_CELL_TYPE_ABI {
-            return Err(CompileError::without_span(format!(
-                "metadata type '{}' typed_cell.abi '{}' does not match expected '{}'",
-                ty.name, typed_cell.abi, TYPED_CELL_TYPE_ABI
-            )));
-        }
-        if typed_cell.conflict_key_fields.is_empty() {
-            return Err(CompileError::without_span(format!(
-                "metadata type '{}' typed_cell conflict_key must reference at least one field",
-                ty.name
-            )));
-        }
-        for field_name in &typed_cell.conflict_key_fields {
-            let Some(field) = ty.fields.iter().find(|field| &field.name == field_name) else {
-                return Err(CompileError::without_span(format!(
-                    "metadata type '{}' typed_cell conflict_key references missing field '{}'",
-                    ty.name, field_name
-                )));
-            };
-            if !field.fixed_width || field.encoded_size.is_none() {
-                return Err(CompileError::without_span(format!(
-                    "metadata type '{}' typed_cell conflict_key field '{}' must be fixed-width",
-                    ty.name, field_name
-                )));
-            }
-        }
-        let expected_key = if typed_cell.conflict_key_fields.len() == 1 {
-            format!("field({})", typed_cell.conflict_key_fields[0])
-        } else {
-            format!("composite({})", typed_cell.conflict_key_fields.join(","))
-        };
-        if typed_cell.conflict_key != expected_key {
-            return Err(CompileError::without_span(format!(
-                "metadata type '{}' typed_cell conflict_key '{}' does not match fields '{}'",
-                ty.name, typed_cell.conflict_key, expected_key
-            )));
-        }
-        let expected_encoding = if typed_cell.conflict_key_fields.len() == 1 {
-            TYPED_CELL_SINGLE_FIELD_CONFLICT_KEY_ENCODING
-        } else {
-            TYPED_CELL_COMPOSITE_CONFLICT_KEY_ENCODING
-        };
-        if typed_cell.conflict_key_encoding != expected_encoding {
-            return Err(CompileError::without_span(format!(
-                "metadata type '{}' typed_cell conflict_key_encoding '{}' does not match expected '{}'",
-                ty.name, typed_cell.conflict_key_encoding, expected_encoding
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_typed_cell_scheduler_plan_metadata(metadata: &CompileMetadata) -> Result<()> {
-    let profile_is_typed_cell = metadata.target_profile.name == TargetProfile::TypedCell.name();
-    let types_by_name = metadata.types.iter().map(|ty| (ty.name.as_str(), ty)).collect::<HashMap<_, _>>();
-    for action in &metadata.actions {
-        let Some(plan) = &action.typed_cell_scheduler_plan else {
-            continue;
-        };
-        if !profile_is_typed_cell {
-            return Err(CompileError::without_span(format!(
-                "metadata action '{}' has typed_cell_scheduler_plan outside the typed-cell target profile",
-                action.name
-            )));
-        }
-        if plan.abi != TYPED_CELL_SCHEDULER_PLAN_ABI {
-            return Err(CompileError::without_span(format!(
-                "metadata action '{}' typed_cell_scheduler_plan.abi '{}' does not match expected '{}'",
-                action.name, plan.abi, TYPED_CELL_SCHEDULER_PLAN_ABI
-            )));
-        }
-        if plan.conflict_hash_domain != TYPED_CELL_CONFLICT_HASH_DOMAIN {
-            return Err(CompileError::without_span(format!(
-                "metadata action '{}' typed_cell_scheduler_plan.conflict_hash_domain '{}' does not match expected '{}'",
-                action.name, plan.conflict_hash_domain, TYPED_CELL_CONFLICT_HASH_DOMAIN
-            )));
-        }
-        if plan.typed_data_hash_domain != TYPED_CELL_TYPED_DATA_HASH_DOMAIN {
-            return Err(CompileError::without_span(format!(
-                "metadata action '{}' typed_cell_scheduler_plan.typed_data_hash_domain '{}' does not match expected '{}'",
-                action.name, plan.typed_data_hash_domain, TYPED_CELL_TYPED_DATA_HASH_DOMAIN
-            )));
-        }
-        for (index, access) in plan.accesses.iter().enumerate() {
-            if !matches!(access.source.as_str(), "Input" | "CellDep" | "Output") {
-                return Err(CompileError::without_span(format!(
-                    "metadata action '{}' typed_cell_scheduler_plan.accesses[{}].source '{}' is not a typed-cell scheduler source",
-                    action.name, index, access.source
-                )));
-            }
-            if normalize_typed_cell_access_operation(&access.operation, &access.source).is_none() {
-                return Err(CompileError::without_span(format!(
-                    "metadata action '{}' typed_cell_scheduler_plan.accesses[{}] has unsupported operation/source {} {}",
-                    action.name, index, access.operation, access.source
-                )));
-            }
-            let Some(ty) = types_by_name.get(access.ty.as_str()) else {
-                return Err(CompileError::without_span(format!(
-                    "metadata action '{}' typed_cell_scheduler_plan.accesses[{}] references unknown type '{}'",
-                    action.name, index, access.ty
-                )));
-            };
-            match (&ty.typed_cell, &access.conflict_key) {
-                (Some(typed_cell), Some(conflict_key)) => {
-                    if typed_cell.conflict_key != *conflict_key
-                        || typed_cell.conflict_key_fields != access.conflict_key_fields
-                        || Some(typed_cell.conflict_key_encoding.as_str()) != access.conflict_key_encoding.as_deref()
-                    {
-                        return Err(CompileError::without_span(format!(
-                            "metadata action '{}' typed_cell_scheduler_plan.accesses[{}] conflict_key metadata does not match type '{}'",
-                            action.name, index, access.ty
-                        )));
-                    }
-                }
-                (None, Some(_)) => {
-                    return Err(CompileError::without_span(format!(
-                        "metadata action '{}' typed_cell_scheduler_plan.accesses[{}] declares conflict_key for non typed-cell type '{}'",
-                        action.name, index, access.ty
-                    )));
-                }
-                _ => {}
-            }
         }
     }
     Ok(())
@@ -3089,6 +3015,108 @@ fn validate_molecule_schema_manifest_metadata(metadata: &CompileMetadata) -> Res
     Ok(())
 }
 
+fn validate_cell_data_codec_manifest_metadata(metadata: &CompileMetadata) -> Result<()> {
+    let manifest = &metadata.cell_data_codec_manifest;
+    if manifest.schema != "cellscript-cell-data-codec-manifest-v1" {
+        return Err(CompileError::without_span(format!(
+            "metadata cell_data_codec_manifest.schema '{}' is unsupported",
+            manifest.schema
+        )));
+    }
+    if manifest.version != 1 {
+        return Err(CompileError::without_span(format!(
+            "metadata cell_data_codec_manifest.version {} is unsupported",
+            manifest.version
+        )));
+    }
+    if manifest.target_profile != metadata.target_profile.name {
+        return Err(CompileError::without_span(format!(
+            "metadata cell_data_codec_manifest.target_profile '{}' does not match target profile '{}'",
+            manifest.target_profile, metadata.target_profile.name
+        )));
+    }
+    if manifest.default_codec != "molecule" {
+        return Err(CompileError::without_span(format!(
+            "metadata cell_data_codec_manifest.default_codec must be 'molecule', got '{}'",
+            manifest.default_codec
+        )));
+    }
+    if manifest.molecule_schema_manifest_hash != metadata.molecule_schema_manifest.manifest_hash {
+        return Err(CompileError::without_span(
+            "metadata cell_data_codec_manifest.molecule_schema_manifest_hash does not match molecule_schema_manifest.manifest_hash",
+        ));
+    }
+
+    let expected_raw_accesses = raw_cell_data_codec_accesses(&metadata.runtime.ckb_runtime_accesses);
+    let raw_required = !expected_raw_accesses.is_empty();
+    let expected_abi = if raw_required { "molecule+raw-bytes-v1" } else { "molecule" };
+    if manifest.abi != expected_abi {
+        return Err(CompileError::without_span(format!(
+            "metadata cell_data_codec_manifest.abi must be '{}' for runtime cell-data accesses, got '{}'",
+            expected_abi, manifest.abi
+        )));
+    }
+    if manifest.raw_bytes_required != raw_required {
+        return Err(CompileError::without_span(format!(
+            "metadata cell_data_codec_manifest.raw_bytes_required must be {}, got {}",
+            raw_required, manifest.raw_bytes_required
+        )));
+    }
+    if manifest.raw_runtime_access_count != expected_raw_accesses.len() {
+        return Err(CompileError::without_span(format!(
+            "metadata cell_data_codec_manifest.raw_runtime_access_count {} does not match runtime access count {}",
+            manifest.raw_runtime_access_count,
+            expected_raw_accesses.len()
+        )));
+    }
+    if manifest.raw_runtime_accesses != expected_raw_accesses {
+        return Err(CompileError::without_span(
+            "metadata cell_data_codec_manifest.raw_runtime_accesses do not match runtime.ckb_runtime_accesses",
+        ));
+    }
+    for (index, adapter) in manifest.external_codec_adapters.iter().enumerate() {
+        let prefix = format!("metadata cell_data_codec_manifest.external_codec_adapters[{index}]");
+        if adapter.name.trim().is_empty() {
+            return Err(CompileError::without_span(format!("{prefix}.name must be non-empty")));
+        }
+        if adapter.version.trim().is_empty() {
+            return Err(CompileError::without_span(format!("{prefix}.version must be non-empty")));
+        }
+        if adapter.package.trim().is_empty() {
+            return Err(CompileError::without_span(format!("{prefix}.package must be non-empty")));
+        }
+        if !is_canonical_hash_hex(adapter.content_hash.strip_prefix("0x").unwrap_or(adapter.content_hash.as_str())) {
+            return Err(CompileError::without_span(format!(
+                "{prefix}.content_hash '{}' must be a canonical 32-byte hex hash",
+                adapter.content_hash
+            )));
+        }
+        for (vector_index, hash) in adapter.test_vector_hashes.iter().enumerate() {
+            if !is_canonical_hash_hex(hash.strip_prefix("0x").unwrap_or(hash.as_str())) {
+                return Err(CompileError::without_span(format!(
+                    "{prefix}.test_vector_hashes[{vector_index}] '{}' must be a canonical 32-byte hex hash",
+                    hash
+                )));
+            }
+        }
+    }
+    if !is_canonical_hash_hex(&manifest.manifest_hash) {
+        return Err(CompileError::without_span(format!(
+            "metadata cell_data_codec_manifest.manifest_hash '{}' is invalid",
+            manifest.manifest_hash
+        )));
+    }
+    let expected_hash = cell_data_codec_manifest_hash(manifest);
+    if manifest.manifest_hash != expected_hash {
+        return Err(CompileError::without_span(format!(
+            "metadata cell_data_codec_manifest.manifest_hash '{}' does not match manifest entries",
+            manifest.manifest_hash
+        )));
+    }
+
+    Ok(())
+}
+
 pub fn validate_source_units_on_disk(metadata: &CompileMetadata) -> Result<()> {
     validate_source_metadata(metadata)?;
     if metadata.source_units.is_empty() {
@@ -3348,44 +3376,6 @@ pub struct TypeMetadata {
     pub molecule_schema: Option<MoleculeSchemaMetadata>,
     #[serde(default, skip_serializing_if = "is_default_identity_policy")]
     pub identity_policy: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub typed_cell: Option<TypedCellTypeMetadata>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TypedCellTypeMetadata {
-    pub abi: String,
-    pub ownership: String,
-    pub conflict_key: String,
-    pub conflict_key_fields: Vec<String>,
-    pub conflict_key_encoding: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity_policy: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TypedCellSchedulerPlanMetadata {
-    pub abi: String,
-    pub conflict_hash_domain: String,
-    pub typed_data_hash_domain: String,
-    pub accesses: Vec<TypedCellSchedulerAccessPlanMetadata>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TypedCellSchedulerAccessPlanMetadata {
-    pub operation: String,
-    pub source: String,
-    pub index: usize,
-    pub binding: String,
-    pub ty: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conflict_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conflict_key_fields: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conflict_key_encoding: Option<String>,
-    pub conflict_key_value_source: String,
-    pub typed_data_source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3442,8 +3432,6 @@ pub struct ActionMetadata {
     pub scheduler_witness_hex: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     scheduler_witness_molecule_hex: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub typed_cell_scheduler_plan: Option<TypedCellSchedulerPlanMetadata>,
     pub consume_set: Vec<CellPatternMetadata>,
     pub read_refs: Vec<CellPatternMetadata>,
     pub create_set: Vec<CreatePatternMetadata>,
@@ -3501,61 +3489,6 @@ impl ActionMetadata {
             return decode_scheduler_witness_hex(scheduler_witness_molecule_hex);
         }
         Err(CompileError::without_span("scheduler witness metadata is missing"))
-    }
-
-    /// Build a live typed-cell scheduler witness using transaction-specific scripts and cell data.
-    ///
-    /// `scheduler_witness_hex` is a compile-time shape witness. For real typed-cell
-    /// transactions, builders should use this method with the action's
-    /// `typed_cell_scheduler_plan` and the concrete type script, conflict-key,
-    /// and data bytes from the transaction being assembled.
-    pub fn typed_cell_scheduler_witness_bytes(&self, accesses: &[TypedCellSchedulerAccessInput]) -> Result<Vec<u8>> {
-        let plan = self
-            .typed_cell_scheduler_plan
-            .as_ref()
-            .ok_or_else(|| CompileError::without_span(format!("action '{}' has no typed_cell_scheduler_plan metadata", self.name)))?;
-        if plan.accesses.len() != accesses.len() {
-            return Err(CompileError::without_span(format!(
-                "action '{}' typed-cell scheduler witness expected {} accesses, got {}",
-                self.name,
-                plan.accesses.len(),
-                accesses.len()
-            )));
-        }
-
-        let mut hashed_accesses = Vec::with_capacity(accesses.len());
-        for (index, (plan_access, input)) in plan.accesses.iter().zip(accesses.iter()).enumerate() {
-            if plan_access.operation != input.operation
-                || plan_access.source != input.source
-                || plan_access.index as u32 != input.index
-            {
-                return Err(CompileError::without_span(format!(
-                    "action '{}' typed-cell access {} expected {} {}#{}, got {} {}#{}",
-                    self.name,
-                    index,
-                    plan_access.operation,
-                    plan_access.source,
-                    plan_access.index,
-                    input.operation,
-                    input.source,
-                    input.index
-                )));
-            }
-            hashed_accesses.push(crate::stdlib::TypedCellSchedulerAccess {
-                operation: input.operation.clone(),
-                source: input.source.clone(),
-                index: input.index,
-                conflict_hash: compute_typed_cell_conflict_hash(&input.type_script, &input.conflict_key_value),
-                typed_data_hash: compute_typed_cell_typed_data_hash(&input.type_script, &input.typed_data),
-            });
-        }
-
-        Ok(crate::stdlib::SchedulerMetadata::generate_typed_cell_molecule_with_hashes(
-            &self.effect_class,
-            self.parallelizable,
-            self.estimated_cycles,
-            hashed_accesses,
-        ))
     }
 
     /// Encode positional entry witness bytes for the generated `_cellscript_entry` wrapper.
@@ -3645,58 +3578,6 @@ pub enum EntryWitnessArg {
     Address([u8; 32]),
     Hash([u8; 32]),
     Bytes(Vec<u8>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypedCellTypeScriptInput {
-    pub code_hash: [u8; 32],
-    pub hash_type: u8,
-    pub args: Vec<u8>,
-}
-
-impl TypedCellTypeScriptInput {
-    pub fn new(code_hash: [u8; 32], hash_type: u8, args: Vec<u8>) -> Self {
-        Self { code_hash, hash_type, args }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypedCellSchedulerAccessInput {
-    pub operation: String,
-    pub source: String,
-    pub index: u32,
-    pub type_script: TypedCellTypeScriptInput,
-    pub conflict_key_value: Vec<u8>,
-    pub typed_data: Vec<u8>,
-}
-
-pub fn compute_typed_cell_conflict_hash(type_script: &TypedCellTypeScriptInput, conflict_key_value: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(TYPED_CELL_CONFLICT_HASH_DOMAIN.as_bytes());
-    hasher.update(&type_script.code_hash);
-    hasher.update(&[type_script.hash_type]);
-    hasher.update(&type_script.args);
-    hasher.update(conflict_key_value);
-    *hasher.finalize().as_bytes()
-}
-
-pub fn compute_typed_cell_typed_data_hash(type_script: &TypedCellTypeScriptInput, typed_data: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(TYPED_CELL_TYPED_DATA_HASH_DOMAIN.as_bytes());
-    hasher.update(&type_script.code_hash);
-    hasher.update(&[type_script.hash_type]);
-    hasher.update(&type_script.args);
-    hasher.update(typed_data);
-    *hasher.finalize().as_bytes()
-}
-
-pub fn encode_typed_cell_composite_conflict_key(fields: &[&[u8]]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for field in fields {
-        out.extend_from_slice(&(field.len() as u32).to_le_bytes());
-        out.extend_from_slice(field);
-    }
-    out
 }
 
 /// Encode positional witness bytes for CellScript's generated entry wrapper.
@@ -4148,6 +4029,19 @@ pub struct LoadedModule {
     pub ast: ast::Module,
 }
 
+#[derive(Debug)]
+struct LoadedProject {
+    entry_index: usize,
+    modules: Vec<LoadedModule>,
+    resolver: ModuleResolver,
+}
+
+impl LoadedProject {
+    fn entry(&self) -> &LoadedModule {
+        &self.modules[self.entry_index]
+    }
+}
+
 impl CompileResult {
     /// Validate that artifact bytes, hash, format, and metadata agree.
     pub fn validate(&self) -> Result<()> {
@@ -4242,27 +4136,183 @@ pub fn default_metadata_path_for_artifact<P: AsRef<Utf8Path>>(artifact_path: P) 
 
 pub fn load_modules_for_input<P: AsRef<Utf8Path>>(input: P) -> Result<Vec<LoadedModule>> {
     let resolved = resolve_input_path(input.as_ref())?;
-    let mut files = if let Some(package_root) = find_package_root(&resolved)? {
-        collect_package_cell_files(&package_root)?
-    } else {
-        vec![resolved.clone()]
+    load_project_modules_for_entry(&resolved, None)
+}
+
+fn load_project_for_entry(entry_path: &Utf8Path, entry_source_override: Option<&str>) -> Result<LoadedProject> {
+    let entry_path = canonical_utf8_path(entry_path)?;
+    let modules = load_project_modules_for_entry(&entry_path, entry_source_override)?;
+    let Some(entry_index) = modules.iter().position(|module| module.path == entry_path) else {
+        return Err(CompileError::new(
+            format!("entry source '{}' was not loaded into the project graph", entry_path),
+            error::Span::default(),
+        ));
     };
+    let resolver = build_module_resolver_from_loaded_modules(&modules)?;
+    Ok(LoadedProject { entry_index, modules, resolver })
+}
 
-    if !files.contains(&resolved) {
-        files.push(resolved);
-        files.sort();
+fn load_project_for_entry_diagnostics(
+    entry_path: &Utf8Path,
+    entry_source_override: Option<&str>,
+) -> std::result::Result<LoadedProject, Vec<CompileError>> {
+    let entry_path = canonical_utf8_path(entry_path).map_err(|error| vec![error])?;
+    let modules = load_project_modules_for_entry_diagnostics(&entry_path, entry_source_override)?;
+    let Some(entry_index) = modules.iter().position(|module| module.path == entry_path) else {
+        return Err(vec![CompileError::new(
+            format!("entry source '{}' was not loaded into the project graph", entry_path),
+            error::Span::default(),
+        )]);
+    };
+    let resolver = build_module_resolver_from_loaded_modules(&modules).map_err(|error| vec![error])?;
+    Ok(LoadedProject { entry_index, modules, resolver })
+}
+
+fn load_virtual_project_for_entry_diagnostics(
+    sources: &[InMemorySource],
+    entry_path: &str,
+) -> std::result::Result<LoadedProject, Vec<CompileError>> {
+    if sources.is_empty() {
+        return Err(vec![CompileError::without_span("multi-file compile requires at least one source")]);
     }
+    let entry_path_buf = Utf8PathBuf::from(entry_path);
+    let mut seen_paths = HashSet::new();
+    let mut modules = Vec::with_capacity(sources.len());
+    let mut diagnostics = Vec::new();
+    for source in sources {
+        if source.path.is_empty() {
+            diagnostics.push(CompileError::without_span("multi-file compile source path must not be empty"));
+            continue;
+        }
+        if !seen_paths.insert(source.path.clone()) {
+            diagnostics.push(CompileError::without_span(format!("duplicate multi-file compile source path '{}'", source.path)));
+            continue;
+        }
+        match parse_loaded_module_diagnostics(Utf8PathBuf::from(source.path.clone()), source.source.clone()) {
+            Ok(module) => modules.push(module),
+            Err(errors) => diagnostics.extend(errors),
+        }
+    }
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+    let Some(entry_index) = modules.iter().position(|module| module.path == entry_path_buf) else {
+        return Err(vec![CompileError::without_span(format!("entry source '{}' was not provided", entry_path))]);
+    };
+    let resolver = build_module_resolver_from_loaded_modules(&modules).map_err(|error| vec![error])?;
+    Ok(LoadedProject { entry_index, modules, resolver })
+}
 
-    files
+fn load_project_modules_for_entry(entry_path: &Utf8Path, entry_source_override: Option<&str>) -> Result<Vec<LoadedModule>> {
+    let entry_path = canonical_utf8_path(entry_path)?;
+    let source_paths = collect_source_paths_for_compile_file(&entry_path)?;
+    source_paths
         .into_iter()
         .map(|path| {
-            let source = std::fs::read_to_string(&path)
-                .map_err(|e| CompileError::new(format!("failed to read module '{}': {}", path, e), error::Span::default()))?;
-            let tokens = lexer::lex(&source).map_err(|e| e.with_file(path.clone()))?;
-            let ast = parser::parse(&tokens).map_err(|e| e.with_file(path.clone()))?;
-            Ok(LoadedModule { path, source, ast })
+            let source = if path == entry_path {
+                if let Some(source) = entry_source_override {
+                    source.to_string()
+                } else {
+                    read_module_source(&path)?
+                }
+            } else {
+                read_module_source(&path)?
+            };
+            parse_loaded_module(path, source)
         })
         .collect()
+}
+
+fn load_project_modules_for_entry_diagnostics(
+    entry_path: &Utf8Path,
+    entry_source_override: Option<&str>,
+) -> std::result::Result<Vec<LoadedModule>, Vec<CompileError>> {
+    let entry_path = canonical_utf8_path(entry_path).map_err(|error| vec![error])?;
+    let source_paths = collect_source_paths_for_compile_file(&entry_path).map_err(|error| vec![error])?;
+    let mut modules = Vec::with_capacity(source_paths.len());
+    let mut diagnostics = Vec::new();
+    for path in source_paths {
+        let source = if path == entry_path {
+            if let Some(source) = entry_source_override {
+                source.to_string()
+            } else {
+                match read_module_source(&path) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        diagnostics.push(error);
+                        continue;
+                    }
+                }
+            }
+        } else {
+            match read_module_source(&path) {
+                Ok(source) => source,
+                Err(error) => {
+                    diagnostics.push(error);
+                    continue;
+                }
+            }
+        };
+        match parse_loaded_module_diagnostics(path, source) {
+            Ok(module) => modules.push(module),
+            Err(errors) => diagnostics.extend(errors),
+        }
+    }
+    if diagnostics.is_empty() {
+        Ok(modules)
+    } else {
+        Err(diagnostics)
+    }
+}
+
+fn read_module_source(path: &Utf8Path) -> Result<String> {
+    std::fs::read_to_string(path)
+        .map_err(|e| CompileError::new(format!("failed to read module '{}': {}", path, e), error::Span::default()))
+}
+
+fn parse_loaded_module(path: Utf8PathBuf, source: String) -> Result<LoadedModule> {
+    let tokens = lexer::lex(&source).map_err(|e| e.with_file(path.clone()))?;
+    let ast = parser::parse(&tokens).map_err(|e| e.with_file(path.clone()))?;
+    Ok(LoadedModule { path, source, ast })
+}
+
+fn parse_loaded_module_diagnostics(path: Utf8PathBuf, source: String) -> std::result::Result<LoadedModule, Vec<CompileError>> {
+    let tokens = lexer::lex(&source).map_err(|e| vec![e.with_file(path.clone())])?;
+    let ast = parser::parse_diagnostics(&tokens)
+        .map_err(|errors| errors.into_iter().map(|error| error.with_file(path.clone())).collect::<Vec<_>>())?;
+    Ok(LoadedModule { path, source, ast })
+}
+
+fn build_module_resolver_from_loaded_modules(modules: &[LoadedModule]) -> Result<ModuleResolver> {
+    let mut resolver = ModuleResolver::new();
+    for module in modules {
+        resolver.register_module(module.ast.clone()).map_err(|error| attach_file_if_missing(error, &module.path))?;
+    }
+    validate_loaded_project_imports(&resolver, modules)?;
+    Ok(resolver)
+}
+
+fn validate_loaded_project_imports(resolver: &ModuleResolver, modules: &[LoadedModule]) -> Result<()> {
+    for module in modules {
+        for import in resolver.imports_for_module(&module.ast.name) {
+            let target_module = import.module_path.join("::");
+            if resolver.module(&target_module).is_none() {
+                return Err(CompileError::new(
+                    format!("module '{}' imported by '{}' not found", target_module, module.ast.name),
+                    import.span,
+                )
+                .with_file(module.path.clone()));
+            }
+            if !resolver.module_has_symbol(&target_module, &import.name) {
+                return Err(CompileError::new(
+                    format!("symbol '{}' imported by '{}' not found in module '{}'", import.name, module.ast.name, target_module),
+                    import.span,
+                )
+                .with_file(module.path.clone()));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Compile CellScript source code
@@ -4294,6 +4344,422 @@ pub fn compile_metadata(source: &str, target: Option<String>) -> Result<CompileM
     Ok(metadata)
 }
 
+#[derive(Debug, Clone)]
+pub struct CompileMetadataDiagnosticReport {
+    pub metadata: Option<CompileMetadata>,
+    pub diagnostics: Vec<CompileError>,
+}
+
+impl CompileMetadataDiagnosticReport {
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics.iter().any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InMemorySource {
+    pub path: String,
+    pub source: String,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+/// Generate compile metadata while collecting all recoverable diagnostics.
+/// Lexer failures remain fatal single diagnostics. Parser recovery collects
+/// independent item and statement errors, then semantic phases collect type,
+/// flow, and IR diagnostics when parsing succeeds.
+pub fn compile_metadata_with_diagnostics(source: &str, target: Option<String>) -> CompileMetadataDiagnosticReport {
+    let tokens = match lexer::lex(source) {
+        Ok(tokens) => tokens,
+        Err(error) => return CompileMetadataDiagnosticReport { metadata: None, diagnostics: vec![error] },
+    };
+    let ast = match parser::parse_diagnostics(&tokens) {
+        Ok(ast) => ast,
+        Err(diagnostics) => return CompileMetadataDiagnosticReport { metadata: None, diagnostics },
+    };
+    let artifact_format = match ArtifactFormat::from_target(target.as_deref().unwrap_or(DEFAULT_TARGET)) {
+        Ok(format) => format,
+        Err(error) => return CompileMetadataDiagnosticReport { metadata: None, diagnostics: vec![error] },
+    };
+    let target_profile = TargetProfile::Ckb;
+
+    let mut diagnostics = types::diagnostics(&ast);
+    if diagnostics.iter().any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error) {
+        return CompileMetadataDiagnosticReport { metadata: None, diagnostics };
+    }
+
+    diagnostics.extend(flow::diagnostics(&ast));
+    if diagnostics.iter().any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error) {
+        return CompileMetadataDiagnosticReport { metadata: None, diagnostics };
+    }
+
+    let ir = match ir::generate_diagnostics(&ast) {
+        Ok(ir) => ir,
+        Err(errors) => {
+            diagnostics.extend(errors);
+            return CompileMetadataDiagnosticReport { metadata: None, diagnostics };
+        }
+    };
+    let mut metadata = compile_metadata_from_ir(&ir, artifact_format, target_profile);
+    bind_source_metadata(&mut metadata, vec![source_unit_from_bytes("<memory>", "memory", source.as_bytes())]);
+    if let Err(error) = validate_compile_metadata(&metadata, artifact_format) {
+        diagnostics.push(error);
+        return CompileMetadataDiagnosticReport { metadata: None, diagnostics };
+    }
+
+    CompileMetadataDiagnosticReport { metadata: Some(metadata), diagnostics }
+}
+
+pub fn compile_sources_metadata_with_diagnostics(
+    sources: &[InMemorySource],
+    entry_path: &str,
+    target: Option<String>,
+) -> CompileMetadataDiagnosticReport {
+    let project = match load_virtual_project_for_entry_diagnostics(sources, entry_path) {
+        Ok(project) => project,
+        Err(diagnostics) => return CompileMetadataDiagnosticReport { metadata: None, diagnostics },
+    };
+    let options = CompileOptions { target, ..CompileOptions::default() };
+    let artifact_format = match ArtifactFormat::from_target(resolve_target(&options, None)) {
+        Ok(format) => format,
+        Err(error) => return CompileMetadataDiagnosticReport { metadata: None, diagnostics: vec![error] },
+    };
+    let target_profile = TargetProfile::Ckb;
+
+    let mut diagnostics = project_frontend_diagnostics(&project, &options, true);
+    if diagnostics.iter().any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error) {
+        return CompileMetadataDiagnosticReport { metadata: None, diagnostics };
+    }
+
+    let entry = project.entry();
+    let ir = match ir::generate_with_resolver_diagnostics(&entry.ast, &project.resolver, &entry.ast.name) {
+        Ok(ir) => ir,
+        Err(errors) => {
+            diagnostics.extend(attach_default_file(errors, &entry.path));
+            return CompileMetadataDiagnosticReport { metadata: None, diagnostics };
+        }
+    };
+    let mut metadata = compile_metadata_from_ir(&ir, artifact_format, target_profile);
+    let source_units = sources
+        .iter()
+        .map(|source| {
+            source_unit_from_bytes(
+                source.path.clone(),
+                source
+                    .role
+                    .clone()
+                    .unwrap_or_else(|| if source.path == entry_path { "entry".to_string() } else { "memory".to_string() }),
+                source.source.as_bytes(),
+            )
+        })
+        .collect();
+    bind_source_metadata(&mut metadata, source_units);
+    if let Err(error) = validate_compile_metadata(&metadata, artifact_format) {
+        diagnostics.push(error);
+        return CompileMetadataDiagnosticReport { metadata: None, diagnostics };
+    }
+
+    CompileMetadataDiagnosticReport { metadata: Some(metadata), diagnostics }
+}
+
+/// Generate compile metadata for a file/package path while collecting semantic
+/// diagnostics. This mirrors `compile_path` input resolution and module
+/// resolution, but skips artifact codegen so CLI tools can report multiple
+/// independent frontend diagnostics before the builder/deployment pipeline.
+pub fn compile_path_metadata_with_diagnostics<P: AsRef<Utf8Path>>(
+    path: P,
+    options: CompileOptions,
+) -> CompileMetadataDiagnosticReport {
+    let resolved = match resolve_input_path(path.as_ref()) {
+        Ok(path) => path,
+        Err(error) => return CompileMetadataDiagnosticReport { metadata: None, diagnostics: vec![error] },
+    };
+    compile_file_metadata_with_diagnostics(&resolved, options, None)
+}
+
+pub fn compile_path_metadata_with_diagnostics_for_source<P: AsRef<Utf8Path>>(
+    path: P,
+    source: &str,
+    options: CompileOptions,
+) -> CompileMetadataDiagnosticReport {
+    let resolved = match resolve_input_path(path.as_ref()) {
+        Ok(path) => path,
+        Err(error) => return CompileMetadataDiagnosticReport { metadata: None, diagnostics: vec![error] },
+    };
+    compile_file_metadata_with_diagnostics(&resolved, options, Some(source))
+}
+
+fn compile_file_metadata_with_diagnostics(
+    path: &Utf8Path,
+    options: CompileOptions,
+    entry_source_override: Option<&str>,
+) -> CompileMetadataDiagnosticReport {
+    let project = match load_project_for_entry_diagnostics(path, entry_source_override) {
+        Ok(project) => project,
+        Err(diagnostics) => return CompileMetadataDiagnosticReport { metadata: None, diagnostics },
+    };
+    let manifest = match find_package_root(path).and_then(|root| root.map(|root| load_manifest(&root)).transpose()) {
+        Ok(manifest) => manifest,
+        Err(error) => return CompileMetadataDiagnosticReport { metadata: None, diagnostics: vec![error] },
+    };
+    let build = manifest.as_ref().map(|manifest| &manifest.build);
+
+    if let Err(error) = validate_compile_options(&options) {
+        return CompileMetadataDiagnosticReport { metadata: None, diagnostics: vec![error] };
+    }
+    let target_profile = match TargetProfile::from_options(&options, build).and_then(|profile| {
+        profile.ensure_compile_supported()?;
+        Ok(profile)
+    }) {
+        Ok(profile) => profile,
+        Err(error) => return CompileMetadataDiagnosticReport { metadata: None, diagnostics: vec![error] },
+    };
+    let artifact_format = match ArtifactFormat::from_target(resolve_target(&options, build)) {
+        Ok(format) => format,
+        Err(error) => return CompileMetadataDiagnosticReport { metadata: None, diagnostics: vec![error] },
+    };
+
+    let check_all_modules = manifest.is_some();
+    let mut diagnostics = project_frontend_diagnostics(&project, &options, check_all_modules);
+    if diagnostics.iter().any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error) {
+        return CompileMetadataDiagnosticReport { metadata: None, diagnostics };
+    }
+
+    let entry = project.entry();
+
+    let ir = match ir::generate_with_resolver_diagnostics(&entry.ast, &project.resolver, &entry.ast.name) {
+        Ok(ir) => ir,
+        Err(errors) => {
+            diagnostics.extend(attach_default_file(errors, &entry.path));
+            return CompileMetadataDiagnosticReport { metadata: None, diagnostics };
+        }
+    };
+    let mut metadata = compile_metadata_from_ir(&ir, artifact_format, target_profile);
+    match collect_source_units_for_compile_file(path).and_then(|source_units| {
+        bind_source_metadata(&mut metadata, source_units);
+        if let Some(manifest) = manifest.as_ref() {
+            apply_manifest_deploy_metadata(&mut metadata, manifest)?;
+        }
+        validate_compile_metadata(&metadata, artifact_format)
+    }) {
+        Ok(()) => CompileMetadataDiagnosticReport { metadata: Some(metadata), diagnostics },
+        Err(error) => {
+            diagnostics.push(error);
+            CompileMetadataDiagnosticReport { metadata: None, diagnostics }
+        }
+    }
+}
+
+fn attach_default_file(diagnostics: Vec<CompileError>, path: &Utf8Path) -> Vec<CompileError> {
+    diagnostics.into_iter().map(|error| attach_file_if_missing(error, path)).collect()
+}
+
+fn attach_file_if_missing(error: CompileError, path: &Utf8Path) -> CompileError {
+    if error.file.is_none() {
+        error.with_file(path.to_owned())
+    } else {
+        error
+    }
+}
+
+fn project_frontend_diagnostics(project: &LoadedProject, options: &CompileOptions, check_all_modules: bool) -> Vec<CompileError> {
+    let mut diagnostics = Vec::new();
+    for (index, module) in project.modules.iter().enumerate() {
+        if !check_all_modules && index != project.entry_index {
+            continue;
+        }
+        let module_error_start = diagnostics.len();
+
+        if options.is_primitive_strict_015() {
+            if let Err(error) = check_primitive_strict_015(&module.ast) {
+                diagnostics.push(attach_file_if_missing(error, &module.path));
+            }
+        }
+
+        diagnostics.extend(attach_default_file(
+            types::diagnostics_with_resolver(&module.ast, &project.resolver, &module.ast.name),
+            &module.path,
+        ));
+        diagnostics.extend(attach_default_file(flow::diagnostics(&module.ast), &module.path));
+
+        let module_has_errors =
+            diagnostics[module_error_start..].iter().any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error);
+        if !module_has_errors {
+            if let Err(errors) = ir::generate_with_resolver_diagnostics(&module.ast, &project.resolver, &module.ast.name) {
+                diagnostics.extend(attach_default_file(errors, &module.path));
+            }
+        }
+    }
+    diagnostics
+}
+
+fn diagnostics_to_compile_error(mut diagnostics: Vec<CompileError>) -> CompileError {
+    match diagnostics.len() {
+        0 => CompileError::without_span("compilation failed"),
+        1 => diagnostics.remove(0),
+        len => CompileError::without_span(format!("aborting due to {} diagnostics", len)).with_related(diagnostics),
+    }
+}
+
+#[cfg(test)]
+mod compile_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn compile_metadata_diagnostics_collects_multiple_type_errors() {
+        let source = r#"
+module multi_errors
+
+action bad_one() -> u64 {
+    verification
+        return true
+}
+
+action bad_two() -> bool {
+    verification
+        return 1
+}
+"#;
+        let report = compile_metadata_with_diagnostics(source, None);
+        assert!(report.metadata.is_none());
+        assert_eq!(report.diagnostics.len(), 2);
+        assert!(report.diagnostics.iter().any(|error| error.message.contains("expected U64, found Bool")));
+        assert!(report.diagnostics.iter().any(|error| error.message.contains("expected Bool, found U64")));
+    }
+
+    #[test]
+    fn compile_metadata_diagnostics_collects_multiple_parse_errors() {
+        let source = r#"
+module multi_parse_errors
+
+action bad() -> bool {
+    verification
+        let first: u64 true
+        let second: bool 1
+        return true
+}
+"#;
+        let report = compile_metadata_with_diagnostics(source, None);
+        assert!(report.metadata.is_none());
+        assert_eq!(report.diagnostics.len(), 2);
+        assert!(report.diagnostics.iter().any(|error| error.message.contains("expected '=', found 'true'")));
+        assert!(report.diagnostics.iter().any(|error| error.message.contains("expected '=', found integer 1")));
+    }
+
+    #[test]
+    fn compile_sources_metadata_diagnostics_collects_parse_errors_across_files() {
+        let sources = vec![
+            InMemorySource {
+                path: "src/main.cell".to_string(),
+                role: Some("entry".to_string()),
+                source: r#"
+module demo::main
+
+action bad() -> bool {
+    verification
+        let first: u64 true
+        return true
+}
+"#
+                .to_string(),
+            },
+            InMemorySource {
+                path: "src/helper.cell".to_string(),
+                role: None,
+                source: r#"
+module demo::helper
+
+action also_bad() -> bool {
+    verification
+        let second: bool 1
+        return true
+}
+"#
+                .to_string(),
+            },
+        ];
+        let report = compile_sources_metadata_with_diagnostics(&sources, "src/main.cell", None);
+        assert!(report.metadata.is_none());
+        assert_eq!(report.diagnostics.len(), 2);
+        assert!(report.diagnostics.iter().any(|error| error.file.as_ref().is_some_and(|file| file.as_str() == "src/main.cell")));
+        assert!(report.diagnostics.iter().any(|error| error.file.as_ref().is_some_and(|file| file.as_str() == "src/helper.cell")));
+    }
+
+    #[test]
+    fn compile_metadata_diagnostics_collects_multiple_statement_errors() {
+        let source = r#"
+module multi_errors
+
+action bad() -> bool {
+    verification
+        let first: u64 = true
+        let second: bool = 1
+        return true
+}
+"#;
+        let report = compile_metadata_with_diagnostics(source, None);
+        assert!(report.metadata.is_none());
+        assert_eq!(report.diagnostics.len(), 2);
+        assert!(report.diagnostics.iter().any(|error| error.message.contains("expected U64, found Bool")));
+        assert!(report.diagnostics.iter().any(|error| error.message.contains("expected Bool, found U64")));
+    }
+
+    #[test]
+    fn compile_metadata_diagnostics_span_primitive_return_errors() {
+        let source = r#"
+module return_span
+
+action bad() -> bool {
+    verification
+        return 1
+}
+"#;
+        let report = compile_metadata_with_diagnostics(source, None);
+        assert!(report.metadata.is_none());
+        assert_eq!(report.diagnostics.len(), 1);
+        let diagnostic = &report.diagnostics[0];
+        assert!(diagnostic.message.contains("expected Bool, found U64"));
+        assert_eq!(diagnostic.span.line, 6);
+        assert_eq!(diagnostic.span.column, 9);
+        assert_eq!(&source[diagnostic.span.start..diagnostic.span.end], "return 1");
+    }
+
+    #[test]
+    fn compile_metadata_diagnostics_collects_multiple_ir_errors() {
+        let source = r#"
+module multi_ir_errors
+
+resource Token {
+    amount: u64,
+}
+
+#[effect(ReadOnly)]
+action issue_one(amount: u64) -> Token {
+    verification
+        let out = create Token {
+            amount: amount
+        }
+        return out
+}
+
+#[effect(ReadOnly)]
+action issue_two(amount: u64) -> Token {
+    verification
+        let out = create Token {
+            amount: amount
+        }
+        return out
+}
+"#;
+        let report = compile_metadata_with_diagnostics(source, None);
+        assert!(report.metadata.is_none());
+        assert_eq!(report.diagnostics.len(), 2);
+        assert!(report.diagnostics.iter().any(|error| error.message.contains("action 'issue_one'")));
+        assert!(report.diagnostics.iter().any(|error| error.message.contains("action 'issue_two'")));
+        assert!(report.diagnostics.iter().all(|error| error.message.contains("declared effect ReadOnly is too weak")));
+    }
+}
+
 fn compile_ast(ast: &ast::Module, options: &CompileOptions, resolver: Option<(&ModuleResolver, &str)>) -> Result<CompileResult> {
     compile_ast_with_build(ast, options, resolver, None, None)
 }
@@ -4308,7 +4774,7 @@ fn compile_ast_with_build(
     ast: &ast::Module,
     options: &CompileOptions,
     resolver: Option<(&ModuleResolver, &str)>,
-    build: Option<&CellBuildConfig>,
+    build: Option<&BuildConfig>,
     entry_scope: Option<&CompileEntryScope>,
 ) -> Result<CompileResult> {
     validate_compile_options(options)?;
@@ -4373,7 +4839,10 @@ fn compile_ast_with_build(
         return Err(CompileError::new("backend produced an empty artifact", error::Span::default()));
     }
 
-    // 5b. Debug info generation (embed DWARF section when debug option enabled and artifact is ELF)
+    // 5b. Debug info generation (embed DWARF section when debug option enabled and artifact is ELF).
+    // Gated out of the wasm build: the debug module pulls native tooling
+    // and DWARF embedding is not needed in the browser playground.
+    #[cfg(not(feature = "wasm"))]
     if options.debug && artifact_format == ArtifactFormat::RiscvElf {
         let mut debug_gen =
             debug::DebugInfoGenerator::new(lowering_ast.name.clone(), std::path::PathBuf::from(lowering_ast.name.clone()));
@@ -4465,45 +4934,68 @@ fn compile_file_with_entry_scope<P: AsRef<Utf8Path>>(
     entry_scope: Option<CompileEntryScope>,
 ) -> Result<CompileResult> {
     let path = path.as_ref();
-    let source =
-        std::fs::read_to_string(path).map_err(|e| CompileError::new(format!("failed to read file: {}", e), error::Span::default()))?;
+    let path = canonical_utf8_path(path)?;
+    let source_units = collect_source_units_for_compile_file(&path)?;
+    let cache_units = collect_cache_units_for_compile_file(&path, &source_units)?;
 
     // Incremental compilation: skip recompilation if cache hit and source unchanged.
     // Cache is only used for default entry scope (no --entry-action / --entry-lock).
     if entry_scope.is_none() {
-        if let Some(cached) = incremental_cache_hit(path, &source, &options) {
+        if let Some(cached) = incremental_cache_hit(&path, &cache_units, &options) {
             return Ok(cached);
         }
     }
 
-    let tokens = lexer::lex(&source)?;
-    let ast = parser::parse(&tokens)?;
-    let resolver = build_module_resolver(path, &ast)?;
-    let manifest = find_package_root(path)?.map(|root| load_manifest(&root)).transpose()?;
+    let project = load_project_for_entry(&path, None)?;
+    let manifest = find_package_root(&path)?.map(|root| load_manifest(&root)).transpose()?;
+    let diagnostics = project_frontend_diagnostics(&project, &options, manifest.is_some());
+    if diagnostics.iter().any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error) {
+        return Err(diagnostics_to_compile_error(diagnostics));
+    }
+
+    let entry = project.entry();
+    let ast = &entry.ast;
     let mut result = compile_ast_with_build(
-        &ast,
+        ast,
         &options,
-        Some((&resolver, &ast.name)),
+        Some((&project.resolver, &ast.name)),
         manifest.as_ref().map(|manifest| &manifest.build),
         entry_scope.as_ref(),
     )?;
-    bind_source_metadata(&mut result.metadata, collect_source_units_for_compile_file(path)?);
+    bind_source_metadata(&mut result.metadata, source_units);
     if let Some(manifest) = manifest.as_ref() {
         apply_manifest_deploy_metadata(&mut result.metadata, manifest)?;
     }
     result.validate()?;
 
-    // Incremental compilation: store successful compilation result in cache
-    incremental_cache_store(path, &source, &options, &result);
+    // Incremental compilation: store successful compilation result in cache.
+    // Entry-scoped compiles use the same public options as default compiles,
+    // so they must not write the default cache key.
+    if entry_scope.is_none() {
+        incremental_cache_store(&path, &cache_units, &options, &result);
+    }
 
     Ok(result)
 }
 
+#[cfg(feature = "cli")]
+pub(crate) fn refresh_incremental_cache_for_input<P: AsRef<Utf8Path>>(
+    input: P,
+    options: &CompileOptions,
+    result: &CompileResult,
+) -> Result<()> {
+    let resolved = resolve_input_path(input.as_ref())?;
+    let source_units = collect_source_units_for_compile_file(&resolved)?;
+    let cache_units = collect_cache_units_for_compile_file(&resolved, &source_units)?;
+    incremental_cache_store(&resolved, &cache_units, options, result);
+    Ok(())
+}
+
 /// Check incremental compilation cache for a previous compile result.
 /// Returns `Some(result)` if the cache is valid and the source has not changed.
-fn incremental_cache_hit(path: &Utf8Path, source: &str, options: &CompileOptions) -> Option<CompileResult> {
+fn incremental_cache_hit(path: &Utf8Path, cache_units: &[SourceUnitMetadata], options: &CompileOptions) -> Option<CompileResult> {
     let cache_dir = incremental_cache_dir(path)?;
-    let cache_key = incremental_cache_key(source, options);
+    let cache_key = incremental_cache_key(cache_units, options);
     let entry_dir = cache_dir.join(&cache_key);
 
     let artifact_path = entry_dir.join("artifact");
@@ -4516,7 +5008,7 @@ fn incremental_cache_hit(path: &Utf8Path, source: &str, options: &CompileOptions
     // Verify the source content hash still matches.
     let source_hash_file = entry_dir.join("source_hash");
     let cached_source_hash = std::fs::read_to_string(&source_hash_file).ok()?;
-    let current_source_hash = hex_encode(&ckb_blake2b256(source.as_bytes()));
+    let current_source_hash = source_set_hash(cache_units);
     if cached_source_hash != current_source_hash {
         return None;
     }
@@ -4547,9 +5039,9 @@ fn incremental_cache_hit(path: &Utf8Path, source: &str, options: &CompileOptions
 }
 
 /// Store compile result to incremental cache after a successful compile.
-fn incremental_cache_store(path: &Utf8Path, source: &str, options: &CompileOptions, result: &CompileResult) {
+fn incremental_cache_store(path: &Utf8Path, cache_units: &[SourceUnitMetadata], options: &CompileOptions, result: &CompileResult) {
     let Some(cache_dir) = incremental_cache_dir(path) else { return };
-    let cache_key = incremental_cache_key(source, options);
+    let cache_key = incremental_cache_key(cache_units, options);
     let entry_dir = cache_dir.join(&cache_key);
 
     let _ = std::fs::create_dir_all(&entry_dir);
@@ -4557,8 +5049,11 @@ fn incremental_cache_store(path: &Utf8Path, source: &str, options: &CompileOptio
     let _ = std::fs::write(entry_dir.join("artifact"), &result.artifact_bytes);
     let metadata_json = serde_json::to_string_pretty(&result.metadata).unwrap_or_default();
     let _ = std::fs::write(entry_dir.join("metadata.json"), metadata_json);
-    let source_hash = hex_encode(&ckb_blake2b256(source.as_bytes()));
+    let source_hash = source_set_hash(cache_units);
     let _ = std::fs::write(entry_dir.join("source_hash"), &source_hash);
+    if let Ok(cache_units_json) = serde_json::to_string_pretty(cache_units) {
+        let _ = std::fs::write(entry_dir.join("source_units.json"), cache_units_json);
+    }
 }
 
 fn incremental_cache_dir(path: &Utf8Path) -> Option<Utf8PathBuf> {
@@ -4573,17 +5068,37 @@ fn incremental_cache_dir(path: &Utf8Path) -> Option<Utf8PathBuf> {
     Some(parent.join(".cell/build/cache"))
 }
 
-fn incremental_cache_key(source: &str, options: &CompileOptions) -> String {
+fn incremental_cache_key(cache_units: &[SourceUnitMetadata], options: &CompileOptions) -> String {
     let mut key_input = String::new();
     key_input.push_str("cellscript-incremental-cache-v2");
     key_input.push_str(&format!("-compiler-{}", VERSION));
     key_input.push_str(&format!("-metadata-{}", METADATA_SCHEMA_VERSION));
-    key_input.push_str(&hex_encode(&ckb_blake2b256(source.as_bytes())));
+    key_input.push_str(&format!(
+        "-metadata-components-{}-{}-{}",
+        SOURCE_METADATA_SCHEMA_VERSION, ARTIFACT_METADATA_SCHEMA_VERSION, CONSTRAINTS_METADATA_SCHEMA_VERSION
+    ));
+    key_input.push_str(&format!("-artifact-cache-{}", ARTIFACT_CACHE_VERSION));
+    key_input.push_str(&source_set_hash(cache_units));
     key_input.push_str(&format!("-O{}", options.opt_level));
     key_input.push_str(&format!("-{}", options.target.as_deref().unwrap_or("default")));
     key_input.push_str(&format!("-{}", options.target_profile.as_deref().unwrap_or("default")));
     key_input.push_str(&format!("-debug{}", options.debug));
     key_input.push_str(&format!("-primitive-{}", options.primitive_compat.as_deref().unwrap_or("default")));
+    hex_encode(&ckb_blake2b256(key_input.as_bytes()))
+}
+
+fn source_set_hash(cache_units: &[SourceUnitMetadata]) -> String {
+    let mut key_input = String::new();
+    for unit in cache_units {
+        key_input.push_str(&unit.role);
+        key_input.push('\0');
+        key_input.push_str(&unit.path);
+        key_input.push('\0');
+        key_input.push_str(&unit.hash);
+        key_input.push('\0');
+        key_input.push_str(&unit.size_bytes.to_string());
+        key_input.push('\n');
+    }
     hex_encode(&ckb_blake2b256(key_input.as_bytes()))
 }
 
@@ -4608,7 +5123,7 @@ fn source_unit_from_file(path: &Utf8Path, role: &str) -> Result<SourceUnitMetada
     Ok(source_unit_from_bytes(path.to_string(), role.to_string(), &bytes))
 }
 
-fn collect_source_units_for_compile_file(entry_path: &Utf8Path) -> Result<Vec<SourceUnitMetadata>> {
+fn collect_source_paths_for_compile_file(entry_path: &Utf8Path) -> Result<BTreeSet<Utf8PathBuf>> {
     let entry_path = canonical_utf8_path(entry_path)?;
     let mut source_paths = BTreeSet::new();
     let package_root = find_package_root(&entry_path)?;
@@ -4623,6 +5138,14 @@ fn collect_source_units_for_compile_file(entry_path: &Utf8Path) -> Result<Vec<So
     }
     source_paths.insert(entry_path.clone());
 
+    Ok(source_paths)
+}
+
+fn collect_source_units_for_compile_file(entry_path: &Utf8Path) -> Result<Vec<SourceUnitMetadata>> {
+    let entry_path = canonical_utf8_path(entry_path)?;
+    let package_root = find_package_root(&entry_path)?;
+    let source_paths = collect_source_paths_for_compile_file(&entry_path)?;
+
     source_paths
         .into_iter()
         .map(|source_path| {
@@ -4636,6 +5159,47 @@ fn collect_source_units_for_compile_file(entry_path: &Utf8Path) -> Result<Vec<So
             source_unit_from_file(&source_path, role)
         })
         .collect()
+}
+
+fn collect_cache_units_for_compile_file(
+    entry_path: &Utf8Path,
+    source_units: &[SourceUnitMetadata],
+) -> Result<Vec<SourceUnitMetadata>> {
+    let entry_path = canonical_utf8_path(entry_path)?;
+    let mut units = source_units.to_vec();
+    if let Some(package_root) = find_package_root(&entry_path)? {
+        let mut package_roots = BTreeSet::new();
+        let mut visited_roots = HashSet::new();
+        collect_package_roots_recursive(&package_root, &mut visited_roots, &mut package_roots)?;
+        for package_root in package_roots {
+            let manifest_path = package_root.join("Cell.toml");
+            if manifest_path.exists() {
+                units.push(source_unit_from_file(&manifest_path, "manifest")?);
+            }
+            let lock_path = package_root.join("Cell.lock");
+            if lock_path.exists() {
+                units.push(source_unit_from_file(&lock_path, "lockfile")?);
+            }
+        }
+    }
+    units.sort_by(|left, right| left.path.cmp(&right.path).then_with(|| left.role.cmp(&right.role)));
+    Ok(units)
+}
+
+fn collect_package_roots_recursive(
+    package_root: &Utf8Path,
+    visited_roots: &mut HashSet<Utf8PathBuf>,
+    package_roots: &mut BTreeSet<Utf8PathBuf>,
+) -> Result<()> {
+    let package_root = canonical_utf8_path(package_root)?;
+    if !visited_roots.insert(package_root.clone()) {
+        return Ok(());
+    }
+    package_roots.insert(package_root.clone());
+    for dep_root in local_dependency_roots(&package_root)? {
+        collect_package_roots_recursive(&dep_root, visited_roots, package_roots)?;
+    }
+    Ok(())
 }
 
 fn collect_package_source_paths_recursive(
@@ -4658,119 +5222,12 @@ fn collect_package_source_paths_recursive(
     Ok(())
 }
 
-fn build_module_resolver(path: &Utf8Path, current_module: &ast::Module) -> Result<ModuleResolver> {
-    let mut resolver = ModuleResolver::new();
-    resolver.register_module(current_module.clone())?;
-
-    let current_path = canonical_utf8_path(path)?;
-    if let Some(package_root) = find_package_root(path)? {
-        let mut visited_roots = HashSet::new();
-        let mut loading_roots = Vec::new();
-        load_package_modules(&mut resolver, &package_root, &current_path, &mut visited_roots, &mut loading_roots)?;
-    } else if let Some(parent) = path.parent() {
-        for candidate in collect_cell_files(parent)? {
-            if candidate == current_path {
-                continue;
-            }
-            register_module_file(&mut resolver, &candidate)?;
-        }
-    }
-
-    Ok(resolver)
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CellManifest {
-    #[serde(default)]
-    package: Option<CellManifestPackage>,
-    #[serde(default)]
-    workspace: Option<CellWorkspaceConfig>,
-    #[serde(default)]
-    build: CellBuildConfig,
-    #[serde(default)]
-    deploy: CellDeployConfig,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CellManifestPackage {
-    #[serde(default)]
-    entry: Option<String>,
-    #[serde(default)]
-    source_roots: Vec<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[allow(dead_code)]
-struct CellWorkspaceConfig {
-    #[serde(default)]
-    members: Vec<String>,
-    #[serde(default)]
-    exclude: Vec<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CellBuildConfig {
-    #[serde(default)]
-    target: Option<String>,
-    #[serde(default)]
-    target_profile: Option<String>,
-    #[serde(default)]
-    out_dir: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CellDeployConfig {
-    #[serde(default)]
-    ckb: Option<CellCkbDeployConfig>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CellCkbDeployConfig {
-    #[serde(default)]
-    artifact_hash: Option<String>,
-    #[serde(default)]
-    data_hash: Option<String>,
-    #[serde(default)]
-    out_point: Option<String>,
-    #[serde(default)]
-    dep_type: Option<String>,
-    #[serde(default)]
-    hash_type: Option<String>,
-    #[serde(default)]
-    type_id: Option<String>,
-    #[serde(default)]
-    cell_deps: Vec<CellCkbCellDepConfig>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CellCkbCellDepConfig {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    out_point: Option<String>,
-    #[serde(default)]
-    tx_hash: Option<String>,
-    #[serde(default)]
-    index: Option<u32>,
-    #[serde(default)]
-    dep_type: Option<String>,
-    #[serde(default)]
-    data_hash: Option<String>,
-    #[serde(default)]
-    hash_type: Option<String>,
-    #[serde(default)]
-    type_id: Option<String>,
-}
-
 fn find_package_root(path: &Utf8Path) -> Result<Option<Utf8PathBuf>> {
     let mut current = path.parent();
     while let Some(dir) = current {
         let manifest = dir.join("Cell.toml");
-        if manifest.exists() {
-            let manifest = load_manifest(dir)?;
-            if manifest.package.is_some() {
-                return Ok(Some(dir.to_path_buf()));
-            }
+        if manifest.exists() && manifest_has_table(&manifest, "package")? {
+            return Ok(Some(dir.to_path_buf()));
         }
         current = dir.parent();
     }
@@ -4784,13 +5241,8 @@ pub fn find_workspace_root(path: &Utf8Path) -> Result<Option<Utf8PathBuf>> {
     let mut current = path.parent();
     while let Some(dir) = current {
         let manifest_path = dir.join("Cell.toml");
-        if manifest_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                let has_workspace = content.contains("[workspace]");
-                if has_workspace {
-                    return Ok(Some(dir.to_path_buf()));
-                }
-            }
+        if manifest_path.exists() && manifest_has_table(&manifest_path, "workspace")? {
+            return Ok(Some(dir.to_path_buf()));
         }
         current = dir.parent();
     }
@@ -4800,12 +5252,21 @@ pub fn find_workspace_root(path: &Utf8Path) -> Result<Option<Utf8PathBuf>> {
 /// Resolve workspace member directories from a workspace root.
 /// Reads the `[workspace]` section and resolves member paths.
 pub fn resolve_workspace_members(workspace_root: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
-    let manifest = load_manifest(workspace_root)?;
-    let Some(ws_config) = manifest.workspace else {
-        return Ok(Vec::new());
+    let manifest_path = workspace_root.join("Cell.toml");
+    let manifest_source = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| CompileError::new(format!("failed to read manifest '{}': {}", manifest_path, e), error::Span::default()))?;
+    let member_patterns = if manifest_has_table(&manifest_path, "package")? {
+        let manifest: PackageManifest = toml::from_str(&manifest_source)
+            .map_err(|e| CompileError::new(format!("failed to parse manifest '{}': {}", manifest_path, e), error::Span::default()))?;
+        manifest.workspace.map(|workspace| workspace.members).unwrap_or_default()
+    } else {
+        let manifest: WorkspaceManifest = toml::from_str(&manifest_source).map_err(|e| {
+            CompileError::new(format!("failed to parse workspace manifest '{}': {}", manifest_path, e), error::Span::default())
+        })?;
+        manifest.workspace.members
     };
     let mut members = Vec::new();
-    for member_pattern in &ws_config.members {
+    for member_pattern in &member_patterns {
         let member_path = workspace_root.join(member_pattern);
         if !member_path.is_dir() {
             return Err(CompileError::new(
@@ -4822,41 +5283,6 @@ pub fn resolve_workspace_members(workspace_root: &Utf8Path) -> Result<Vec<Utf8Pa
         members.push(canonical_utf8_path(&member_path)?);
     }
     Ok(members)
-}
-
-fn load_package_modules(
-    resolver: &mut ModuleResolver,
-    package_root: &Utf8Path,
-    current_path: &Utf8Path,
-    visited_roots: &mut HashSet<Utf8PathBuf>,
-    loading_roots: &mut Vec<Utf8PathBuf>,
-) -> Result<()> {
-    let package_root = canonical_utf8_path(package_root)?;
-    if visited_roots.contains(&package_root) {
-        return Ok(());
-    }
-    if let Some(index) = loading_roots.iter().position(|root| root == &package_root) {
-        let mut cycle = loading_roots[index..].to_vec();
-        cycle.push(package_root.clone());
-        let cycle = cycle.into_iter().map(|path| path.to_string()).collect::<Vec<_>>().join(" -> ");
-        return Err(CompileError::new(format!("path dependency cycle detected: {}", cycle), error::Span::default()));
-    }
-    loading_roots.push(package_root.clone());
-
-    for candidate in collect_package_cell_files(&package_root)? {
-        if candidate == current_path {
-            continue;
-        }
-        register_module_file(resolver, &candidate)?;
-    }
-
-    for dep_root in local_dependency_roots(&package_root)? {
-        load_package_modules(resolver, &dep_root, current_path, visited_roots, loading_roots)?;
-    }
-
-    loading_roots.pop();
-    visited_roots.insert(package_root);
-    Ok(())
 }
 
 fn local_dependency_roots(package_root: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
@@ -4904,7 +5330,7 @@ fn resolve_input_file(input: &Utf8Path) -> Result<Utf8PathBuf> {
 fn resolve_package_entry(package_root: &Utf8Path) -> Result<Utf8PathBuf> {
     let manifest = load_manifest(package_root)?;
 
-    let entry = manifest.package.as_ref().and_then(|package| package.entry.clone()).unwrap_or_else(default_package_entry);
+    let entry = manifest.package.entry;
     let entry_path = package_root.join(entry);
     if !entry_path.exists() {
         return Err(CompileError::new(format!("package entry '{}' does not exist", entry_path), error::Span::default()));
@@ -4944,27 +5370,6 @@ fn metadata_output_path_from_artifact(artifact_path: &Utf8Path) -> Utf8PathBuf {
     artifact_path.with_file_name(metadata_name)
 }
 
-fn target_profile_action_estimated_cycles(target_profile: TargetProfile, base_estimate: u64, body: &ir::IrBody) -> u64 {
-    match target_profile {
-        TargetProfile::Ckb => base_estimate,
-        TargetProfile::TypedCell => base_estimate.max(typed_cell_action_estimated_cycles(body)),
-    }
-}
-
-fn typed_cell_action_estimated_cycles(body: &ir::IrBody) -> u64 {
-    let instruction_count = body.blocks.iter().map(|block| block.instructions.len() as u64).sum::<u64>();
-    let branch_count = body
-        .blocks
-        .iter()
-        .filter(|block| matches!(block.terminator, ir::IrTerminator::Jump(_) | ir::IrTerminator::Branch { .. }))
-        .count() as u64;
-    let cell_ops = (body.consume_set.len() + body.read_refs.len() + body.create_set.len() + body.mutate_set.len()) as u64;
-    1_000u64
-        .saturating_add(instruction_count.saturating_mul(16))
-        .saturating_add(branch_count.saturating_mul(64))
-        .saturating_add(cell_ops.saturating_mul(6_000))
-}
-
 fn compile_metadata_from_ir(ir: &ir::IrModule, artifact_format: ArtifactFormat, target_profile: TargetProfile) -> CompileMetadata {
     let type_layouts = metadata_type_layouts(ir);
     let type_defs = metadata_type_defs_by_name(ir);
@@ -4975,19 +5380,10 @@ fn compile_metadata_from_ir(ir: &ir::IrModule, artifact_format: ArtifactFormat, 
     let fail_closed_runtime_features = module_fail_closed_runtime_features(ir, &type_layouts, &cell_type_kinds, &pure_const_returns);
     let ckb_runtime_features = module_ckb_runtime_features(ir, &cell_type_kinds, &type_layouts);
     let ckb_runtime_accesses = module_ckb_runtime_accesses(ir, &cell_type_kinds, &type_layouts);
-    let mut verifier_obligations =
+    let verifier_obligations =
         module_verifier_obligations(ir, &type_layouts, &flow_states, &flow_state_fields, &cell_type_kinds, &pure_const_returns);
-    verifier_obligations.extend(module_typed_cell_scheduler_verifier_obligations(ir, &type_defs, target_profile));
-    let proof_plan = module_proof_plan_metadata(
-        ir,
-        &type_layouts,
-        &flow_states,
-        &flow_state_fields,
-        &cell_type_kinds,
-        &pure_const_returns,
-        &type_defs,
-        target_profile,
-    );
+    let proof_plan =
+        module_proof_plan_metadata(ir, &type_layouts, &flow_states, &flow_state_fields, &cell_type_kinds, &pure_const_returns);
     let collection_instantiations = module_collection_instantiation_metadata(ir, &type_layouts, &pure_const_returns);
     let transaction_runtime_input_requirements = transaction_runtime_input_requirements_from_obligations(&verifier_obligations);
     let pool_primitives = module_pool_primitive_metadata(ir, &type_layouts, &cell_type_kinds, &pure_const_returns);
@@ -5002,8 +5398,12 @@ fn compile_metadata_from_ir(ir: &ir::IrModule, artifact_format: ArtifactFormat, 
         _ => None,
     }));
     let molecule_schema_manifest = molecule_schema_manifest_metadata(&types, target_profile);
+    let cell_data_codec_manifest = cell_data_codec_manifest_metadata(&ckb_runtime_accesses, &molecule_schema_manifest, target_profile);
     let mut metadata = CompileMetadata {
         metadata_schema_version: METADATA_SCHEMA_VERSION,
+        source_metadata_schema_version: SOURCE_METADATA_SCHEMA_VERSION,
+        artifact_metadata_schema_version: ARTIFACT_METADATA_SCHEMA_VERSION,
+        constraints_metadata_schema_version: CONSTRAINTS_METADATA_SCHEMA_VERSION,
         compiler_version: VERSION.to_string(),
         module: ir.name.clone(),
         artifact_format: artifact_format.display_name().to_string(),
@@ -5058,6 +5458,7 @@ fn compile_metadata_from_ir(ir: &ir::IrModule, artifact_format: ArtifactFormat, 
         },
         constraints: ConstraintsMetadata::default(),
         molecule_schema_manifest,
+        cell_data_codec_manifest,
         types,
         actions: ir
             .items
@@ -5078,7 +5479,7 @@ fn compile_metadata_from_ir(ir: &ir::IrModule, artifact_format: ArtifactFormat, 
                         merge_ckb_runtime_features(body_ckb_runtime_features(&action.name, &action.body, &cell_type_kinds, &type_layouts), &action.params);
                     let ckb_runtime_accesses =
                         merge_ckb_runtime_accesses(body_ckb_runtime_accesses(&action.name, &action.body, &cell_type_kinds, &type_layouts), &action.params);
-                    let mut verifier_obligations = body_verifier_obligations(
+                    let verifier_obligations = body_verifier_obligations(
                         "action",
                         &action.name,
                         &action.body,
@@ -5093,13 +5494,6 @@ fn compile_metadata_from_ir(ir: &ir::IrModule, artifact_format: ArtifactFormat, 
                         action.return_type.as_ref(),
                         &pure_const_returns,
                     );
-                    verifier_obligations.extend(typed_cell_scheduler_verifier_obligations(
-                        "action",
-                        &action.name,
-                        &action.body,
-                        &type_defs,
-                        target_profile,
-                    ));
                     let pool_primitives = body_pool_primitive_metadata(
                         "action",
                         &action.name,
@@ -5121,30 +5515,15 @@ fn compile_metadata_from_ir(ir: &ir::IrModule, artifact_format: ArtifactFormat, 
                         &pool_primitives,
                     );
                     let standalone_runner_compatible = ckb_runtime_features.is_empty() && action.params.is_empty();
-                    let scheduler_accesses = if target_profile == TargetProfile::TypedCell {
-                        typed_cell_scheduler_accesses_from_body(&action.body)
-                    } else {
-                        scheduler_accesses_from_metadata(&ckb_runtime_accesses)
-                    };
+                    let scheduler_accesses = scheduler_accesses_from_metadata(&ckb_runtime_accesses);
                     let scheduler_effect_class = format!("{:?}", action.effect_class);
-                    let estimated_cycles =
-                        target_profile_action_estimated_cycles(target_profile, action.scheduler_hints.estimated_cycles, &action.body);
-                    let scheduler_witness_molecule = if target_profile == TargetProfile::TypedCell {
-                        crate::stdlib::SchedulerMetadata::generate_typed_cell_molecule(
-                            &scheduler_effect_class,
-                            action.scheduler_hints.parallelizable,
-                            estimated_cycles,
-                            scheduler_accesses,
-                        )
-                    } else {
-                        crate::stdlib::SchedulerMetadata::generate(
-                            &scheduler_effect_class,
-                            action.scheduler_hints.parallelizable,
-                            action.scheduler_hints.touches_shared.clone(),
-                            estimated_cycles,
-                            scheduler_accesses,
-                        )
-                    };
+                    let scheduler_witness_molecule = crate::stdlib::SchedulerMetadata::generate(
+                        &scheduler_effect_class,
+                        action.scheduler_hints.parallelizable,
+                        action.scheduler_hints.touches_shared.clone(),
+                        action.scheduler_hints.estimated_cycles,
+                        scheduler_accesses,
+                    );
                     let scheduler_witness_molecule_hex = hex_bytes(&scheduler_witness_molecule);
                     Some(ActionMetadata {
                         name: action.name.clone(),
@@ -5152,11 +5531,10 @@ fn compile_metadata_from_ir(ir: &ir::IrModule, artifact_format: ArtifactFormat, 
                         effect_class: scheduler_effect_class,
                         parallelizable: action.scheduler_hints.parallelizable,
                         touches_shared: action.scheduler_hints.touches_shared.iter().map(hex_hash).collect(),
-                        estimated_cycles,
+                        estimated_cycles: action.scheduler_hints.estimated_cycles,
                         scheduler_witness_abi: SCHEDULER_WITNESS_ABI_MOLECULE.to_string(),
                         scheduler_witness_hex: scheduler_witness_molecule_hex.clone(),
                         scheduler_witness_molecule_hex: String::new(),
-                        typed_cell_scheduler_plan: typed_cell_scheduler_plan_metadata(&action.body, &type_defs, target_profile),
                         consume_set: action.body.consume_set.iter().map(cell_pattern_metadata).collect(),
                         read_refs: action.body.read_refs.iter().map(cell_pattern_metadata).collect(),
                         create_set: action
@@ -5962,26 +6340,6 @@ fn module_verifier_obligations(
     obligations
 }
 
-fn module_typed_cell_scheduler_verifier_obligations(
-    ir: &ir::IrModule,
-    type_defs: &BTreeMap<String, &ir::IrTypeDef>,
-    target_profile: TargetProfile,
-) -> Vec<VerifierObligationMetadata> {
-    let mut obligations = Vec::new();
-    for item in &ir.items {
-        if let ir::IrItem::Action(action) = item {
-            obligations.extend(typed_cell_scheduler_verifier_obligations(
-                "action",
-                &action.name,
-                &action.body,
-                type_defs,
-                target_profile,
-            ));
-        }
-    }
-    obligations
-}
-
 fn module_proof_plan_metadata(
     ir: &ir::IrModule,
     type_layouts: &MetadataTypeLayouts,
@@ -5989,8 +6347,6 @@ fn module_proof_plan_metadata(
     flow_state_fields: &HashMap<String, String>,
     cell_type_kinds: &HashMap<String, ir::IrTypeKind>,
     pure_const_returns: &HashMap<String, ir::IrConst>,
-    type_defs: &BTreeMap<String, &ir::IrTypeDef>,
-    target_profile: TargetProfile,
 ) -> Vec<ProofPlanMetadata> {
     let mut proof_plan = Vec::new();
     for item in &ir.items {
@@ -6014,7 +6370,7 @@ fn module_proof_plan_metadata(
                     body_ckb_runtime_accesses(&action.name, &action.body, cell_type_kinds, type_layouts),
                     &action.params,
                 );
-                let mut verifier_obligations = body_verifier_obligations(
+                let verifier_obligations = body_verifier_obligations(
                     "action",
                     &action.name,
                     &action.body,
@@ -6029,13 +6385,6 @@ fn module_proof_plan_metadata(
                     action.return_type.as_ref(),
                     pure_const_returns,
                 );
-                verifier_obligations.extend(typed_cell_scheduler_verifier_obligations(
-                    "action",
-                    &action.name,
-                    &action.body,
-                    type_defs,
-                    target_profile,
-                ));
                 let pool_primitives = body_pool_primitive_metadata(
                     "action",
                     &action.name,
@@ -8506,7 +8855,15 @@ fn pool_checked_invariant_guard_names(name: &str, operation: &str, source_invari
     }
 
     let named_guards = match (operation, name) {
-        ("create", "seed_pool") => &["token-pair-distinct", "positive-reserves", "fee-bps-bound", "token-pair-identity-distinct"][..],
+        ("create", "seed_pool") => &[
+            "token-pair-distinct",
+            "positive-reserves",
+            "fee-bps-bound",
+            "token-pair-identity-distinct",
+            "liquidity-overflow-bound",
+            "sqrt-input-bound",
+            "positive-lp-supply",
+        ][..],
         ("create", "launch_token") => &[
             "initial-mint-cap",
             "pool-seed-positive",
@@ -8515,9 +8872,42 @@ fn pool_checked_invariant_guard_names(name: &str, operation: &str, source_invari
             "fee-bps-bound",
             "pool-seed-cap",
         ][..],
-        ("mutation-invariants", "swap_a_for_b") => &["input-token-a-match", "minimum-output-bound", "reserve-output-bound"][..],
-        ("mutation-invariants", "add_liquidity") => &["deposit-token-a-match", "deposit-token-b-match"][..],
-        ("mutation-invariants", "remove_liquidity") => &["lp-receipt-pool-id-match"][..],
+        ("mutation-invariants", "swap_a_for_b") => &[
+            "input-token-a-match",
+            "positive-input",
+            "positive-reserves",
+            "positive-lp-supply",
+            "fee-bps-bound",
+            "fee-overflow-bound",
+            "reserve-a-overflow-bound",
+            "positive-net-input",
+            "pricing-overflow-bound",
+            "minimum-output-bound",
+            "reserve-output-bound",
+            "positive-output",
+        ][..],
+        ("mutation-invariants", "add_liquidity") => &[
+            "deposit-token-a-match",
+            "deposit-token-b-match",
+            "positive-deposit",
+            "positive-pool",
+            "reserve-a-overflow-bound",
+            "reserve-b-overflow-bound",
+            "lp-a-overflow-bound",
+            "lp-b-overflow-bound",
+            "positive-lp-mint",
+            "lp-supply-overflow-bound",
+        ][..],
+        ("mutation-invariants", "remove_liquidity") => &[
+            "lp-receipt-pool-id-match",
+            "lp-provider-match",
+            "positive-lp-burn",
+            "positive-pool",
+            "lp-burn-supply-bound",
+            "withdraw-a-overflow-bound",
+            "withdraw-b-overflow-bound",
+            "positive-withdrawal",
+        ][..],
         ("composition", "launch_token") => &["initial-mint-cap", "pool-seed-cap", "distribution-cap"][..],
         _ => &[][..],
     };
@@ -9810,7 +10200,7 @@ fn type_field_has_fixed_width(type_layouts: &MetadataTypeLayouts, type_name: &st
     type_layouts
         .get(type_name)
         .and_then(|fields| fields.get(field))
-        .and_then(metadata_layout_fixed_byte_width)
+        .and_then(|layout| metadata_layout_or_named_fixed_byte_width(layout, type_layouts))
         .is_some_and(|width| width == expected_width)
 }
 
@@ -11422,7 +11812,7 @@ fn metadata_unique_identity_policy_is_executable(
         ir::IrIdentityPolicy::Field(field) => type_layouts
             .get(pattern.ty.as_str())
             .and_then(|fields| fields.get(field))
-            .is_some_and(|layout| metadata_layout_fixed_byte_width(layout).is_some()),
+            .is_some_and(|layout| metadata_layout_or_named_fixed_byte_width(layout, type_layouts).is_some()),
     }
 }
 
@@ -11668,8 +12058,13 @@ fn metadata_prelude_availability(
                         };
                         layout
                     };
-                    if metadata_layout_fixed_byte_width(&layout).is_some() && layout.ty == dest.ty {
+                    if metadata_layout_or_named_fixed_byte_width(&layout, type_layouts).is_some() && layout.ty == dest.ty {
                         availability.fixed_value_vars.insert(dest.id);
+                        if metadata_ir_type_fixed_width(&dest.ty, type_layouts).is_some_and(|width| width > 8) {
+                            availability
+                                .aggregate_pointer_vars
+                                .insert(dest.id, MetadataAggregatePointerSource { ty: dest.ty.clone() });
+                        }
                     }
                     if metadata_layout_fixed_scalar_width(&layout).is_some() && layout.ty == dest.ty {
                         availability.scalar_vars.insert(dest.id);
@@ -11678,7 +12073,7 @@ fn metadata_prelude_availability(
                             availability.u64_operand_vars.insert(dest.id);
                         }
                     }
-                    if metadata_layout_fixed_byte_width(&layout).is_none()
+                    if metadata_layout_or_named_fixed_byte_width(&layout, type_layouts).is_none()
                         && metadata_molecule_vector_element_fixed_width(&layout.ty, type_layouts).is_some()
                         && layout.ty == dest.ty
                     {
@@ -12000,7 +12395,7 @@ fn metadata_can_verify_create_output_fields(
     }
     pattern.fields.iter().all(|(field, value)| {
         layouts.get(field).is_some_and(|layout| {
-            if let Some(width) = metadata_layout_fixed_byte_width(layout) {
+            if let Some(width) = metadata_layout_or_named_fixed_byte_width(layout, type_layouts) {
                 metadata_fixed_value_available_with_width(value, availability, width)
             } else {
                 metadata_dynamic_create_output_value_available(value, layout, availability, type_layouts)
@@ -12462,6 +12857,10 @@ fn metadata_layout_fixed_byte_width(layout: &MetadataFieldLayout) -> Option<usiz
     metadata_fixed_byte_width(&layout.ty, layout.fixed_size).or(layout.fixed_enum_size)
 }
 
+fn metadata_layout_or_named_fixed_byte_width(layout: &MetadataFieldLayout, type_layouts: &MetadataTypeLayouts) -> Option<usize> {
+    metadata_layout_fixed_byte_width(layout).or(layout.fixed_size).or_else(|| metadata_ir_type_fixed_width(&layout.ty, type_layouts))
+}
+
 fn metadata_fixed_aggregate_pointer_size(ty: &ir::IrType) -> Option<usize> {
     match ty {
         ir::IrType::Array(_, _) | ir::IrType::Tuple(_) => type_static_length(ty).filter(|width| *width > 8),
@@ -12492,7 +12891,7 @@ fn metadata_inline_type_fixed_width(ty: &str, type_layouts: &MetadataTypeLayouts
         other => type_layouts.get(other).and_then(|fields| {
             fields
                 .values()
-                .try_fold(0usize, |acc, layout| metadata_layout_fixed_byte_width(layout).and_then(|width| acc.checked_add(width)))
+                .try_fold(0usize, |acc, layout| layout.fixed_size.or(layout.fixed_enum_size).and_then(|width| acc.checked_add(width)))
         }),
     }
 }
@@ -12736,7 +13135,6 @@ fn body_ckb_runtime_features(
                             | "__ckb_cell_type_hash_type"
                             | "__ckb_cell_lock_args_empty"
                             | "__ckb_cell_type_args_empty"
-                            | "__ckb_cell_exists"
                             | "__ckb_cell_lock_args_hash"
                             | "__ckb_cell_type_args_hash"
                             | "__ckb_require_cell_lock_hash"
@@ -12753,6 +13151,8 @@ fn body_ckb_runtime_features(
                             | "__ckb_require_cell_type_args_suffix_hash"
                             | "__ckb_require_cell_lock_script_hash_type"
                             | "__ckb_require_cell_type_script_hash_type"
+                            | "__ckb_cell_data_hash"
+                            | "__ckb_cell_data_hash_at"
                             | "__ckb_cell_data_size"
                             | "__ckb_cell_data_u32_le"
                             | "__ckb_cell_data_u64_le"
@@ -12797,7 +13197,10 @@ fn body_ckb_runtime_features(
                     ) {
                         features.insert("ckb-script-ref-read".to_string());
                     }
-                    if matches!(func.as_str(), "__ckb_cell_data_u32_le" | "__ckb_cell_data_u64_le") {
+                    if matches!(
+                        func.as_str(),
+                        "__ckb_cell_data_hash" | "__ckb_cell_data_hash_at" | "__ckb_cell_data_u32_le" | "__ckb_cell_data_u64_le"
+                    ) {
                         features.insert("ckb-cell-data-decode".to_string());
                     }
                     if matches!(func.as_str(), "__ckb_require_cell_lock_script_hash_type" | "__ckb_require_cell_type_script_hash_type")
@@ -12956,7 +13359,7 @@ fn is_executable_schema_field_access(
     let Some(layout) = type_layouts.get(type_name).and_then(|fields| fields.get(field)) else {
         return false;
     };
-    metadata_layout_fixed_byte_width(layout).is_some()
+    metadata_layout_or_named_fixed_byte_width(layout, type_layouts).is_some()
         || metadata_molecule_vector_element_fixed_width(&layout.ty, type_layouts).is_some()
 }
 
@@ -12975,7 +13378,7 @@ fn is_executable_aggregate_field_access(
     let Some(layout) = metadata_aggregate_or_named_field_layout(&source.ty, field, type_layouts) else {
         return false;
     };
-    metadata_layout_fixed_byte_width(&layout).is_some()
+    metadata_layout_or_named_fixed_byte_width(&layout, type_layouts).is_some()
 }
 
 fn is_executable_tuple_call_return_field_access(obj: &ir::IrOperand, field: &str, availability: &MetadataPreludeAvailability) -> bool {
@@ -13308,7 +13711,6 @@ fn ckb_v014_runtime_access(func: &str) -> Option<(&'static str, &'static str, &'
         "__ckb_cell_type_args_empty" => {
             Some(("cell-type-script-args-empty-read", "LOAD_CELL_BY_FIELD", "SourceView", "ckb::cell_type_args_empty"))
         }
-        "__ckb_cell_exists" => Some(("cell-exists", "LOAD_CELL_DATA", "SourceView", "ckb::cell_exists")),
         "__ckb_cell_lock_args_hash" => {
             Some(("cell-lock-script-args-hash-read", "LOAD_CELL_BY_FIELD", "SourceView", "ckb::cell_lock_args_hash"))
         }
@@ -13376,6 +13778,8 @@ fn ckb_v014_runtime_access(func: &str) -> Option<(&'static str, &'static str, &'
             "ckb::require_current_script_args_empty",
         )),
         "__ckb_current_script_hash" => Some(("current-script-hash", "LOAD_SCRIPT_HASH", "CurrentScript", "ckb::current_script_hash")),
+        "__ckb_cell_data_hash" => Some(("cell-data-hash", "LOAD_CELL_DATA", "SourceView", "ckb::cell_data_hash")),
+        "__ckb_cell_data_hash_at" => Some(("cell-data-hash-at", "LOAD_CELL_DATA", "SourceView", "ckb::cell_data_hash_at")),
         "__ckb_cell_data_size" => Some(("cell-data-size", "LOAD_CELL_DATA", "SourceView", "ckb::cell_data_size")),
         "__ckb_cell_data_u32_le" => Some(("cell-data-u32-le", "LOAD_CELL_DATA", "SourceView", "ckb::cell_data_u32_le")),
         "__ckb_cell_data_u64_le" => Some(("cell-data-u64-le", "LOAD_CELL_DATA", "SourceView", "ckb::cell_data_u64_le")),
@@ -13469,223 +13873,6 @@ fn scheduler_accesses_from_metadata(accesses: &[CkbRuntimeAccessMetadata]) -> Ve
         .collect()
 }
 
-fn typed_cell_scheduler_verifier_obligations(
-    scope_kind: &str,
-    name: &str,
-    body: &ir::IrBody,
-    type_defs: &BTreeMap<String, &ir::IrTypeDef>,
-    target_profile: TargetProfile,
-) -> Vec<VerifierObligationMetadata> {
-    let Some(plan) = typed_cell_scheduler_plan_metadata(body, type_defs, target_profile) else {
-        return Vec::new();
-    };
-    if plan.accesses.is_empty() {
-        return Vec::new();
-    }
-
-    plan.accesses
-        .into_iter()
-        .map(|access| {
-            let conflict_key = access.conflict_key.as_deref().unwrap_or("none");
-            VerifierObligationMetadata {
-                scope: format!("{}:{}", scope_kind, name),
-                category: "typed-cell-scheduler".to_string(),
-                feature: format!("{}:{}#{}:{}", access.operation, access.source, access.index, access.ty),
-                status: "ckb-runtime".to_string(),
-                detail: format!(
-                    "Typed-cell scheduler witness must bind {} {}#{} ({}) to conflict_key={}, conflict_hash_domain={}, typed_data_hash_domain={}, conflict_key_value_source={}, typed_data_source={}",
-                    access.operation,
-                    access.source,
-                    access.index,
-                    access.binding,
-                    conflict_key,
-                    plan.conflict_hash_domain,
-                    plan.typed_data_hash_domain,
-                    access.conflict_key_value_source,
-                    access.typed_data_source,
-                ),
-            }
-        })
-        .collect()
-}
-
-fn typed_cell_scheduler_accesses_from_body(body: &ir::IrBody) -> Vec<crate::stdlib::SchedulerAccess> {
-    let mut accesses = Vec::new();
-    for (index, pattern) in body.consume_set.iter().enumerate() {
-        if let Some(operation) = normalize_typed_cell_access_operation(&pattern.operation, "Input") {
-            accesses.push(crate::stdlib::SchedulerAccess {
-                operation: operation.to_string(),
-                source: "Input".to_string(),
-                index: u32::try_from(index).unwrap_or(u32::MAX),
-                binding: pattern.binding.clone(),
-            });
-        }
-    }
-    for (index, pattern) in body.read_refs.iter().enumerate() {
-        accesses.push(crate::stdlib::SchedulerAccess {
-            operation: "read_ref".to_string(),
-            source: "CellDep".to_string(),
-            index: u32::try_from(index).unwrap_or(u32::MAX),
-            binding: pattern.binding.clone(),
-        });
-    }
-    for (index, pattern) in body.create_set.iter().enumerate() {
-        if let Some(operation) = normalize_typed_cell_access_operation(&pattern.operation, "Output") {
-            accesses.push(crate::stdlib::SchedulerAccess {
-                operation: operation.to_string(),
-                source: "Output".to_string(),
-                index: u32::try_from(index).unwrap_or(u32::MAX),
-                binding: pattern.binding.clone(),
-            });
-        }
-    }
-    for pattern in &body.mutate_set {
-        accesses.push(crate::stdlib::SchedulerAccess {
-            operation: "consume".to_string(),
-            source: "Input".to_string(),
-            index: u32::try_from(pattern.input_index).unwrap_or(u32::MAX),
-            binding: pattern.binding.clone(),
-        });
-        accesses.push(crate::stdlib::SchedulerAccess {
-            operation: "create".to_string(),
-            source: "Output".to_string(),
-            index: u32::try_from(pattern.output_index).unwrap_or(u32::MAX),
-            binding: pattern.binding.clone(),
-        });
-    }
-    accesses
-}
-
-fn typed_cell_scheduler_plan_metadata(
-    body: &ir::IrBody,
-    type_defs: &BTreeMap<String, &ir::IrTypeDef>,
-    target_profile: TargetProfile,
-) -> Option<TypedCellSchedulerPlanMetadata> {
-    if target_profile != TargetProfile::TypedCell {
-        return None;
-    }
-
-    let mut accesses = Vec::new();
-    let type_hash_names = type_defs.keys().map(|name| (ir::type_hash_for_name(name), name.as_str())).collect::<BTreeMap<_, _>>();
-
-    for (index, pattern) in body.consume_set.iter().enumerate() {
-        let Some(type_hash) = pattern.type_hash else {
-            continue;
-        };
-        let Some(ty) = type_hash_names.get(&type_hash).copied() else {
-            continue;
-        };
-        push_typed_cell_scheduler_access_plan(&mut accesses, &pattern.operation, "Input", index, &pattern.binding, ty, type_defs);
-    }
-    for (index, pattern) in body.read_refs.iter().enumerate() {
-        let Some(type_hash) = pattern.type_hash else {
-            continue;
-        };
-        let Some(ty) = type_hash_names.get(&type_hash).copied() else {
-            continue;
-        };
-        push_typed_cell_scheduler_access_plan(&mut accesses, "read_ref", "CellDep", index, &pattern.binding, ty, type_defs);
-    }
-    for (index, pattern) in body.create_set.iter().enumerate() {
-        push_typed_cell_scheduler_access_plan(
-            &mut accesses,
-            &pattern.operation,
-            "Output",
-            index,
-            &pattern.binding,
-            &pattern.ty,
-            type_defs,
-        );
-    }
-    for pattern in &body.mutate_set {
-        push_typed_cell_scheduler_access_plan(
-            &mut accesses,
-            "consume",
-            "Input",
-            pattern.input_index,
-            &pattern.binding,
-            &pattern.ty,
-            type_defs,
-        );
-        push_typed_cell_scheduler_access_plan(
-            &mut accesses,
-            "create",
-            "Output",
-            pattern.output_index,
-            &pattern.binding,
-            &pattern.ty,
-            type_defs,
-        );
-    }
-
-    Some(TypedCellSchedulerPlanMetadata {
-        abi: TYPED_CELL_SCHEDULER_PLAN_ABI.to_string(),
-        conflict_hash_domain: TYPED_CELL_CONFLICT_HASH_DOMAIN.to_string(),
-        typed_data_hash_domain: TYPED_CELL_TYPED_DATA_HASH_DOMAIN.to_string(),
-        accesses,
-    })
-}
-
-fn push_typed_cell_scheduler_access_plan(
-    accesses: &mut Vec<TypedCellSchedulerAccessPlanMetadata>,
-    operation: &str,
-    source: &str,
-    index: usize,
-    binding: &str,
-    ty: &str,
-    type_defs: &BTreeMap<String, &ir::IrTypeDef>,
-) {
-    let Some(operation) = normalize_typed_cell_access_operation(operation, source) else {
-        return;
-    };
-    let conflict_key = type_defs.get(ty).and_then(|type_def| metadata_conflict_key_policy(&type_def.identity));
-    let (conflict_key, conflict_key_fields, conflict_key_encoding) = match conflict_key {
-        Some((key, fields, encoding)) => (Some(key), fields, Some(encoding)),
-        None => (None, Vec::new(), None),
-    };
-    accesses.push(TypedCellSchedulerAccessPlanMetadata {
-        operation: operation.to_string(),
-        source: source.to_string(),
-        index,
-        binding: binding.to_string(),
-        ty: ty.to_string(),
-        conflict_key,
-        conflict_key_fields,
-        conflict_key_encoding,
-        conflict_key_value_source: typed_cell_conflict_key_value_source(source).to_string(),
-        typed_data_source: typed_cell_typed_data_source(source).to_string(),
-    });
-}
-
-fn normalize_typed_cell_access_operation(operation: &str, source: &str) -> Option<&'static str> {
-    match (operation, source) {
-        ("read_ref", "Input" | "CellDep") => Some("read_ref"),
-        ("input" | "consume" | "claim" | "settle" | "replace_unique", "Input") => Some("consume"),
-        ("destroy", "Input") => Some("destroy"),
-        ("transfer", "Input" | "Output") => Some("transfer"),
-        ("output" | "create" | "create_unique" | "claim" | "settle" | "replace_unique", "Output") => Some("create"),
-        _ => None,
-    }
-}
-
-fn typed_cell_conflict_key_value_source(source: &str) -> &'static str {
-    match source {
-        "Input" => "transaction-input-data-conflict-key-fields",
-        "CellDep" => "transaction-cell-dep-data-conflict-key-fields",
-        "Output" => "transaction-output-data-conflict-key-fields",
-        _ => "transaction-cell-data-conflict-key-fields",
-    }
-}
-
-fn typed_cell_typed_data_source(source: &str) -> &'static str {
-    match source {
-        "Input" => "transaction-input-data",
-        "CellDep" => "transaction-cell-dep-data",
-        "Output" => "transaction-output-data",
-        _ => "transaction-cell-data",
-    }
-}
-
 fn ckb_script_group_metadata(
     entry_kind: &str,
     ckb_runtime_accesses: &[CkbRuntimeAccessMetadata],
@@ -13777,44 +13964,41 @@ fn scheduler_access_is_cell_state_access(access: &CkbRuntimeAccessMetadata) -> b
 
 fn metadata_type_layouts(ir: &ir::IrModule) -> MetadataTypeLayouts {
     let mut layouts = HashMap::new();
+    let type_defs = metadata_type_defs_by_name(ir);
     for type_def in &ir.external_type_defs {
-        let fields = type_def
-            .fields
-            .iter()
-            .map(|field| {
-                let fixed_enum_size = match &field.ty {
-                    ir::IrType::Named(name) => ir.enum_fixed_sizes.get(name).copied(),
-                    _ => None,
-                };
-                (
-                    field.name.clone(),
-                    MetadataFieldLayout { ty: field.ty.clone(), offset: field.offset, fixed_size: field.fixed_size, fixed_enum_size },
-                )
-            })
-            .collect();
+        let fields = metadata_layout_fields(type_def, &type_defs, &ir.enum_fixed_sizes);
         layouts.insert(type_def.name.clone(), fields);
     }
     for item in &ir.items {
         let ir::IrItem::TypeDef(type_def) = item else {
             continue;
         };
-        let fields = type_def
-            .fields
-            .iter()
-            .map(|field| {
-                let fixed_enum_size = match &field.ty {
-                    ir::IrType::Named(name) => ir.enum_fixed_sizes.get(name).copied(),
-                    _ => None,
-                };
-                (
-                    field.name.clone(),
-                    MetadataFieldLayout { ty: field.ty.clone(), offset: field.offset, fixed_size: field.fixed_size, fixed_enum_size },
-                )
-            })
-            .collect();
+        let fields = metadata_layout_fields(type_def, &type_defs, &ir.enum_fixed_sizes);
         layouts.insert(type_def.name.clone(), fields);
     }
     layouts
+}
+
+fn metadata_layout_fields(
+    type_def: &ir::IrTypeDef,
+    type_defs: &BTreeMap<String, &ir::IrTypeDef>,
+    enum_fixed_sizes: &HashMap<String, usize>,
+) -> HashMap<String, MetadataFieldLayout> {
+    let mut next_offset = Some(0usize);
+    type_def
+        .fields
+        .iter()
+        .map(|field| {
+            let fixed_enum_size = match &field.ty {
+                ir::IrType::Named(name) => enum_fixed_sizes.get(name).copied(),
+                _ => None,
+            };
+            let fixed_size = ir_type_encoded_size(&field.ty, type_defs, &mut BTreeSet::new()).or(field.fixed_size).or(fixed_enum_size);
+            let offset = next_offset.unwrap_or(field.offset);
+            next_offset = next_offset.and_then(|current| fixed_size.and_then(|size| current.checked_add(size)));
+            (field.name.clone(), MetadataFieldLayout { ty: field.ty.clone(), offset, fixed_size, fixed_enum_size })
+        })
+        .collect()
 }
 
 fn metadata_flow_states(ir: &ir::IrModule) -> HashMap<String, Vec<String>> {
@@ -13918,49 +14102,9 @@ fn type_metadata(
         },
         flow_states,
         encoded_size: type_encoded_size(type_def, type_defs),
-        fields: type_def.fields.iter().map(|field| field_metadata(field, type_defs)).collect(),
+        fields: fields_metadata(type_def, type_defs),
         molecule_schema: type_molecule_schema_metadata(type_def, type_defs),
         identity_policy: metadata_identity_policy(&type_def.identity),
-        typed_cell: typed_cell_type_metadata(type_def, type_defs, target_profile),
-    }
-}
-
-fn typed_cell_type_metadata(
-    type_def: &ir::IrTypeDef,
-    type_defs: &BTreeMap<String, &ir::IrTypeDef>,
-    target_profile: TargetProfile,
-) -> Option<TypedCellTypeMetadata> {
-    if target_profile != TargetProfile::TypedCell {
-        return None;
-    }
-    let (conflict_key, fields, encoding) = metadata_conflict_key_policy(&type_def.identity)?;
-    Some(TypedCellTypeMetadata {
-        abi: TYPED_CELL_TYPE_ABI.to_string(),
-        ownership: typed_cell_ownership_metadata(type_def.kind).to_string(),
-        conflict_key,
-        conflict_key_fields: fields.clone(),
-        conflict_key_encoding: if fields.iter().all(|field| {
-            type_def
-                .fields
-                .iter()
-                .find(|candidate| candidate.name == *field)
-                .and_then(|field| ir_type_encoded_size(&field.ty, type_defs, &mut BTreeSet::new()).or(field.fixed_size))
-                .is_some()
-        }) {
-            encoding
-        } else {
-            "invalid-unresolved-or-dynamic-field".to_string()
-        },
-        identity_policy: metadata_identity_policy(&type_def.identity),
-    })
-}
-
-fn typed_cell_ownership_metadata(kind: ir::IrTypeKind) -> &'static str {
-    match kind {
-        ir::IrTypeKind::Resource => "resource",
-        ir::IrTypeKind::Shared => "shared",
-        ir::IrTypeKind::Receipt => "receipt",
-        ir::IrTypeKind::Struct => "struct",
     }
 }
 
@@ -14098,6 +14242,107 @@ fn molecule_schema_manifest_metadata(types: &[TypeMetadata], target_profile: Tar
         manifest_hash: hex_encode(&ckb_blake2b256(canonical.as_bytes())),
         entries,
     }
+}
+
+fn cell_data_codec_manifest_metadata(
+    accesses: &[CkbRuntimeAccessMetadata],
+    molecule_schema_manifest: &MoleculeSchemaManifestMetadata,
+    target_profile: TargetProfile,
+) -> CellDataCodecManifestMetadata {
+    let raw_runtime_accesses = raw_cell_data_codec_accesses(accesses);
+    let raw_bytes_required = !raw_runtime_accesses.is_empty();
+    let external_codec_adapters = Vec::new();
+    let mut manifest = CellDataCodecManifestMetadata {
+        schema: "cellscript-cell-data-codec-manifest-v1".to_string(),
+        version: 1,
+        target_profile: target_profile.name().to_string(),
+        abi: if raw_bytes_required { "molecule+raw-bytes-v1" } else { "molecule" }.to_string(),
+        default_codec: "molecule".to_string(),
+        molecule_schema_manifest_hash: molecule_schema_manifest.manifest_hash.clone(),
+        raw_bytes_required,
+        raw_runtime_access_count: raw_runtime_accesses.len(),
+        raw_runtime_accesses,
+        external_codec_adapters,
+        manifest_hash: String::new(),
+    };
+    manifest.manifest_hash = cell_data_codec_manifest_hash(&manifest);
+    manifest
+}
+
+fn raw_cell_data_codec_accesses(accesses: &[CkbRuntimeAccessMetadata]) -> Vec<CellDataCodecRuntimeAccessMetadata> {
+    let mut raw = accesses
+        .iter()
+        .filter(|access| runtime_access_uses_raw_cell_data(access))
+        .map(|access| CellDataCodecRuntimeAccessMetadata {
+            operation: access.operation.clone(),
+            syscall: access.syscall.clone(),
+            source: access.source.clone(),
+            index: access.index,
+            binding: access.binding.clone(),
+            codec: "raw-bytes-v1".to_string(),
+        })
+        .collect::<Vec<_>>();
+    raw.sort_by(|left, right| {
+        (left.operation.as_str(), left.syscall.as_str(), left.source.as_str(), left.index, left.binding.as_str()).cmp(&(
+            right.operation.as_str(),
+            right.syscall.as_str(),
+            right.source.as_str(),
+            right.index,
+            right.binding.as_str(),
+        ))
+    });
+    raw
+}
+
+fn runtime_access_uses_raw_cell_data(access: &CkbRuntimeAccessMetadata) -> bool {
+    access.syscall.split('+').any(|part| part == "LOAD_CELL_DATA") || access.syscall.split('/').any(|part| part == "LOAD_CELL_DATA")
+}
+
+fn cell_data_codec_manifest_hash(manifest: &CellDataCodecManifestMetadata) -> String {
+    let mut canonical = String::new();
+    canonical.push_str(&manifest.schema);
+    canonical.push('|');
+    canonical.push_str(&manifest.version.to_string());
+    canonical.push('|');
+    canonical.push_str(&manifest.target_profile);
+    canonical.push('|');
+    canonical.push_str(&manifest.abi);
+    canonical.push('|');
+    canonical.push_str(&manifest.default_codec);
+    canonical.push('|');
+    canonical.push_str(&manifest.molecule_schema_manifest_hash);
+    canonical.push('|');
+    canonical.push_str(if manifest.raw_bytes_required { "raw-required" } else { "raw-not-required" });
+    canonical.push('|');
+    canonical.push_str(&manifest.raw_runtime_access_count.to_string());
+    canonical.push('\n');
+    for access in &manifest.raw_runtime_accesses {
+        canonical.push_str(&access.operation);
+        canonical.push('|');
+        canonical.push_str(&access.syscall);
+        canonical.push('|');
+        canonical.push_str(&access.source);
+        canonical.push('|');
+        canonical.push_str(&access.index.to_string());
+        canonical.push('|');
+        canonical.push_str(&access.binding);
+        canonical.push('|');
+        canonical.push_str(&access.codec);
+        canonical.push('\n');
+    }
+    for adapter in &manifest.external_codec_adapters {
+        canonical.push_str(&adapter.name);
+        canonical.push('|');
+        canonical.push_str(&adapter.version);
+        canonical.push('|');
+        canonical.push_str(&adapter.package);
+        canonical.push('|');
+        canonical.push_str(&adapter.content_hash);
+        canonical.push('|');
+        canonical.push_str(&adapter.test_vector_hashes.join(","));
+        canonical.push('\n');
+    }
+    hex_encode(&ckb_blake2b256(canonical.as_bytes()))
 }
 
 fn molecule_dynamic_fields(type_def: &ir::IrTypeDef, type_defs: &BTreeMap<String, &ir::IrTypeDef>) -> Vec<String> {
@@ -14411,21 +14656,6 @@ fn metadata_identity_policy(policy: &ir::IrIdentityPolicy) -> Option<String> {
     }
 }
 
-fn metadata_conflict_key_policy(policy: &ir::IrIdentityPolicy) -> Option<(String, Vec<String>, String)> {
-    let ir::IrIdentityPolicy::Field(path) = policy else {
-        return None;
-    };
-    let fields = path.split('+').map(str::trim).filter(|field| !field.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>();
-    if fields.is_empty() {
-        return None;
-    }
-    if fields.len() == 1 {
-        Some((format!("field({})", fields[0]), fields, TYPED_CELL_SINGLE_FIELD_CONFLICT_KEY_ENCODING.to_string()))
-    } else {
-        Some((format!("composite({})", fields.join(",")), fields, TYPED_CELL_COMPOSITE_CONFLICT_KEY_ENCODING.to_string()))
-    }
-}
-
 fn flow_transition_metadata(states: &[String]) -> Vec<FlowTransitionMetadata> {
     states
         .windows(2)
@@ -14443,12 +14673,25 @@ fn flow_rule_metadata(rule: &ir::IrFlowRule) -> FlowTransitionMetadata {
     FlowTransitionMetadata { from: rule.from.clone(), to: rule.to.clone(), from_index: rule.from_index, to_index: rule.to_index }
 }
 
-fn field_metadata(field: &ir::IrField, type_defs: &BTreeMap<String, &ir::IrTypeDef>) -> FieldMetadata {
-    let encoded_size = ir_type_encoded_size(&field.ty, type_defs, &mut BTreeSet::new()).or(field.fixed_size);
+fn fields_metadata(type_def: &ir::IrTypeDef, type_defs: &BTreeMap<String, &ir::IrTypeDef>) -> Vec<FieldMetadata> {
+    let mut next_offset = Some(0usize);
+    type_def
+        .fields
+        .iter()
+        .map(|field| {
+            let encoded_size = ir_type_encoded_size(&field.ty, type_defs, &mut BTreeSet::new()).or(field.fixed_size);
+            let offset = next_offset.unwrap_or(field.offset);
+            next_offset = next_offset.and_then(|current| encoded_size.and_then(|size| current.checked_add(size)));
+            field_metadata(field, encoded_size, offset)
+        })
+        .collect()
+}
+
+fn field_metadata(field: &ir::IrField, encoded_size: Option<usize>, offset: usize) -> FieldMetadata {
     FieldMetadata {
         name: field.name.clone(),
         ty: ir_type_to_string(&field.ty),
-        offset: field.offset,
+        offset,
         encoded_size,
         fixed_width: encoded_size.is_some(),
     }
@@ -14939,7 +15182,7 @@ fn mutate_preserved_field_is_verifier_coverable(pattern: &ir::MutatePattern, fie
     if metadata_type_encoded_size_from_layouts(fields).is_none() {
         return true;
     }
-    let Some(width) = metadata_layout_fixed_byte_width(layout) else {
+    let Some(width) = metadata_layout_or_named_fixed_byte_width(layout, type_layouts) else {
         return false;
     };
     layout.offset + width <= METADATA_MUTATE_CELL_BUFFER_SIZE
@@ -14963,7 +15206,7 @@ fn mutate_preserved_data_except_transition_is_verifier_coverable(
     }
     pattern.transitions.iter().all(|transition| {
         fields.get(&transition.field).is_some_and(|layout| {
-            metadata_layout_fixed_byte_width(layout)
+            metadata_layout_or_named_fixed_byte_width(layout, type_layouts)
                 .map(|width| layout.offset + width)
                 .is_some_and(|end| end <= METADATA_MUTATE_CELL_BUFFER_SIZE)
         })
@@ -15013,7 +15256,7 @@ fn mutate_transition_is_verifier_coverable(
         };
     }
     if transition.op == ir::MutateTransitionOp::Set {
-        let Some(width) = metadata_layout_fixed_byte_width(layout) else {
+        let Some(width) = metadata_layout_or_named_fixed_byte_width(layout, type_layouts) else {
             return false;
         };
         if !dynamic_table && layout.offset + width > METADATA_MUTATE_CELL_BUFFER_SIZE {
@@ -15121,27 +15364,22 @@ fn collect_package_cell_files(package_root: &Utf8Path) -> Result<Vec<Utf8PathBuf
     let mut roots = Vec::new();
     let mut seen_roots = HashSet::new();
 
-    if let Some(package) = &manifest.package {
-        if !package.source_roots.is_empty() {
-            for source_root in &package.source_roots {
-                let root = package_root.join(source_root);
-                if !root.exists() {
-                    return Err(CompileError::new(
-                        format!("configured source root '{}' does not exist", root),
-                        error::Span::default(),
-                    ));
-                }
-                if !root.is_dir() {
-                    return Err(CompileError::new(
-                        format!("configured source root '{}' is not a directory", root),
-                        error::Span::default(),
-                    ));
-                }
+    if !manifest.package.source_roots.is_empty() {
+        for source_root in &manifest.package.source_roots {
+            let root = package_root.join(source_root);
+            if !root.exists() {
+                return Err(CompileError::new(format!("configured source root '{}' does not exist", root), error::Span::default()));
+            }
+            if !root.is_dir() {
+                return Err(CompileError::new(
+                    format!("configured source root '{}' is not a directory", root),
+                    error::Span::default(),
+                ));
+            }
 
-                let root = canonical_utf8_path(&root)?;
-                if seen_roots.insert(root.clone()) {
-                    roots.push(root);
-                }
+            let root = canonical_utf8_path(&root)?;
+            if seen_roots.insert(root.clone()) {
+                roots.push(root);
             }
         }
     }
@@ -15157,7 +15395,7 @@ fn collect_package_cell_files(package_root: &Utf8Path) -> Result<Vec<Utf8PathBuf
     }
 
     let mut explicit_entry = None;
-    if let Some(entry) = manifest.package.as_ref().and_then(|package| package.entry.clone()) {
+    if let Some(entry) = explicit_manifest_entry(package_root)? {
         let entry_path = package_root.join(entry);
         if !entry_path.exists() {
             return Err(CompileError::new(format!("package entry '{}' does not exist", entry_path), error::Span::default()));
@@ -15230,14 +15468,6 @@ fn should_skip_cell_dir(path: &Utf8Path) -> bool {
     matches!(path.file_name(), Some(".git" | ".cell" | "target")) || path.join("Cell.toml").exists()
 }
 
-fn register_module_file(resolver: &mut ModuleResolver, path: &Utf8Path) -> Result<()> {
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| CompileError::new(format!("failed to read module file '{}': {}", path, e), error::Span::default()))?;
-    let tokens = lexer::lex(&source).map_err(|e| e.with_file(path.to_path_buf()))?;
-    let module = parser::parse(&tokens).map_err(|e| e.with_file(path.to_path_buf()))?;
-    resolver.register_module(module)
-}
-
 fn canonical_utf8_path(path: &Utf8Path) -> Result<Utf8PathBuf> {
     let canonical = std::fs::canonicalize(path)
         .map_err(|e| CompileError::new(format!("failed to canonicalize '{}': {}", path, e), error::Span::default()))?;
@@ -15245,11 +15475,7 @@ fn canonical_utf8_path(path: &Utf8Path) -> Result<Utf8PathBuf> {
         .map_err(|non_utf8| CompileError::new(format!("path is not valid UTF-8: {}", non_utf8.display()), error::Span::default()))
 }
 
-fn default_package_entry() -> String {
-    "src/main.cell".to_string()
-}
-
-fn load_manifest(package_root: &Utf8Path) -> Result<CellManifest> {
+fn load_manifest(package_root: &Utf8Path) -> Result<PackageManifest> {
     let manifest_path = package_root.join("Cell.toml");
     if !manifest_path.exists() {
         return Err(CompileError::new(format!("Cell.toml not found in '{}'", package_root), error::Span::default()));
@@ -15261,7 +15487,30 @@ fn load_manifest(package_root: &Utf8Path) -> Result<CellManifest> {
         .map_err(|e| CompileError::new(format!("failed to parse manifest '{}': {}", manifest_path, e), error::Span::default()))
 }
 
-fn resolve_target<'a>(options: &'a CompileOptions, build: Option<&'a CellBuildConfig>) -> &'a str {
+fn manifest_has_table(manifest_path: &Utf8Path, table: &str) -> Result<bool> {
+    let manifest_source = std::fs::read_to_string(manifest_path)
+        .map_err(|e| CompileError::new(format!("failed to read manifest '{}': {}", manifest_path, e), error::Span::default()))?;
+    let manifest: toml::Value = toml::from_str(&manifest_source)
+        .map_err(|e| CompileError::new(format!("failed to parse manifest '{}': {}", manifest_path, e), error::Span::default()))?;
+    Ok(manifest.get(table).is_some())
+}
+
+fn explicit_manifest_entry(package_root: &Utf8Path) -> Result<Option<String>> {
+    let manifest_path = package_root.join("Cell.toml");
+    let manifest_source = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| CompileError::new(format!("failed to read manifest '{}': {}", manifest_path, e), error::Span::default()))?;
+    let manifest: toml::Value = toml::from_str(&manifest_source)
+        .map_err(|e| CompileError::new(format!("failed to parse manifest '{}': {}", manifest_path, e), error::Span::default()))?;
+    let Some(package) = manifest.get("package").and_then(toml::Value::as_table) else {
+        return Ok(None);
+    };
+    let Some(entry) = package.get("entry").and_then(toml::Value::as_str) else {
+        return Ok(None);
+    };
+    Ok(Some(entry.to_string()))
+}
+
+fn resolve_target<'a>(options: &'a CompileOptions, build: Option<&'a BuildConfig>) -> &'a str {
     options.target.as_deref().or_else(|| build.and_then(|build| build.target.as_deref())).unwrap_or(DEFAULT_TARGET)
 }
 
@@ -15276,8 +15525,8 @@ mod tests {
     use super::{
         compile, compile_file, compile_file_with_entry_action, compile_file_with_entry_lock, compile_path,
         decode_scheduler_witness_hex, default_output_path_for_input, encode_entry_witness_args_for_params, incremental_cache_key,
-        load_modules_for_input, resolve_input_path, ActionMetadata, ArtifactFormat, CompileOptions, EntryWitnessArg,
-        TypedCellSchedulerAccessInput, TypedCellTypeScriptInput, ENTRY_WITNESS_ABI_MAGIC, SCHEDULER_WITNESS_ABI_MOLECULE,
+        load_modules_for_input, resolve_input_path, source_unit_from_bytes, ActionMetadata, ArtifactFormat, CompileOptions,
+        EntryWitnessArg, ENTRY_WITNESS_ABI_MAGIC, SCHEDULER_WITNESS_ABI_MOLECULE,
     };
     use crate::{ir, lexer, parser};
     use camino::{Utf8Path, Utf8PathBuf};
@@ -15412,14 +15661,51 @@ action add(x: u64, y: u64) -> u64 {
         u16::from_le_bytes(bytes.try_into().expect("u16 width"))
     }
 
+    fn read_u16_at(bytes: &[u8], offset: usize, field: &str) -> u16 {
+        read_u16(&bytes[offset..offset + 2], field)
+    }
+
     fn read_u32(bytes: &[u8], field: &str) -> u32 {
         assert_eq!(bytes.len(), 4, "{field} should be a molecule u32");
         u32::from_le_bytes(bytes.try_into().expect("u32 width"))
     }
 
+    fn read_u32_at(bytes: &[u8], offset: usize, field: &str) -> u32 {
+        read_u32(&bytes[offset..offset + 4], field)
+    }
+
     fn read_u64(bytes: &[u8], field: &str) -> u64 {
         assert_eq!(bytes.len(), 8, "{field} should be a molecule u64");
         u64::from_le_bytes(bytes.try_into().expect("u64 width"))
+    }
+
+    fn read_u64_at(bytes: &[u8], offset: usize, field: &str) -> u64 {
+        read_u64(&bytes[offset..offset + 8], field)
+    }
+
+    fn executable_elf_entry_segment_for_test(elf: &[u8]) -> (u32, u64, u64, usize) {
+        assert!(elf.starts_with(b"\x7fELF"), "expected ELF magic");
+        let entry = read_u64_at(elf, 24, "e_entry");
+        let phoff = usize::try_from(read_u64_at(elf, 32, "e_phoff")).expect("program header offset should fit usize");
+        let phentsize = usize::from(read_u16_at(elf, 54, "e_phentsize"));
+        let phnum = usize::from(read_u16_at(elf, 56, "e_phnum"));
+
+        for index in 0..phnum {
+            let offset = phoff + index * phentsize;
+            let p_type = read_u32_at(elf, offset, "p_type");
+            let flags = read_u32_at(elf, offset + 4, "p_flags");
+            if p_type != 1 || flags & 1 == 0 {
+                continue;
+            }
+            let p_offset = read_u64_at(elf, offset + 8, "p_offset");
+            let p_vaddr = read_u64_at(elf, offset + 16, "p_vaddr");
+            let file_size = read_u64_at(elf, offset + 32, "p_filesz");
+            let memory_size = read_u64_at(elf, offset + 40, "p_memsz");
+            let entry_file_offset = p_offset + entry.checked_sub(p_vaddr).expect("entrypoint should be inside executable segment");
+            return (flags, file_size, memory_size, usize::try_from(entry_file_offset).expect("entry file offset should fit usize"));
+        }
+
+        panic!("expected an executable PT_LOAD segment");
     }
 
     const OPTIMIZER_PROGRAM: &str = r#"
@@ -16247,6 +16533,22 @@ module test
 action widen(x: u16) -> u64 {
     verification
         return x as u64
+}
+"#;
+
+    const U64_DIVISION_PROGRAM: &str = r#"
+module test
+
+const U64_MAX: u64 = 18446744073709551615
+
+struct Token {
+    amount: u64,
+}
+
+action checked(token_a: Token, token_b: Token) -> u64 {
+    verification
+        require token_a.amount <= U64_MAX / token_b.amount
+        return token_a.amount / token_b.amount
 }
 "#;
 
@@ -19163,6 +19465,11 @@ action activate(ticket: Ticket) -> Ticket {
         let asm = String::from_utf8(result.artifact_bytes.clone()).unwrap();
 
         assert!(asm.contains("beqz t0, .Lincrement_if_block_2"), "missing conditional branch to else block:\n{}", asm);
+        assert!(
+            !asm.contains("j .Lincrement_if_block_1"),
+            "then block is already the physical fall-through and should not need an unconditional jump:\n{}",
+            asm
+        );
         assert!(asm.contains(".Lincrement_if_block_1:"), "missing then block label:\n{}", asm);
         assert!(asm.contains(".Lincrement_if_block_2:"), "missing else block label:\n{}", asm);
         assert!(asm.contains(".Lincrement_if_block_3:"), "missing join block label:\n{}", asm);
@@ -19186,6 +19493,11 @@ action activate(ticket: Ticket) -> Ticket {
         let asm = String::from_utf8(result.artifact_bytes.clone()).unwrap();
 
         assert!(asm.contains("beqz t0, .Lchoose_block_2"), "missing conditional branch for if expression:\n{}", asm);
+        assert!(
+            !asm.contains("j .Lchoose_block_1"),
+            "then block is already the physical fall-through and should not need an unconditional jump:\n{}",
+            asm
+        );
         assert!(asm.contains(".Lchoose_block_3:"), "missing join block for if expression:\n{}", asm);
         assert!(asm.contains("sd t0, 24(sp)") || asm.contains("sd t0, 32(sp)"), "missing branch value move into join slot:\n{}", asm);
     }
@@ -19196,7 +19508,7 @@ action activate(ticket: Ticket) -> Ticket {
         let asm = String::from_utf8(result.artifact_bytes.clone()).unwrap();
 
         assert!(
-            asm.contains("la t0, __cellscript_const_data_"),
+            asm.contains("la a0, __cellscript_const_data_"),
             "fixed-byte constant move must materialize a rodata pointer instead of a null pointer:\n{}",
             asm
         );
@@ -19211,6 +19523,11 @@ action activate(ticket: Ticket) -> Ticket {
         assert!(asm.contains(".Lspin_block_2:"), "missing while body block:\n{}", asm);
         assert!(asm.contains(".Lspin_block_3:"), "missing while exit block:\n{}", asm);
         assert!(asm.contains("beqz t0, .Lspin_block_3"), "missing while false-branch jump:\n{}", asm);
+        assert!(
+            !asm.contains("j .Lspin_block_2"),
+            "loop body is already the physical fall-through and should not need an unconditional jump:\n{}",
+            asm
+        );
         assert!(asm.contains("j .Lspin_block_1"), "missing while back edge:\n{}", asm);
     }
 
@@ -19578,6 +19895,17 @@ action activate(ticket: Ticket) -> Ticket {
 
         assert!(!asm.contains("li t0, 0"), "cast lowering regressed to zero fallback:\n{}", asm);
         assert!(asm.contains(".global widen"), "missing widened function symbol:\n{}", asm);
+    }
+
+    #[test]
+    fn compile_lowers_u64_division_as_unsigned_riscv() {
+        let result = compile(U64_DIVISION_PROGRAM, CompileOptions::default()).unwrap();
+        let asm = String::from_utf8(result.artifact_bytes.clone()).unwrap();
+
+        assert!(asm.contains("divu t0, t0, t1"), "u64 return division should lower to unsigned divu:\n{}", asm);
+        assert!(asm.contains("divu t1, t3, t1"), "u64 assertion expression should lower to unsigned divu:\n{}", asm);
+        assert!(!asm.contains("div t0, t0, t1"), "u64 return division regressed to signed div:\n{}", asm);
+        assert!(!asm.contains("div t1, t3, t1"), "u64 assertion expression regressed to signed div:\n{}", asm);
     }
 
     #[test]
@@ -20097,17 +20425,12 @@ action bad(amount: u64) -> out: Coin {
             asm
         );
         assert!(
-            asm.contains("# cellscript abi: bounds check Config.threshold required=8"),
-            "read_ref schema field access did not emit a loaded-byte bounds check:\n{}",
-            asm
-        );
-        assert!(
-            asm.contains("# cellscript abi: exact size check Config expected=8"),
+            asm.contains("# cellscript abi: exact size check fixed-byte scalar field access loaded bytes var0 expected=8"),
             "read_ref schema field access did not enforce exact fixed schema size:\n{}",
             asm
         );
         assert!(
-            asm.contains("# cellscript abi: schema field Config.threshold offset=0 size=8"),
+            asm.contains("# cellscript abi: fixed-byte scalar field Ref(Named(\"Config\")).threshold offset=0 size=8"),
             "read_ref schema field access did not expose concrete layout:\n{}",
             asm
         );
@@ -20303,9 +20626,8 @@ action grant(read config: Config, token: Token) -> Grant {
         let result = compile(PARAM_FIELD_PROGRAM, CompileOptions::default()).unwrap();
         let asm = String::from_utf8(result.artifact_bytes.clone()).unwrap();
 
-        assert!(asm.contains("# field access .amount"), "parameter field access vanished from assembly:\n{}", asm);
         assert!(
-            asm.contains("# cellscript abi: schema field Snapshot.amount offset=0 size=8"),
+            asm.contains("# cellscript abi: fixed-byte scalar field Named(\"Snapshot\").amount offset=0 size=8"),
             "schema field access did not expose the concrete layout contract:\n{}",
             asm
         );
@@ -20315,12 +20637,7 @@ action grant(read config: Config, token: Token) -> Grant {
             asm
         );
         assert!(
-            asm.contains("# cellscript abi: bounds check Snapshot.amount required=8"),
-            "schema parameter field access did not emit length-backed bounds check:\n{}",
-            asm
-        );
-        assert!(
-            asm.contains("# cellscript abi: exact size check Snapshot expected=8"),
+            asm.contains("# cellscript abi: exact size check fixed-byte scalar field access loaded bytes var0 expected=8"),
             "schema parameter field access did not enforce exact fixed schema size:\n{}",
             asm
         );
@@ -20361,17 +20678,17 @@ action grant(read config: Config, token: Token) -> Grant {
         let asm = String::from_utf8(result.artifact_bytes.clone()).unwrap();
 
         assert!(
-            asm.contains("# cellscript abi: schema field Flags.enabled offset=0 size=1"),
+            asm.contains("# cellscript abi: fixed-byte scalar field Ref(Named(\"Flags\")).enabled offset=0 size=1"),
             "bool schema field access did not expose concrete layout:\n{}",
             asm
         );
         assert!(
-            asm.contains("# cellscript abi: schema field Flags.nonce offset=1 size=4"),
+            asm.contains("# cellscript abi: fixed-byte scalar field Ref(Named(\"Flags\")).nonce offset=1 size=4"),
             "u32 schema field access did not expose packed schema offset:\n{}",
             asm
         );
         assert!(
-            asm.contains("# cellscript abi: bounds check Flags.nonce required=5"),
+            asm.contains("# cellscript abi: exact size check fixed-byte scalar field access loaded bytes var0 expected=5"),
             "packed u32 schema field access did not check full byte span:\n{}",
             asm
         );
@@ -20458,17 +20775,12 @@ action grant(read config: Config, token: Token) -> Grant {
             asm
         );
         assert!(
-            asm.contains("# cellscript abi: bounds check Token.amount required=8"),
-            "consumed input field access did not check loaded cell bounds:\n{}",
-            asm
-        );
-        assert!(
-            asm.contains("# cellscript abi: exact size check Token expected=8"),
+            asm.contains("# cellscript abi: exact size check fixed-byte scalar field access loaded bytes var0 expected=8"),
             "consumed input field access did not enforce exact fixed schema size:\n{}",
             asm
         );
         assert!(
-            asm.contains("# cellscript abi: schema field Token.amount offset=0 size=8"),
+            asm.contains("# cellscript abi: fixed-byte scalar field Named(\"Token\").amount offset=0 size=8"),
             "consumed input field access did not expose concrete schema layout:\n{}",
             asm
         );
@@ -22263,8 +22575,8 @@ action bad() -> u64 {
             asm
         );
         assert!(
-            asm.contains("# cellscript abi: generic field Snapshot.owner offset=0 size=32")
-                && asm.contains("# cellscript abi: generic field Snapshot.amount offset=32 size=8"),
+            asm.contains("# cellscript abi: fixed-byte field Named(\"Snapshot\").owner offset=0 size=32")
+                && asm.contains("# cellscript abi: fixed-byte scalar field Named(\"Snapshot\").amount offset=32 size=8"),
             "Vec<Snapshot> elements should remain field-readable after pop:\n{}",
             asm
         );
@@ -22582,7 +22894,7 @@ action batch(collection_before: Collection, recipients: Vec<Address>) -> collect
             "entry witness wrapper should reject sizes above its local buffer:\n{}",
             asm
         );
-        assert!(asm.contains("li t1, 1025"), "entry witness wrapper should enforce ENTRY_WITNESS_BUFFER_SIZE=1024:\n{}", asm);
+        assert!(asm.contains("li t1, 4097"), "entry witness wrapper should enforce ENTRY_WITNESS_BUFFER_SIZE=4096:\n{}", asm);
     }
 
     #[test]
@@ -22748,6 +23060,9 @@ action get_marker(snapshot: Big) -> [u8; 1] {
             compile(SIMPLE_PROGRAM, CompileOptions { target: Some("riscv64-elf".to_string()), ..CompileOptions::default() }).unwrap();
 
         assert_eq!(result.metadata.metadata_schema_version, crate::METADATA_SCHEMA_VERSION);
+        assert_eq!(result.metadata.source_metadata_schema_version, crate::SOURCE_METADATA_SCHEMA_VERSION);
+        assert_eq!(result.metadata.artifact_metadata_schema_version, crate::ARTIFACT_METADATA_SCHEMA_VERSION);
+        assert_eq!(result.metadata.constraints_metadata_schema_version, crate::CONSTRAINTS_METADATA_SCHEMA_VERSION);
         assert_eq!(result.metadata.compiler_version, crate::VERSION);
         assert_eq!(result.metadata.runtime.vm_abi.format, "molecule");
         assert_eq!(result.metadata.runtime.vm_abi.version, 0x8001);
@@ -22771,6 +23086,87 @@ action get_marker(snapshot: Big) -> [u8; 1] {
         assert_eq!(result.metadata.source_units.len(), 1);
         assert_eq!(result.metadata.source_units[0].path, "<memory>");
         assert_eq!(result.metadata.source_units[0].role, "memory");
+        assert_eq!(result.metadata.cell_data_codec_manifest.schema, "cellscript-cell-data-codec-manifest-v1");
+        assert_eq!(result.metadata.cell_data_codec_manifest.abi, "molecule");
+        assert_eq!(result.metadata.cell_data_codec_manifest.default_codec, "molecule");
+        assert!(!result.metadata.cell_data_codec_manifest.raw_bytes_required);
+        assert_eq!(result.metadata.cell_data_codec_manifest.raw_runtime_access_count, 0);
+        assert!(result.metadata.cell_data_codec_manifest.raw_runtime_accesses.is_empty());
+        assert_eq!(
+            result.metadata.cell_data_codec_manifest.molecule_schema_manifest_hash,
+            result.metadata.molecule_schema_manifest.manifest_hash
+        );
+        assert_eq!(
+            result.metadata.cell_data_codec_manifest.manifest_hash,
+            crate::cell_data_codec_manifest_hash(&result.metadata.cell_data_codec_manifest)
+        );
+    }
+
+    #[test]
+    fn compile_metadata_declares_raw_bytes_codec_for_cell_data_primitives() {
+        let program = r#"
+module test::raw_codec
+
+action inspect() -> u64 {
+    verification
+        let input = source::group_input(0)
+        let quantity = ckb::cell_data_u32_le(input, 0)
+        let amount = ckb::cell_data_u64_le(input, 4)
+        if quantity != 7 {
+            return 90
+        }
+        if amount != 123456789 {
+            return 91
+        }
+        return 0
+}
+"#;
+        let result =
+            compile(program, CompileOptions { target: Some("riscv64-elf".to_string()), ..CompileOptions::default() }).unwrap();
+        let manifest = &result.metadata.cell_data_codec_manifest;
+
+        assert_eq!(manifest.schema, "cellscript-cell-data-codec-manifest-v1");
+        assert_eq!(manifest.abi, "molecule+raw-bytes-v1");
+        assert_eq!(manifest.default_codec, "molecule");
+        assert!(manifest.raw_bytes_required);
+        assert_eq!(manifest.raw_runtime_access_count, manifest.raw_runtime_accesses.len());
+        assert!(manifest.raw_runtime_accesses.iter().any(|access| {
+            access.operation == "cell-data-u32-le" && access.binding == "ckb::cell_data_u32_le" && access.codec == "raw-bytes-v1"
+        }));
+        assert!(manifest.raw_runtime_accesses.iter().any(|access| {
+            access.operation == "cell-data-u64-le" && access.binding == "ckb::cell_data_u64_le" && access.codec == "raw-bytes-v1"
+        }));
+        assert_eq!(manifest.molecule_schema_manifest_hash, result.metadata.molecule_schema_manifest.manifest_hash);
+        assert_eq!(manifest.manifest_hash, crate::cell_data_codec_manifest_hash(manifest));
+        result.validate().unwrap();
+    }
+
+    #[test]
+    fn compile_result_validation_rejects_hidden_raw_cell_data_codec() {
+        let program = r#"
+module test::raw_codec_tamper
+
+action inspect() -> u64 {
+    verification
+        let input = source::group_input(0)
+        let amount = ckb::cell_data_u64_le(input, 4)
+        if amount != 123456789 {
+            return 91
+        }
+        return 0
+}
+"#;
+        let mut result =
+            compile(program, CompileOptions { target: Some("riscv64-elf".to_string()), ..CompileOptions::default() }).unwrap();
+        result.metadata.cell_data_codec_manifest.abi = "molecule".to_string();
+        result.metadata.cell_data_codec_manifest.raw_bytes_required = false;
+        result.metadata.cell_data_codec_manifest.raw_runtime_access_count = 0;
+        result.metadata.cell_data_codec_manifest.raw_runtime_accesses.clear();
+        result.metadata.cell_data_codec_manifest.manifest_hash =
+            crate::cell_data_codec_manifest_hash(&result.metadata.cell_data_codec_manifest);
+
+        let err = result.validate().unwrap_err();
+        assert!(err.message.contains("cell_data_codec_manifest.abi"), "unexpected error: {}", err.message);
     }
 
     #[test]
@@ -23462,16 +23858,17 @@ action main() -> u64 {
         let strict_release_elf = CompileOptions { primitive_compat: Some("0.16".to_string()), ..release_elf.clone() };
         let debug_release_elf = CompileOptions { debug: true, ..release_elf.clone() };
 
-        let release_key = incremental_cache_key(SIMPLE_PROGRAM, &release_elf);
+        let cache_units = vec![source_unit_from_bytes("<memory>", "entry", SIMPLE_PROGRAM.as_bytes())];
+        let release_key = incremental_cache_key(&cache_units, &release_elf);
 
         assert_ne!(
             release_key,
-            incremental_cache_key(SIMPLE_PROGRAM, &strict_release_elf),
+            incremental_cache_key(&cache_units, &strict_release_elf),
             "primitive strict metadata must not reuse a non-strict cache entry"
         );
         assert_ne!(
             release_key,
-            incremental_cache_key(SIMPLE_PROGRAM, &debug_release_elf),
+            incremental_cache_key(&cache_units, &debug_release_elf),
             "debug artefacts must not reuse a non-debug cache entry"
         );
     }
@@ -23494,6 +23891,16 @@ action main() -> u64 {
         let err = result.validate().unwrap_err();
 
         assert!(err.message.contains("unsupported metadata_schema_version"), "unexpected error: {}", err.message);
+    }
+
+    #[test]
+    fn compile_result_validation_rejects_metadata_component_schema_mismatch() {
+        let mut result = compile(SIMPLE_PROGRAM, CompileOptions::default()).unwrap();
+        result.metadata.source_metadata_schema_version = crate::SOURCE_METADATA_SCHEMA_VERSION + 1;
+
+        let err = result.validate().unwrap_err();
+
+        assert!(err.message.contains("unsupported source_metadata_schema_version"), "unexpected error: {}", err.message);
     }
 
     #[test]
@@ -25639,92 +26046,6 @@ action transfer_token(token: Token, to: Address) -> next_token: Token {
     }
 
     #[test]
-    fn typed_cell_profile_emits_scheduler_plan_and_live_witness_bytes() {
-        let source = r#"
-module test
-
-resource NFT has store
-    identity(field(token_id))
-{
-    token_id: u64,
-    owner: Address
-}
-
-action mint(token_id: u64, owner: Address) -> NFT {
-    verification
-        create NFT { token_id: token_id, owner: owner }
-}
-"#;
-
-        let result =
-            compile(source, CompileOptions { target_profile: Some("typed-cell".to_string()), ..CompileOptions::default() }).unwrap();
-        assert_eq!(result.metadata.target_profile.name, "typed-cell");
-        assert_eq!(result.metadata.target_profile.scheduler_abi, "myelin-typed-cell-scheduler-witness-v1-molecule");
-        assert_eq!(result.metadata.target_profile.hash_domain, "myelin-typed-cell-blake3");
-
-        let nft = result.metadata.types.iter().find(|ty| ty.name == "NFT").expect("NFT metadata");
-        let typed_cell = nft.typed_cell.as_ref().expect("typed-cell metadata");
-        assert_eq!(typed_cell.abi, "myelin-typed-cell-type-v1");
-        assert_eq!(typed_cell.conflict_key, "field(token_id)");
-        assert_eq!(typed_cell.conflict_key_fields, vec!["token_id"]);
-        assert_eq!(typed_cell.conflict_key_encoding, "single-field-fixed-bytes-v1");
-
-        let action = result.metadata.actions.iter().find(|action| action.name == "mint").expect("mint metadata");
-        let plan = action.typed_cell_scheduler_plan.as_ref().expect("typed-cell scheduler plan");
-        assert_eq!(plan.abi, "myelin-typed-cell-scheduler-plan-v1");
-        assert_eq!(plan.conflict_hash_domain, "myelin-typed-cell/conflict-hash/v1");
-        assert_eq!(plan.typed_data_hash_domain, "myelin-typed-cell/typed-data-hash/v1");
-        assert_eq!(plan.accesses.len(), 1);
-        let access = &plan.accesses[0];
-        assert_eq!(access.operation, "create");
-        assert_eq!(access.source, "Output");
-        assert_eq!(access.index, 0);
-        assert_eq!(access.ty, "NFT");
-        assert_eq!(access.conflict_key.as_deref(), Some("field(token_id)"));
-        assert_eq!(access.conflict_key_fields, vec!["token_id"]);
-        assert_eq!(access.conflict_key_value_source, "transaction-output-data-conflict-key-fields");
-        assert_eq!(access.typed_data_source, "transaction-output-data");
-
-        let type_script = TypedCellTypeScriptInput::new([7; 32], 1, b"nft-type".to_vec());
-        let token_id = 42u64.to_le_bytes().to_vec();
-        let witness = action
-            .typed_cell_scheduler_witness_bytes(&[TypedCellSchedulerAccessInput {
-                operation: "create".to_string(),
-                source: "Output".to_string(),
-                index: 0,
-                type_script: type_script.clone(),
-                conflict_key_value: token_id.clone(),
-                typed_data: b"nft-output-v1".to_vec(),
-            }])
-            .expect("typed-cell live witness");
-        let changed_witness = action
-            .typed_cell_scheduler_witness_bytes(&[TypedCellSchedulerAccessInput {
-                operation: "create".to_string(),
-                source: "Output".to_string(),
-                index: 0,
-                type_script,
-                conflict_key_value: token_id,
-                typed_data: b"nft-output-v2".to_vec(),
-            }])
-            .expect("typed-cell changed live witness");
-        assert_ne!(witness, changed_witness, "live typed data must affect typed-cell scheduler witness bytes");
-
-        let fields = decode_molecule_table(&witness, 7);
-        assert_eq!(read_u16(fields[0], "typed magic"), 0xCE11);
-        assert_eq!(read_u8(fields[1], "typed version"), 1);
-        assert_eq!(read_u8(fields[2], "typed effect class"), 3);
-        assert_eq!(read_bool(fields[3], "typed parallelizable"), action.parallelizable);
-        assert_eq!(read_u64(fields[4], "typed estimated cycles"), action.estimated_cycles);
-        assert_eq!(read_u32(fields[5], "typed access count"), 1);
-        let access_bytes = fields[6];
-        assert_eq!(access_bytes.len(), 4 + 70);
-        assert_eq!(read_u32(&access_bytes[..4], "typed access fixvec count"), 1);
-        assert_eq!(access_bytes[4], 7);
-        assert_eq!(access_bytes[5], 3);
-        assert_eq!(read_u32(&access_bytes[6..10], "typed access index"), 0);
-    }
-
-    #[test]
     fn scheduler_witness_hex_decode_rejects_invalid_metadata_hex() {
         let odd = decode_scheduler_witness_hex("11c").unwrap_err();
         assert!(odd.message.contains("full bytes"));
@@ -25743,7 +26064,6 @@ action mint(token_id: u64, owner: Address) -> NFT {
             scheduler_witness_abi: SCHEDULER_WITNESS_ABI_MOLECULE.to_string(),
             scheduler_witness_hex: scheduler_witness_hex.to_string(),
             scheduler_witness_molecule_hex: scheduler_witness_molecule_hex.to_string(),
-            typed_cell_scheduler_plan: None,
             consume_set: vec![],
             read_refs: vec![],
             create_set: vec![],
@@ -25871,7 +26191,7 @@ action transfer(nft_before: NFT, to: Address) -> nft_after: NFT {
         assert!(action.consume_set.iter().any(|pattern| pattern.operation == "input" && pattern.binding == "nft_before"));
         assert!(action.create_set.iter().any(|pattern| pattern.operation == "output" && pattern.binding == "nft_after"));
         assert!(
-            asm.contains("# cellscript abi: schema field NFT.owner offset=8 size=32"),
+            asm.contains("# cellscript abi: fixed-byte field Named(\"NFT\").owner offset=8 size=32"),
             "fixed-byte output owner requirement should read the proposed output field:\n{}",
             asm
         );
@@ -25892,7 +26212,7 @@ action transfer(nft_before: NFT, to: Address) -> nft_after: NFT {
     }
 
     #[test]
-    fn dynamic_named_output_constraints_are_proven_in_where_block() {
+    fn dynamic_named_output_constraints_are_proven_in_verification_section() {
         let source = r#"
 module test
 
@@ -25916,18 +26236,18 @@ action mint(collection_before: Collection) -> collection_after: Collection {
         let asm = String::from_utf8(result.artifact_bytes.clone()).unwrap();
 
         assert!(
-            asm.contains("# cellscript abi: output field verification deferred to explicit where constraints"),
-            "dynamic named outputs should be bound in the prelude and proven by where constraints:\n{}",
+            asm.contains("# cellscript abi: output field verification deferred to explicit verification constraints"),
+            "dynamic named outputs should be bound in the prelude and proven by verification constraints:\n{}",
             asm
         );
         assert!(
             !asm.contains("# cellscript abi: fail closed because the output state is not fully verified"),
-            "signature output constraints should not fail closed before where requirements run:\n{}",
+            "signature output constraints should not fail closed before verification requirements run:\n{}",
             asm
         );
         assert!(
             asm.contains("# cellscript abi: dynamic schema field Collection.name index=0 as Molecule vector bytes"),
-            "dynamic where constraint should still emit runtime Molecule field comparison:\n{}",
+            "dynamic verification constraint should still emit runtime Molecule field comparison:\n{}",
             asm
         );
         assert!(
@@ -27112,13 +27432,22 @@ action main() -> u64 {
 
         let result =
             compile(program, CompileOptions { target: Some("riscv64-elf".to_string()), ..CompileOptions::default() }).unwrap();
+        let artifact = crate::strip_vm_abi_trailer(&result.artifact_bytes);
+        let (flags, file_size, memory_size, text_offset) = executable_elf_entry_segment_for_test(artifact);
+        assert_eq!(flags & 0x2, 0, "CKB executable segment must not be writable");
+        assert_eq!(file_size, memory_size, "CKB ELF must not fake stack memory through PT_LOAD");
+
+        let first_instruction = read_u32_at(artifact, text_offset, "entry trampoline first instruction");
+        assert_eq!(first_instruction & 0x7f, 0x17, "ELF trampoline should call the entrypoint, not initialise sp");
+        assert_eq!((first_instruction >> 7) & 0x1f, 1, "ELF trampoline call should write ra");
+
         let exit_syscall_addi_a7 = [0x93, 0x88, 0xd8, 0x05];
         let ecall = [0x73, 0x00, 0x00, 0x00];
         assert!(
-            result.artifact_bytes.windows(exit_syscall_addi_a7.len()).any(|window| window == exit_syscall_addi_a7),
+            artifact.windows(exit_syscall_addi_a7.len()).any(|window| window == exit_syscall_addi_a7),
             "expected exit syscall load in ELF trampoline"
         );
-        assert!(result.artifact_bytes.windows(ecall.len()).any(|window| window == ecall), "expected ecall in ELF trampoline");
+        assert!(artifact.windows(ecall.len()).any(|window| window == ecall), "expected ecall in ELF trampoline");
     }
 
     #[test]
@@ -27247,12 +27576,12 @@ action stack_arg(a: A, b: B, c: C, owner: Address, required: u64) -> u64 {
             asm
         );
         assert!(
-            asm.contains("# cellscript entry abi: stage stack arg8 at pre-call sp-8")
-                && asm.contains("# cellscript entry abi: reserve 8 bytes for outgoing stack call arguments"),
+            asm.contains("# cellscript entry abi: stage stack arg8 at pre-call sp-16")
+                && asm.contains("# cellscript entry abi: reserve 16 bytes for outgoing stack call arguments"),
             "entry wrapper did not stage the stack scalar argument below the witness frame before calling the action:\n{}",
             asm
         );
-        assert!(asm.contains("sd t3, -8(sp)"), "entry wrapper did not emit the staged stack argument store:\n{}", asm);
+        assert!(asm.contains("sd t3, -16(sp)"), "entry wrapper did not emit the staged stack argument store:\n{}", asm);
 
         let action = result.metadata.actions.iter().find(|action| action.name == "stack_arg").unwrap();
         let owner = [7u8; 32];
@@ -27396,6 +27725,60 @@ action pass_through(token: Token) -> Token {
         assert!(roles.contains(&"entry"), "missing entry source unit: {:?}", result.metadata.source_units);
         assert!(roles.contains(&"dependency"), "missing dependency source unit: {:?}", result.metadata.source_units);
         assert_eq!(result.metadata.source_units.len(), 2);
+    }
+
+    #[test]
+    fn compile_file_metadata_lays_out_imported_nested_fixed_structs() {
+        let temp = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp.path()).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cell.toml"),
+            r#"
+[package]
+name = "nested_layout"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("schema.cell"),
+            r#"
+module nested_layout::schema
+
+struct Core {
+    amount: u64,
+    owner: Hash,
+}
+
+struct Signed {
+    core: Core,
+    digest: Hash,
+    receipt: Hash,
+}
+"#,
+        )
+        .unwrap();
+        let entry = root.join("src").join("main.cell");
+        std::fs::write(
+            &entry,
+            r#"
+module nested_layout::main
+
+use nested_layout::schema::{Core, Signed}
+
+action inspect(witness signed: Signed) -> u64 {
+    verification
+        1
+}
+"#,
+        )
+        .unwrap();
+
+        let result = compile_file(&entry, CompileOptions::default()).unwrap();
+        let signed = result.metadata.types.iter().find(|ty| ty.name == "Signed").expect("Signed metadata");
+        let offsets = signed.fields.iter().map(|field| (field.name.as_str(), field.offset, field.encoded_size)).collect::<Vec<_>>();
+        assert_eq!(offsets, vec![("core", 0, Some(40)), ("digest", 40, Some(32)), ("receipt", 72, Some(32))]);
     }
 
     #[test]
@@ -27917,6 +28300,163 @@ action pass(token: Token) -> Token {
         let result = compile_path(root, CompileOptions::default()).unwrap();
         assert_eq!(result.artifact_format, ArtifactFormat::RiscvAssembly);
         assert!(!result.artifact_bytes.is_empty());
+    }
+
+    #[test]
+    fn compile_path_rejects_missing_import_even_with_same_named_type_loaded() {
+        let temp = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp.path()).unwrap();
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cell.toml"),
+            r#"
+[package]
+name = "bad-import"
+version = "0.1.0"
+entry = "src/main.cell"
+source_roots = ["src"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("other.cell"),
+            r#"
+module real::other
+
+resource Token {
+    value: u64
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("main.cell"),
+            r#"
+module app
+
+use missing::module::Token
+
+action pass(token: Token) -> Token {
+    verification
+        token
+}
+"#,
+        )
+        .unwrap();
+
+        let err = compile_path(root, CompileOptions::default()).unwrap_err();
+        assert!(err.message.contains("module 'missing::module' imported by 'app' not found"));
+    }
+
+    #[test]
+    fn compile_path_rejects_invalid_unreferenced_package_module() {
+        let temp = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp.path()).unwrap();
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cell.toml"),
+            r#"
+[package]
+name = "unreferenced-bad"
+version = "0.1.0"
+entry = "src/main.cell"
+source_roots = ["src"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("main.cell"),
+            r#"
+module app
+
+action ok() -> bool {
+    verification
+        true
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("helper.cell"),
+            r#"
+module helper
+
+action broken() -> u64 {
+    verification
+        true
+}
+"#,
+        )
+        .unwrap();
+
+        let err = compile_path(root, CompileOptions::default()).unwrap_err();
+        assert!(err.file.as_ref().is_some_and(|path| path.file_name() == Some("helper.cell")));
+        assert!(err.message.contains("expected U64, found Bool"));
+    }
+
+    #[test]
+    fn incremental_cache_invalidates_when_imported_cell_changes() {
+        let temp = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp.path()).unwrap();
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cell.toml"),
+            r#"
+[package]
+name = "cache-drift"
+version = "0.1.0"
+entry = "src/main.cell"
+source_roots = ["src"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("types.cell"),
+            r#"
+module dep::types
+
+resource Pair {
+    value: u64
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src").join("main.cell"),
+            r#"
+module app
+
+use dep::types::Pair
+
+action keep(pair: Pair) -> Pair {
+    verification
+        pair
+}
+"#,
+        )
+        .unwrap();
+
+        let first = compile_path(root, CompileOptions::default()).unwrap();
+        assert!(!first.cache_hit);
+
+        std::fs::write(
+            root.join("src").join("types.cell"),
+            r#"
+module dep::types
+
+resource Pair {
+    value: u64,
+    nonce: u64
+}
+"#,
+        )
+        .unwrap();
+
+        let second = compile_path(root, CompileOptions::default()).unwrap();
+        assert!(!second.cache_hit);
     }
 
     #[test]

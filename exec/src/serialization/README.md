@@ -140,7 +140,7 @@ serialization/
 - Native `myelin-exec` has no direct or transitive legacy serializer dependency,
   and no legacy serializer API usage in execution, CellTx, typed metadata,
   scheduler-witness, VM ABI, or serialization code; `myelin-hashes`,
-  `myelin-math`, and `myelin-utils` no longer carry that legacy serializer for
+  `myelin-math` no longer carry that legacy serializer for
   native builds
 - CKB `Script` / `OutPoint` / `CellInput` / `CellOutput` / `CellDep` / `RawTransaction` / `Transaction` / `WitnessArgs` / `RawHeader` / `Header` / packed `EpochNumberWithFraction` helpers are available for CKB-profile byte and hash material, including zeroed-lock `SIGHASH_ALL`, header hash, Blake160 pubkey hashes, local CKB Blake160 recoverable-signature verification, and local zeroed-lock CKB sighash-all witness verification
 - `VmSemantics::CkbStrict` uses provider-supplied CKB `Header` bytes for `LOAD_HEADER` and CKB epoch fields for `LOAD_HEADER_BY_FIELD`; it does not fall back to Myelin `ResolvedHeader`

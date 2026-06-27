@@ -1,3 +1,5 @@
+# Tutorial 04: Packages and CLI Workflow
+
 Small experiments can be compiled as single `.cell` files. Once a contract has
 more than one source file, a dependency, or a release target, use a package.
 
@@ -47,6 +49,7 @@ name = "my_contract"
 version = "0.1.0"
 edition = "2021"
 entry = "src/main.cell"
+source_roots = ["src"]
 
 [build]
 target = "riscv64-elf"
@@ -60,16 +63,41 @@ my_lib = { path = "../my_lib" }
 Read the manifest as a build promise:
 
 - `entry` tells the compiler where the package starts;
+- `source_roots` tells the compiler which package directories contain `.cell`
+  modules;
 - `target` chooses assembly or ELF-style output;
 - `target_profile` chooses the runtime assumptions;
 - `out_dir` chooses where artifacts are written;
-- path dependencies keep local packages explicit.
+- path, git, and registry source-package dependencies keep package inputs
+  explicit and lockable.
 
-Registry publishing and registry dependency resolution are intentionally
-experimental/fail-closed until a trusted registry path is ready. Local path
-dependencies are the supported workflow for repeatable local development.
+Registry source-package resolution is implemented for packages that provide
+`Cell.toml`, `registry.json`, tag-pinned Git provenance, and a verified
+`source_hash`. Local path dependencies remain the fastest repeatable
+development workflow, and non-CellScript registry artifact profiles still fail
+closed until they have their own resolver contracts.
 
-When registry resolution is enabled, `cellc add` must remain a dependency
+## Multi-file Packages
+
+Package builds are entry-driven, but the frontend loads the full package source
+set before compiling the entry artifact. The compiler walks `source_roots`
+(defaulting to `src`), parses every `.cell` file it finds, registers each file's
+`module` declaration, and validates every `use path::Symbol` import against the
+loaded module graph. Path dependencies are loaded the same way, so shared schema
+packages can provide common Cell types without copying them into every contract.
+
+There is no `mod` keyword and no implicit basename lookup. The module declared
+inside the file is the source identity. Duplicate module declarations fail, bad
+imports fail, and invalid package modules fail during `build` or `check` even
+when the entry file does not reference them directly.
+
+This is not a contract linker. Each CKB script remains an independent RISC-V
+artifact. Cross-file helper calls are resolved at compile time and inlined into
+the entry artifact, but there is no ELF linker and no cross-script runtime
+coupling. Use multi-file packages for schema reuse, shared helper functions,
+reviewable module organization, and repeatable source/package hashes.
+
+For registry resolution, `cellc add` must remain a dependency
 resolver, not a code-snippet finder. Anything reachable by `cellc add` must be
 safe to participate in the package, build, deployment, or declared TCB identity
 chain. Template-only material belongs behind copy/scaffold commands instead.
@@ -158,10 +186,15 @@ For CKB-specific builder and deployment review:
 ```bash
 cellc constraints . --target riscv64-elf --target-profile ckb --json
 cellc abi . --target-profile ckb --action transfer
-cellc entry-witness . --target-profile ckb --action transfer --json
+cellc entry-witness . --target-profile ckb --action transfer
 cellc ckb-hash --file build/main.elf
 cellc verify-artifact build/main.elf --expect-target-profile ckb --verify-sources --production
 ```
+
+Builder-facing contract commands such as `action build`, `entry-witness`,
+`solve-tx`, `explain-assumptions`, `validate-tx`, and `gen-builder` expose the
+metadata that transaction builders consume. Prefer `--json` where a command
+offers it, and reserve human summaries for interactive review.
 
 These reports are not busywork. They answer questions reviewers will ask:
 
@@ -195,15 +228,18 @@ You can also add and lock a local dependency in one command:
 cellc install my_lib --path ../my_lib
 ```
 
-Git dependencies must be pinned to a full commit hash:
+The current CLI can record a Git dependency URL:
 
 ```bash
-cellc add math --git https://example.com/math.git --rev 0123456789abcdef0123456789abcdef01234567
-cellc install math --git https://example.com/math.git --rev 0123456789abcdef0123456789abcdef01234567
+cellc add math --git https://example.com/math.git
+cellc install math --git https://example.com/math.git
 ```
 
-Branch, tag, and default-branch git dependencies are rejected because they can
-move without changing `Cell.toml`.
+For reviewable package identity, prefer a manifest-level detailed dependency
+with `rev = "<full-commit-hash>"`, then run `cellc install` so `Cell.lock`
+records the resolved package source. Branch, tag, and default-branch Git
+dependencies are easier to move without changing `Cell.toml`, so treat them as
+development convenience rather than production evidence.
 
 Remove it:
 
@@ -230,17 +266,19 @@ external CKB tooling artifacts such as bootstrapper outputs. Resolver profiles
 must stay narrower: an object can be discovered without being installable by
 `cellc add`.
 
-That means registry resolution is stricter than discovery. The future resolver
-path should accept only objects that can be checked fail-closed:
+That means registry resolution is stricter than discovery. Current `cellc`
+registry dependencies are CellScript source-package dependencies. Future
+profile-aware resolver paths should accept only objects that can be checked
+fail-closed:
 
-| Kind | `cellc add` | Boundary |
+| Kind | Current `cellc add` | Future profile boundary |
 | --- | --- | --- |
 | `source_package` / library | yes | Source and API identity must be pinned and reproducible. |
-| `runtime_verifier` / `spawn-verifier` | yes | TCB object; requires verifier ID, ABI, artifact identity, build profile, security status, and production deployment pins when used in production. |
-| `deployable_contract` | yes | Must expose build/audit/deployment identity, not just source text. |
-| `deployed_artifact_record` | yes | Must bind network, OutPoint, dep type, code/data hash, and status. |
-| `reproducible_artifact` | yes, if artifact-safe | Must bind source hash, build profile hash, artifact hash, and compatibility profile. |
-| `protocol_profile_library` | yes, if resolver-safe | Must be a real package with checkable source/schema/API semantics. |
+| `runtime_verifier` / `spawn-verifier` | no, unless wrapped as a CellScript package today | TCB object; requires verifier ID, ABI, artifact identity, build profile, security status, and production deployment pins when used in production. |
+| `deployable_contract` | no, unless it is a CellScript source package today | Must expose build/audit/deployment identity, not just source text. |
+| `deployed_artifact_record` | no | Must bind network, OutPoint, dep type, code/data hash, and status. |
+| `reproducible_artifact` | no | Must bind source hash, build profile hash, artifact hash, and compatibility profile. |
+| `protocol_profile_library` | only if it is a real CellScript package today | Must be a real package with checkable source/schema/API semantics. |
 | `template`, `cookbook`, `protocol_skeleton`, scaffold | no | Copy-only starting material; after copying, it becomes local project code. |
 
 The rule is intentionally blunt:
@@ -259,24 +297,28 @@ still be resolver-safe because it is a runtime verifier artifact. Its manifest
 or registry record must identify the verifier capability, IPC ABI, artifact
 hashes, build profile, TCB/security status, and any production CellDep pins.
 
-A starter project, by contrast, is not dependency-safe merely because it
-contains useful `.cell` code. If users are expected to copy it and edit terms,
+A NovaSeal starter project, by contrast, is not dependency-safe merely because
+it contains useful `.cell` code. If users are expected to copy it and edit terms,
 authorities, manifests, or deployment pins, it belongs in a cookbook or template
-flow such as:
-
-```bash
-cellc new my_contract --template ckb/basic-cell
-cellc cookbook copy examples/token ./my-contract
-```
+flow, not in dependency resolution. The current `cellc` CLI does not ship a
+template or cookbook-copy command; copy starter material with repository tooling
+or a future scaffold command, then treat the result as local project source.
 
 It should not be installed with:
 
-```bash
-cellc add examples/token
+```text
+cellc add novaseal/mvb-starter
 ```
 
 This keeps the registry as a verifiable dependency and artifact discovery layer,
 not a general examples marketplace.
+
+For mixed projects, keep the records separate. A CellScript app may depend on a
+CellScript library, reference a deployed verifier as TCB evidence, use a
+reproducible bootstrapper artifact during its build process, and copy a cookbook
+starter into local source. Those are four different profile boundaries. They
+may share one registry service and one `namespace/name` style, but they must not
+share one unchecked dependency path.
 
 ## Package Information
 
@@ -290,11 +332,20 @@ debugging dependency resolution.
 
 ## Experimental Commands
 
-Registry publishing, registry package installation, `login`, `run`, and `repl`
-remain experimental/future-facing. Local `install --path` and `update` are
-supported as lockfile helpers for local path dependency workflows.
+Registry source-package installation and registry-backed `update` are supported
+for the CellScript source-package profile. The public registry policy is:
+`cellc auth capability create --principal-id <principal_id> --scope
+publish:namespace/package --expires 90d` authorises a JoyID-rooted publisher
+capability, then `cellc publish` writes a real registry entry. The
+`principal_id` is derived from the connected JoyID signer, not from a display
+address. The same metadata can still be
+mirrored with `cellc publish --offline` to `registry.json` and Git tags for
+audit, local fixtures, and offline fallback. `cellc registry add` manages discovery/claim metadata rather than
+ordinary version publication. `run`, `repl`, cryptographic audit-signature
+verification, and non-CellScript artifact profiles remain future-facing or
+fail-closed.
 
 ## Next
 
 With a repeatable package workflow in place, continue with
-[CKB Target Profiles](https://github.com/a19q3/CellScript/wiki/Tutorial-05-CKB-Target-Profiles).
+[CKB Target Profiles](https://github.com/CellScript-Labs/CellScript/wiki/Tutorial-05-CKB-Target-Profiles).

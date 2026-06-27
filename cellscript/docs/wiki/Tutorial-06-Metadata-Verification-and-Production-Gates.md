@@ -1,3 +1,5 @@
+# Tutorial 06: Metadata Verification and Production Gates
+
 Every CellScript artifact should be treated as a pair:
 
 ```text
@@ -106,6 +108,9 @@ You do not need to memorize the whole sidecar. Start with these fields:
 - `source_content_hash`
 - `source_units`
 - `metadata_schema_version`
+- `source_metadata_schema_version`
+- `artifact_metadata_schema_version`
+- `constraints_metadata_schema_version`
 - `actions`
 - `locks`
 - `schema`
@@ -131,6 +136,12 @@ When reviewing a contract, ask simple questions first:
 - which Cells are consumed or created;
 - which runtime obligations remain;
 - which CKB profile assumptions are recorded.
+
+The top-level `metadata_schema_version` is the envelope version. The component
+schema fields split review risk by surface: source/package identity,
+artifact-binding facts, and CKB constraint summaries can now move independently
+in future schema revisions. `verify-artifact` still rejects a mismatch in any of
+these versions.
 
 ## v0.16 Assurance Checks
 
@@ -166,6 +177,9 @@ cellc deploy-plan src/main.cell --json
 cellc proof-diff old.meta.json new.meta.json --json
 cellc audit-bundle src/main.cell --output target/audit
 ```
+
+For the review-finding closure matrix, see
+`docs/archive/0.17/CELLSCRIPT_0_17_REVIEW_FINDINGS_CLOSURE.md`.
 
 ## Suggested Compiler CI Gate
 
@@ -215,10 +229,10 @@ For repository work, use the unified gate wrapper instead of hand-picking
 component scripts:
 
 ```bash
-cargo check --locked -p cellscript --all-targets
-./scripts/cellscript_ckb_release_gate.sh quick
-./scripts/cellscript_strict_backend_audit.sh full
-./scripts/cellscript_ckb_release_gate.sh full
+./scripts/cellscript_gate.sh dev
+./scripts/cellscript_gate.sh ci
+./scripts/cellscript_gate.sh backend
+./scripts/cellscript_gate.sh release
 ```
 
 `dev` is the local fast path. `ci` is the pull-request gate. `backend` is for
@@ -232,38 +246,52 @@ to chain evidence. Run the CKB acceptance gate from the CellScript repository
 root:
 
 ```bash
-./scripts/cellscript_ckb_release_gate.sh full
+./scripts/cellscript_gate.sh release
 ```
 
 For pre-push checks, the development gate runs the compiler checks, strict
 backend quick audit, syntax-combination quick audit, and diff checks:
 
 ```bash
-cargo check --locked -p cellscript --all-targets
+./scripts/cellscript_gate.sh dev
 ```
 
 If you specifically need the old compile-only production acceptance pass,
 `./scripts/cellscript_ckb_release_gate.sh quick` remains supported and delegates
-to `./scripts/cellscript_ckb_release_gate.sh quick`. The legacy
+to `./scripts/cellscript_gate.sh release-quick`. The legacy
 `./scripts/cellscript_ckb_release_gate.sh full` command is also supported as a
-compatibility wrapper for `./scripts/cellscript_ckb_release_gate.sh full`. The production
+compatibility wrapper for `./scripts/cellscript_gate.sh release`. The production
 mode is the release-facing gate because it first runs compiler and
 backend-contract evidence, then runs builder-backed local CKB transactions and
 stateful scenario/action coverage.
 
 The CKB validator records primitive-strict original bundled-example coverage,
 including strict v0.16 PP0150 fail-closed records, then requires scoped action
-and lock compile coverage, builder-backed action runs, source-bound acceptance
-provenance, builder-backed lock valid-spend and invalid-spend matrices, valid
+and lock compile coverage, builder-backed action runs, source-bound acceptance provenance,
+builder-backed lock valid-spend and invalid-spend matrices, valid
 transaction dry-runs, committed valid transactions, malformed rejection,
-measured cycles, consensus-serialized transaction size, occupied-capacity
-evidence, no under-capacity outputs, bundled example deployment, and a passed
-final production hardening gate. Fail-closed PP0150 records are evidence of a
-strict boundary, not deployable production acceptance.
+measured cycles, consensus-serialized transaction size, occupied-capacity evidence,
+exact-artifact build reports, live code-cell data-hash linkage, no
+under-capacity outputs, bundled example deployment, and a passed final
+production hardening gate. Fail-closed PP0150 records are evidence of a strict
+boundary, not deployable production acceptance.
 
 The report must explicitly record a passed final production hardening gate and
 source provenance for the repository commit, tracked source file list, tracked
-source hash, acceptance runner hash, and evidence validator hash.
+source hash, acceptance runner hash, and evidence validator hash. It must also
+record `cellscript_build_reports`: each row binds the compiled RISC-V ELF,
+`verify-artifact` result, ELF entry ABI result, CKB data hash, and any live
+devnet code-cell deployment whose data hash equals that compiled artifact hash.
+Compile-only reports keep the live deployment list empty and are not external
+release evidence.
+
+For the current NovaSeal profile set, production-ready source-package evidence
+means the live local devnet runners pass for core, Agreement, and the six
+planned profiles: BTC transaction commitment, BTC UTXO seal, dual seal, Fiber
+candidate, Fungible xUDT, and RWA receipt. Public/mainnet deployment evidence is
+separate: profile docs must still name any required CellDep attestation,
+external BIP340 TCB review, public BTC SPV/indexer report, or RWA legal/registry
+review.
 
 The production gate compiles the seven checked-in top-level
 `examples/*.cell` bundled examples directly. Those files are the single
@@ -286,4 +314,4 @@ not external production release evidence.
 ## Next
 
 Once the verification boundary is clear, continue with
-[LSP and Tooling](https://github.com/a19q3/CellScript/wiki/Tutorial-07-LSP-and-Tooling).
+[LSP and Tooling](https://github.com/CellScript-Labs/CellScript/wiki/Tutorial-07-LSP-and-Tooling).

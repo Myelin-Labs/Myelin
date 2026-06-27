@@ -1,10 +1,11 @@
 use crate::ast::*;
-use crate::error::{CompileError, Span};
+use crate::error::{CompileError, DiagnosticSeverity as CompilerDiagnosticSeverity, Span};
 use crate::lexer::token::{keyword_or_identifier, TokenKind};
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[cfg(not(feature = "wasm"))]
 pub mod server;
 
 pub struct LspServer {
@@ -195,25 +196,29 @@ impl LspServer {
             }
         };
 
-        let ast = match crate::parser::parse(&tokens) {
+        let ast = match crate::parser::parse_diagnostics(&tokens) {
             Ok(ast) => ast,
-            Err(error) => {
-                self.diagnostics.insert(uri.to_string(), vec![diagnostic_from_error(content, &error)]);
+            Err(errors) => {
+                self.diagnostics.insert(uri.to_string(), errors.iter().map(|error| diagnostic_from_error(content, error)).collect());
                 return;
             }
         };
 
         self.ast_cache.insert(uri.to_string(), ast.clone());
-        let diagnostics = match crate::types::check(&ast).and_then(|_| crate::flow::check(&ast)) {
-            Ok(()) => {
-                let mut diagnostics = Vec::new();
-                if let Ok(metadata) = crate::compile_metadata(content, None) {
-                    diagnostics.extend(lowering_diagnostics(content, &ast, &metadata));
-                }
-                diagnostics
-            }
-            Err(error) => vec![diagnostic_from_error(content, &error)],
-        };
+        let uri_path = file_uri_to_utf8_path(uri).filter(|path| path.exists());
+        let report = uri_path
+            .as_ref()
+            .map(|path| crate::compile_path_metadata_with_diagnostics_for_source(path, content, crate::CompileOptions::default()))
+            .unwrap_or_else(|| crate::compile_metadata_with_diagnostics(content, None));
+        let mut diagnostics = report
+            .diagnostics
+            .iter()
+            .filter(|error| diagnostic_belongs_to_uri(error, uri_path.as_ref()))
+            .map(|error| diagnostic_from_error(content, error))
+            .collect::<Vec<_>>();
+        if let Some(metadata) = report.metadata.as_ref() {
+            diagnostics.extend(lowering_diagnostics(content, &ast, metadata));
+        }
         self.diagnostics.insert(uri.to_string(), diagnostics);
     }
 
@@ -580,7 +585,6 @@ impl LspServer {
                     ("cell_type_hash_type", "ckb::cell_type_hash_type(${1:source::group_input(0)})"),
                     ("cell_lock_args_empty", "ckb::cell_lock_args_empty(${1:source::group_input(0)})"),
                     ("cell_type_args_empty", "ckb::cell_type_args_empty(${1:source::group_input(0)})"),
-                    ("cell_exists", "ckb::cell_exists(${1:source::group_input(0)})"),
                     ("cell_lock_args_hash", "ckb::cell_lock_args_hash(${1:source::group_input(0)})"),
                     ("cell_type_args_hash", "ckb::cell_type_args_hash(${1:source::group_input(0)})"),
                     ("require_cell_lock_hash", "ckb::require_cell_lock_hash(${1:source::group_input(0)}, ${2:expected_lock_hash})"),
@@ -1045,7 +1049,7 @@ impl LspServer {
             if let Some(loc) = module.ast.items.iter().find_map(|item| {
                 let name = item_name(item)?;
                 if name == symbol {
-                    Some(Location { uri: module_uri.clone(), range: span_to_range(&module.source, item_span(item)) })
+                    Some(Location { uri: module_uri.clone(), range: item_name_range(&module.source, item, name) })
                 } else {
                     None
                 }
@@ -1770,7 +1774,7 @@ impl LspServer {
             if let Some(location) = ast.items.iter().find_map(|item| {
                 let name = item_name(item)?;
                 if name == symbol {
-                    Some(Location { uri: uri.to_string(), range: span_to_range(source, item_span(item)) })
+                    Some(Location { uri: uri.to_string(), range: item_name_range(source, item, name) })
                 } else {
                     None
                 }
@@ -1783,7 +1787,7 @@ impl LspServer {
             if let Some(location) = module.ast.items.iter().find_map(|item| {
                 let name = item_name(item)?;
                 if name == symbol {
-                    Some(Location { uri: utf8_path_to_file_uri(&module.path), range: span_to_range(&module.source, item_span(item)) })
+                    Some(Location { uri: utf8_path_to_file_uri(&module.path), range: item_name_range(&module.source, item, name) })
                 } else {
                     None
                 }
@@ -1950,9 +1954,20 @@ fn span_to_range(source: &str, span: Span) -> Range {
 fn diagnostic_from_error(source: &str, error: &CompileError) -> Diagnostic {
     Diagnostic {
         range: span_to_range(source, error.span),
-        severity: DiagnosticSeverity::Error,
+        severity: match error.severity {
+            CompilerDiagnosticSeverity::Error => DiagnosticSeverity::Error,
+            CompilerDiagnosticSeverity::Warning => DiagnosticSeverity::Warning,
+        },
         message: error.message.clone(),
         source: "cellscript".to_string(),
+    }
+}
+
+fn diagnostic_belongs_to_uri(error: &CompileError, uri_path: Option<&Utf8PathBuf>) -> bool {
+    match (&error.file, uri_path) {
+        (Some(file), Some(path)) => same_workspace_path(file, path),
+        (Some(_), None) => false,
+        (None, _) => true,
     }
 }
 
@@ -2068,10 +2083,24 @@ fn item_span(item: &Item) -> Span {
     }
 }
 
+fn item_name_range(source: &str, item: &Item, name: &str) -> Range {
+    let span = item_span(item);
+    let start = span.start.min(source.len());
+    let end = span.end.min(source.len()).max(start);
+    let slice = &source[start..end];
+    if let Some((relative_start, relative_end)) = word_occurrences(slice, name).into_iter().next() {
+        return Range {
+            start: offset_to_position(source, start + relative_start),
+            end: offset_to_position(source, start + relative_end),
+        };
+    }
+    span_to_range(source, span)
+}
+
 fn stmt_span(stmt: &Stmt) -> Span {
     match stmt {
         Stmt::Let(s) => s.span,
-        Stmt::Return(_) => Span::default(),
+        Stmt::Return(s) => s.span,
         Stmt::If(s) => s.span,
         Stmt::For(s) => s.span,
         Stmt::While(s) => s.span,
@@ -2703,6 +2732,58 @@ action accept(input: Offer) -> output: Offer {
     }
 
     #[test]
+    fn test_parse_recovery_collects_multiple_diagnostics() {
+        let mut server = LspServer::new();
+        let uri = "file:///multi_parse_errors.cell".to_string();
+        let source = r#"
+module multi_parse_errors
+
+action bad() -> bool {
+    verification
+        let first: u64 true
+        let second: bool 1
+        return true
+}
+"#;
+        server.open_document(uri.clone(), source.to_string());
+        let diagnostics = server.get_diagnostics(&uri);
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("expected '=', found 'true'")));
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("expected '=', found integer 1")));
+    }
+
+    #[test]
+    fn test_type_errors_collect_multiple_diagnostics() {
+        let mut server = LspServer::new();
+        let uri = "file:///multi_errors.cell".to_string();
+        let source = r#"
+module multi_errors
+
+action bad_one() -> u64 {
+    verification
+        return true
+}
+
+action bad_two() -> bool {
+    verification
+        return 1
+}
+"#;
+        server.open_document(uri.clone(), source.to_string());
+        let diagnostics = server.get_diagnostics(&uri);
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("expected U64, found Bool")));
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("expected Bool, found U64")));
+    }
+
+    #[test]
+    fn compiler_warning_diagnostics_keep_warning_severity() {
+        let error = CompileError::warning("compatibility note", Span::new(0, 4, 1, 1));
+        let diagnostic = diagnostic_from_error("note", &error);
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Warning);
+    }
+
+    #[test]
     fn test_goto_definition_and_references() {
         let mut server = LspServer::new();
         let uri = "file:///defs.cell".to_string();
@@ -2712,6 +2793,8 @@ action accept(input: Offer) -> output: Offer {
 
         let definition = server.goto_definition(&uri, Position { line: 8, character: 20 }).expect("definition");
         assert_eq!(definition.range.start.line, 2);
+        assert_eq!(definition.range.start.character, 9);
+        assert_eq!(definition.range.end.character, 14);
 
         let refs = server.find_references(&uri, Position { line: 8, character: 20 });
         assert!(refs.len() >= 2);
@@ -2881,7 +2964,8 @@ action use_collection() -> Vec<NFT> {
         let temp = tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("Cell.toml"), "[package]\nentry = \"src/main.cell\"\n").unwrap();
+        std::fs::write(root.join("Cell.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nentry = \"src/main.cell\"\n")
+            .unwrap();
         std::fs::write(root.join("src/types.cell"), "module demo::types\n\nresource Token {\n    amount: u64,\n}\n").unwrap();
         let main_source =
             "module demo::main\n\nuse demo::types::Token\n\naction inspect(token: Token) -> u64 {\n    verification\n        token.amount\n}\n";
@@ -2902,7 +2986,8 @@ action use_collection() -> Vec<NFT> {
         let temp = tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("Cell.toml"), "[package]\nentry = \"src/main.cell\"\n").unwrap();
+        std::fs::write(root.join("Cell.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nentry = \"src/main.cell\"\n")
+            .unwrap();
         let types_source = "module demo::types\n\nresource Token {\n    amount: u64,\n}\n";
         let types_path = root.join("src/types.cell");
         std::fs::write(&types_path, types_source).unwrap();
@@ -2925,7 +3010,8 @@ action use_collection() -> Vec<NFT> {
         let temp = tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("Cell.toml"), "[package]\nentry = \"src/main.cell\"\n").unwrap();
+        std::fs::write(root.join("Cell.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nentry = \"src/main.cell\"\n")
+            .unwrap();
         let types_source = "module demo::types\n\nresource Token {\n    amount: u64,\n}\n";
         let types_path = root.join("src/types.cell");
         std::fs::write(&types_path, types_source).unwrap();

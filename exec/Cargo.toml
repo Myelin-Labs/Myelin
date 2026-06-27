@@ -19,10 +19,6 @@ secp256k1 = { version = "0.29", features = ["recovery", "global-context"] }
 
 # Errors
 thiserror = "1.0"
-anyhow = "1.0"
-
-# Collections
-indexmap = "=2.2.6"
 
 # Parallel execution
 rayon = "1.10"
@@ -30,7 +26,6 @@ parking_lot = "0.12"
 
 # CKB-VM integration for script execution
 ckb-vm = { version = "0.24", features = ["asm", "detect-asm"], optional = true }
-byteorder = { version = "1.5", optional = true }
 
 # Myelin dependencies
 myelin-hashes = { path = "../crypto/hashes", version = "0.1.0" }
@@ -48,7 +43,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
 default = ["vm"]
-vm = ["ckb-vm", "byteorder", "hex"]  # VM integration enabled
+vm = ["ckb-vm", "hex"]  # VM integration enabled
 vm-ipc = ["vm"]  # CKB VM v2 spawn/IPC syscall surface
 
 [[bench]]
