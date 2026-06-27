@@ -96,7 +96,7 @@
       "publish_dry_run_command": "cd proposals/evolving-dob/evolving-dob-profile-v1 && cellc publish --dry-run",
       "registry_path": "proposals/evolving-dob/evolving-dob-profile-v1/registry.json",
       "repository": "https://github.com/CellScript-Labs/dob-evo",
-      "source_revision": null,
+      "source_revision": "8661e1bc08956fdf23cfa2fb08bc91889dd33865",
       "status": "active",
       "verify_command": "cd proposals/evolving-dob/evolving-dob-profile-v1 && cellc registry verify --live --json",
       "versions": [
