@@ -19,12 +19,12 @@ evidence pipeline.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253",
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3",
     "fontFamily": "Inter, system-ui, sans-serif"
   }
 }}%%
@@ -40,13 +40,13 @@ flowchart LR
     A --> B --> C --> D --> E --> F --> G
     F --> C
 
-    classDef source   fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef artefact fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef tx       fill:#1A4253,stroke:#3CCBAA,color:#E8F5F1;
-    classDef sched    fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef vm       fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef state    fill:#1A4253,stroke:#4EE0BC,color:#E8F5F1;
-    classDef evidence fill:#143946,stroke:#00CC9F,color:#E8F5F1;
+    classDef source   fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef artefact fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef tx       fill:#3730A3,stroke:#6366F1,color:#F1F5F9;
+    classDef sched    fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef vm       fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef state    fill:#3730A3,stroke:#818CF8,color:#F1F5F9;
+    classDef evidence fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
 ```
 
 ## 2 — Cell Model consumption / creation
@@ -57,12 +57,12 @@ How a CKB transaction consumes and creates Cells.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -81,9 +81,9 @@ flowchart LR
     TX -->|create| D
     TX -->|create| E
 
-    classDef live fill:#143946,stroke:#FFB347,color:#E8F5F1;
-    classDef new  fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef tx   fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
+    classDef live fill:#312E81,stroke:#F59E0B,color:#F1F5F9;
+    classDef new  fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef tx   fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
 ```
 
 ## 3 — Three-layer model
@@ -94,12 +94,12 @@ The complete L1 / L2 / off-chain picture.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -130,9 +130,9 @@ flowchart TB
     E -.fetch.-> CT
     S2 -.dispute.-> CT
 
-    classDef off fill:#143946,stroke:#FFB347,color:#E8F5F1;
-    classDef l2  fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef l1  fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
+    classDef off fill:#312E81,stroke:#F59E0B,color:#F1F5F9;
+    classDef l2  fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef l1  fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
 ```
 
 ## 4 — CellDAG with dependencies
@@ -143,12 +143,12 @@ How two CellTxs become dependent, conflicting, or parallel.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -165,9 +165,9 @@ flowchart TB
     C -->|x2 read| E
     E -->|y2 consumed| F
 
-    classDef a fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef b fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef c fill:#1A4253,stroke:#00CC9F,color:#E8F5F1;
+    classDef a fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef b fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef c fill:#3730A3,stroke:#8B5CF6,color:#F1F5F9;
 ```
 
 ## 5 — DA ladder
@@ -178,12 +178,12 @@ The four readiness levels.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -194,10 +194,10 @@ flowchart TB
 
     L1 --> L2 --> L3 --> L4
 
-    classDef r1 fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef r2 fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef r3 fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef r4 fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
+    classDef r1 fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef r2 fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef r3 fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef r4 fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
 ```
 
 ## 6 — Five-step readiness chain
@@ -208,12 +208,12 @@ Context → economics → inclusion → stability → finality.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -227,9 +227,9 @@ flowchart LR
 
     A --> B --> C --> D --> E --> F --> G
 
-    classDef in   fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef step fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef out  fill:#143946,stroke:#00CC9F,color:#E8F5F1;
+    classDef in   fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef step fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef out  fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
 ```
 
 ## 7 — Claim ladder
@@ -240,12 +240,12 @@ The four-tier claim ladder.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -256,10 +256,10 @@ flowchart TB
 
     T0 --> T1 --> T2 --> T3
 
-    classDef t0 fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef t1 fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef t2 fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef t3 fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
+    classDef t0 fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef t1 fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef t2 fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef t3 fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
 ```
 
 ## 8 — Use-case tiers
@@ -270,12 +270,12 @@ What's in scope, viable, and out of scope for Myelin.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -300,9 +300,9 @@ flowchart LR
         O4["Raw sensor firehose as Cells"]:::no
         O5["Day-1 permissionless validator network"]:::no
     end
-    classDef ok  fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef warn fill:#0F2D3D,stroke:#FFB347,color:#E8F5F1;
-    classDef no  fill:#1A4253,stroke:#FF6B6B,color:#E8F5F1;
+    classDef ok  fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef warn fill:#1E1B4B,stroke:#F59E0B,color:#F1F5F9;
+    classDef no  fill:#3730A3,stroke:#F87171,color:#F1F5F9;
 ```
 
 ## 9 — Session lifecycle timeline
@@ -313,12 +313,12 @@ Open → chunks → DA → settlement → L1 close.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 gantt
@@ -352,12 +352,12 @@ The nine-step production gate.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -373,7 +373,7 @@ flowchart TB
 
     A --> B --> C --> D --> E --> F --> G --> H --> I
 
-    classDef step fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
+    classDef step fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
 ```
 
 ## Notes on re-use

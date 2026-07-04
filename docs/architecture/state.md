@@ -28,12 +28,12 @@ re-derived from the same Cell set on any validator.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -56,9 +56,9 @@ flowchart LR
     E --> D4
     D1 & D2 & D3 & D4 --> R
 
-    classDef exec  fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef delta fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef root  fill:#1A4253,stroke:#00CC9F,color:#E8F5F1;
+    classDef exec  fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef delta fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef root  fill:#3730A3,stroke:#8B5CF6,color:#F1F5F9;
 ```
 
 ## State root invariants
@@ -115,12 +115,12 @@ emits a DA manifest.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -139,13 +139,13 @@ flowchart TB
     F --> D
     D --> G
 
-    classDef in    fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef stage fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef proof fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef out   fill:#1A4253,stroke:#00CC9F,color:#E8F5F1;
-    classDef store fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef ext   fill:#1A4253,stroke:#FFB347,color:#E8F5F1;
-    classDef ready fill:#143946,stroke:#00CC9F,color:#E8F5F1;
+    classDef in    fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef stage fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef proof fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef out   fill:#3730A3,stroke:#8B5CF6,color:#F1F5F9;
+    classDef store fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef ext   fill:#3730A3,stroke:#F59E0B,color:#F1F5F9;
+    classDef ready fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
 ```
 
 A DA manifest carries:

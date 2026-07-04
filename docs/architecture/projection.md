@@ -61,12 +61,12 @@ equality hold.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -90,12 +90,12 @@ flowchart TB
     R --> H
     R2 --> H
 
-    classDef in    fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef stage fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef check fill:#1A4253,stroke:#3CCBAA,color:#E8F5F1;
-    classDef hash  fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef build fill:#0F2D3D,stroke:#00CC9F,color:#E8F5F1;
-    classDef bad   fill:#1A4253,stroke:#FF6B6B,color:#E8F5F1;
+    classDef in    fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef stage fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef check fill:#3730A3,stroke:#6366F1,color:#F1F5F9;
+    classDef hash  fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef build fill:#1E1B4B,stroke:#8B5CF6,color:#F1F5F9;
+    classDef bad   fill:#3730A3,stroke:#F87171,color:#F1F5F9;
 ```
 
 ## What counts as "Myelin-only"

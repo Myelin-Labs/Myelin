@@ -40,12 +40,12 @@ max_cycles          : VM budget per fill-rule script
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 sequenceDiagram

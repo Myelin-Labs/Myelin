@@ -67,12 +67,12 @@ document the disputer submits to whichever venue accepts it.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -96,11 +96,11 @@ flowchart TB
     H -->|valid: true| I["Self-contained court input"]:::good
     H -->|mismatch| J["Reject + report reason"]:::bad
 
-    classDef l2     fill:#143946,stroke:#3CCBAA,color:#E8F5F1;
-    classDef cli    fill:#0F2D3D,stroke:#FFB347,color:#E8F5F1;
-    classDef bundle fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
-    classDef good   fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef bad    fill:#1A4253,stroke:#FF6B6B,color:#E8F5F1;
+    classDef l2     fill:#312E81,stroke:#6366F1,color:#F1F5F9;
+    classDef cli    fill:#1E1B4B,stroke:#F59E0B,color:#F1F5F9;
+    classDef bundle fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
+    classDef good   fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef bad    fill:#3730A3,stroke:#F87171,color:#F1F5F9;
 ```
 
 ## The verification step
@@ -164,12 +164,12 @@ to a *decision*:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -189,8 +189,8 @@ flowchart LR
     F --> G
     G --> H
 
-    classDef l2 fill:#143946,stroke:#3CCBAA,color:#E8F5F1;
-    classDef l1 fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
+    classDef l2 fill:#312E81,stroke:#6366F1,color:#F1F5F9;
+    classDef l1 fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
 ```
 
 The settlement intent carries:

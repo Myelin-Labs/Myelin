@@ -34,12 +34,12 @@ edges are explicit dependencies:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -56,9 +56,9 @@ flowchart TB
     C -->|x2 read by E| E
     E -->|y2 consumed by| F
 
-    classDef a fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef b fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef c fill:#1A4253,stroke:#00CC9F,color:#E8F5F1;
+    classDef a fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef b fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef c fill:#3730A3,stroke:#8B5CF6,color:#F1F5F9;
 ```
 
 In this small example:
@@ -120,12 +120,12 @@ For each pair of CellTxs, the scheduler decides:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -139,11 +139,11 @@ flowchart LR
     S -- yes --> Y["Conflicting:<br/>same group output race"]:::conf
     S -- no  --> Z["Parallel:<br/>same batch"]:::par
 
-    classDef a   fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef q   fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef dep fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
-    classDef conf fill:#1A4253,stroke:#FF6B6B,color:#E8F5F1;
-    classDef par  fill:#143946,stroke:#00CC9F,color:#E8F5F1;
+    classDef a   fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef q   fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef dep fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
+    classDef conf fill:#3730A3,stroke:#F87171,color:#F1F5F9;
+    classDef par  fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
 ```
 
 A and B are:

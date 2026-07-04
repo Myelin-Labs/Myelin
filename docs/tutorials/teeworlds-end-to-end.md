@@ -12,12 +12,12 @@ bundle ready for the future dispute verifier.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -39,8 +39,8 @@ flowchart TB
     D --> H --> I
     H --> J
 
-    classDef off fill:#143946,stroke:#FFB347,color:#E8F5F1;
-    classDef l2  fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
+    classDef off fill:#312E81,stroke:#F59E0B,color:#F1F5F9;
+    classDef l2  fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
 ```
 
 Every box is a real step. Every arrow is a real CLI invocation.

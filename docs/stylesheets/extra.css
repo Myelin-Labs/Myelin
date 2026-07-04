@@ -1,137 +1,167 @@
 /* =========================================================================
- * Myelin docs — CKB color theme
+ * Myelin docs — blue-purple theme (clean, restrained)
  *
- * CKB brand palette inspiration:
- *   Teal primary  : #3CCBAA
- *   Teal accent   : #4EE0BC / #00CC9F
- *   Deep navy     : #05161C -> #0A2530 -> #0F2D3D
- *   Cool blue     : #5DD4E5
+ * Brand palette
+ *   Indigo primary  : #6366F1  (indigo-500)
+ *   Indigo deep     : #4F46E5  (indigo-600)
+ *   Violet accent   : #8B5CF6  (violet-500)
+ *   Slate neutrals  : slate-50 → slate-900
  *
- * The site uses Material's "slate" base in dark mode and the default
- * "white" base in light mode; the variables below override the Material
- * design tokens so the navy/teal feel carries through both modes.
+ * Aesthetic target: Linear / Stripe docs — quiet, typographic, no
+ * flashy gradients. One accent color used sparingly.
+ * ========================================================================= */
+
+/* =========================================================================
+ * Light mode  (data-md-color-scheme="default")
  * ========================================================================= */
 
 :root,
 [data-md-color-scheme="default"] {
-  --ckb-teal:        #3CCBAA;
-  --ckb-teal-bright: #4EE0BC;
-  --ckb-green:       #00CC9F;
-  --ckb-cyan:        #5DD4E5;
-  --ckb-amber:       #FFB347;
-  --ckb-red:         #FF6B6B;
+  /* Brand */
+  --indigo:        #6366F1;
+  --indigo-strong: #4F46E5;
+  --indigo-soft:   #EEF2FF;
+  --violet:        #8B5CF6;
+  --violet-soft:   #F3EEFF;
 
-  --ckb-navy-0:      #F2F8F6;   /* page bg light */
-  --ckb-navy-1:      #E6F1ED;   /* card bg light */
-  --ckb-navy-2:      #C9DDD6;
-  --ckb-navy-3:      #6E8A82;
+  /* Slate scale */
+  --slate-50:   #F8FAFC;
+  --slate-100:  #F1F5F9;
+  --slate-200:  #E2E8F0;
+  --slate-300:  #CBD5E1;
+  --slate-400:  #94A3B8;
+  --slate-500:  #64748B;
+  --slate-600:  #475569;
+  --slate-700:  #334155;
+  --slate-800:  #1E293B;
+  --slate-900:  #0F172A;
 
-  --ckb-ink:         #0F2D3D;
-  --ckb-ink-soft:    #2A4754;
+  /* Semantic */
+  --amber:      #D97706;
+  --red:        #DC2626;
 
-  /* Material primary / accent (light) */
-  --md-primary-fg-color:        var(--ckb-teal);
-  --md-primary-fg-color--light: #5DD4E5;
-  --md-primary-fg-color--dark:  #00CC9F;
+  /* Material primary / accent */
+  --md-primary-fg-color:        var(--indigo);
+  --md-primary-fg-color--light: var(--violet);
+  --md-primary-fg-color--dark:  var(--indigo-strong);
   --md-primary-bg-color:        #ffffff;
   --md-primary-bg-color--light: rgba(255, 255, 255, 0.7);
 
-  --md-accent-fg-color:         #00CC9F;
-  --md-accent-fg-color--transparent: rgba(0, 204, 159, 0.1);
+  --md-accent-fg-color:         var(--violet);
+  --md-accent-fg-color--transparent: rgba(99, 102, 241, 0.10);
   --md-accent-bg-color:         #ffffff;
   --md-accent-bg-color--light:  rgba(255, 255, 255, 0.7);
 
-  --md-typeset-a-color:         #00a37e;
-  --md-typeset-a-color--hover:  #3CCBAA;
+  /* Links */
+  --md-typeset-a-color:         var(--indigo-strong);
+  --md-typeset-a-color--hover:  var(--violet);
 
-  /* Code blocks */
-  --md-code-bg-color:           #EEF6F3;
-  --md-code-fg-color:           #0F2D3D;
-  --md-code-hl-color:           #C8E8DE;
+  /* Code */
+  --md-code-bg-color:           var(--slate-100);
+  --md-code-fg-color:           var(--slate-800);
+  --md-code-hl-color:           var(--indigo-soft);
 
-  /* Admonitions */
-  --md-admonition-fg-color:     var(--md-default-fg-color);
-  --md-admonition-bg-color:     #E6F1ED;
+  /* Default fg / bg */
+  --md-default-fg-color:        var(--slate-800);
+  --md-default-fg-color--light: var(--slate-600);
+  --md-default-fg-color--lighter: var(--slate-400);
+  --md-default-bg-color:        #ffffff;
+  --md-default-bg-color--light: var(--slate-50);
 
-  --md-default-fg-color:        #0F2D3D;
-  --md-default-fg-color--light: #2A4754;
-  --md-default-fg-color--lighter: #6E8A82;
-  --md-default-bg-color:        #F2F8F6;
-  --md-default-bg-color--light: rgba(255, 255, 255, 0.7);
-
-  --md-shadow-z1: 0 4px 12px rgba(15, 45, 61, 0.06);
-  --md-shadow-z2: 0 8px 24px rgba(15, 45, 61, 0.10);
-}
-
-[data-md-color-scheme="slate"] {
-  --ckb-teal:        #3CCBAA;
-  --ckb-teal-bright: #4EE0BC;
-  --ckb-green:       #00CC9F;
-  --ckb-cyan:        #5DD4E5;
-  --ckb-amber:       #FFB347;
-  --ckb-red:         #FF6B6B;
-
-  --ckb-navy-0:      #05161C;
-  --ckb-navy-1:      #0A2530;
-  --ckb-navy-2:      #0F2D3D;
-  --ckb-navy-3:      #143946;
-  --ckb-navy-4:      #1A4253;
-
-  --ckb-ink:         #E8F5F1;
-  --ckb-ink-soft:    #B8D4CC;
-
-  /* Material primary / accent (dark) */
-  --md-primary-fg-color:        #3CCBAA;
-  --md-primary-fg-color--light: #5DD4E5;
-  --md-primary-fg-color--dark:  #00CC9F;
-  --md-primary-bg-color:        #0A2530;
-  --md-primary-bg-color--light: rgba(15, 45, 61, 0.6);
-
-  --md-accent-fg-color:         #4EE0BC;
-  --md-accent-fg-color--transparent: rgba(78, 224, 188, 0.15);
-  --md-accent-bg-color:         #0A2530;
-  --md-accent-bg-color--light:  rgba(15, 45, 61, 0.6);
-
-  --md-typeset-a-color:         #4EE0BC;
-  --md-typeset-a-color--hover:  #5DD4E5;
-
-  --md-code-bg-color:           #0A2530;
-  --md-code-fg-color:           #E8F5F1;
-  --md-code-hl-color:           #143946;
-
-  --md-default-fg-color:        #E8F5F1;
-  --md-default-fg-color--light: #B8D4CC;
-  --md-default-fg-color--lighter: #7A9A92;
-  --md-default-bg-color:        #05161C;
-  --md-default-bg-color--light: rgba(10, 37, 48, 0.7);
-
-  --md-shadow-z1: 0 4px 14px rgba(0, 0, 0, 0.5);
-  --md-shadow-z2: 0 10px 30px rgba(0, 0, 0, 0.55);
+  /* Shadows — subtle */
+  --md-shadow-z1: 0 1px 2px rgba(15, 23, 42, 0.04),
+                  0 1px 3px rgba(15, 23, 42, 0.06);
+  --md-shadow-z2: 0 4px 8px rgba(15, 23, 42, 0.06),
+                  0 8px 16px rgba(15, 23, 42, 0.06);
 }
 
 /* =========================================================================
- * Header / hero
+ * Dark mode  (data-md-color-scheme="slate")
+ * ========================================================================= */
+
+[data-md-color-scheme="slate"] {
+  --indigo:        #818CF8;
+  --indigo-strong: #6366F1;
+  --indigo-soft:   rgba(99, 102, 241, 0.16);
+  --violet:        #A78BFA;
+  --violet-soft:   rgba(139, 92, 246, 0.16);
+
+  --slate-50:   #F8FAFC;
+  --slate-100:  #F1F5F9;
+  --slate-200:  #E2E8F0;
+  --slate-300:  #CBD5E1;
+  --slate-400:  #94A3B8;
+  --slate-500:  #64748B;
+  --slate-600:  #475569;
+  --slate-700:  #334155;
+  --slate-800:  #1E293B;
+  --slate-900:  #0F172A;
+
+  --bg-deep:    #0A0E1F;
+  --bg:         #0F1428;
+  --surface:    #161B33;
+  --surface-2:  #1C2240;
+  --line:       #252B4A;
+
+  --amber:      #F59E0B;
+  --red:        #F87171;
+
+  --md-primary-fg-color:        var(--indigo);
+  --md-primary-fg-color--light: var(--violet);
+  --md-primary-fg-color--dark:  #A5B4FC;
+  --md-primary-bg-color:        var(--bg);
+  --md-primary-bg-color--light: var(--surface);
+
+  --md-accent-fg-color:         var(--violet);
+  --md-accent-fg-color--transparent: rgba(167, 139, 250, 0.16);
+  --md-accent-bg-color:         var(--bg);
+  --md-accent-bg-color--light:  var(--surface);
+
+  --md-typeset-a-color:         #A5B4FC;
+  --md-typeset-a-color--hover:  var(--violet);
+
+  --md-code-bg-color:           var(--surface);
+  --md-code-fg-color:           var(--slate-100);
+  --md-code-hl-color:           var(--surface-2);
+
+  --md-default-fg-color:        var(--slate-100);
+  --md-default-fg-color--light: var(--slate-300);
+  --md-default-fg-color--lighter: var(--slate-400);
+  --md-default-bg-color:        var(--bg);
+  --md-default-bg-color--light: var(--surface);
+
+  --md-shadow-z1: 0 1px 2px rgba(0, 0, 0, 0.30),
+                  0 1px 3px rgba(0, 0, 0, 0.20);
+  --md-shadow-z2: 0 4px 8px rgba(0, 0, 0, 0.30),
+                  0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+/* =========================================================================
+ * Header — flat tinted bar, no gradient soup
  * ========================================================================= */
 
 .md-header {
-  background: linear-gradient(120deg,
-    rgba(0, 204, 159, 0.18) 0%,
-    rgba(61, 203, 170, 0.10) 35%,
-    rgba(15, 45, 61, 0.85) 100%),
-  var(--md-primary-fg-color);
-  backdrop-filter: saturate(140%) blur(8px);
+  background: var(--md-primary-fg-color);
+  color: #ffffff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 [data-md-color-scheme="default"] .md-header {
-  background:
-    linear-gradient(120deg,
-      rgba(255, 255, 255, 0.30),
-      rgba(255, 255, 255, 0.05)),
-    linear-gradient(120deg, #3CCBAA, #00CC9F);
+  background: var(--md-primary-fg-color);
+}
+
+.md-header__title,
+.md-header__button.md-icon {
+  color: #ffffff;
+}
+
+.md-header__title:hover {
+  color: #ffffff;
+  opacity: 0.85;
 }
 
 /* =========================================================================
- * Navigation
+ * Tabs — solid indigo, no gradient
  * ========================================================================= */
 
 .md-tabs {
@@ -140,6 +170,7 @@
 }
 
 .md-tabs__link {
+  color: rgba(255, 255, 255, 0.78);
   font-weight: 500;
 }
 
@@ -150,245 +181,316 @@
 }
 
 [data-md-color-scheme="default"] .md-tabs {
-  background: linear-gradient(120deg, #3CCBAA, #00CC9F);
-  color: #ffffff;
+  background: var(--md-primary-fg-color);
 }
 
 /* =========================================================================
- * Cards & surfaces
+ * Cards & surfaces — restrained
  * ========================================================================= */
 
 .md-typeset .grid.cards > ul > li,
 .md-typeset .grid > .card {
-  border: 1px solid var(--ckb-navy-3);
-  border-radius: 12px;
+  border: 1px solid var(--slate-200);
+  border-radius: 10px;
   padding: 1rem 1.2rem;
-  background: var(--ckb-navy-1);
-  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+  background: var(--md-default-bg-color);
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
 }
 
 .md-typeset .grid.cards > ul > li:hover {
-  transform: translateY(-2px);
-  border-color: var(--ckb-teal);
+  transform: translateY(-1px);
+  border-color: var(--indigo);
   box-shadow: var(--md-shadow-z2);
 }
 
 .md-typeset .grid.cards > ul > li > hr {
-  border-color: var(--ckb-navy-3);
+  border-color: var(--slate-200);
 }
 
-[data-md-color-scheme="default"] .md-typeset .grid.cards > ul > li {
-  background: #ffffff;
-  box-shadow: var(--md-shadow-z1);
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li,
+[data-md-color-scheme="slate"] .md-typeset .grid > .card {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--indigo);
+  box-shadow: var(--md-shadow-z2);
 }
 
 /* =========================================================================
- * Admonitions — recolor the CKB-typical notes
+ * Admonitions — quiet borders, no fill
  * ========================================================================= */
+
+.md-typeset .admonition,
+.md-typeset details {
+  border-left: 3px solid var(--indigo);
+  background: transparent;
+  box-shadow: none;
+}
 
 .md-typeset .admonition.note,
 .md-typeset details.note {
-  border-color: var(--ckb-teal);
-}
-
-.md-typeset .admonition.note > .admonition-title,
-.md-typeset details.note > .admonition-title {
-  background-color: rgba(61, 203, 170, 0.12);
+  border-left-color: var(--indigo);
 }
 
 .md-typeset .admonition.tip,
 .md-typeset details.tip {
-  border-color: var(--ckb-green);
+  border-left-color: var(--violet);
 }
 
 .md-typeset .admonition.warning,
 .md-typeset details.warning {
-  border-color: var(--ckb-amber);
+  border-left-color: var(--amber);
 }
 
 .md-typeset .admonition.danger,
 .md-typeset details.danger {
-  border-color: var(--ckb-red);
+  border-left-color: var(--red);
+}
+
+.md-typeset .admonition-title {
+  background: transparent;
+  border-bottom: 1px solid var(--slate-200);
+  font-weight: 600;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .admonition-title {
+  border-bottom-color: var(--line);
 }
 
 /* =========================================================================
- * Code blocks
+ * Code blocks — restrained, slightly tinted
  * ========================================================================= */
 
 .md-typeset code {
   background: var(--md-code-bg-color);
   color: var(--md-code-fg-color);
   border-radius: 4px;
-  padding: 0.1em 0.35em;
+  padding: 0.12em 0.4em;
   font-size: 0.92em;
+  font-weight: 500;
 }
 
 .md-typeset pre > code {
   border-radius: 8px;
   box-shadow: var(--md-shadow-z1);
   padding: 1rem 1.1rem;
+  font-weight: 400;
 }
 
 [data-md-color-scheme="slate"] .md-typeset pre > code {
-  background:
-    linear-gradient(180deg, #0A2530, #0F2D3D);
-  border: 1px solid rgba(78, 224, 188, 0.10);
+  background: var(--surface);
+  border: 1px solid var(--line);
 }
 
 /* =========================================================================
- * Mermaid diagrams — CKB teal/navy theme override
- *
- * Mermaid renders inside <pre class="mermaid">. We inject its theme
- * variables with `%%{init:}%%` per-diagram, but a few global polish
- * rules help too.
+ * Mermaid diagrams — global polish (colors live in each diagram's
+ * %%{init:{...}}%% block so they remain portable when copied).
  * ========================================================================= */
 
 .mermaid {
   background: transparent;
   font-family: var(--md-text-font, "Inter"), system-ui, sans-serif;
-}
-
-[data-md-color-scheme="slate"] .mermaid {
-  filter: drop-shadow(0 6px 20px rgba(0, 0, 0, 0.4));
+  display: flex;
+  justify-content: center;
 }
 
 /* =========================================================================
- * Tables — slightly more readable
+ * Tables — clean, readable
  * ========================================================================= */
 
 .md-typeset table:not([class]) {
   font-size: 0.92rem;
   border-radius: 8px;
   overflow: hidden;
-  border: 1px solid var(--ckb-navy-3);
+  border: 1px solid var(--slate-200);
 }
 
 .md-typeset table:not([class]) th {
-  background: var(--ckb-navy-2);
-  color: var(--ckb-ink);
+  background: var(--slate-50);
+  color: var(--slate-700);
   font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
-[data-md-color-scheme="default"] .md-typeset table:not([class]) th {
-  background: rgba(61, 203, 170, 0.10);
-  color: var(--ckb-ink);
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) {
+  border-color: var(--line);
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) th {
+  background: var(--surface);
+  color: var(--slate-100);
 }
 
 .md-typeset table:not([class]) tr:hover {
-  background: rgba(61, 203, 170, 0.06);
+  background: var(--slate-50);
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) tr:hover {
+  background: var(--surface-2);
 }
 
 /* =========================================================================
- * Footer
+ * Footer — flat, no gradient
  * ========================================================================= */
 
 .md-footer {
-  background:
-    linear-gradient(180deg, rgba(61, 203, 170, 0.05), transparent 50%),
-    var(--ckb-navy-0);
+  background: var(--slate-50);
+  border-top: 1px solid var(--slate-200);
+}
+
+[data-md-color-scheme="slate"] .md-footer {
+  background: var(--bg-deep);
+  border-top-color: var(--line);
 }
 
 .md-footer-meta {
-  background: rgba(0, 0, 0, 0.20);
+  background: var(--slate-100);
+}
+
+[data-md-color-scheme="slate"] .md-footer-meta {
+  background: var(--bg-deep);
 }
 
 /* =========================================================================
- * Hero block (used on home + section landing pages)
+ * Hero block — clean, generous whitespace, single accent
  * ========================================================================= */
 
 .hero {
-  margin: 2.5rem 0 3rem;
+  margin: 2rem 0 2.4rem;
   padding: 2.4rem 2rem;
-  border-radius: 16px;
-  background:
-    radial-gradient(900px 300px at 10% -10%, rgba(78, 224, 188, 0.18), transparent 60%),
-    radial-gradient(800px 260px at 95% 110%, rgba(93, 212, 229, 0.14), transparent 60%),
-    var(--ckb-navy-2);
-  border: 1px solid var(--ckb-navy-3);
-  position: relative;
-  overflow: hidden;
+  border-radius: 12px;
+  background: var(--md-default-bg-color);
+  border: 1px solid var(--slate-200);
+}
+
+[data-md-color-scheme="slate"] .hero {
+  border-color: var(--line);
+  background: var(--surface);
 }
 
 .hero h1 {
-  margin: 0 0 0.6rem;
-  font-size: 2.4rem;
-  letter-spacing: -0.01em;
-  background: linear-gradient(120deg, #4EE0BC, #5DD4E5);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  margin: 0 0 0.7rem;
+  font-size: 2.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  color: var(--slate-900);
 }
 
-[data-md-color-scheme="default"] .hero {
-  background:
-    radial-gradient(900px 300px at 10% -10%, rgba(61, 203, 170, 0.18), transparent 60%),
-    radial-gradient(800px 260px at 95% 110%, rgba(93, 212, 229, 0.14), transparent 60%),
-    #ffffff;
-  border: 1px solid #C9DDD6;
-}
-
-[data-md-color-scheme="default"] .hero h1 {
-  background: linear-gradient(120deg, #00a37e, #3CCBAA);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+[data-md-color-scheme="slate"] .hero h1 {
+  color: var(--slate-50);
 }
 
 .hero p.lead {
-  font-size: 1.1rem;
-  color: var(--ckb-ink-soft);
-  max-width: 60ch;
+  font-size: 1.05rem;
+  color: var(--slate-600);
+  margin: 0;
+  max-width: 64ch;
+  line-height: 1.6;
+}
+
+[data-md-color-scheme="slate"] .hero p.lead {
+  color: var(--slate-300);
 }
 
 .hero .cta {
-  margin-top: 1.4rem;
+  margin-top: 1.6rem;
   display: flex;
-  gap: 0.8rem;
+  gap: 0.6rem;
   flex-wrap: wrap;
 }
 
 .hero .cta a.md-button {
-  border-radius: 8px;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.hero .cta a.md-button--primary {
+  background: var(--indigo-strong);
+  border-color: var(--indigo-strong);
+}
+
+.hero .cta a.md-button--primary:hover {
+  background: var(--indigo);
+  border-color: var(--indigo);
 }
 
 /* =========================================================================
- * Layer badges (L1 / L2 / off-chain) used in interaction docs
+ * Layer badges (L1 / L2 / off-chain) — used in interactions docs
  * ========================================================================= */
 
 .badge {
   display: inline-block;
-  padding: 0.18rem 0.55rem;
-  border-radius: 999px;
-  font-size: 0.78em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.74em;
   font-weight: 600;
   letter-spacing: 0.02em;
   border: 1px solid currentColor;
   margin-right: 0.35rem;
   vertical-align: middle;
+  font-family: var(--md-code-font), monospace;
 }
 
-.badge.l1  { color: #5DD4E5; }
-.badge.l2  { color: #3CCBAA; }
-.badge.off { color: #FFB347; }
-.badge.dev { color: #B8D4CC; }
+.badge.l1  { color: #4F46E5; }
+.badge.l2  { color: #7C3AED; }
+.badge.off { color: #B45309; }
+.badge.dev { color: var(--slate-500); }
 
-[data-md-color-scheme="default"] .badge.l1  { color: #0a8aa8; }
-[data-md-color-scheme="default"] .badge.l2  { color: #00a37e; }
-[data-md-color-scheme="default"] .badge.off { color: #c47c00; }
-[data-md-color-scheme="default"] .badge.dev { color: #4d6e66; }
+[data-md-color-scheme="slate"] .badge.l1  { color: #A5B4FC; }
+[data-md-color-scheme="slate"] .badge.l2  { color: #C4B5FD; }
+[data-md-color-scheme="slate"] .badge.off { color: #FBBF24; }
+[data-md-color-scheme="slate"] .badge.dev { color: var(--slate-400); }
 
 /* =========================================================================
- * Subtle scrollbar in dark mode
+ * Subtle scrollbar (dark mode)
  * ========================================================================= */
 
 [data-md-color-scheme="slate"] ::-webkit-scrollbar { width: 10px; height: 10px; }
 [data-md-color-scheme="slate"] ::-webkit-scrollbar-thumb {
-  background: rgba(78, 224, 188, 0.25);
+  background: rgba(165, 180, 252, 0.20);
   border-radius: 6px;
 }
 [data-md-color-scheme="slate"] ::-webkit-scrollbar-thumb:hover {
-  background: rgba(78, 224, 188, 0.45);
+  background: rgba(165, 180, 252, 0.35);
 }
 [data-md-color-scheme="slate"] ::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.20);
+  background: transparent;
+}
+
+/* =========================================================================
+ * Selection — match brand
+ * ========================================================================= */
+
+::selection {
+  background: rgba(99, 102, 241, 0.25);
+  color: inherit;
+}
+
+[data-md-color-scheme="slate"] ::selection {
+  background: rgba(165, 180, 252, 0.30);
+}
+
+/* =========================================================================
+ * Inline keyboard / UI polish
+ * ========================================================================= */
+
+.md-typeset kbd {
+  background: var(--slate-100);
+  color: var(--slate-700);
+  border: 1px solid var(--slate-200);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0.05em 0.4em;
+  font-size: 0.85em;
+  font-family: var(--md-code-font), monospace;
+}
+
+[data-md-color-scheme="slate"] .md-typeset kbd {
+  background: var(--surface);
+  color: var(--slate-200);
+  border-color: var(--line);
 }

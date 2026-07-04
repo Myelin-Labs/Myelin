@@ -45,12 +45,12 @@ listed below.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -84,14 +84,14 @@ flowchart TB
     E -.-> R5
     E -.-> R6
 
-    classDef src  fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef comp fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef meta fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef tx   fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
-    classDef check fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef ok   fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef good fill:#0F2D3D,stroke:#00CC9F,color:#E8F5F1;
-    classDef bad  fill:#1A4253,stroke:#FF6B6B,color:#E8F5F1;
+    classDef src  fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef comp fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef meta fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef tx   fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
+    classDef check fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef ok   fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef good fill:#1E1B4B,stroke:#8B5CF6,color:#F1F5F9;
+    classDef bad  fill:#3730A3,stroke:#F87171,color:#F1F5F9;
 ```
 
 ## Rejection taxonomy

@@ -97,12 +97,12 @@ can verify the report by re-running
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -124,13 +124,13 @@ flowchart LR
     C --> G
     B --> D
 
-    classDef in    fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef exec  fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef proj  fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef da    fill:#1A4253,stroke:#FFB347,color:#E8F5F1;
-    classDef court fill:#143946,stroke:#5DD4E5,color:#E8F5F1;
-    classDef anchor fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
-    classDef settle fill:#0F2D3D,stroke:#5DD4E5,color:#E8F5F1;
+    classDef in    fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef exec  fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef proj  fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef da    fill:#3730A3,stroke:#F59E0B,color:#F1F5F9;
+    classDef court fill:#312E81,stroke:#A78BFA,color:#F1F5F9;
+    classDef anchor fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
+    classDef settle fill:#1E1B4B,stroke:#A78BFA,color:#F1F5F9;
 ```
 
 ## Path 3 — Court
@@ -232,12 +232,12 @@ and then through the five-step readiness chain.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -253,11 +253,11 @@ flowchart TB
     P2 --> P4
     P3 --> P4
 
-    classDef in fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef p1 fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef p2 fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef p3 fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
-    classDef p4 fill:#143946,stroke:#FFB347,color:#E8F5F1;
+    classDef in fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef p1 fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef p2 fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef p3 fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
+    classDef p4 fill:#312E81,stroke:#F59E0B,color:#F1F5F9;
 ```
 
 Path 1 and Path 2 run independently off the same CellTx. Path 3

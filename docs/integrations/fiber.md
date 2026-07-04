@@ -61,12 +61,12 @@ The controller:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -90,9 +90,9 @@ flowchart LR
     M3 -.compact.-> B2 -.metadata.-> F2
     F3 -.outpoint.-> M1
 
-    classDef my fill:#143946,stroke:#3CCBAA,color:#E8F5F1;
-    classDef br fill:#0F2D3D,stroke:#FFB347,color:#E8F5F1;
-    classDef fb fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
+    classDef my fill:#312E81,stroke:#6366F1,color:#F1F5F9;
+    classDef br fill:#1E1B4B,stroke:#F59E0B,color:#F1F5F9;
+    classDef fb fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
 ```
 
 The bridge is the *only* component that knows about both systems.
@@ -148,12 +148,12 @@ bridge releases the preimage to settle the Fiber invoice
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 sequenceDiagram

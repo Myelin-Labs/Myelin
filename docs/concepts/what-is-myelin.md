@@ -70,12 +70,12 @@ The full positioning case (with use-case tiers) lives in the upstream
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -100,9 +100,9 @@ flowchart LR
         O4["Raw sensor firehose as Cells"]:::no
         O5["Day-1 permissionless validator network"]:::no
     end
-    classDef ok  fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef warn fill:#0F2D3D,stroke:#FFB347,color:#E8F5F1;
-    classDef no  fill:#1A4253,stroke:#FF6B6B,color:#E8F5F1;
+    classDef ok  fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef warn fill:#1E1B4B,stroke:#F59E0B,color:#F1F5F9;
+    classDef no  fill:#3730A3,stroke:#F87171,color:#F1F5F9;
 ```
 
 ## The claim ladder

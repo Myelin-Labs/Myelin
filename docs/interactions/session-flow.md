@@ -30,12 +30,12 @@ script whose args commit to the session ID and the committee.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -52,9 +52,9 @@ flowchart LR
     P3 --> LOCK
     LOCK --> L
 
-    classDef l1     fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
-    classDef lock   fill:#143946,stroke:#FFB347,color:#E8F5F1;
-    classDef locked fill:#0F2D3D,stroke:#00CC9F,color:#E8F5F1;
+    classDef l1     fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
+    classDef lock   fill:#312E81,stroke:#F59E0B,color:#F1F5F9;
+    classDef locked fill:#1E1B4B,stroke:#8B5CF6,color:#F1F5F9;
 ```
 
 The lock script is the CKB-side anchor of the session. Its args
@@ -95,12 +95,12 @@ scheduler decides. Each chunk:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 sequenceDiagram
@@ -150,12 +150,12 @@ an external DA provider's signed receipt, it can climb to
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -171,9 +171,9 @@ flowchart LR
     D -.->|signed receipt| B
     B --> E --> F
 
-    classDef l2  fill:#143946,stroke:#3CCBAA,color:#E8F5F1;
-    classDef off fill:#1A4253,stroke:#FFB347,color:#E8F5F1;
-    classDef l1  fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
+    classDef l2  fill:#312E81,stroke:#6366F1,color:#F1F5F9;
+    classDef off fill:#3730A3,stroke:#F59E0B,color:#F1F5F9;
+    classDef l1  fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
 ```
 
 For the deepest dive on DA, see [Data availability
@@ -214,12 +214,12 @@ There are two paths:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -229,11 +229,11 @@ flowchart TB
     Q -- yes --> Y["Disputed close:<br/>settlement package<br/>+ L1 court verdict"]:::warn
     Y --> Z["Release / slash<br/>per verdict"]:::verdict
 
-    classDef l2     fill:#143946,stroke:#3CCBAA,color:#E8F5F1;
-    classDef q      fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef good   fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef warn   fill:#1A4253,stroke:#FFB347,color:#E8F5F1;
-    classDef verdict fill:#143946,stroke:#00CC9F,color:#E8F5F1;
+    classDef l2     fill:#312E81,stroke:#6366F1,color:#F1F5F9;
+    classDef q      fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef good   fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef warn   fill:#3730A3,stroke:#F59E0B,color:#F1F5F9;
+    classDef verdict fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
 ```
 
 For the deepest dive on submission, see [L1 submission
@@ -245,12 +245,12 @@ flow](submission-flow.md).
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 gantt

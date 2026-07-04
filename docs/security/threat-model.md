@@ -11,12 +11,12 @@ the "in scope" list should be assumed to be out of scope.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -41,8 +41,8 @@ flowchart LR
     E --> P5
     F --> P6
 
-    classDef threat fill:#1A4253,stroke:#FF6B6B,color:#E8F5F1;
-    classDef def    fill:#143946,stroke:#00CC9F,color:#E8F5F1;
+    classDef threat fill:#3730A3,stroke:#F87171,color:#F1F5F9;
+    classDef def    fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
 ```
 
 | Threat | How Myelin handles it |
@@ -110,12 +110,12 @@ implemented.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -126,7 +126,7 @@ flowchart LR
     E["MEV<br/>protection"]:::out
     F["Privacy<br/>of witnesses"]:::out
 
-    classDef out fill:#1A4253,stroke:#FF6B6B,color:#E8F5F1;
+    classDef out fill:#3730A3,stroke:#F87171,color:#F1F5F9;
 ```
 
 | Out of scope | Why |

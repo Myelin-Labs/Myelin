@@ -34,12 +34,12 @@ l1_da_published      -> + DA anchor CellTx committed on CKB
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart TB
@@ -50,10 +50,10 @@ flowchart TB
 
     L1 --> L2 --> L3 --> L4
 
-    classDef r1 fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef r2 fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef r3 fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef r4 fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
+    classDef r1 fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef r2 fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef r3 fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef r4 fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
 ```
 
 The four levels are **cumulative**. `production_ready` implies
@@ -90,12 +90,12 @@ tree.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -115,14 +115,14 @@ flowchart LR
     D -.->|add receipt| F
     F --> G --> H
 
-    classDef in      fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef stage   fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
-    classDef store   fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef manifest fill:#1A4253,stroke:#3CCBAA,color:#E8F5F1;
-    classDef manifest2 fill:#143946,stroke:#00CC9F,color:#E8F5F1;
-    classDef ext     fill:#1A4253,stroke:#FFB347,color:#E8F5F1;
-    classDef pkg     fill:#143946,stroke:#3CCBAA,color:#E8F5F1;
-    classDef l1      fill:#1A4253,stroke:#5DD4E5,color:#E8F5F1;
+    classDef in      fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef stage   fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef store   fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef manifest fill:#3730A3,stroke:#6366F1,color:#F1F5F9;
+    classDef manifest2 fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef ext     fill:#3730A3,stroke:#F59E0B,color:#F1F5F9;
+    classDef pkg     fill:#312E81,stroke:#6366F1,color:#F1F5F9;
+    classDef l1      fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
 ```
 
 ## Step 1 — Local sealing
@@ -214,12 +214,12 @@ The full submission readiness chain runs after submission:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#0F2D3D",
-    "primaryTextColor": "#E8F5F1",
-    "primaryBorderColor": "#3CCBAA",
-    "lineColor": "#4EE0BC",
-    "secondaryColor": "#143946",
-    "tertiaryColor": "#1A4253"
+    "primaryColor": "#1E1B4B",
+    "primaryTextColor": "#F1F5F9",
+    "primaryBorderColor": "#6366F1",
+    "lineColor": "#818CF8",
+    "secondaryColor": "#312E81",
+    "tertiaryColor": "#3730A3"
   }
 }}%%
 flowchart LR
@@ -233,8 +233,8 @@ flowchart LR
 
     A --> B --> C --> D --> E --> F --> G
 
-    classDef in   fill:#143946,stroke:#4EE0BC,color:#E8F5F1;
-    classDef step fill:#0F2D3D,stroke:#3CCBAA,color:#E8F5F1;
+    classDef in   fill:#312E81,stroke:#818CF8,color:#F1F5F9;
+    classDef step fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
 ```
 
 Only when all five steps agree on the same CKB transaction hash and
