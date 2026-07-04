@@ -287,6 +287,21 @@
 /* =========================================================================
  * Mermaid diagrams — global polish (colors live in each diagram's
  * %%{init:{...}}%% block so they remain portable when copied).
+ *
+ * The classDef `color:` field has inconsistent behavior across mermaid
+ * versions and is overridden by Material's `--md-default-fg-color`. We
+ * force the text fill via `!important` so diagrams stay readable on
+ * both light and dark pages regardless of the page color scheme.
+ *
+ * Strategy: mode-aware fills + mode-aware text.
+ *   Light mode → light pastel node fills + dark slate text (high contrast
+ *                against the white page; the diagrams look "embedded").
+ *   Dark mode  → dark indigo node fills  + light slate text (high contrast
+ *                against the slate-900 page; the diagrams look "embedded").
+ *
+ * The classDef `fill:` / `color:` set in each diagram are presentation
+ * attributes (lower specificity than CSS), so the !important rules below
+ * cleanly override them per color scheme.
  * ========================================================================= */
 
 .mermaid {
@@ -294,6 +309,59 @@
   font-family: var(--md-text-font, "Inter"), system-ui, sans-serif;
   display: flex;
   justify-content: center;
+}
+
+/* ----- Light mode: pastel fills + dark text ----- */
+
+[data-md-color-scheme="default"] .mermaid text,
+[data-md-color-scheme="default"] .mermaid tspan,
+[data-md-color-scheme="default"] .mermaid .nodeLabel,
+[data-md-color-scheme="default"] .mermaid .edgeLabel,
+[data-md-color-scheme="default"] .mermaid .label,
+[data-md-color-scheme="default"] .mermaid foreignObject div {
+  fill: #1E293B !important;
+  color: #1E293B !important;
+}
+
+[data-md-color-scheme="default"] .mermaid .edgePath .path,
+[data-md-color-scheme="default"] .mermaid .flowchart-link,
+[data-md-color-scheme="default"] .mermaid .transition {
+  stroke: #4F46E5 !important;
+}
+
+/* ----- Dark mode: dark indigo fills + light text ----- */
+
+[data-md-color-scheme="slate"] .mermaid text,
+[data-md-color-scheme="slate"] .mermaid tspan,
+[data-md-color-scheme="slate"] .mermaid .nodeLabel,
+[data-md-color-scheme="slate"] .mermaid .edgeLabel,
+[data-md-color-scheme="slate"] .mermaid .label,
+[data-md-color-scheme="slate"] .mermaid foreignObject div {
+  fill: #F1F5F9 !important;
+  color: #F1F5F9 !important;
+}
+
+[data-md-color-scheme="slate"] .mermaid .edgePath .path,
+[data-md-color-scheme="slate"] .mermaid .flowchart-link,
+[data-md-color-scheme="slate"] .mermaid .transition {
+  stroke: #A5B4FC !important;
+}
+
+/* Override the light pastel classDef fills in dark mode so the
+   light text has a dark surface to read against. Mermaid emits node
+   shapes as <rect>, <polygon>, and class="basic" / "default" groups. */
+[data-md-color-scheme="slate"] .mermaid .node rect,
+[data-md-color-scheme="slate"] .mermaid .node polygon,
+[data-md-color-scheme="slate"] .mermaid .cluster rect,
+[data-md-color-scheme="slate"] .mermaid .cluster polygon {
+  fill: #1E1B4B !important;
+  stroke: #6366F1 !important;
+}
+
+[data-md-color-scheme="slate"] .mermaid .node.default rect,
+[data-md-color-scheme="slate"] .mermaid .node.default polygon {
+  fill: #312E81 !important;
+  stroke: #818CF8 !important;
 }
 
 /* =========================================================================
