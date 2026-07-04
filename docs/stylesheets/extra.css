@@ -285,20 +285,22 @@
 }
 
 /* =========================================================================
- * Mermaid diagrams — two-tier text strategy.
+ * Mermaid diagrams — single, mode-aware strategy.
  *
- * Mermaid emits two kinds of text in an SVG:
- *   1. Node + edge labels: these sit on the diagram's mid-tone pastel
- *      node fills (indigo-300, violet-300, slate-300, etc.). Dark text
- *      gives 7:1+ contrast in both light and dark page contexts, so
- *      node labels are forced to dark slate always.
- *   2. Subgraph / cluster labels: these sit on the PAGE background
- *      (not on a node fill). They have to follow the page color
- *      scheme — dark text on light pages, light text on dark pages.
+ * The one rule we cannot violate: never put light text on a light
+ * background, never put dark text on a dark background.
  *
- * Plus: each layer (L1, L2, off-chain) gets a distinct hue family in
- * its classDef so the three layers are visually distinguishable in both
- * modes, not just different by stroke.
+ * Two surfaces appear in every diagram:
+ *   1. Node + edge labels. Nodes use mid-tone pastel fills in light mode
+ *      (indigo-300 / violet-300 / slate-300), so dark text reads.
+ *      Cluster container fills are now TRANSPARENT — the page background
+ *      shows through and cluster labels follow the page text color.
+ *   2. Cluster / subgraph containers. They have NO fill; only a stroke
+ *      marks the boundary. Cluster labels sit on the page background
+ *      and follow the page color scheme.
+ *
+ * Plus: each layer (L1, L2, off-chain) keeps its own hue family in
+ * its classDef so the three layers are visually distinguishable.
  * ========================================================================= */
 
 .mermaid {
@@ -308,7 +310,9 @@
   justify-content: center;
 }
 
-/* --- Node + edge labels: always dark slate (they sit on pastel fills) --- */
+/* --- Node + edge labels: dark slate on pastel node fills.
+       These always sit on the node's own fill, so dark text works in
+       both light and dark page contexts. --- */
 
 .mermaid .node text,
 .mermaid .node tspan,
@@ -320,39 +324,42 @@
   color: #1E293B !important;
 }
 
-/* --- Subgraph / cluster labels: follow the page color scheme --- */
+/* --- Subgraph / cluster container: TRANSPARENT fill.
+       Without this, Mermaid paints the subgraph rect with
+       themeVariables.tertiaryColor (a light pastel), and dark-mode
+       cluster labels (light text) end up sitting on top of that light
+       pastel — invisible. Letting the page show through means the
+       cluster label can follow the page text color safely. --- */
+
+.mermaid .cluster rect,
+.mermaid .cluster polygon {
+  fill: transparent !important;
+  stroke-width: 1.5px !important;
+}
+
+/* --- Cluster / subgraph labels: follow the page color scheme. --- */
 
 [data-md-color-scheme="default"] .mermaid .cluster-label,
 [data-md-color-scheme="default"] .mermaid .cluster-label text,
-[data-md-color-scheme="default"] .mermaid .cluster-label tspan,
-[data-md-color-scheme="default"] .mermaid .cluster text {
+[data-md-color-scheme="default"] .mermaid .cluster-label tspan {
   fill: #1E293B !important;
   color: #1E293B !important;
 }
 
 [data-md-color-scheme="slate"] .mermaid .cluster-label,
 [data-md-color-scheme="slate"] .mermaid .cluster-label text,
-[data-md-color-scheme="slate"] .mermaid .cluster-label tspan,
-[data-md-color-scheme="slate"] .mermaid .cluster text {
+[data-md-color-scheme="slate"] .mermaid .cluster-label tspan {
   fill: #F1F5F9 !important;
   color: #F1F5F9 !important;
 }
 
-/* --- Edge strokes: indigo, reads on both mid-tone fills and on the
+/* --- Edge strokes: indigo-600 reads on both mid-tone fills and on the
        page background in both color schemes. --- */
 
 .mermaid .edgePath .path,
 .mermaid .flowchart-link,
 .mermaid .transition {
   stroke: #4F46E5 !important;
-}
-
-/* --- Subgraph container borders: slightly thicker so the layer
-       boundaries are visible in both color schemes. --- */
-
-.mermaid .cluster rect,
-.mermaid .cluster polygon {
-  stroke-width: 1.5px !important;
 }
 
 /* =========================================================================
