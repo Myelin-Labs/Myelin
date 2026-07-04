@@ -29,7 +29,7 @@ rustc --version
 ## 2. Clone and build Myelin
 
 ```bash
-git clone https://github.com/Myelin-Network/Myelin.git
+git clone https://github.com/Myelin-Labs/Myelin.git
 cd Myelin
 
 # Sanity check: formatting, clippy, tests

@@ -18,7 +18,7 @@ adjudicated by a CKB-VM-style verifier on the L1.
 
 [Get started :material-rocket-launch:](getting-started/index.md){ .md-button .md-button--primary }
 [Read the architecture :material-graph-outline:](architecture/overview.md){ .md-button }
-[GitHub :fontawesome-brands-github:](https://github.com/Myelin-Network/Myelin){ .md-button }
+[GitHub :fontawesome-brands-github:](https://github.com/Myelin-Labs/Myelin){ .md-button }
 
 </div>
 
@@ -28,19 +28,19 @@ adjudicated by a CKB-VM-style verifier on the L1.
 
     ---
 
-    [`Myelin-Network/Myelin`](https://github.com/Myelin-Network/Myelin) — source, issues, CI, releases.
+    [`Myelin-Labs/Myelin`](https://github.com/Myelin-Labs/Myelin) — source, issues, CI, releases.
 
 -   :material-book-open-page-variant-outline:{ .lg .middle } **License**
 
     ---
 
-    MIT. See [`LICENSE`](https://github.com/Myelin-Network/Myelin/blob/main/LICENSE) for the full text.
+    MIT. See [`LICENSE`](https://github.com/Myelin-Labs/Myelin/blob/main/LICENSE) for the full text.
 
 -   :material-bug-outline:{ .lg .middle } **Report an issue**
 
     ---
 
-    Found a bug or a docs error? [Open an issue](https://github.com/Myelin-Network/Myelin/issues/new) — please include the page URL and the exact command / code that misbehaved.
+    Found a bug or a docs error? [Open an issue](https://github.com/Myelin-Labs/Myelin/issues/new) — please include the page URL and the exact command / code that misbehaved.
 
 -   :material-rocket-launch-outline:{ .lg .middle } **Deploy this site**
 

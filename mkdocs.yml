@@ -8,9 +8,9 @@ docs_dir: docs
 
 # We host at the project root for a user/org site (replace with `myelin` if
 # serving under https://<org>.github.io/myelin/).
-site_url: https://myelin-network.github.io/Myelin/
-repo_url: https://github.com/Myelin-Network/Myelin
-repo_name: Myelin-Network/Myelin
+site_url: https://myelin-labs.github.io/Myelin/
+repo_url: https://github.com/Myelin-Labs/Myelin
+repo_name: Myelin-Labs/Myelin
 edit_uri: edit/main/docs/
 
 copyright: >-
@@ -110,12 +110,12 @@ plugins:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/Myelin-Network/Myelin
+      link: https://github.com/Myelin-Labs/Myelin
       name: Myelin on GitHub
   generator: false
   feedback:
     title: Question? Open an issue
-    url: https://github.com/Myelin-Network/Myelin/issues/new
+    url: https://github.com/Myelin-Labs/Myelin/issues/new
   alternativelink:
     - en/
   version:
