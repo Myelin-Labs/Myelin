@@ -285,21 +285,20 @@
 }
 
 /* =========================================================================
- * Mermaid diagrams — global polish (colors live in each diagram's
- * %%{init:{...}}%% block so they remain portable when copied).
+ * Mermaid diagrams — two-tier text strategy.
  *
- * Approach: don't try to outsmart Mermaid. Use mid-tone pastel node
- * fills (indigo-200/300, violet-200) that have enough contrast with
- * EITHER dark text or light text. Then force the text fill to always
- * be dark slate via a single global rule. This survives:
- *   - Material's --md-default-fg-color override (which would otherwise
- *     push text to slate-100 in dark mode, breaking the contrast)
- *   - Mermaid's classDef `color:` field (inconsistent across versions)
- *   - Mermaid's internal id-scoped <style> tag (higher specificity but
- *     no !important on text fill, so our !important wins)
+ * Mermaid emits two kinds of text in an SVG:
+ *   1. Node + edge labels: these sit on the diagram's mid-tone pastel
+ *      node fills (indigo-300, violet-300, slate-300, etc.). Dark text
+ *      gives 7:1+ contrast in both light and dark page contexts, so
+ *      node labels are forced to dark slate always.
+ *   2. Subgraph / cluster labels: these sit on the PAGE background
+ *      (not on a node fill). They have to follow the page color
+ *      scheme — dark text on light pages, light text on dark pages.
  *
- * Result: same diagram look on both light and dark pages — mid-tone
- * pastel boxes, dark slate text, indigo/violet strokes. Always readable.
+ * Plus: each layer (L1, L2, off-chain) gets a distinct hue family in
+ * its classDef so the three layers are visually distinguishable in both
+ * modes, not just different by stroke.
  * ========================================================================= */
 
 .mermaid {
@@ -309,25 +308,51 @@
   justify-content: center;
 }
 
-/* Force all mermaid text to dark slate, regardless of color scheme.
-   Mid-tone pastel fills (above) give 4.5:1+ contrast with this text in
-   both light and dark page contexts. */
-.mermaid text,
-.mermaid tspan,
+/* --- Node + edge labels: always dark slate (they sit on pastel fills) --- */
+
+.mermaid .node text,
+.mermaid .node tspan,
 .mermaid .nodeLabel,
 .mermaid .edgeLabel,
-.mermaid .label,
+.mermaid .edgeLabel tspan,
 .mermaid foreignObject div {
   fill: #1E293B !important;
   color: #1E293B !important;
 }
 
-/* Strokes: indigo-500 reads on both mid-tone pastel fills and on the
-   page background in both color schemes. */
+/* --- Subgraph / cluster labels: follow the page color scheme --- */
+
+[data-md-color-scheme="default"] .mermaid .cluster-label,
+[data-md-color-scheme="default"] .mermaid .cluster-label text,
+[data-md-color-scheme="default"] .mermaid .cluster-label tspan,
+[data-md-color-scheme="default"] .mermaid .cluster text {
+  fill: #1E293B !important;
+  color: #1E293B !important;
+}
+
+[data-md-color-scheme="slate"] .mermaid .cluster-label,
+[data-md-color-scheme="slate"] .mermaid .cluster-label text,
+[data-md-color-scheme="slate"] .mermaid .cluster-label tspan,
+[data-md-color-scheme="slate"] .mermaid .cluster text {
+  fill: #F1F5F9 !important;
+  color: #F1F5F9 !important;
+}
+
+/* --- Edge strokes: indigo, reads on both mid-tone fills and on the
+       page background in both color schemes. --- */
+
 .mermaid .edgePath .path,
 .mermaid .flowchart-link,
 .mermaid .transition {
   stroke: #4F46E5 !important;
+}
+
+/* --- Subgraph container borders: slightly thicker so the layer
+       boundaries are visible in both color schemes. --- */
+
+.mermaid .cluster rect,
+.mermaid .cluster polygon {
+  stroke-width: 1.5px !important;
 }
 
 /* =========================================================================

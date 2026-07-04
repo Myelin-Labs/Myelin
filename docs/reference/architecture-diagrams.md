@@ -130,7 +130,7 @@ flowchart TB
     E -.fetch.-> CT
     S2 -.dispute.-> CT
 
-    classDef off fill:#C7D2FE,stroke:#D97706,color:#1E293B;
+    classDef off fill:#CBD5E1,stroke:#334155,color:#1E293B;
     classDef l2  fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
     classDef l1  fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
