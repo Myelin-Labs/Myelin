@@ -11,12 +11,12 @@ zooms into one part of this picture.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3",
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE",
     "fontFamily": "Inter, system-ui, sans-serif",
     "fontSize": "13px"
   },
@@ -72,9 +72,9 @@ flowchart TB
     CB  -. dispute submission .- CV
     CV --> VERDICT
 
-    classDef off fill:#312E81,stroke:#F59E0B,color:#F1F5F9;
-    classDef l2  fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
-    classDef l1  fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
+    classDef off fill:#E0E7FF,stroke:#D97706,color:#1E293B;
+    classDef l2  fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef l1  fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
 The three layers are colour-coded:
@@ -136,12 +136,12 @@ shape is the same: deterministic replay, deterministic verdict.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3"
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE"
   }
 }}%%
 flowchart LR
@@ -163,8 +163,8 @@ flowchart LR
     D --> E
     D --> G
 
-    classDef l2 fill:#312E81,stroke:#6366F1,color:#F1F5F9;
-    classDef l1 fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
+    classDef l2 fill:#E0E7FF,stroke:#4F46E5,color:#1E293B;
+    classDef l1 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
 Solid arrows: produced on L2, optionally published to L1. Dotted

@@ -11,12 +11,12 @@ chunk ready for the court path.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3",
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE",
     "fontFamily": "Inter, system-ui, sans-serif"
   }
 }}%%
@@ -77,15 +77,15 @@ flowchart LR
     N --> Q
     O --> P
 
-    classDef src  fill:#312E81,stroke:#818CF8,color:#F1F5F9;
-    classDef comp fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
-    classDef exec fill:#312E81,stroke:#818CF8,color:#F1F5F9;
-    classDef state fill:#3730A3,stroke:#6366F1,color:#F1F5F9;
-    classDef pool fill:#1E1B4B,stroke:#818CF8,color:#F1F5F9;
-    classDef cons fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
-    classDef proj fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
-    classDef da   fill:#1E1B4B,stroke:#F59E0B,color:#F1F5F9;
-    classDef out  fill:#312E81,stroke:#F59E0B,color:#F1F5F9;
+    classDef src  fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
+    classDef comp fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef exec fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
+    classDef state fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
+    classDef pool fill:#EEF2FF,stroke:#6366F1,color:#1E293B;
+    classDef cons fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef proj fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
+    classDef da   fill:#EEF2FF,stroke:#D97706,color:#1E293B;
+    classDef out  fill:#E0E7FF,stroke:#D97706,color:#1E293B;
 ```
 
 Every arrow is a real API call between crates. The spine is **acyclic
@@ -146,12 +146,12 @@ contract is what makes finality evidence reproducible.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3"
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE"
   }
 }}%%
 sequenceDiagram

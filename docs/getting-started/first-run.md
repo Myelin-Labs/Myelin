@@ -112,12 +112,12 @@ court path:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3",
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE",
     "fontFamily": "Inter, system-ui, sans-serif"
   }
 }}%%
@@ -148,10 +148,10 @@ flowchart LR
     F --> H
     F --> I
     I --> J
-    classDef off    fill:#312E81,stroke:#F59E0B,color:#F1F5F9;
-    classDef proj   fill:#1E1B4B,stroke:#A78BFA,color:#F1F5F9;
-    classDef bundle fill:#3730A3,stroke:#6366F1,color:#F1F5F9;
-    classDef l1     fill:#312E81,stroke:#A78BFA,color:#F1F5F9;
+    classDef off    fill:#E0E7FF,stroke:#D97706,color:#1E293B;
+    classDef proj   fill:#EEF2FF,stroke:#7C3AED,color:#1E293B;
+    classDef bundle fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
+    classDef l1     fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
 ```
 
 The verify command recomputes every hash in the bundle from its

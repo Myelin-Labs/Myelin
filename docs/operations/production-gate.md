@@ -22,12 +22,12 @@ and what it asserted.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3"
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE"
   }
 }}%%
 flowchart TB
@@ -43,7 +43,7 @@ flowchart TB
 
     A --> B --> C --> D --> E --> F --> G --> H --> I
 
-    classDef step fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
+    classDef step fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
 ```
 
 The order matters: each later step assumes the earlier ones

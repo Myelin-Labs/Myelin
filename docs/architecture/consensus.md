@@ -39,12 +39,12 @@ engine is active.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3"
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE"
   }
 }}%%
 flowchart TB
@@ -73,11 +73,11 @@ flowchart TB
     S -->|implements| TR
     T -->|implements| TR
 
-    classDef trait fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
-    classDef impl1 fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
-    classDef impl2 fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
-    classDef sel  fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
-    classDef cfg  fill:#1E1B4B,stroke:#F59E0B,color:#F1F5F9;
+    classDef trait fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef impl1 fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef impl2 fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef sel  fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
+    classDef cfg  fill:#EEF2FF,stroke:#D97706,color:#1E293B;
 ```
 
 ## The MyelinBlock shape
@@ -183,12 +183,12 @@ makes it BFT-equivalent under partial synchrony assumptions.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3"
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE"
   }
 }}%%
 sequenceDiagram

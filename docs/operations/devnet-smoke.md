@@ -25,12 +25,12 @@ funding cell, deploys the carrier verifiers, and waits for blocks.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3"
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE"
   }
 }}%%
 flowchart TB
@@ -57,9 +57,9 @@ flowchart TB
     I --> J
     J --> K --> L --> M
 
-    classDef dev fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
-    classDef sm  fill:#312E81,stroke:#6366F1,color:#F1F5F9;
-    classDef out fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
+    classDef dev fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
+    classDef sm  fill:#E0E7FF,stroke:#4F46E5,color:#1E293B;
+    classDef out fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
 ```
 
 ## The two carrier verifiers
@@ -122,12 +122,12 @@ expected behaviour:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3"
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE"
   }
 }}%%
 sequenceDiagram

@@ -20,12 +20,12 @@ future exercised court    -> CKB-aligned adjudication path
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3"
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE"
   }
 }}%%
 flowchart TB
@@ -36,10 +36,10 @@ flowchart TB
 
     T0 --> T1 --> T2 --> T3
 
-    classDef t0 fill:#312E81,stroke:#818CF8,color:#F1F5F9;
-    classDef t1 fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
-    classDef t2 fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
-    classDef t3 fill:#3730A3,stroke:#A78BFA,color:#F1F5F9;
+    classDef t0 fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
+    classDef t1 fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef t2 fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef t3 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
 ## Tier 0 — Designed to stay close to CKB semantics

@@ -70,12 +70,12 @@ and the CKB-VM syscall surface:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#1E1B4B",
-    "primaryTextColor": "#F1F5F9",
-    "primaryBorderColor": "#6366F1",
-    "lineColor": "#818CF8",
-    "secondaryColor": "#312E81",
-    "tertiaryColor": "#3730A3"
+    "primaryColor": "#EEF2FF",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#E0E7FF",
+    "tertiaryColor": "#C7D2FE"
   }
 }}%%
 flowchart TB
@@ -88,11 +88,11 @@ flowchart TB
     D -- no  --> E["semantic_profile =<br/>ckb-compatible<br/>(projection_possible=true)"]:::ok
     D -- yes --> H3["semantic_profile =<br/>myelin-native<br/>(helper listed)"]:::warn2
 
-    classDef m       fill:#312E81,stroke:#818CF8,color:#F1F5F9;
-    classDef decide  fill:#1E1B4B,stroke:#6366F1,color:#F1F5F9;
-    classDef ok      fill:#312E81,stroke:#8B5CF6,color:#F1F5F9;
-    classDef warn    fill:#3730A3,stroke:#F59E0B,color:#F1F5F9;
-    classDef warn2   fill:#1E1B4B,stroke:#F87171,color:#F1F5F9;
+    classDef m       fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
+    classDef decide  fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef ok      fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef warn    fill:#C7D2FE,stroke:#D97706,color:#1E293B;
+    classDef warn2   fill:#EEF2FF,stroke:#DC2626,color:#1E293B;
 ```
 
 ## How the profile changes a Myelin claim
