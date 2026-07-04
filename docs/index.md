@@ -131,11 +131,11 @@ about **where** work happens, not **what** work means:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE",
     "fontFamily": "Inter, system-ui, sans-serif",
     "fontSize": "14px"
@@ -154,13 +154,13 @@ flowchart LR
     A --> B --> C --> D --> E --> F --> G
     F --> C
 
-    classDef source   fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef artefact fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
+    classDef source   fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef artefact fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
     classDef tx       fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
-    classDef sched    fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef vm       fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef sched    fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef vm       fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
     classDef state    fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
-    classDef evidence fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef evidence fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
 Every box on this spine is a real crate in the workspace — `cellscript`,

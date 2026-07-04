@@ -32,11 +32,11 @@ CKB-VM uses the [RISC-V](https://riscv.org/) instruction set. Concretely:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -56,12 +56,12 @@ flowchart TB
     VM <-->|reads| SYSCALL
     VM --> VERDICT
 
-    classDef src     fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef target  fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef elf     fill:#E0E7FF,stroke:#4F46E5,color:#1E293B;
+    classDef src     fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef target  fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef elf     fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
     classDef cell    fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-    classDef vm      fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef sys     fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
+    classDef vm      fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef sys     fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
     classDef verdict fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 

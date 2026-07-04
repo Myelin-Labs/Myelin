@@ -97,11 +97,11 @@ can verify the report by re-running
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -124,13 +124,13 @@ flowchart LR
     C --> G
     B --> D
 
-    classDef in    fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef exec  fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef proj  fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef in    fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef exec  fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef proj  fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
     classDef da    fill:#C7D2FE,stroke:#D97706,color:#1E293B;
-    classDef court fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef court fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
     classDef anchor fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-    classDef settle fill:#EEF2FF,stroke:#7C3AED,color:#1E293B;
+    classDef settle fill:#A5B4FC,stroke:#7C3AED,color:#1E293B;
 ```
 
 ## Path 3 — Court
@@ -232,11 +232,11 @@ and then through the five-step readiness chain.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -253,11 +253,11 @@ flowchart TB
     P2 --> P4
     P3 --> P4
 
-    classDef in fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef p1 fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef p2 fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef in fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef p1 fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef p2 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
     classDef p3 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-    classDef p4 fill:#E0E7FF,stroke:#D97706,color:#1E293B;
+    classDef p4 fill:#C7D2FE,stroke:#D97706,color:#1E293B;
 ```
 
 Path 1 and Path 2 run independently off the same CellTx. Path 3

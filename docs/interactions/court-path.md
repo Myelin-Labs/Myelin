@@ -67,11 +67,11 @@ document the disputer submits to whichever venue accepts it.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -96,10 +96,10 @@ flowchart TB
     H -->|valid: true| I["Self-contained court input"]:::good
     H -->|mismatch| J["Reject + report reason"]:::bad
 
-    classDef l2     fill:#E0E7FF,stroke:#4F46E5,color:#1E293B;
-    classDef cli    fill:#EEF2FF,stroke:#D97706,color:#1E293B;
+    classDef l2     fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
+    classDef cli    fill:#A5B4FC,stroke:#D97706,color:#1E293B;
     classDef bundle fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-    classDef good   fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef good   fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
     classDef bad    fill:#C7D2FE,stroke:#DC2626,color:#1E293B;
 ```
 
@@ -164,11 +164,11 @@ to a *decision*:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -189,7 +189,7 @@ flowchart LR
     F --> G
     G --> H
 
-    classDef l2 fill:#E0E7FF,stroke:#4F46E5,color:#1E293B;
+    classDef l2 fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
     classDef l1 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 

@@ -11,11 +11,11 @@ the "in scope" list should be assumed to be out of scope.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -42,7 +42,7 @@ flowchart LR
     F --> P6
 
     classDef threat fill:#C7D2FE,stroke:#DC2626,color:#1E293B;
-    classDef def    fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef def    fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
 | Threat | How Myelin handles it |
@@ -110,11 +110,11 @@ implemented.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%

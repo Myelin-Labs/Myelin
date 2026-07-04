@@ -84,11 +84,11 @@ escrow Cells to the payee and refunds the remainder to the payer.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -106,7 +106,7 @@ flowchart LR
     A --> B --> C --> D --> E --> F --> G --> H --> I
 
     classDef l1 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-    classDef l2 fill:#E0E7FF,stroke:#4F46E5,color:#1E293B;
+    classDef l2 fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
 ```
 
 ## What a dispute looks like

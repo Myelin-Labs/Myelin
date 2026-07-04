@@ -12,11 +12,11 @@ bundle ready for the future dispute verifier.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -39,8 +39,8 @@ flowchart TB
     D --> H --> I
     H --> J
 
-    classDef off fill:#E0E7FF,stroke:#D97706,color:#1E293B;
-    classDef l2  fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef off fill:#C7D2FE,stroke:#D97706,color:#1E293B;
+    classDef l2  fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
 ```
 
 Every box is a real step. Every arrow is a real CLI invocation.

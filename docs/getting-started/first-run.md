@@ -112,11 +112,11 @@ court path:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE",
     "fontFamily": "Inter, system-ui, sans-serif"
   }
@@ -148,10 +148,10 @@ flowchart LR
     F --> H
     F --> I
     I --> J
-    classDef off    fill:#E0E7FF,stroke:#D97706,color:#1E293B;
-    classDef proj   fill:#EEF2FF,stroke:#7C3AED,color:#1E293B;
+    classDef off    fill:#C7D2FE,stroke:#D97706,color:#1E293B;
+    classDef proj   fill:#A5B4FC,stroke:#7C3AED,color:#1E293B;
     classDef bundle fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
-    classDef l1     fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef l1     fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
 The verify command recomputes every hash in the bundle from its

@@ -45,11 +45,11 @@ listed below.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -84,13 +84,13 @@ flowchart TB
     E -.-> R5
     E -.-> R6
 
-    classDef src  fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef comp fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef meta fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
+    classDef src  fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef comp fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef meta fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
     classDef tx   fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-    classDef check fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef ok   fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
-    classDef good fill:#EEF2FF,stroke:#7C3AED,color:#1E293B;
+    classDef check fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef ok   fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
+    classDef good fill:#A5B4FC,stroke:#7C3AED,color:#1E293B;
     classDef bad  fill:#C7D2FE,stroke:#DC2626,color:#1E293B;
 ```
 

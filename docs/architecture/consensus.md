@@ -39,11 +39,11 @@ engine is active.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -73,11 +73,11 @@ flowchart TB
     S -->|implements| TR
     T -->|implements| TR
 
-    classDef trait fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef impl1 fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
-    classDef impl2 fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef trait fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef impl1 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
+    classDef impl2 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
     classDef sel  fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-    classDef cfg  fill:#EEF2FF,stroke:#D97706,color:#1E293B;
+    classDef cfg  fill:#A5B4FC,stroke:#D97706,color:#1E293B;
 ```
 
 ## The MyelinBlock shape
@@ -183,11 +183,11 @@ makes it BFT-equivalent under partial synchrony assumptions.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%

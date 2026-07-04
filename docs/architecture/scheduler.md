@@ -34,11 +34,11 @@ edges are explicit dependencies:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -56,8 +56,8 @@ flowchart TB
     C -->|x2 read by E| E
     E -->|y2 consumed by| F
 
-    classDef a fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef b fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef a fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef b fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
     classDef c fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
@@ -120,11 +120,11 @@ For each pair of CellTxs, the scheduler decides:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -139,11 +139,11 @@ flowchart LR
     S -- yes --> Y["Conflicting:<br/>same group output race"]:::conf
     S -- no  --> Z["Parallel:<br/>same batch"]:::par
 
-    classDef a   fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef q   fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef a   fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef q   fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
     classDef dep fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
     classDef conf fill:#C7D2FE,stroke:#DC2626,color:#1E293B;
-    classDef par  fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef par  fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
 A and B are:

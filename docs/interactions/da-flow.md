@@ -34,11 +34,11 @@ l1_da_published      -> + DA anchor CellTx committed on CKB
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -50,9 +50,9 @@ flowchart TB
 
     L1 --> L2 --> L3 --> L4
 
-    classDef r1 fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef r2 fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef r3 fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef r1 fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef r2 fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef r3 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
     classDef r4 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
@@ -90,11 +90,11 @@ tree.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -115,13 +115,13 @@ flowchart LR
     D -.->|add receipt| F
     F --> G --> H
 
-    classDef in      fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef stage   fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef store   fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
+    classDef in      fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef stage   fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef store   fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
     classDef manifest fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
-    classDef manifest2 fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef manifest2 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
     classDef ext     fill:#C7D2FE,stroke:#D97706,color:#1E293B;
-    classDef pkg     fill:#E0E7FF,stroke:#4F46E5,color:#1E293B;
+    classDef pkg     fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
     classDef l1      fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
@@ -214,11 +214,11 @@ The full submission readiness chain runs after submission:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -233,8 +233,8 @@ flowchart LR
 
     A --> B --> C --> D --> E --> F --> G
 
-    classDef in   fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef step fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef in   fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef step fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
 ```
 
 Only when all five steps agree on the same CKB transaction hash and

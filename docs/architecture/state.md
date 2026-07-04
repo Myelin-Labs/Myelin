@@ -28,11 +28,11 @@ re-derived from the same Cell set on any validator.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -56,8 +56,8 @@ flowchart LR
     E --> D4
     D1 & D2 & D3 & D4 --> R
 
-    classDef exec  fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef delta fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef exec  fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef delta fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
     classDef root  fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
@@ -115,11 +115,11 @@ emits a DA manifest.
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -139,13 +139,13 @@ flowchart TB
     F --> D
     D --> G
 
-    classDef in    fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef stage fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef proof fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
+    classDef in    fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef stage fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef proof fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
     classDef out   fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-    classDef store fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
+    classDef store fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
     classDef ext   fill:#C7D2FE,stroke:#D97706,color:#1E293B;
-    classDef ready fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef ready fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
 A DA manifest carries:

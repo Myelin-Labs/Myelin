@@ -92,11 +92,11 @@ encoded in a CKB-style context **without losing semantics**. If it's
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -133,9 +133,9 @@ flowchart TB
     M5 & M6 & M7 --> P7
     M5 & M6 & M7 --> P8
     P2 & P3 & P4 & P5 --> P1
-    classDef m fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
+    classDef m fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
     classDef p fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
-    classDef k fill:#EEF2FF,stroke:#7C3AED,color:#1E293B;
+    classDef k fill:#A5B4FC,stroke:#7C3AED,color:#1E293B;
 ```
 
 The projection layer is the credibility hinge: every serious demo

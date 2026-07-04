@@ -20,11 +20,11 @@ future exercised court    -> CKB-aligned adjudication path
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -36,9 +36,9 @@ flowchart TB
 
     T0 --> T1 --> T2 --> T3
 
-    classDef t0 fill:#E0E7FF,stroke:#6366F1,color:#1E293B;
-    classDef t1 fill:#EEF2FF,stroke:#4F46E5,color:#1E293B;
-    classDef t2 fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
+    classDef t0 fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef t1 fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef t2 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
     classDef t3 fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 

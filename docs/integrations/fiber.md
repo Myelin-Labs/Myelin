@@ -61,11 +61,11 @@ The controller:
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -90,8 +90,8 @@ flowchart LR
     M3 -.compact.-> B2 -.metadata.-> F2
     F3 -.outpoint.-> M1
 
-    classDef my fill:#E0E7FF,stroke:#4F46E5,color:#1E293B;
-    classDef br fill:#EEF2FF,stroke:#D97706,color:#1E293B;
+    classDef my fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
+    classDef br fill:#A5B4FC,stroke:#D97706,color:#1E293B;
     classDef fb fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
@@ -148,11 +148,11 @@ bridge releases the preimage to settle the Fiber invoice
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%

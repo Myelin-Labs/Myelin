@@ -70,11 +70,11 @@ The full positioning case (with use-case tiers) lives in the upstream
 %%{init: {
   "theme": "base",
   "themeVariables": {
-    "primaryColor": "#EEF2FF",
+    "primaryColor": "#A5B4FC",
     "primaryTextColor": "#1E293B",
     "primaryBorderColor": "#4F46E5",
     "lineColor": "#6366F1",
-    "secondaryColor": "#E0E7FF",
+    "secondaryColor": "#C7D2FE",
     "tertiaryColor": "#C7D2FE"
   }
 }}%%
@@ -100,8 +100,8 @@ flowchart LR
         O4["Raw sensor firehose as Cells"]:::no
         O5["Day-1 permissionless validator network"]:::no
     end
-    classDef ok  fill:#E0E7FF,stroke:#7C3AED,color:#1E293B;
-    classDef warn fill:#EEF2FF,stroke:#D97706,color:#1E293B;
+    classDef ok  fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
+    classDef warn fill:#A5B4FC,stroke:#D97706,color:#1E293B;
     classDef no  fill:#C7D2FE,stroke:#DC2626,color:#1E293B;
 ```
 
