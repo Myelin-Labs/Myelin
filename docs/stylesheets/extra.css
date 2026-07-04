@@ -1,0 +1,394 @@
+/* =========================================================================
+ * Myelin docs — CKB color theme
+ *
+ * CKB brand palette inspiration:
+ *   Teal primary  : #3CCBAA
+ *   Teal accent   : #4EE0BC / #00CC9F
+ *   Deep navy     : #05161C -> #0A2530 -> #0F2D3D
+ *   Cool blue     : #5DD4E5
+ *
+ * The site uses Material's "slate" base in dark mode and the default
+ * "white" base in light mode; the variables below override the Material
+ * design tokens so the navy/teal feel carries through both modes.
+ * ========================================================================= */
+
+:root,
+[data-md-color-scheme="default"] {
+  --ckb-teal:        #3CCBAA;
+  --ckb-teal-bright: #4EE0BC;
+  --ckb-green:       #00CC9F;
+  --ckb-cyan:        #5DD4E5;
+  --ckb-amber:       #FFB347;
+  --ckb-red:         #FF6B6B;
+
+  --ckb-navy-0:      #F2F8F6;   /* page bg light */
+  --ckb-navy-1:      #E6F1ED;   /* card bg light */
+  --ckb-navy-2:      #C9DDD6;
+  --ckb-navy-3:      #6E8A82;
+
+  --ckb-ink:         #0F2D3D;
+  --ckb-ink-soft:    #2A4754;
+
+  /* Material primary / accent (light) */
+  --md-primary-fg-color:        var(--ckb-teal);
+  --md-primary-fg-color--light: #5DD4E5;
+  --md-primary-fg-color--dark:  #00CC9F;
+  --md-primary-bg-color:        #ffffff;
+  --md-primary-bg-color--light: rgba(255, 255, 255, 0.7);
+
+  --md-accent-fg-color:         #00CC9F;
+  --md-accent-fg-color--transparent: rgba(0, 204, 159, 0.1);
+  --md-accent-bg-color:         #ffffff;
+  --md-accent-bg-color--light:  rgba(255, 255, 255, 0.7);
+
+  --md-typeset-a-color:         #00a37e;
+  --md-typeset-a-color--hover:  #3CCBAA;
+
+  /* Code blocks */
+  --md-code-bg-color:           #EEF6F3;
+  --md-code-fg-color:           #0F2D3D;
+  --md-code-hl-color:           #C8E8DE;
+
+  /* Admonitions */
+  --md-admonition-fg-color:     var(--md-default-fg-color);
+  --md-admonition-bg-color:     #E6F1ED;
+
+  --md-default-fg-color:        #0F2D3D;
+  --md-default-fg-color--light: #2A4754;
+  --md-default-fg-color--lighter: #6E8A82;
+  --md-default-bg-color:        #F2F8F6;
+  --md-default-bg-color--light: rgba(255, 255, 255, 0.7);
+
+  --md-shadow-z1: 0 4px 12px rgba(15, 45, 61, 0.06);
+  --md-shadow-z2: 0 8px 24px rgba(15, 45, 61, 0.10);
+}
+
+[data-md-color-scheme="slate"] {
+  --ckb-teal:        #3CCBAA;
+  --ckb-teal-bright: #4EE0BC;
+  --ckb-green:       #00CC9F;
+  --ckb-cyan:        #5DD4E5;
+  --ckb-amber:       #FFB347;
+  --ckb-red:         #FF6B6B;
+
+  --ckb-navy-0:      #05161C;
+  --ckb-navy-1:      #0A2530;
+  --ckb-navy-2:      #0F2D3D;
+  --ckb-navy-3:      #143946;
+  --ckb-navy-4:      #1A4253;
+
+  --ckb-ink:         #E8F5F1;
+  --ckb-ink-soft:    #B8D4CC;
+
+  /* Material primary / accent (dark) */
+  --md-primary-fg-color:        #3CCBAA;
+  --md-primary-fg-color--light: #5DD4E5;
+  --md-primary-fg-color--dark:  #00CC9F;
+  --md-primary-bg-color:        #0A2530;
+  --md-primary-bg-color--light: rgba(15, 45, 61, 0.6);
+
+  --md-accent-fg-color:         #4EE0BC;
+  --md-accent-fg-color--transparent: rgba(78, 224, 188, 0.15);
+  --md-accent-bg-color:         #0A2530;
+  --md-accent-bg-color--light:  rgba(15, 45, 61, 0.6);
+
+  --md-typeset-a-color:         #4EE0BC;
+  --md-typeset-a-color--hover:  #5DD4E5;
+
+  --md-code-bg-color:           #0A2530;
+  --md-code-fg-color:           #E8F5F1;
+  --md-code-hl-color:           #143946;
+
+  --md-default-fg-color:        #E8F5F1;
+  --md-default-fg-color--light: #B8D4CC;
+  --md-default-fg-color--lighter: #7A9A92;
+  --md-default-bg-color:        #05161C;
+  --md-default-bg-color--light: rgba(10, 37, 48, 0.7);
+
+  --md-shadow-z1: 0 4px 14px rgba(0, 0, 0, 0.5);
+  --md-shadow-z2: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+
+/* =========================================================================
+ * Header / hero
+ * ========================================================================= */
+
+.md-header {
+  background: linear-gradient(120deg,
+    rgba(0, 204, 159, 0.18) 0%,
+    rgba(61, 203, 170, 0.10) 35%,
+    rgba(15, 45, 61, 0.85) 100%),
+  var(--md-primary-fg-color);
+  backdrop-filter: saturate(140%) blur(8px);
+}
+
+[data-md-color-scheme="default"] .md-header {
+  background:
+    linear-gradient(120deg,
+      rgba(255, 255, 255, 0.30),
+      rgba(255, 255, 255, 0.05)),
+    linear-gradient(120deg, #3CCBAA, #00CC9F);
+}
+
+/* =========================================================================
+ * Navigation
+ * ========================================================================= */
+
+.md-tabs {
+  background: var(--md-primary-fg-color);
+  color: #ffffff;
+}
+
+.md-tabs__link {
+  font-weight: 500;
+}
+
+.md-tabs__link--active,
+.md-tabs__link:hover {
+  color: #ffffff;
+  opacity: 1;
+}
+
+[data-md-color-scheme="default"] .md-tabs {
+  background: linear-gradient(120deg, #3CCBAA, #00CC9F);
+  color: #ffffff;
+}
+
+/* =========================================================================
+ * Cards & surfaces
+ * ========================================================================= */
+
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid > .card {
+  border: 1px solid var(--ckb-navy-3);
+  border-radius: 12px;
+  padding: 1rem 1.2rem;
+  background: var(--ckb-navy-1);
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.md-typeset .grid.cards > ul > li:hover {
+  transform: translateY(-2px);
+  border-color: var(--ckb-teal);
+  box-shadow: var(--md-shadow-z2);
+}
+
+.md-typeset .grid.cards > ul > li > hr {
+  border-color: var(--ckb-navy-3);
+}
+
+[data-md-color-scheme="default"] .md-typeset .grid.cards > ul > li {
+  background: #ffffff;
+  box-shadow: var(--md-shadow-z1);
+}
+
+/* =========================================================================
+ * Admonitions — recolor the CKB-typical notes
+ * ========================================================================= */
+
+.md-typeset .admonition.note,
+.md-typeset details.note {
+  border-color: var(--ckb-teal);
+}
+
+.md-typeset .admonition.note > .admonition-title,
+.md-typeset details.note > .admonition-title {
+  background-color: rgba(61, 203, 170, 0.12);
+}
+
+.md-typeset .admonition.tip,
+.md-typeset details.tip {
+  border-color: var(--ckb-green);
+}
+
+.md-typeset .admonition.warning,
+.md-typeset details.warning {
+  border-color: var(--ckb-amber);
+}
+
+.md-typeset .admonition.danger,
+.md-typeset details.danger {
+  border-color: var(--ckb-red);
+}
+
+/* =========================================================================
+ * Code blocks
+ * ========================================================================= */
+
+.md-typeset code {
+  background: var(--md-code-bg-color);
+  color: var(--md-code-fg-color);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 0.92em;
+}
+
+.md-typeset pre > code {
+  border-radius: 8px;
+  box-shadow: var(--md-shadow-z1);
+  padding: 1rem 1.1rem;
+}
+
+[data-md-color-scheme="slate"] .md-typeset pre > code {
+  background:
+    linear-gradient(180deg, #0A2530, #0F2D3D);
+  border: 1px solid rgba(78, 224, 188, 0.10);
+}
+
+/* =========================================================================
+ * Mermaid diagrams — CKB teal/navy theme override
+ *
+ * Mermaid renders inside <pre class="mermaid">. We inject its theme
+ * variables with `%%{init:}%%` per-diagram, but a few global polish
+ * rules help too.
+ * ========================================================================= */
+
+.mermaid {
+  background: transparent;
+  font-family: var(--md-text-font, "Inter"), system-ui, sans-serif;
+}
+
+[data-md-color-scheme="slate"] .mermaid {
+  filter: drop-shadow(0 6px 20px rgba(0, 0, 0, 0.4));
+}
+
+/* =========================================================================
+ * Tables — slightly more readable
+ * ========================================================================= */
+
+.md-typeset table:not([class]) {
+  font-size: 0.92rem;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--ckb-navy-3);
+}
+
+.md-typeset table:not([class]) th {
+  background: var(--ckb-navy-2);
+  color: var(--ckb-ink);
+  font-weight: 600;
+}
+
+[data-md-color-scheme="default"] .md-typeset table:not([class]) th {
+  background: rgba(61, 203, 170, 0.10);
+  color: var(--ckb-ink);
+}
+
+.md-typeset table:not([class]) tr:hover {
+  background: rgba(61, 203, 170, 0.06);
+}
+
+/* =========================================================================
+ * Footer
+ * ========================================================================= */
+
+.md-footer {
+  background:
+    linear-gradient(180deg, rgba(61, 203, 170, 0.05), transparent 50%),
+    var(--ckb-navy-0);
+}
+
+.md-footer-meta {
+  background: rgba(0, 0, 0, 0.20);
+}
+
+/* =========================================================================
+ * Hero block (used on home + section landing pages)
+ * ========================================================================= */
+
+.hero {
+  margin: 2.5rem 0 3rem;
+  padding: 2.4rem 2rem;
+  border-radius: 16px;
+  background:
+    radial-gradient(900px 300px at 10% -10%, rgba(78, 224, 188, 0.18), transparent 60%),
+    radial-gradient(800px 260px at 95% 110%, rgba(93, 212, 229, 0.14), transparent 60%),
+    var(--ckb-navy-2);
+  border: 1px solid var(--ckb-navy-3);
+  position: relative;
+  overflow: hidden;
+}
+
+.hero h1 {
+  margin: 0 0 0.6rem;
+  font-size: 2.4rem;
+  letter-spacing: -0.01em;
+  background: linear-gradient(120deg, #4EE0BC, #5DD4E5);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+[data-md-color-scheme="default"] .hero {
+  background:
+    radial-gradient(900px 300px at 10% -10%, rgba(61, 203, 170, 0.18), transparent 60%),
+    radial-gradient(800px 260px at 95% 110%, rgba(93, 212, 229, 0.14), transparent 60%),
+    #ffffff;
+  border: 1px solid #C9DDD6;
+}
+
+[data-md-color-scheme="default"] .hero h1 {
+  background: linear-gradient(120deg, #00a37e, #3CCBAA);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.hero p.lead {
+  font-size: 1.1rem;
+  color: var(--ckb-ink-soft);
+  max-width: 60ch;
+}
+
+.hero .cta {
+  margin-top: 1.4rem;
+  display: flex;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.hero .cta a.md-button {
+  border-radius: 8px;
+}
+
+/* =========================================================================
+ * Layer badges (L1 / L2 / off-chain) used in interaction docs
+ * ========================================================================= */
+
+.badge {
+  display: inline-block;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.78em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid currentColor;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+
+.badge.l1  { color: #5DD4E5; }
+.badge.l2  { color: #3CCBAA; }
+.badge.off { color: #FFB347; }
+.badge.dev { color: #B8D4CC; }
+
+[data-md-color-scheme="default"] .badge.l1  { color: #0a8aa8; }
+[data-md-color-scheme="default"] .badge.l2  { color: #00a37e; }
+[data-md-color-scheme="default"] .badge.off { color: #c47c00; }
+[data-md-color-scheme="default"] .badge.dev { color: #4d6e66; }
+
+/* =========================================================================
+ * Subtle scrollbar in dark mode
+ * ========================================================================= */
+
+[data-md-color-scheme="slate"] ::-webkit-scrollbar { width: 10px; height: 10px; }
+[data-md-color-scheme="slate"] ::-webkit-scrollbar-thumb {
+  background: rgba(78, 224, 188, 0.25);
+  border-radius: 6px;
+}
+[data-md-color-scheme="slate"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(78, 224, 188, 0.45);
+}
+[data-md-color-scheme="slate"] ::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.20);
+}

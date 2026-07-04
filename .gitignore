@@ -27,6 +27,10 @@ __pycache__/
 /website/dist/
 /website/.astro/
 
+# mkdocs-material build output
+/site/
+/docs/.cache/
+
 # Temporary files
 *.tmp
 *.bak
