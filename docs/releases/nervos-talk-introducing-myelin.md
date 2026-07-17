@@ -11,12 +11,14 @@
 [Myelin](https://github.com/Myelin-Network/Myelin) is an off-chain Cell
 session runtime. It runs high-throughput, finite state transitions outside
 CKB and keeps every transition projectable back to a CKB-style transaction.
-It schedules independent chunks in parallel, wraps a batch of CKB-VM-verified
+It schedules independent chunks (self-contained units of computation that
+each run as one CKB-VM transaction) in parallel, wraps a batch of verified
 chunks into a finalised session block, and emits a self-contained court
-bundle for any disputed chunk. The idea is that a future on-chain verifier
-can adjudicate a single chunk without re-running the whole session. The
-closed-validator fast path ships today as a prototype; the permissionless
-path is the roadmap.
+bundle (a packaged evidence file a future on-chain verifier can consume to
+adjudicate a single disputed chunk) for any disputed chunk. The idea is that
+a future on-chain verifier can adjudicate a single chunk without re-running
+the whole session. The closed-validator fast path ships today as a prototype;
+the permissionless path is the roadmap.
 
 Myelin is no CKB full node, no new L1, and no finished permissionless L2. It
 is a protocol seed: the execution, state, evidence, and session-finality
@@ -54,8 +56,11 @@ account-style contract, and it does not modify CKB-VM. The VM is a fixed
 oracle.
 
 The reason is isomorphism. Myelin runs the same CKB-VM, with the same
-RISC-V ISA, the same script semantics (`CkbStrict`), and the same Molecule
-transaction serialisation as L1. That means a Myelin CellTx is structurally
+RISC-V ISA, the same script semantics (`CkbStrict`, the strict verification
+profile CKB uses on chain), and the same Molecule transaction serialisation
+(CKB's canonical binary encoding for transactions and witnesses) as L1. That
+means a Myelin CellTx (a Cell transaction: consume some live Cells as inputs,
+create new Cells as outputs, same shape as a CKB transaction) is structurally
 projectable into a CKB transaction. The projection layer asks a simple
 question: can this `CellTx` be serialised with the CKB Molecule transaction
 layout, and do its script and witness assumptions match a CKB-strict
@@ -90,6 +95,12 @@ Official CKB references I build against:
 [CKB-VM](https://docs.nervos.org/docs/ckb-fundamentals/ckb-vm).
 
 ## How Myelin works
+
+The pipeline below runs from source to evidence. CellScript is the DSL that
+compiles Cell-model programs (actions, resources, flows) into typed-cell
+metadata and a RISC-V VM artefact. The CellDAG is Myelin's dependency
+scheduler: it figures out which CellTxs in a batch can run in parallel and
+which must be ordered.
 
 ```mermaid
 %%{init: {
@@ -156,7 +167,7 @@ crates live under `core-utils/`, `crypto/`, and `math/`.
 | Path | Role |
 | --- | --- |
 | `exec/` | Cell transactions, script verification, VM and syscall glue, scheduler witnesses, and CellDAG conflict scheduling. |
-| `state/` | Live Cell state roots (incremental MuHash) and data-availability proof primitives. |
+| `state/` | Live Cell state roots (incremental MuHash, a multiplicative hash accumulator that lets the root update in O(1) per cell change) and data-availability proof primitives. |
 | `mempool/` | Cell transaction pool and deterministic conflict scoring. |
 | `consensus/` | Static closed committee and Tendermint-style weighted precommit finality. |
 | `cli/` | Command-line fixtures and report generation for CellTx, session, DA, settlement, and submission flows. |
@@ -187,7 +198,9 @@ division of labour is deliberate. CellScript compiles; Myelin types. The
 vendored compiler is kept byte-for-byte in sync with upstream CellScript
 (currently 0.21.1; `scripts/check_cellscript_parent_parity.py` enforces
 this). It emits generic scheduler witnesses: a 9-field molecule carrying a
-per-access `binding_hash`. I did not fork the compiler to change that.
+per-access `binding_hash` (a hash of the source-level variable name the cell
+is bound to, like "coin" or "order"). I did not fork the compiler to change
+that.
 
 The typed-cell runtime types (`TypedCellDecl`, `ConflictKeySpec`,
 `TypedCellStore`, `CellScriptSchedulerWitness`,
@@ -208,13 +221,17 @@ emission target is a separate, open decision.
 
 Given typed cells with conflict keys, the CellDAG builds a read/write
 dependency graph over the transactions in a session batch and schedules
-independent transactions across Rayon topological layers. Two transactions
-that read the same conflict domain stay in the same layer (parallel). A
-read/write or write/write pair on the same domain creates a dependency edge
-(serial). The conflict edges come from the typed-cell model, so the scheduler
-understands semantic conflicts (two transactions touching the same logical
-resource), which is a good deal more useful than only seeing structural
-OutPoint-level chaining.
+independent transactions across topological layers, parallelised with Rayon
+(a Rust data-parallelism library). Two transactions that read the same
+conflict domain stay in the same layer (parallel). A read/write or
+write/write pair on the same domain creates a dependency edge (serial). The
+conflict edges come from the typed-cell model, so the scheduler understands
+semantic conflicts (two transactions touching the same logical resource),
+which is a good deal more useful than only seeing structural OutPoint-level
+chaining. An OutPoint is the CKB way of pointing at a specific Cell output
+(transaction hash plus output index); relying on OutPoint overlap alone
+would miss cases where two transactions touch the same logical resource
+through different Cells.
 
 ### 3. Closed-validator finality with dual engines
 
