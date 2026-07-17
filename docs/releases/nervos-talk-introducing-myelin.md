@@ -1,9 +1,7 @@
 # Introducing Myelin: a CKB-aligned off-chain Cell session runtime
 
-> **Draft Nervos Talk post.** The canonical public introduction to Myelin:
-> what it is, the problem it solves, how it works, what it ships today, what
-> it does not claim, and what comes next. This post supersedes the README as
-> the long-form narrative; the README remains the one-screen index.
+> **Draft Nervos Talk post.** This is the long-form introduction to Myelin —
+> what it is, why I built it, how it works, and where it is going.
 
 ---
 
@@ -19,10 +17,9 @@ verifier can adjudicate a single chunk without re-running the whole session.
 The closed-validator fast path ships today as a prototype; the permissionless
 path is the roadmap.
 
-Myelin is **not** a CKB full node, not a new L1, and not a finished
-permissionless L2. It is a protocol seed: it keeps the execution, state,
-evidence, and session-finality pieces needed to test the shape of an
-off-chain Cell ledger.
+Myelin is not a CKB full node, not a new L1, and not a finished
+permissionless L2. It is a protocol seed: the execution, state, evidence, and
+session-finality pieces needed to test the shape of an off-chain Cell ledger.
 
 ## The problem
 
@@ -31,7 +28,7 @@ A single chunk of a real-time game, a metering window, or a settlement batch
 can execute inside the VM and verify correctly. But a usable system is more
 than one verified chunk. To turn "this chunk executed correctly" into "this
 *session* is a finalised, contestable state transition with a path back to
-L1," you need a layer above the chunk that can answer five questions:
+L1," a layer above the chunk has to answer five questions:
 
 - **Scheduling** — how do many chunks in a batch execute together, and which
   can run in parallel?
@@ -41,10 +38,10 @@ L1," you need a layer above the chunk that can answer five questions:
   the input shape?
 - **Data availability** — where does the evidence live?
 
-Myelin is that layer. It treats off-chain execution as a finite Cell session
-that can always answer those five questions.
+I built Myelin to be that layer — to treat off-chain execution as a finite
+Cell session that can always answer those five questions.
 
-## The isomorphism principle: why we do not touch the VM
+## The isomorphism principle: why I do not touch the VM
 
 This is the single most important design decision in Myelin, and it shapes
 everything else.
@@ -53,28 +50,28 @@ CKB uses the **Cell Model**, not an account model: a transaction consumes
 live Cells and creates new Cells; state changes happen through Cell
 replacement; Cells carry data, a lock script, and an optional type script;
 scripts run in CKB-VM. Myelin follows that mental model exactly. It does not
-hide session state inside an account-style contract, and it does **not**
-modify CKB-VM. The VM is treated as a fixed oracle.
+hide session state inside an account-style contract, and it does not modify
+CKB-VM. The VM is treated as a fixed oracle.
 
 The reason is **isomorphism**. Because Myelin runs the same CKB-VM, with the
 same RISC-V ISA, the same script semantics (`CkbStrict`), and the same
 Molecule transaction serialisation as L1, a Myelin CellTx is *structurally
-projectable* into a CKB transaction. Concretely, Myelin's projection layer
-asks: can this `CellTx` be serialised with the CKB Molecule transaction
-layout, and do its script/witness assumptions match a CKB-strict profile?
-When the answer is yes, the chunk is `ckb_compatible` — a future on-chain
-court verifier can re-run the *same* bytes through the *same* VM and reach
-the *same* verdict. When Myelin invents a host-side shortcut (a cache, a
-parallel scheduler, a different finality engine), that shortcut is
-*transparent*: it changes how Myelin reaches an answer, not what the answer
-is. The VM result is the ground truth both off-chain and on-chain.
+projectable* into a CKB transaction. Myelin's projection layer asks: can this
+`CellTx` be serialised with the CKB Molecule transaction layout, and do its
+script/witness assumptions match a CKB-strict profile? When the answer is
+yes, the chunk is `ckb_compatible` — a future on-chain court verifier can
+re-run the *same* bytes through the *same* VM and reach the *same* verdict.
+Every host-side shortcut I add (a cache, a parallel scheduler, a different
+finality engine) is transparent: it changes how Myelin reaches an answer, not
+what the answer is. The VM result is the ground truth both off-chain and
+on-chain.
 
-If we changed the VM — added an opcode, relaxed a cycle limit, substituted a
-different ISA — that isomorphism would break. A chunk that verifies under
-Myelin's modified VM might not verify under CKB's, and the projection path
-would be a lie. So every optimisation Myelin makes lives strictly on the
-host side: scheduling, caching, finality, evidence packaging. The VM is the
-contract that keeps off-chain and on-chain honest with each other.
+If I changed the VM — added an opcode, relaxed a cycle limit, substituted a
+different ISA — that isomorphism would break. A chunk that verifies under a
+modified VM might not verify under CKB's, and the projection path would be
+meaningless. So every optimisation in Myelin lives strictly on the host side:
+scheduling, caching, finality, evidence packaging. The VM is the contract
+that keeps off-chain and on-chain honest with each other.
 
 ## How Myelin works
 
@@ -137,69 +134,67 @@ flowchart TB
 Every box is a real crate in the workspace: `cellscript`, `myelin-exec`,
 `myelin-state`, `myelin-mempool`, `myelin-consensus`, `myelin-cli`.
 
-## The five things Myelin contributes
+## What I built
 
 ### 1. The typed-cell model
 
 A Cell in CKB carries data, a lock script, and an optional type script. The
 type script is what gives a Cell its *kind* — a token cell, an order cell, a
-game-state cell. CKB verifies type scripts on chain, but it does not give the
-*runtime* a structured way to reason about "this is a typed cell of kind X,
-with these conflict dimensions, this ownership, this mutability" before it
-hits the VM.
+game-state cell. CKB verifies type scripts on chain, but the runtime has no
+structured way to reason about "this is a typed cell of kind X, with these
+conflict dimensions, this ownership, this mutability" before it hits the VM.
 
-Myelin adds that layer. The **typed-cell model** is a runtime-side type
-system that declares, for each type script, a `TypedCellDecl`: its ownership
+I added that layer. The **typed-cell model** is a runtime-side type system
+that declares, for each type script, a `TypedCellDecl`: its ownership
 (one-of-a-kind vs fungible), its mutability, and — critically — its
 **conflict key** (`ConflictKeySpec`: by cell id, by field, by composite key,
 or none). The conflict key is what lets the scheduler decide whether two
-transactions touch the same state and therefore must be ordered, or touch
-disjoint state and can run in parallel.
+transactions touch the same state and must be ordered, or touch disjoint
+state and can run in parallel.
 
-This typed-cell model is **a Myelin-side development branched from the
-CellScript line, and it has not been merged back to the upstream CellScript
-compiler.** The division of labour is:
+This model is a Myelin-side development, branched from the CellScript line,
+and it has **not** been merged back to the upstream CellScript compiler. The
+division of labour is deliberate:
 
 - **CellScript compiles, Myelin types.** The vendored `cellscript/` compiler
   is kept byte-for-byte in sync with upstream CellScript (currently 0.21.1;
   `scripts/check_cellscript_parent_parity.py` enforces this). It emits
-  generic scheduler witnesses (a 9-field molecule with a per-access
-  `binding_hash`). Myelin does not fork the compiler to change that.
-- The typed-cell runtime types — `TypedCellDecl`, `ConflictKeySpec`,
+  generic scheduler witnesses — a 9-field molecule carrying a per-access
+  `binding_hash`. I did not fork the compiler to change that.
+- The typed-cell runtime types (`TypedCellDecl`, `ConflictKeySpec`,
   `TypedCellStore`, `CellScriptSchedulerWitness`,
-  `CellScriptSchedulerAccessWitness`, `compute_conflict_hash` — all live in
+  `CellScriptSchedulerAccessWitness`, `compute_conflict_hash`) all live in
   Myelin's own `exec` crate (`exec/src/celltx/types.rs`), not in the
   compiler.
 - A [witness bridge](https://github.com/Myelin-Network/Myelin/blob/main/exec/src/celltx/witness_bridge.rs)
-  decodes the compiler's generic witness at runtime and *recomputes* Myelin's
+  decodes the compiler's generic witness at runtime and recomputes Myelin's
   stronger `conflict_hash` / `typed_data_hash` from the transaction's
-  concrete cells. The compiler cannot emit these directly because it does not
-  know the deployed type-script identity at compile time — only the runtime
-  does.
+  concrete cells. The compiler cannot emit these directly because it does
+  not know the deployed type-script identity at compile time — only the
+  runtime does.
 
-This is an intentional boundary: it keeps the compiler upstream-clean and
-lets the typed-cell model evolve at runtime speed. Whether the typed-cell
-model is proposed back upstream as a compiler emission target is an open,
-separate decision.
+This boundary keeps the compiler upstream-clean and lets the typed-cell model
+evolve at runtime speed. Whether it is proposed back upstream as a compiler
+emission target is a separate, open decision.
 
 ### 2. Inter-transaction conflict scheduling (CellDAG)
 
-Given typed cells with conflict keys, Myelin's **CellDAG** builds a
-read/write dependency graph over the transactions in a session batch and
-schedules independent transactions across Rayon topological layers. Two
-transactions that read the same conflict domain stay in the same layer
-(parallel); a read/write or write/write pair on the same domain creates a
-dependency edge (serial). The conflict edges come from the typed-cell model
-above, not just from OutPoint-level input/output chaining — so the scheduler
-understands *semantic* conflicts (two txs touching the same logical resource),
+Given typed cells with conflict keys, the **CellDAG** builds a read/write
+dependency graph over the transactions in a session batch and schedules
+independent transactions across Rayon topological layers. Two transactions
+that read the same conflict domain stay in the same layer (parallel); a
+read/write or write/write pair on the same domain creates a dependency edge
+(serial). The conflict edges come from the typed-cell model, not just from
+OutPoint-level input/output chaining — so the scheduler understands
+*semantic* conflicts (two transactions touching the same logical resource),
 not just structural ones.
 
 ### 3. Closed-validator finality with dual engines
 
-Myelin wraps a batch of verified chunks into a `MyelinBlock` and finalises it
+A batch of verified chunks is wrapped into a `MyelinBlock` and finalised
 under a pluggable committee: a static closed committee today, and a
 Tendermint-style weighted-precommit verifier that is domain-separated and
-tested alongside it. This is explicitly **closed-validator** (see
+tested alongside it. This is explicitly closed-validator (see
 [the boundary](#what-myelin-does-not-claim)) — the session-finality layer a
 benchmarking workload needs, not a permissionless consensus claim.
 
@@ -223,96 +218,77 @@ but the commitment shape is in place.
 ## Optimisations — what each one buys, and why none touch the VM
 
 Every optimisation below lives strictly on the host side. The VM is never
-modified. This is not a limitation we work around — it is the isomorphism
-contract described above. Each item states *what effect it achieves*.
+modified — this is not a limitation I work around but the isomorphism contract
+described above. Each item states the effect it achieves.
 
 ### Already shipping
 
 | Optimisation | What it achieves | Why it preserves isomorphism |
 | --- | --- | --- |
-| **CellDAG parallel inter-tx verification** (`exec/src/scheduler/executor.rs`) | Independent transactions in a batch verify concurrently across Rayon topological layers instead of serially. This is the headline off-chain throughput win: a session of N independent chunks finishes in `O(depth)` sequential verification rounds, not `O(N)`. | Scheduling changes *when* each tx is verified, not *whether* it passes. Every tx still runs through the unmodified CKB-VM verifier; the parallel layers just run disjoint txs at the same time. The union of results is identical to serial. |
-| **Within-tx script-group parallelism** (`exec/src/vm/verifier.rs`) | The lock and type script groups *within one transaction* are verified in parallel (`script_groups.par_iter()`). A tx with K script groups finishes in `O(1)` rounds instead of `O(K)`. | Same VM, same scripts, same cycle accounting — only the order of independent group evaluations is shuffled. Cycle totals are summed deterministically. |
-| **Incremental MuHash state root** (`state/src/cell_tree.rs`) | Each cell insert/remove updates the session state root in `O(1)` (a single 384-byte modular operation), instead of re-hashing the entire cell set. A session that commits thousands of cells pays no `O(n)` root cost per commit. | MuHash is an associative, order-independent accumulator; the root is the same whether computed incrementally or from scratch. The VM never sees the root computation — it is host-side accounting. |
-| **Parallel DA Merkle leaf hashing** (`state/src/store/proof.rs`) | Sealing a 1 GB DA segment hashes its leaves in parallel (`par_chunks(2)` per Merkle level) instead of serially. Seal latency drops near-linearly with core count. | Merkle hashing is a pure, deterministic function; parallelising it yields a byte-identical root. The on-chain court would verify the same root from the same leaves. |
+| **CellDAG parallel inter-tx verification** (`exec/src/scheduler/executor.rs`) | Independent transactions in a batch verify concurrently across Rayon topological layers instead of serially. A session of *N* independent chunks finishes in `O(depth)` sequential verification rounds, not `O(N)`. | Scheduling changes *when* each transaction is verified, not *whether* it passes. Every transaction still runs through the unmodified CKB-VM verifier; the parallel layers run disjoint transactions at the same time. The union of results is identical to serial. |
+| **Within-tx script-group parallelism** (`exec/src/vm/verifier.rs`) | The lock and type script groups *within one transaction* are verified in parallel (`script_groups.par_iter()`). A transaction with *K* script groups finishes in `O(1)` rounds instead of `O(K)`. | Same VM, same scripts, same cycle accounting — only the order of independent group evaluations changes. Cycle totals are summed deterministically. |
+| **Incremental MuHash state root** (`state/src/cell_tree.rs`) | Each cell insert/remove updates the session state root in `O(1)` (a single 384-byte modular operation) instead of re-hashing the entire cell set. A session that commits thousands of cells pays no `O(n)` root cost per commit. | MuHash is an associative, order-independent accumulator; the root is identical whether computed incrementally or from scratch. The VM never sees the root computation — it is host-side accounting. |
+| **Parallel DA Merkle leaf hashing** (`state/src/store/proof.rs`) | Sealing a 1 GB DA segment hashes its leaves in parallel (`par_chunks(2)` per Merkle level) instead of serially. Seal latency drops near-linearly with core count. | Merkle hashing is a pure, deterministic function; parallelising it yields a byte-identical root that the on-chain court would verify from the same leaves. |
 | **Segment-reader lock release** (`state/src/store/segment.rs`) | The DA segment reader releases its file-handle cache lock *before* doing disk I/O (cloning the handle under the lock, reading outside it). One slow disk read no longer serialises all concurrent readers. | Pure host-side I/O scheduling; the bytes read are identical, only the locking discipline changes. |
-| **Serialization cache** (`exec/src/serialization/cache.rs`) | A thread-safe LRU caches serialised bytes of versioned values, avoiding redundant re-serialisation of the same structures across a session. | The cached bytes are the exact Molecule encoding the VM/chain would see; caching avoids recomputing an identical byte string. |
+| **Serialization cache** (`exec/src/serialization/cache.rs`) | A thread-safe LRU caches serialised bytes of versioned values, avoiding redundant re-serialisation of the same structures across a session. | The cached bytes are the exact Molecule encoding the VM and chain would see; caching avoids recomputing an identical byte string. |
 
 ### Planned (each with its specific effect)
 
 | Optimisation | What it will achieve | Status |
 | --- | --- | --- |
-| **Mempool batch admission** | Admit a batch of txs under one write lock, with conflict keys computed in parallel. Turns `N` serial `O(pool)` scans into one parallel pass + one critical section, and closes a size-check race. | Planned (M) |
-| **Sighash reused-values cache** | Fill the `NoCache` placeholder for CKB's `StandardSigHashReusedValues`, caching repeated sighash sub-computations across inputs of the same tx. | Planned (M) |
-| **Content-addressable VM-result cache** | Cache `(script_code_hash, args, inputs_hash) → (cycles, exit_code)` so re-verification of unchanged script groups (court replays, re-runs) is a lookup instead of a full VM run. The biggest throughput win for dispute workloads. | Planned (L) |
+| **Mempool batch admission** | Admit a batch of transactions under one write lock, with conflict keys computed in parallel. Turns *N* serial `O(pool)` scans into one parallel pass plus one critical section, and closes a size-check race. | Planned (M) |
+| **Sighash reused-values cache** | Fill the `NoCache` placeholder for CKB's `StandardSigHashReusedValues`, caching repeated sighash sub-computations across inputs of the same transaction. | Planned (M) |
+| **Content-addressable VM-result cache** | Cache `(script_code_hash, args, inputs_hash) → (cycles, exit_code)` so re-verification of unchanged script groups (court replays, re-runs) is a lookup instead of a full VM run — the biggest throughput win for dispute workloads. | Planned (L) |
 | **Parallel consensus signature verification** | Once real secp256k1/BLS replaces the current deterministic-blake3 stubs, verify committee precommit signatures in parallel. | Planned (waits on real crypto) |
 
 None of the above changes a single VM instruction, cycle budget, or
-serialisation rule. That is the point: the off-chain path can be made as fast
-as host hardware allows, *without* diverging from what the chain would
-verify.
+serialisation rule. The off-chain path can be made as fast as host hardware
+allows, without diverging from what the chain would verify.
 
-## Standing on shoulders: credit where it is due
+## Acknowledgements
 
-Myelin would not exist without the body of work xxuejie (Xuejie Xiao)
-published on running real computation inside CKB-VM. We want to be explicit
-about what is his and what is ours, because the line matters.
+Myelin stands on work that xuejie (Xuejie Xiao) did first, and I want to be
+specific about that because the intellectual lineage matters.
 
-**What is entirely xxuejie's:**
+His [*Teeworlds on CKB*](https://xuejie.space/2026_06_16_teeworlds_on_ckb/)
+experiment proved a full multiplayer game tick loop runs inside CKB-VM —
+including the RISC-V replayer binary, the fixture builder, and every layer of
+in-VM optimisation (fixed-point math, custom collision detection, musl/libcxx
+ports, libc stripping). Myelin reuses that binary unchanged; I did not write
+a line of it. It is the most demanding publicly available CKB-VM workload, and
+it is the reference pressure test Myelin runs against.
 
-- The *Teeworlds on CKB* experiment — proving a 60 Hz multiplayer game tick
-  loop runs in CKB-VM as one chunk per transaction
-  ([post](https://xuejie.space/2026_06_16_teeworlds_on_ckb/)). This includes
-  the RISC-V replayer binary, the fixture builder, and all the in-VM
-  optimisation work (fixed-point math, custom collision, musl/libcxx ports,
-  libc stripping). Myelin reuses that binary **unchanged** — we did not write
-  a line of it.
-- The *fat / thin transactions* framework
-  ([post](https://xuejie.space/2026_06_24_fat_transactions/)) — the insight
-  that a transaction's witness, input/output, and data are independent
-  expansion axes. This framework shaped our discipline of keeping scheduler
+Three of his subsequent posts shaped how I designed the runtime, each by
+exposing a design pressure the session layer must absorb:
+
+- [*Fat transactions, thin transactions*](https://xuejie.space/2026_06_24_fat_transactions/)
+  framed a transaction's witness, input/output, and data as independent
+  expansion axes. That framing hardened my discipline of keeping scheduler
   policy in the witness axis and payload in the data axis.
-- The *One Hour One Life* port
-  ([post](https://xuejie.space/2026_06_29_porting_one_hour_one_life_game_loop_to_ckb/))
-  — proving a persistent crafting world runs on CKB-VM, and surfacing the
-  need for a chained world-state hash across chunks. This directly informed
-  our decision to make the session state root a first-class, incrementally
-  computed commitment.
-- The *Archipelagos* design
-  ([post](https://xuejie.space/2026_06_30_archipelago/)) — the exploration
-  of sharding a world that does not fit in one chunk into typed islands with
-  a customs border. This is the most directly generative of his posts for
-  us: it validated that the typed-cell conflict-domain model we were already
-  building maps naturally onto multi-domain sessions, and it pushed us to
-  think about session-level composition evidence.
+- [*Porting One Hour One Life*](https://xuejie.space/2026_06_29_porting_one_hour_one_life_game_loop_to_ckb/)
+  proved a persistent crafting world runs on CKB-VM and surfaced the need for
+  a chained world-state hash across chunks. That directly informed my decision
+  to make the session state root a first-class, incrementally computed
+  commitment.
+- [*Archipelagos*](https://xuejie.space/2026_06_30_archipelago/) explored
+  sharding a world too large for one chunk into typed islands with a customs
+  border. It reinforced that the typed-cell conflict-domain model I was
+  building maps naturally onto multi-domain sessions, and it pushed me toward
+  session-level composition evidence as a roadmap goal.
 
-**What is Myelin's:**
-
-- The off-chain session runtime itself: CellDAG inter-transaction parallel
-  scheduling, the dual-engine closed-validator finality, the CKB-style
-  projection layer, the court bundle, the DA evidence path.
-- The typed-cell model — a runtime-side type system
-  (`TypedCellDecl`, `ConflictKeySpec`, `compute_conflict_hash`) that is
-  Myelin's own development, not in upstream CellScript.
-- The witness bridge that connects the CellScript compiler's generic
-  witnesses to Myelin's typed conflict domains at runtime.
-- All host-side optimisations described above.
-
-The clean way to state it: xxuejie proved *what CKB-VM can do* and, in each
-post, named the next layer as future work. Myelin builds *that layer* — the
-off-chain session runtime — and the design pressures his experiments surfaced
-directly shaped which runtime features we built first. We reuse his replayer
-binary as our reference workload; we do not compete with or claim to extend
-his in-VM work.
+To state the line plainly: xuejie demonstrated what CKB-VM is capable of and,
+in each post, pointed at the session-and-evidence layer as the next problem.
+Myelin is my attempt at that layer. I reuse his replayer binary as the
+reference workload; the runtime, the typed-cell model, the witness bridge, and
+every host-side optimisation are my own work.
 
 ## The reference workload
 
-The flagship workload is a real CKB-VM binary running through Myelin's
-verifier end to end. We use xxuejie's *Teeworlds on CKB* replayer — a RISC-V
-ELF that runs a full multiplayer game tick loop — as the reference pressure
-test, because it is the most demanding publicly available CKB-VM workload.
-Myelin runs that binary through its own CKB-strict verifier, chunks the game
-tape, projects each chunk to CKB, and produces a court bundle. The measured
-run is fully reproducible from the
+The flagship workload runs a real CKB-VM binary through Myelin's verifier end
+to end — xuejie's *Teeworlds on CKB* replayer, a RISC-V ELF that runs a full
+multiplayer game tick loop. Myelin runs it through its own CKB-strict
+verifier, chunks the game tape, projects each chunk to CKB, and produces a
+court bundle. The measured run is fully reproducible from the
 [runbook](https://github.com/Myelin-Network/Myelin/blob/main/docs/tutorials/teeworlds-end-to-end.md):
 `tape_bytes: 2162`, `vm_cycles: 15,139,695`, `court_checks: 22`.
 
@@ -332,39 +308,34 @@ run is fully reproducible from the
 
 ## Roadmap
 
-Myelin's roadmap is driven by the needs of the session runtime itself —
-making the typed-cell scheduler deeper, the court evidence richer, and the
-session composition story explicit. Two near-term directions, both internal
-to Myelin's architecture:
+Two near-term directions, both internal to Myelin's architecture:
 
-- **Per-participant state commitment.** Today a session commit rolls the
-  full session state root. For workloads with many independent participants
-  (a game with many players, an IoT batch with many gateways, a sharded order
-  book), this is heavier than necessary: each participant's state could be
-  committed and scheduled independently via its own typed conflict domain,
-  so the CellDAG can run participant-local transitions in parallel without
-  re-committing the whole world. The CellTx shape and `ConflictKeySpec` model
-  already support scoping a conflict key to a single participant; the work is
-  to make that a first-class, validated commit path. (We note that the
-  generality of this problem — fine-grained state crossing a chunk boundary —
-  was surfaced concretely by xuejie's [OHOL port](https://xuejie.space/2026_06_29_porting_one_hour_one_life_game_loop_to_ckb/);
-  our solution is Myelin's own design on top of the typed-cell substrate.)
+- **Per-participant state commitment.** Today a session commit rolls the full
+  session state root. For workloads with many independent participants (a
+  game with many players, an IoT batch with many gateways, a sharded order
+  book), that is heavier than necessary: each participant's state could be
+  committed and scheduled independently via its own typed conflict domain, so
+  the CellDAG runs participant-local transitions in parallel without
+  re-committing the whole world. The `CellTx` shape and `ConflictKeySpec`
+  model already support scoping a conflict key to a single participant; the
+  work is to make that a first-class, validated commit path. The generality
+  of this problem — fine-grained state crossing a chunk boundary — was
+  surfaced concretely by xuejie's [OHOL port](https://xuejie.space/2026_06_29_porting_one_hour_one_life_game_loop_to_ckb/),
+  but the solution is my own design on top of the typed-cell substrate.
 
-- **Session-level composition evidence.** When a session spans multiple
-  typed domains (different type scripts with different logic and conflict
-  rules), the interesting unit of audit is not a single chunk but the *set
-  of domains the session touched and the transitions between them*. Myelin's
-  typed-cell model already models each domain as a `TypedCellDecl` and
-  schedules cross-domain transactions by conflict hash; the work is to
-  aggregate that into a session-level manifest that a court or auditor can
-  read as a unit, at the same evidence tier as the single-chunk court bundle.
-  (The value of explicit domain-composition evidence was reinforced by
-  xuejie's [Archipelagos post](https://xuejie.space/2026_06_30_archipelago/);
-  the manifest design and its court-visible shape are Myelin's own.)
+- **Session-level composition evidence.** When a session spans multiple typed
+  domains (different type scripts with different logic and conflict rules),
+  the interesting unit of audit is not a single chunk but the set of domains
+  the session touched and the transitions between them. The typed-cell model
+  already models each domain as a `TypedCellDecl` and schedules cross-domain
+  transactions by conflict hash; the work is to aggregate that into a
+  session-level manifest a court or auditor can read as a unit, at the same
+  evidence tier as the single-chunk court bundle. The value of explicit
+  domain-composition evidence was reinforced by xuejie's [Archipelagos post](https://xuejie.space/2026_06_30_archipelago/),
+  but the manifest design and its court-visible shape are my own.
 
-Both build on substrate Myelin already ships (typed cells, CellDAG, conflict
-domains, court bundle). Neither requires changing CKB-VM, the `CellTx` shape,
-or the typed-cell model.
+Both build on substrate Myelin already ships. Neither requires changing
+CKB-VM, the `CellTx` shape, or the typed-cell model.
 
 ## What Myelin does **not** claim
 
@@ -373,16 +344,15 @@ This is a positioning statement, not a production-readiness claim.
 - **Closed-validator finality only.** The committee is static and known.
   Permissionless validator entry is out of scope today. Static committee
   finality must not be marketed as permissionless L2 security.
-- **No on-chain court yet.** The court bundle is the *input shape* for a
-  future on-chain verifier; the verifier itself is not deployed
-  (`l1_court_implemented: false`). Myelin sits at **Tier 2** of the claim
-  ladder (executable disputed-chunk input shape), not Tier 3 (exercised
-  court).
+- **No on-chain court yet.** The court bundle is the input shape for a future
+  on-chain verifier; the verifier itself is not deployed
+  (`l1_court_implemented: false`). Myelin sits at Tier 2 of the claim ladder
+  (executable disputed-chunk input shape), not Tier 3 (exercised court).
 - **No mainnet, no external DA, no custody.** All evidence today is
   fixture-backed or local-devnet-backed.
 - **The typed-cell model is not in upstream CellScript.** It is a Myelin
   runtime-side development. Whether it is proposed back upstream as a
-  compiler emission target is an open, separate decision.
+  compiler emission target is a separate, open decision.
 
 ```mermaid
 %%{init: { "theme": "base", "themeVariables": { "primaryColor": "#A5B4FC", "primaryTextColor": "#1E293B", "primaryBorderColor": "#4F46E5", "lineColor": "#6366F1", "fontFamily": "Inter, system-ui, sans-serif", "fontSize": "13px" } }}%%
@@ -412,5 +382,5 @@ builds the RISC-V replayer and runs it through Myelin end to end.
 
 ---
 
-*Myelin is MIT-licensed and open source. Discussions and contributions are
-welcome on [GitHub](https://github.com/Myelin-Network/Myelin).*
+*Myelin is MIT-licensed and open source. I welcome discussions and
+contributions on [GitHub](https://github.com/Myelin-Network/Myelin).*
