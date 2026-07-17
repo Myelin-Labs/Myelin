@@ -154,9 +154,11 @@ impl CellDAG {
         let mut conflict_hash_conflicts: BTreeMap<[u8; 32], Vec<ConflictEntry>> = BTreeMap::new();
 
         for (node_id, tx) in txs.iter().enumerate() {
-            // If decode fails, skip: the transaction has no valid scheduler
-            // metadata, so it falls back to OutPoint-level dependencies.
-            for witness in tx.decoded_cellscript_scheduler_witnesses().filter_map(Result::ok) {
+            // Schema-discriminating decode: native 7-field Myelin witnesses
+            // decode directly; legacy cellscript 9-field witnesses are
+            // translated via the bridge (recomputing conflict_hash from this
+            // tx's concrete cells). Decode failures fall back to OutPoint deps.
+            for witness in tx.decoded_cellscript_scheduler_witnesses_with_legacy().into_iter().filter_map(Result::ok) {
                 for access in &witness.accesses {
                     let mode = AccessMode::from_operation(access.operation);
                     let entry = ConflictEntry { node_id, mode };
@@ -208,7 +210,7 @@ impl CellDAG {
     /// Returns an empty vector if the transaction has no valid scheduler witness.
     pub fn extract_conflict_accesses(tx: &CellTx) -> Vec<([u8; 32], AccessMode)> {
         let mut result = Vec::new();
-        for witness in tx.decoded_cellscript_scheduler_witnesses().flatten() {
+        for witness in tx.decoded_cellscript_scheduler_witnesses_with_legacy().into_iter().flatten() {
             for access in &witness.accesses {
                 let mode = AccessMode::from_operation(access.operation);
                 result.push((access.conflict_hash, mode));
@@ -747,5 +749,61 @@ mod tests {
 
         // tx0 → tx3 transitive (pool A chain)
         assert!(dag.has_path(0, 3), "pool A first swap must precede pool A second swap");
+    }
+
+    #[test]
+    fn typed_dag_consumes_cellscript_legacy_witness_via_bridge() {
+        // PROOF TEST: a real cellscript-compiled witness (9-field legacy
+        // format) attached to two txs must drive typed conflict edges through
+        // the bridge → build_from_typed. Two txs sharing the same Output
+        // type-script + binding, one READ_REF and one CONSUME, must produce a
+        // dependency edge (READ+WRITE rule, dag.rs:184-191). This proves the
+        // compiler's scheduler metadata now reaches the DAG, not just the
+        // OutPoint-level structure.
+        use crate::celltx::witness_bridge::{CellscriptLegacyAccess, CellscriptLegacyWitness};
+        use crate::celltx::types::{
+            CellOutput, Script, CELLSCRIPT_SCHEDULER_OP_CREATE,
+            CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT, CELLSCRIPT_SCHEDULER_WITNESS_MAGIC,
+        };
+
+        let shared_type_script = Script::new([0x55; 32], 1, vec![0x01]);
+        let shared_binding = [0xAB; 32]; // same binding name hash on both txs
+
+        let make_tx = |op: u8| {
+            let lock = Script::new([0x00; 32], 0, vec![]);
+            let output = CellOutput { lock, type_: Some(shared_type_script.clone()), capacity: 1000 };
+            let mut tx = CellTx::new(vec![], vec![], vec![output], vec![vec![]], vec![]).unwrap();
+            let legacy = CellscriptLegacyWitness {
+                magic: u16::from_le_bytes(CELLSCRIPT_SCHEDULER_WITNESS_MAGIC),
+                version: 1,
+                effect_class: 3, // Creating
+                parallelizable: false,
+                touches_shared: vec![],
+                estimated_cycles: 100,
+                accesses: vec![CellscriptLegacyAccess {
+                    operation: op,
+                    source: CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT,
+                    index: 0,
+                    binding_hash: shared_binding,
+                }],
+            };
+            tx.push_cellscript_scheduler_witness(legacy.encode()).unwrap();
+            tx
+        };
+
+        // tx0 and tx1 both CREATE a typed cell on Output[0] with the same
+        // type-script + binding. Same type-script + binding => the bridge
+        // recomputes the same conflict_hash for both, and WRITE+WRITE
+        // (CREATE+CREATE) => dependency edge tx0 → tx1 (dag.rs:184-191).
+        let tx_a = make_tx(CELLSCRIPT_SCHEDULER_OP_CREATE);
+        let tx_b = make_tx(CELLSCRIPT_SCHEDULER_OP_CREATE);
+        let dag = CellDAG::build_from_typed(&[tx_a, tx_b]).expect("DAG builds");
+
+        // The two txs have no OutPoint dependency (both create independent
+        // outputs with no inputs), so any edge between them MUST come from the
+        // typed conflict-hash path — i.e. the bridge successfully decoded the
+        // legacy witness and recomputed matching conflict hashes.
+        assert!(dag.has_path(0, 1), "WRITE→WRITE on shared typed cell must create a dependency edge via the legacy-witness bridge");
+        assert!(dag.layers.len() >= 2, "the conflict edge must place the two txs in separate layers");
     }
 }

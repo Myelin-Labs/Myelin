@@ -135,14 +135,20 @@ impl ExecutionResult {
     }
 }
 
-/// Execution receipt (simplified for now)
+/// Execution receipt for a verified Cell transaction.
+///
+/// Carries the real CKB-VM outcome: consumed cycles and the script exit
+/// code. `gas_used` and `logs` are retained for forward compatibility but
+/// are zero/empty until a richer VM receipt is wired.
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionReceipt {
-    /// Cycles consumed
+    /// Cycles consumed by the CKB-VM run.
     pub cycles: u64,
-    /// Gas used (for future compatibility)
+    /// Script exit code (0 = success). Mirrors CKB-VM's exit code convention.
+    pub exit_code: i8,
+    /// Gas used (for future compatibility; currently 0).
     pub gas_used: u64,
-    /// Output logs (for debugging)
+    /// Output logs (for debugging; currently empty).
     pub logs: Vec<String>,
 }
 
@@ -174,6 +180,10 @@ pub enum ExecutionError {
     /// Missing execution result
     #[error("Missing execution result for transaction")]
     MissingResult,
+
+    /// The CellDAG could not be built over the supplied transactions.
+    #[error("CellDAG build failed: {0}")]
+    DagBuild(String),
 }
 
 #[cfg(test)]
@@ -201,7 +211,7 @@ mod tests {
         // Use sequential execution for simplicity
         let results = executor
             .execute_sequential(&txs, |_tx, node_id| {
-                Ok(ExecutionReceipt { cycles: 1000, gas_used: 100, logs: vec![format!("Executed tx {}", node_id)] })
+                Ok(ExecutionReceipt { cycles: 1000, exit_code: 0, gas_used: 100, logs: vec![format!("Executed tx {}", node_id)] })
             })
             .unwrap();
 
@@ -232,7 +242,7 @@ mod tests {
         let txs = vec![create_test_tx(vec![]), create_test_tx(vec![])];
 
         let results = executor
-            .execute_sequential(&txs, |_tx, node_id| Ok(ExecutionReceipt { cycles: node_id as u64 * 100, gas_used: 0, logs: vec![] }))
+            .execute_sequential(&txs, |_tx, node_id| Ok(ExecutionReceipt { cycles: node_id as u64 * 100, exit_code: 0, gas_used: 0, logs: vec![] }))
             .unwrap();
 
         assert_eq!(results.len(), 2);
@@ -244,5 +254,60 @@ mod tests {
         if let ExecutionResult::Success { receipt, .. } = &results[1] {
             assert_eq!(receipt.cycles, 100);
         }
+    }
+
+    #[test]
+    fn test_parallel_execute_respects_dag_layers() {
+        // First test to exercise the real `execute` path (rayon across DAG
+        // layers). Topology: tx0 produces an output consumed by tx1, tx2 is
+        // independent. Expected layers: {tx0, tx2} in layer 0, {tx1} in
+        // layer 1. All transactions "succeed" (stub closure); we assert the
+        // layering and deterministic NodeId-ordered results.
+        let executor = ParallelExecutor::default();
+
+        // tx0: no inputs, produces output at (compute_wtxid(tx0), 0). The DAG
+        // derives the producer edge from the wtxid map, so tx1's input must
+        // reference the producer by wtxid (not txid) for the edge to resolve.
+        let tx0 = create_test_tx(vec![]);
+        let tx0_wtxid = crate::celltx::sighash::compute_wtxid(&tx0);
+        let tx1 = create_test_tx(vec![OutPoint::new(tx0_wtxid, 0)]);
+        let tx2 = create_test_tx(vec![]);
+        let txs = vec![tx0, tx1, tx2];
+
+        let dag = CellDAG::build(&txs).expect("DAG builds over the 3-tx chain");
+
+        let results = executor
+            .execute(&dag, &txs, |_tx, node_id| {
+                Ok(ExecutionReceipt { cycles: 1000 + node_id as u64, exit_code: 0, gas_used: 0, logs: vec![] })
+            })
+            .expect("parallel execute succeeds");
+
+        assert_eq!(results.len(), 3, "one result per input tx");
+        assert!(results.iter().all(|r| r.is_success()), "all txs succeed");
+
+        // NodeId ordering is preserved (results indexed by NodeId).
+        assert_eq!(results[0].node_id(), 0);
+        assert_eq!(results[1].node_id(), 1);
+        assert_eq!(results[2].node_id(), 2);
+
+        // tx1 depends on tx0, so it must sit in a strictly later layer.
+        let layer_of = |node_id: usize| -> usize {
+            match results
+                .iter()
+                .find(|r| r.node_id() == node_id)
+                .expect("result present")
+            {
+                ExecutionResult::Success { layer, .. } | ExecutionResult::Failed { layer, .. } => *layer,
+            }
+        };
+        assert!(layer_of(1) > layer_of(0), "tx1 (consumer of tx0) must be in a later layer than tx0");
+        // tx2 is independent; it should be in layer 0 alongside tx0.
+        assert_eq!(layer_of(2), 0, "independent tx2 sits in layer 0");
+
+        let stats = ParallelExecutor::get_stats(&results);
+        assert_eq!(stats.total_txs, 3);
+        assert_eq!(stats.successful_txs, 3);
+        assert_eq!(stats.failed_txs, 0);
+        assert!(stats.max_layer_depth >= 2, "at least two layers exist");
     }
 }

@@ -16,7 +16,10 @@ pub mod conflict;
 pub mod dag;
 /// Parallel executor module
 pub mod executor;
+/// Bridge between the CellDAG scheduler and the CKB-VM verifier.
+pub mod vm_bridge;
 
 pub use conflict::{ConflictKey, ConflictResolution, ConflictResolver};
 pub use dag::{AccessMode, CellDAG, ConflictEntry, DagEdge, DagNode};
-pub use executor::{ExecutionReceipt, ExecutionResult, ParallelExecutor};
+pub use executor::{ExecutionError, ExecutionReceipt, ExecutionResult, ExecutionStats, ParallelExecutor};
+pub use vm_bridge::{verify_celltx_via_dag, verify_with_existing_dag};

@@ -9,6 +9,8 @@
 pub mod sighash;
 /// Cell transaction core types
 pub mod types;
+/// Bridge for the cellscript compiler's legacy scheduler-witness wire format.
+pub mod witness_bridge;
 // pub mod codec;  // Phase 1.5 - Molecule serialization
 
 pub use sighash::{compute_rw_bound_sighash, compute_txid, compute_wtxid, pubkey_hash};
@@ -30,6 +32,7 @@ pub use types::{
     CELLSCRIPT_SCHEDULER_SOURCE_INPUT, CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT, CELLSCRIPT_SCHEDULER_WITNESS_MAGIC,
     CELLSCRIPT_SCHEDULER_WITNESS_VERSION, CELLTX_SCHEMA_VERSION, MAX_CELLSCRIPT_ACCESS_COUNT, TYPED_CELL_SCHEDULER_WITNESS_VERSION,
 };
+pub use witness_bridge::{translate_legacy_witness_for_tx, CellscriptLegacyAccess, CellscriptLegacyWitness};
 
 // Re-export VersionedSerializable implementations for storage layer types
 pub use types::{
