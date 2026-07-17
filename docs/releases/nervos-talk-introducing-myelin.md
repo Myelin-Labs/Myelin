@@ -311,6 +311,39 @@ Myelin is my attempt at that layer. I reuse his replayer binary as the
 reference workload; the runtime, the typed-cell model, the witness bridge, and
 every host-side optimisation are my own work.
 
+## From a single chunk to a session
+
+xuejie's model is *one verified chunk*: a self-contained transaction that runs
+a slice of computation in the VM and either passes or fails. That model is
+deliberately complete at its own altitude — a chunk needs no external state
+to adjudicate, which is what makes on-chain verification tractable. Myelin
+takes that atomic unit and makes it the building block of a larger structure,
+without weakening the atomicity a court relies on. The advance is not in the
+VM or the chunk itself; it is in everything that sits between and above chunks
+to turn a sequence of verified executions into a finalised, contestable
+session.
+
+Concretely, the model gains seven dimensions that the single-chunk
+demonstration did not carry:
+
+| Dimension | Single-chunk model | Myelin session model |
+| --- | --- | --- |
+| **Inter-chunk scheduling** | None — each chunk is verified in isolation. | CellDAG builds a typed read/write dependency graph and schedules independent chunks across parallel topological layers. |
+| **State continuity** | A world-state hash is threaded manually across chunks. | An incremental MuHash accumulator (`CellStateTree`) maintains the session state root in `O(1)` per cell transition; every commit produces a `state_root_before → state_root_after` pair. |
+| **Conflict reasoning** | `binding_hash` — a hash of the source-level variable name, carrying no type-script identity. | `ConflictKeySpec` + `compute_conflict_hash` bind the type-script identity into the conflict domain, so two transactions conflict iff they touch the same typed resource. |
+| **Projection to L1** | Execution is the endpoint; no notion of "can this land on CKB?" | A projection report tests whether each chunk serialises to a valid CKB Molecule transaction under `CkbStrict` semantics, producing a `ckb_compatible` verdict per chunk. |
+| **Dispute shape** | The chunk-in-one-tx philosophy (no bisection). | Adopted unchanged — but wrapped in a self-contained **court bundle** (22 verification checks) that packages the witness layout, molecule transaction, chunk data, and finality evidence a future on-chain verifier would consume. |
+| **Finality** | One-shot execution; no notion of a committed block. | A batch of verified chunks is finalised into a `MyelinBlock` under a pluggable committee (static closed committee + Tendermint precommit, domain-separated). |
+| **Data availability** | None. | Sealed Merkle segments with a replicated-committee availability layer and a hook for an external DA receipt. |
+
+None of these dimensions modify the chunk itself or the VM that verifies it.
+A future court still re-runs a single disputed chunk through the same CKB-VM,
+exactly as xuejie's model prescribes. What changes is that the chunk now
+exists inside a session that has been scheduled, state-rooted, projected,
+finalised, and made data-available — the surrounding structure that turns a
+verified execution into a usable off-chain state transition. That is the
+layer he deferred, and it is the layer Myelin provides.
+
 ## The reference workload
 
 The flagship workload runs a real CKB-VM binary through Myelin's verifier end
