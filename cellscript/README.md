@@ -66,10 +66,23 @@ metadata assurance, and CKB target-profile stability.
 
 ## Quick Start
 
-Install from this repository:
+Install a published release (one line, four platform binaries):
 
 ```bash
-cd cellscript
+curl -fsSL https://raw.githubusercontent.com/CellScript-Labs/CellScript/main/scripts/install.sh | sh
+```
+
+Or pin a specific version:
+
+```bash
+CELLSCRIPT_VERSION=0.21.1 curl -fsSL https://raw.githubusercontent.com/CellScript-Labs/CellScript/main/scripts/install.sh | sh
+```
+
+Build from this repository instead (tracks `main`):
+
+```bash
+git clone https://github.com/CellScript-Labs/CellScript.git
+cd CellScript
 cargo install --path .
 ```
 
@@ -107,9 +120,9 @@ Inspect what the compiler can explain about the NFT example:
 cellc metadata examples/nft.cell --target-profile ckb
 cellc constraints examples/nft.cell --target-profile ckb
 cellc scheduler-plan examples/nft.cell --target-profile ckb
-cellc explain-assumptions examples/nft.cell --target-profile ckb --json
-cellc solve-tx examples/nft.cell --target-profile ckb --json
-cellc deploy-plan examples/nft.cell --target-profile ckb --json
+cellc explain assumptions examples/nft.cell --target-profile ckb --json
+cellc tx solve examples/nft.cell --target-profile ckb --json
+cellc deploy plan examples/nft.cell --target-profile ckb --json
 cellc profile examples/nft.cell --target-profile ckb --json
 cellc audit-bundle examples/nft.cell --target-profile ckb --json
 ```
@@ -202,8 +215,8 @@ transformations:
 - **Scheduler-aware metadata** — CKB-targeted builds expose access summaries
   and shared touch domains so block builders can reason about independent work.
 - **Typed schema metadata** — Cell data layout, type identity, source hashes,
-  runtime accesses, and verifier obligations are emitted as machine-readable
-  metadata.
+  runtime accesses, TemplateLayout records, and verifier obligations are emitted
+  as machine-readable metadata.
 - **RISC-V output** — the executable target is ckb-vm-compatible RISC-V
   assembly or ELF. CellScript does not introduce a separate VM.
 - **Package-aware compilation** — packages use `Cell.toml`, local modules,
@@ -287,13 +300,18 @@ invariant token_conservation {
 }
 ```
 
-Declared invariants must state their CKB trigger and scope explicitly. In v0.15
-they are emitted into Covenant ProofPlan metadata with trigger/scope/read
-coverage, aggregate primitive relation checks, and a `gap:metadata-only` status
-until executable verifier lowering is available. ProofPlan records also carry
-macro expansion provenance for selected protocol flows and warnings for risky
-coverage assumptions such as `lock_group` verifiers that scan transaction-wide
-views.
+Declared invariants must state their CKB trigger and scope explicitly. They are
+emitted into Covenant ProofPlan metadata with trigger/scope/read coverage and
+aggregate primitive relation checks. Most aggregate declarations remain
+`gap:metadata-only` or `gap:runtime-helper-required` until executable verifier
+lowering is available; recognised xUDT group amount conservation equality is
+auto-lowered into action-prelude runtime helper calls only for matching
+one-input/one-output amount-preserving actions, while xUDT `assert_delta`
+records are marked `covered` only when generated action code emits the matching
+runtime helper and the corresponding ProofPlan record is rebuilt with generated
+helper coverage. ProofPlan records also carry macro expansion provenance for
+selected protocol flows and warnings for risky coverage assumptions such as
+`lock_group` verifiers that scan transaction-wide views.
 
 **Complete fungible-token example:**
 
@@ -421,7 +439,6 @@ or CellFabric intent engine.
 - [CKB deployment manifest](docs/CELLSCRIPT_CKB_DEPLOYMENT_MANIFEST.md)
 - [Capacity and builder contract](docs/CELLSCRIPT_CAPACITY_AND_BUILDER_CONTRACT.md)
 - [CKB adapter boundary](docs/CELLSCRIPT_CKB_ADAPTER.md)
-- [CKB ecosystem reuse audit](docs/CELLSCRIPT_CKB_ECOSYSTEM_REUSE_AUDIT.md)
 - [ckb-std compatibility](docs/CELLSCRIPT_CKB_STD_COMPAT.md)
 - [Token and AMM bootstrap builder path](docs/examples/token_amm_bootstrap.md)
 - [Linear ownership](docs/CELLSCRIPT_LINEAR_OWNERSHIP.md)
@@ -434,7 +451,7 @@ or CellFabric intent engine.
 - [Collections matrix example](docs/examples/collections_matrix.md)
 - [Deployment manifest example](docs/examples/deployment_manifest.md)
 - [Output append example](docs/examples/output_append.md)
-- [0.20 generated builder roadmap](docs/CELLSCRIPT_0_20_ROADMAP.md)
+- [0.20 generated builder roadmap](docs/archive/0.20/CELLSCRIPT_0_20_ROADMAP.md)
 - [Roadmap overview](roadmap/CELLSCRIPT_ROADMAP.md)
 - [0.13 release scope](docs/releases/CELLSCRIPT_0_13_RELEASE_SCOPE.md)
 - [0.14 roadmap](roadmap/CELLSCRIPT_0_14_ROADMAP.md)
@@ -444,8 +461,11 @@ or CellFabric intent engine.
 - [0.16 roadmap](roadmap/CELLSCRIPT_0_16_ROADMAP.md)
 - [0.16 release notes](docs/releases/CELLSCRIPT_0_16_RELEASE_NOTES.md)
 - [0.17 roadmap](docs/archive/0.17/CELLSCRIPT_0_17_ROADMAP.md)
-- [0.18 roadmap](docs/CELLSCRIPT_0_18_ROADMAP.md)
-- [0.19 roadmap](docs/CELLSCRIPT_0_19_ROADMAP.md)
+- [0.18 roadmap](docs/archive/0.18/CELLSCRIPT_0_18_ROADMAP.md)
+- [0.19 roadmap](docs/archive/0.19/CELLSCRIPT_0_19_ROADMAP.md)
+- [0.20 release notes](docs/releases/CELLSCRIPT_0_20_RELEASE_NOTES.md)
+- [0.21 release notes](docs/releases/CELLSCRIPT_0_21_RELEASE_NOTES.md)
+- [Agentic Loops and cellscript-mcp tutorial](docs/wiki/Tutorial-13-Agentic-Loops-and-cellscript-mcp.md)
 
 ---
 
@@ -523,7 +543,7 @@ policy gates need — without re-parsing source:
 | Scheduler witness ABI & access domains | `codegen/` | CKB block builder, parallel scheduler |
 | Source hashes, artifact CKB Blake2b | `lib.rs` | `cellc verify-artifact`, CI gates |
 | Verifier obligations, pool invariants | `ir/` | On-chain verifier, policy checker |
-| Covenant ProofPlan trigger/scope/read coverage, risk diagnostics, macro provenance | `proof_plan/` | `cellc explain-proof`, auditors |
+| Covenant ProofPlan trigger/scope/read coverage, risk diagnostics, macro provenance | `proof_plan/` | `cellc explain proof`, auditors |
 | Target-profile policy violations | `lib.rs` | `cellc check`, CI gates |
 
 `cellc constraints` produces a human-readable subset focused on production
@@ -544,6 +564,7 @@ CKB cycle/capacity estimates.
 | **CLI** | `cli/` + `main.rs` | `cellc` binary with all subcommands |
 | **LSP** | `lsp/` + `lsp/server.rs` | In-process `LspServer` + `tower-lsp` JSON-RPC over stdio (`cellc --lsp`) |
 | **VS Code** | `editors/vscode-cellscript/` | Shells out to `cellc` for LSP startup, reports, action-builder generation, and package/registry verification |
+| **MCP server** | `cellscript-mcp` (separate bin) | Read-only Model Context Protocol JSON-RPC server that exposes compiler reports and explain commands to MCP-aware agents (Claude Code, Cursor, Aider, Codex, etc.) |
 | **Formatter** | `fmt/` | Idempotent formatter for `cellc fmt` and LSP |
 | **Doc generator** | `docgen/` | HTML/Markdown/JSON docs from AST + metadata |
 | **Simulator** | `simulate.rs` | Simulated evaluator — emits `TraceEvent` logs without ckb-vm |
@@ -628,7 +649,7 @@ policy defaults:
 ```toml
 [package]
 name = "token"
-version = "0.20.0-rc.2"
+version = "0.21.1"
 entry = "src/main.cell"
 source_roots = ["src"]
 
@@ -752,18 +773,20 @@ still fail closed.
 | `cellc constraints` | Emit profile-aware production constraints |
 | `cellc abi` | Explain `_cellscript_entry` witness ABI layout for an action or lock |
 | `cellc entry-witness` | Encode `_cellscript_entry` witness bytes |
-| `cellc action build` | Emit a semantic action-builder contract and transaction draft |
+| `cellc action build` | Emit a semantic action-builder contract, transaction draft, and compile-only action scan selectors |
 | `cellc gen-builder --target typescript` | Generate a TypeScript action-builder package from metadata, lockfile, and optional deployment facts |
 | `cellc scheduler-plan` | Consume scheduler hints and report serial/conflict policy |
 | `cellc ckb-hash` | Compute CKB default Blake2b-256 hashes for builders and release evidence |
-| `cellc explain-assumptions` | Emit v0.16 builder-assumption evidence from ProofPlan metadata |
-| `cellc validate-tx` | Validate transaction JSON shape against builder assumptions before signing |
-| `cellc solve-tx` | Emit a deterministic transaction template from metadata |
-| `cellc deploy-plan` | Emit a reproducible deployment plan |
-| `cellc verify-deploy` / `diff-deploy` / `lock-deps` | Verify, compare, and lock deployment metadata |
-| `cellc proof-diff` / `profile` / `trace-tx` / `audit-bundle` | Emit v0.16 audit and debug reports |
+| `cellc explain assumptions` | Emit v0.16 builder-assumption evidence from ProofPlan metadata |
+| `cellc explain graph` | Derive a cyclic ProtocolGraph audit view from compile metadata |
+| `cellc tx validate` | Validate transaction JSON shape against builder assumptions before signing |
+| `cellc tx solve` | Emit a deterministic transaction template from metadata |
+| `cellc deploy plan` | Emit a reproducible deployment plan |
+| `cellc deploy verify` / `deploy diff` / `deploy lock-deps` | Verify, compare, and lock deployment metadata |
+| `cellc proof-diff` / `profile` / `tx trace` / `audit-bundle` | Emit v0.16 audit and debug reports |
 | `cellc opt-report` | Compare O0..O3 artifact size and constraints status |
-| `cellc verify-artifact` | Verify an artifact against its metadata sidecar |
+| `cellc receipt` / `sign-receipt` / `verify-receipt` | Emit, sign, and verify compile receipts over metadata/artifact hashes |
+| `cellc verify-artifact` | Verify an artifact against its metadata sidecar, with optional receipt binding |
 | `cellc test` | Run compiler and policy tests (no trusted runtime execution) |
 | `cellc doc` | Generate API and audit documentation |
 | `cellc fmt` | Format `.cell` sources or check formatting |
@@ -788,7 +811,9 @@ still fail closed.
 | `--target-profile ckb` | Use the CKB profile |
 | `--entry-action <ACTION>` | Compile a single action as the artifact entrypoint |
 | `--entry-lock <LOCK>` | Compile a single lock as the artifact entrypoint |
-| `--json` | Emit machine-readable summaries where supported |
+| `--json` | Emit machine-readable summaries where supported (successful payloads) |
+| `--message-format=json` | Emit diagnostics as structured JSON (CI / agent loops). Plain output otherwise. |
+| `--color=auto\|always\|never` | Control ANSI colour output. `auto` is the default; `NO_COLOR=1` forces `never` |
 | `--production` | Apply production-oriented metadata policy checks |
 | `--deny-fail-closed` | Reject fail-closed runtime features or obligations |
 | `--deny-ckb-runtime` | Reject CKB transaction/syscall runtime requirements |

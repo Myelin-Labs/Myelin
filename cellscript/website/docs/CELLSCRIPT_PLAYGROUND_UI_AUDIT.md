@@ -1,5 +1,11 @@
 # CellScript Playground — UI/UX audit (June 2026)
 
+> **Historical UI snapshot.** This audit records the playground state observed
+> during the June 2026 pass, including the then-visible `cellc v0.17.0` status
+> string and the UI behavior documented below. The website and playground may
+> have moved on since this snapshot; rerun the playground audit before using
+> these findings as current 0.21 evidence.
+
 A full-pass audit of `website/src/pages/playground.astro` and its supporting
 code (highlight, translations, data, global.css). The audit was conducted by
 reading the source, running the dev server, and exercising every interactive

@@ -1,11 +1,18 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-// site.ts lives at website/src/data/site.ts. We need to reach the
-// repo root (../../..) to read the examples/ directory.
+// In the main CellScript checkout, site.ts lives at website/src/data/site.ts and
+// reaches the repo root with ../../.. . Standalone website builds can provide
+// CELLSCRIPT_REPO_ROOT instead.
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..", "..", "..");
+const repoRootCandidates = [
+  process.env.CELLSCRIPT_REPO_ROOT,
+  resolve(here, "..", "..", ".."),
+].filter((candidate): candidate is string => Boolean(candidate));
+const repoRoot =
+  repoRootCandidates.find((candidate) => existsSync(resolve(candidate, "examples"))) ??
+  repoRootCandidates[0];
 
 export const links = {
   docs: "/docs/",

@@ -649,25 +649,25 @@ function buildReportPlan(document, kind, cwd) {
 
   if (kind === "builder-assumptions") {
     return {
-      args: ["explain-assumptions", document.uri.fsPath, ...targetProfileArgs(document), "--json"],
+      args: ["explain", "assumptions", document.uri.fsPath, ...targetProfileArgs(document), "--json"],
       outputPath: null,
-      source: "cellc explain-assumptions"
+      source: "cellc explain assumptions"
     };
   }
 
   if (kind === "tx-template") {
     return {
-      args: ["solve-tx", document.uri.fsPath, ...targetProfileArgs(document), "--json"],
+      args: ["tx", "solve", document.uri.fsPath, ...targetProfileArgs(document), "--json"],
       outputPath: null,
-      source: "cellc solve-tx"
+      source: "cellc tx solve"
     };
   }
 
   if (kind === "deploy-plan") {
     return {
-      args: ["deploy-plan", document.uri.fsPath, ...targetProfileArgs(document), "--json"],
+      args: ["deploy", "plan", document.uri.fsPath, ...targetProfileArgs(document), "--json"],
       outputPath: null,
-      source: "cellc deploy-plan"
+      source: "cellc deploy plan"
     };
   }
 

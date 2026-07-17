@@ -1,18 +1,11 @@
 {
   "releases": [
     {
-      "tag": "v0.20.0-rc.2",
-      "name": "CellScript 0.20.0-rc.2",
-      "date": "2026-06-25",
-      "body": "## Installation\r\n\r\n### One-line install (Global)\r\n\r\n```bash\r\ncurl -fsSL https://raw.githubusercontent.com/CellScript-Labs/CellScript/main/s\u2026",
-      "url": "https://github.com/CellScript-Labs/CellScript/releases/tag/v0.20.0-rc.2"
-    },
-    {
-      "tag": "v0.20.0-rc.1",
-      "name": "CellScript 0.20.0-rc.1",
-      "date": "2026-06-24",
-      "body": "## Installation\r\n\r\n### One-line install (Global)\r\n\r\n```bash\r\ncurl -fsSL https://raw.githubusercontent.com/CellScript-Labs/CellScript/main/s\u2026",
-      "url": "https://github.com/CellScript-Labs/CellScript/releases/tag/v0.20.0-rc.1"
+      "tag": "v0.20.0",
+      "name": "CellScript 0.20.0",
+      "date": "2026-06-28",
+      "body": "## Installation\n\n### One-line install (Global)\n\n```bash\ncurl -fsSL https://raw.githubusercontent.com/CellScript-Labs/CellScript/main/script\u2026",
+      "url": "https://github.com/CellScript-Labs/CellScript/releases/tag/v0.20.0"
     },
     {
       "tag": "v0.16.2",
@@ -20,43 +13,50 @@
       "date": "2026-06-21",
       "body": "CellScript 0.16.2 is a builder-ergonomics patch for CKB resource identity\r\nhandoff. It keeps the 0.16 compiler/runtime scope, while making\u2026",
       "url": "https://github.com/CellScript-Labs/CellScript/releases/tag/v0.16.2"
+    },
+    {
+      "tag": "v0.16.1",
+      "name": "CellScript 0.16.1",
+      "date": "2026-06-15",
+      "body": "CellScript 0.16.1 is a patch release for bundled example lifecycle clarity and\r\nbuilder handoff. It keeps the 0.16 assurance/tooling scope,\u2026",
+      "url": "https://github.com/CellScript-Labs/CellScript/releases/tag/v0.16.1"
     }
   ],
   "commits": [
     {
-      "sha": "535cbc1",
-      "message": "Improve multi-diagnostic recovery and reporting",
-      "author": "Arthur",
-      "date": "2026-06-26",
-      "url": "https://github.com/CellScript-Labs/CellScript/commit/535cbc1d4de307a5e25e72b41cfdc46f9baeb358"
+      "sha": "0b9749c",
+      "message": "Update website redeploy data",
+      "author": "Tawan",
+      "date": "2026-06-29",
+      "url": "https://github.com/CellScript-Labs/CellScript/commit/0b9749c2c052508d6b175f2129fb734cc8a119a8"
     },
     {
-      "sha": "875436f",
-      "message": "Improve cellc multi-diagnostic CLI output",
-      "author": "Arthur",
-      "date": "2026-06-25",
-      "url": "https://github.com/CellScript-Labs/CellScript/commit/875436ffc1e2468072fb30c52ccfa287d645a697"
+      "sha": "037e04a",
+      "message": "Fix redeploy workflow inputs",
+      "author": "Tawan",
+      "date": "2026-06-29",
+      "url": "https://github.com/CellScript-Labs/CellScript/commit/037e04a08b53e9d87046ffa6950b68ef1f30b8e4"
     },
     {
-      "sha": "2a35070",
-      "message": "Improve cellc CLI diagnostics",
-      "author": "Arthur",
-      "date": "2026-06-25",
-      "url": "https://github.com/CellScript-Labs/CellScript/commit/2a3507055af7a6a2de19671d528b4bf234f654e4"
+      "sha": "5b83b68",
+      "message": "Merge pull request #2 from toastmanAu/docs/wiki-agentic-loops",
+      "author": "Tawan",
+      "date": "2026-06-28",
+      "url": "https://github.com/CellScript-Labs/CellScript/commit/5b83b68a36531252563db354c67a9f1dcf76ccab"
     },
     {
-      "sha": "32a967c",
-      "message": "Fix wiki tutorial accuracy",
-      "author": "Arthur",
-      "date": "2026-06-25",
-      "url": "https://github.com/CellScript-Labs/CellScript/commit/32a967cc3218a273d5236bb2d93c828960e733d2"
+      "sha": "0d8126a",
+      "message": "Add agentic loop tutorial",
+      "author": "Tawan",
+      "date": "2026-06-28",
+      "url": "https://github.com/CellScript-Labs/CellScript/commit/0d8126a557cabafd752f931c2f1b1ca78628c10e"
     },
     {
-      "sha": "0bca9ab",
-      "message": "Update website highlighting audit",
-      "author": "Arthur",
-      "date": "2026-06-25",
-      "url": "https://github.com/CellScript-Labs/CellScript/commit/0bca9ab2f8d22a2c19f8d53b4efec50807a00cfe"
+      "sha": "7f53292",
+      "message": "Prepare 0.20.0 release",
+      "author": "Tawan",
+      "date": "2026-06-28",
+      "url": "https://github.com/CellScript-Labs/CellScript/commit/7f532920c98bb4566fec289665a416dbdda95b4d"
     }
   ]
 }

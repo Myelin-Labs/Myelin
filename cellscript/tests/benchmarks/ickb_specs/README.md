@@ -48,13 +48,16 @@ original iCKB scripts. The Rust integration tests under
 `tests/ickb_benchmark.rs` compile these CellScript specs and run deterministic
 model-level positive and negative fixtures, while `tests/ickb_diff.rs` is the
 executable original-vs-CellScript CKB VM differential replay gate and matrix
-consistency check. `tests/v0_17.rs` and `tests/v0_18.rs` additionally check
-that CKB source primitives, C256
-requirement helpers, signed `i32` ABI lowering, first-class Script
-construction, OutPoint reads, and cell-data decoders compile and execute where
-required. Fixtures that do not execute a generated CKB VM binary are not
-counted as equivalence rows. The stricter production-equivalence claim gate is
-documented in `docs/archive/0.17/CELLSCRIPT_0_17_ICKB_PRODUCTION_EQUIVALENCE_GATE.md`.
+consistency check. The CKB source primitives, C256 requirement helpers, signed
+`i32` ABI lowering, first-class Script construction, OutPoint reads, and
+cell-data decoders that the historical `tests/v0_17.rs` / `tests/v0_18.rs`
+exercised were consolidated into `tests/ickb_benchmark.rs`, `tests/ickb_diff.rs`,
+`tests/ckb_compat_runner.rs`, and the compiler's in-crate unit tests across the
+0.18–0.21 release lines, so those versioned test files no longer exist as
+standalone targets. Fixtures that do not execute a generated CKB VM binary are
+not counted as equivalence rows. The stricter production-equivalence claim gate
+is documented in
+`docs/archive/0.17/CELLSCRIPT_0_17_ICKB_PRODUCTION_EQUIVALENCE_GATE.md`.
 
 ## Original Semantics Mapped
 
@@ -69,7 +72,6 @@ documented in `docs/archive/0.17/CELLSCRIPT_0_17_ICKB_PRODUCTION_EQUIVALENCE_GAT
 
 ```bash
 cargo test --locked -p cellscript --test ickb_benchmark
-cargo test --locked -p cellscript --test v0_17
 cargo test --locked -p cellscript --test ckb_compat_runner
 cargo test --locked -p cellscript --test ickb_diff
 cargo run --locked -p cellscript --bin cellc -- verify-ckb-fixtures tests/compat/ckb_standard/manifest.json --json
@@ -124,9 +126,12 @@ git diff --check
   matrix; additional adversarial header/witness permutations are hardening
   work.
 - The discount arithmetic is expressed directly in CellScript. Plain xUDT
-  transfer conservation can declare the exact group amount aggregate and call
-  `xudt::require_group_amount_conserved()`; 0.17 strict mode rejects that
-  declaration if the helper is not emitted. xUDT token-side mint/burn deltas now
+  transfer conservation can declare the exact group amount aggregate; 0.21
+  auto-lowers the recognised group amount equality to
+  `xudt::require_group_amount_conserved()` only in the matching
+  amount-preserving transfer action, and 0.17 strict mode rejects stale
+  helper-required metadata for unsupported aggregate shapes. xUDT token-side
+  mint/burn deltas now
   have declared `assert_delta` invariants paired with
   `xudt::require_group_amount_minted(delta)` and
   `xudt::require_group_amount_burned(delta)`; this benchmark uses the

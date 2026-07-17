@@ -156,7 +156,6 @@ action transfer_ickb(token: IckbToken, to: Address) -> next_token: IckbToken {
     verification
     ckb::require_current_script_args_empty()
     require token.amount > ZERO_U128, "empty transfer"
-    xudt::require_group_amount_conserved()
 
     consume token
 

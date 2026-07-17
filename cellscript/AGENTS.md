@@ -13,7 +13,7 @@ crate at the repo root is `cellscript` (workspace member `.`); a sibling crate
 website submodule under `website/` ships an Astro + WASM playground that loads
 the prebuilt bundle.
 
-Version line: the workspace `Cargo.toml` pins `version = "0.20.0-rc.1"` and
+Version line: the workspace `Cargo.toml` pins `version = "0.21.1"` and
 `rust-version = "1.92.0"`. CI installs exactly that toolchain; do not bump
 either without coordinating with the release gate.
 
@@ -22,10 +22,11 @@ either without coordinating with the release gate.
 1. `CODING_STYLE.md` — the tracked project standard for compiler, backend,
    docs, and release work. Treat it as a contract, not a suggestion.
 2. `CHANGELOG.md` — current scope and what the latest release ships.
-3. `BRANCHES.md` — which branch (`main` vs `0.16` vs
+3. `BRANCHES.md` — which branch or release line (`main` /
+   `nightly-0.21` vs `v0.20.0` vs `0.16` vs
    `research/protocol-equivalence`) represents which evidence level. Don't
-   describe `research/protocol-equivalence` as production-equivalent; it
-   keeps `equivalence_status = NOT_PROVEN` and
+   describe `research/protocol-equivalence` as production-equivalent; it keeps
+   `equivalence_status = NOT_PROVEN` and
    `production_equivalence_claim = false` by design.
 4. `docs/CELLSCRIPT_GATE_POLICY.md` and `docs/wiki/Tutorial-06-Metadata-Verification-and-Production-Gates.md`
    — what each gate mode (dev / ci / backend / release / release-quick) is
@@ -87,7 +88,7 @@ require extra tooling.
 | --- | --- |
 | `dev` | `cargo fmt --all`, `cargo check --locked -p cellscript --all-targets`, strict backend audit (quick), syntax combo audit (quick), forbidden tracked-file check, `git diff --check`. Run before committing. |
 | `ci` | `dev` checks plus `cargo test --locked -p cellscript -- --test-threads=1`, `cargo clippy --locked -p cellscript --all-targets -- -D warnings`, full package contents check, website build check (requires `npm`), shell + Python syntax check, trailing-whitespace check. Run before claiming merge-readiness. |
-| `backend` | For IR / codegen / assembler / ABI / ELF / RISC-V changes: `cargo fmt --all --check`, `cargo check --locked -p cellscript --all-targets`, `cargo test --locked -p cellscript`, `cargo clippy ... -D warnings`, strict backend audit (full), `git diff --check`. |
+| `backend` | For IR / codegen / assembler / ABI / ELF / RISC-V changes: `cargo fmt --all --check`, `cargo check --locked -p cellscript --all-targets`, `cargo test --locked -p cellscript`, `cargo clippy ... -D warnings`, strict backend audit (full, which itself fires the CKB stateful-scenarios harness via `cellscript_ckb_stateful_scenarios.sh`), `git diff --check`. |
 | `release` / `release-quick` | Everything `ci` does plus release-auxiliary checks (CKB acceptance, NovaSeal pinning, NovaSeal Rust tooling for RISC-V, VS Code extension validate + publish dry-run, CKB tx measure tool, etc.) and the CKB acceptance harness (`scripts/ckb_cellscript_acceptance.sh`). These modes need the CKB submodule, the NovaSeal submodule, a sibling `ckb-sdk-rust` checkout at tag `v5.1.0`, and `riscv64imac-unknown-none-elf` for NovaSeal verifier builds. Do not run them casually. |
 
 Focused commands are still useful while debugging — `cargo check --locked -p
@@ -249,7 +250,15 @@ Existing command families to be aware of:
   support the CKB-compat and iCKB suites.
 - `tests/benchmarks/` is a submodule (`cellscript-ickb-equivalence`) and is
   intentionally empty in this checkout — `git submodule update --init` if you
-  need to run benchmark code.
+  need to run benchmark code. When a coordinated change needs to update iCKB
+  benchmark specs or their docs (e.g. a new release line renames or consolidates
+  test files the submodule cites), edit the submodule in place, commit inside
+  it, and then bump the parent's submodule pointer in the same change. Do not
+  push the submodule to its remote without explicit coordination; a local
+  submodule commit + parent pointer bump is enough for review.
+  The 0.21 RC citation-refresh submodule commit `82129ff1` was explicitly
+  coordinated for remote publication on 2026-07-03; future submodule pushes
+  still need their own coordination.
 
 ## CKB / NovaSeal gotchas
 

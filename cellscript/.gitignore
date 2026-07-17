@@ -30,10 +30,6 @@ Cell.lock
 proposals/*
 !proposals/novaseal/
 proposals/novaseal/*
-!proposals/novaseal/.gitignore
-!proposals/novaseal/*.md
-!proposals/novaseal/scripts/
-!proposals/novaseal/scripts/**
 !proposals/novaseal/v0-mvp-skeleton/
 !proposals/novaseal/v0-mvp-skeleton/**
 !proposals/novaseal/agreement-profile-v0/

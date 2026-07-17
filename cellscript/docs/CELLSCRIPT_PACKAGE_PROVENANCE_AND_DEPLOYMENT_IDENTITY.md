@@ -1,12 +1,15 @@
 # CellScript Package Provenance and Deployment Identity
 
-**Status**: RFC — early design discussion
+**Status**: implementation contract for the current CellScript CKB profile.
+Phase 1 landed in the 0.19 line; Phase 2 source-package, generated-builder,
+deployment identity, and trust-metadata checks extend through 0.20 and the
+0.21 RC.
 
 **Scope**: Source package registry, deployment registry, lockfile binding, and
 builder verification for CellScript on CKB
 
-**Depends on**: v0.12 stable developer surface, v0.17 CKB protocol semantics,
-v0.18 first-class ScriptRef / ScriptArgs work
+**Historical scope anchors**: v0.12 stable developer surface, v0.17 CKB
+protocol semantics, and v0.18 first-class ScriptRef / ScriptArgs work.
 
 **Forum thread**: <https://talk.nervos.org/t/cellscript-package-and-deployment-registry-early-design-discussion/10210>
 
@@ -412,7 +415,7 @@ namespace = "cellscript"
 source_hash = "blake2b:0xabcd..."
 
 [package.build]
-compiler_version = "0.19.0"
+compiler_version = "0.21.0"
 target_profile = "ckb"
 artifact_hash = "blake2b:0x1234..."
 metadata_hash = "blake2b:0x5678..."
@@ -583,7 +586,7 @@ version = "1.2.0"
 source_hash = "blake2b:0xabcd..."
 
 [build]
-compiler_version = "0.19.0"
+compiler_version = "0.21.0"
 artifact_hash = "blake2b:0x1234..."
 metadata_hash = "blake2b:0x5678..."
 schema_hash = "blake2b:0x9abc..."
@@ -704,7 +707,7 @@ namespace = "cellscript"
 source_hash = "blake2b:0xabcd..."
 
 [package.build]
-compiler_version = "0.19.0"
+compiler_version = "0.21.0"
 target_profile = "ckb"
 artifact_hash = "blake2b:0x1234..."
 metadata_hash = "blake2b:0x5678..."
@@ -835,7 +838,7 @@ version = "1.2.0"
 source_hash = "blake2b:0xabcd..."
 
 [build]
-compiler_version = "0.19.0"
+compiler_version = "0.21.0"
 artifact_hash = "blake2b:0x1234..."
 metadata_hash = "blake2b:0x5678..."
 schema_hash = "blake2b:0x9abc..."
@@ -1278,7 +1281,7 @@ cellc build
   → generates artifact, metadata, schema, abi, constraints
   → writes Cell.lock [package.build]
 
-cellc deploy-plan
+cellc deploy plan
   → reads Cell.lock [package.build]
   → reads Cell.toml [deploy.ckb] intent
   → produces deployment plan JSON
@@ -1750,7 +1753,7 @@ implications from the audit above.
 | TYPE_ID upgrade lineage tracking | `Deployed.toml` carries `upgrade_lineage`; `cellc registry verify` rejects self-referential and empty lineage (off-chain consistency; on-chain TYPE_ID upgrade-chain proof remains a live-RPC concern) |
 | Publisher signature binding | `Deployed.toml` optionally carries `publisher_signature`; `cellc registry verify --require-publisher-signature` enforces presence (metadata-presence only; cryptographic verification is a later security milestone) |
 | Yanking metadata | `registry.json` version entries carry `yanked_at`, `yanked_reason`, `replaced_by`; resolver warns and suggests the replacement when a yanked version is reached |
-| `cellc deploy-plan` / `cellc verify-deploy` / `cellc lock-deps` | CLI commands emit or verify deployment registry records |
+| `cellc deploy plan` / `cellc deploy verify` / `cellc deploy lock-deps` | CLI commands emit or verify deployment registry records |
 | Stale-deployment rejection | Builder refuses to build when deployment record does not match package metadata |
 | Registry mismatch fixtures | Wrong network, wrong code hash, stale metadata hash, missing CellDep, deprecated deployment rejection paths |
 | On-chain type script index (if needed) | Deferred — optional chain-indexed deployment lookup driven by ecosystem demand |

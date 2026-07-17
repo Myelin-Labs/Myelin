@@ -240,7 +240,7 @@ HashMap<K, V>  // full generic
 **What v0.13 WILL NOT do**:
 
 - ❌ arbitrary generic collections
-- ❌ generic linear resources
+- ❌ generic linear resources  
 - ❌ generic cell-backed maps
 - ❌ higher-order trait jungle
 - ❌ fancy type inference
@@ -256,7 +256,7 @@ HashMap<K, V>  // full generic
 > 0.13 must expose every generic instantiation in ABI/metadata/constraints output.
 > No generic instantiation may silently change witness layout, schema commitment, or lock/type lowering.
 
-**Core principle**:
+**Core principle**: 
 > **We support generics without hiding what they become on-chain.**
 
 **Mandatory tooling**:
@@ -286,7 +286,7 @@ cellc constraints         # Show code size impact
 **v0.13 Character**:
 > reusable patterns, visible lowering, bounded ownership semantics.
 
-**Translation**:
+**Translation**: 
 > Not "adding generics to show off", but "adding reusable templates for CKB design patterns".
 
 This aligns with AI-assisted workflows / cookbooks: AI needs **bounded cookbook primitives**, not unrestricted generics.
@@ -330,7 +330,7 @@ Option<LinearAsset<T>>  → Is the asset consumed when None?
 
 **Scenario**: `transfer<T>()` hides too much magic:
 - Some `T` lowers to lock script
-- Some `T` lowers to type script
+- Some `T` lowers to type script  
 - Some `T` depends on builder
 - Some `T` depends on witness ABI
 
@@ -785,14 +785,14 @@ v0.13 goal: Evolve CellScript from "**can run in production**" to "**excellent i
 - Execution cost and deployment size remain regression-gated; percentage reductions require a separate benchmark report
 - Improve simple registry, whitelist, AMM helper, and fixed membership patterns; proof-backed maps and order books remain explicit future work
 
-**v0.12 proved CellScript can run on both chains.**
+**v0.12 proved CellScript can run on both chains.**  
 **v0.13 will tighten CellScript's production UX, helper boundaries, and release evidence.**
 
 ---
 
 ## 🔍 v0.12/v0.13 Overlap Audit
 
-**Audit Scope**: Strict comparison of v0.13 features vs v0.12 accepted deliverables
+**Audit Scope**: Strict comparison of v0.13 features vs v0.12 accepted deliverables  
 **Source Documents**:
 - `CELLSCRIPT_0_12_COMPREHENSIVE_PLAN.md` (v0.12 acceptance record)
 - `CELLSCRIPT_0_12_RELEASE_EVIDENCE.md` (v0.12 evidence checklist)

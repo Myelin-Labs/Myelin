@@ -1,6 +1,88 @@
 # Changelog
 
-## 0.20.0-rc.2 - 2026-06-19
+## 0.21.1 - 2026-07-11
+
+- Close the 0.21 README documentation gap that the 0.21.0 changelog entry
+  claimed but did not fully land:
+  - Document the published-release install path
+    (`scripts/install.sh` one-liner, including the `CELLSCRIPT_VERSION`
+    pin) as the recommended way to install `cellc`; keep the source-tree
+    `cargo install --path .` flow as the "tracks main" option.
+  - Add `cellscript-mcp` to the README tooling-surface table so the 0.21
+    agentic-loop surface is discoverable from the project front page.
+  - Add `--message-format=json` and `--color=auto|always|never` to the
+    README CLI options table, matching what `Tutorial-04` and the 0.21
+    release notes already describe.
+  - Add the 0.20 release notes, the 0.21 release notes, and the new
+    `Tutorial-13: Agentic Loops and cellscript-mcp` link to the README
+    docs list (the previous list stopped at 0.19).
+  - Bump the wiki `Home.md` last-updated marker from `0.21.0-rc.1` to
+    `0.21.0` so it matches the published tag.
+- Bump the workspace crate versions (`cellscript`,
+  `cellscript-ckb-adapter`, `cellscript-wasm`) from `0.21.0` to `0.21.1`
+  so `cellc --version` reports the same value as the new release tag.
+- No compiler, runtime, metadata, ABI, or CLI behaviour changes — the
+  patch is documentation + version metadata only. The CKB target profile,
+  the `--primitive-strict 0.16` / `0.17` gates, the xUDT aggregate
+  invariant lowering, the flow edge validation, the CKB adapter
+  resolution, the compile receipts, the `cellscript-mcp` server, and the
+  CLI surface are byte-identical to 0.21.0.
+
+## 0.21.0 - 2026-07-11
+
+- Promote the common xUDT group amount aggregate invariant shape from
+  metadata-only evidence into executable helper-backed lowering. Matching
+  transfer-style actions now get an auto-lowered
+  `__xudt_require_group_amount_conserved` prelude, ProofPlan records distinguish
+  metadata-only, runtime-helper-required, and checked-runtime coverage, and
+  strict `0.17` metadata validation rejects stale helper gaps that are not
+  backed by generated runtime accesses.
+- Add static flow edge membership validation. Actions that claim a state
+  transition must use an edge declared by the corresponding `flow` block, while
+  declared cyclic flows remain valid.
+- Extend the CKB adapter with materialised action-plan resolution,
+  action-aware scan selector evidence, variable-length `args_parts` script
+  argument construction, manifest-backed CellDep completion, and fail-closed
+  validation for missing or mismatched live-cell scan evidence.
+- Bump compile metadata to schema version 44 and add type-level
+  `template_layouts` plus action `state_transition_edges`. TemplateLayout
+  records are metadata-only in this RC: they derive flat layouts, mark cyclic
+  flows with `RootRequired`, and reject unsupported `consensus_checked = true`
+  claims.
+- Add compile receipts as authenticated metadata envelopes. `cellc receipt`,
+  `cellc sign-receipt`, and `cellc verify-receipt` bind source, metadata,
+  ProofPlan, ProtocolGraph, TemplateLayout, artifact hashes, and optional
+  Ed25519 signatures; AST and IR normalised hashes remain explicitly deferred.
+- Reorganise the CLI around canonical nested command groups for `explain`,
+  `tx`, `deploy`, `registry`, `package`, and `auth capability` while keeping
+  legacy flat aliases executable but hidden from public discovery.
+- Add structured diagnostic transport through `--message-format=json`, explicit
+  colour control through `--color=auto|always|never`, and `NO_COLOR` handling
+  without changing successful `--json` payload semantics.
+- Add the derived `ProtocolGraph` audit view and embed it in audit bundles. The
+  graph remains a metadata-derived view, not a new IR or consensus source of
+  truth.
+- Add the in-repository read-only `cellscript-mcp` server and six CellScript
+  programming skills. The dev and CI gates now run the skill-pack freshness
+  check, and release modes inherit it through the embedded CI gate before
+  release-only auxiliary checks.
+- Reduce gate repetition: release auxiliary checks no longer repeat CI-level
+  script, whitespace, and skill-pack checks; website builds avoid duplicate
+  registry generation; the standalone website artifact workflow is manual-only.
+- Document the 0.21 boundary across the roadmap, README, CKB adapter guide,
+  metadata/gate tutorial, ProofPlan tutorial, and agentic tooling tutorial.
+  P2 Template Merkleisation and new observation syntax remain deferred.
+- Tighten the 0.21 RC validation boundary: add focused regression coverage for
+  flow-edge membership, xUDT conserved lowering and ProofPlan coverage states,
+  TemplateLayout cycle policy and `consensus_checked` rejection, CKB adapter
+  `args_parts`/manifest CellDep/scan-selector evidence; add non-production
+  `atomic_swap` and `multi_phase_dao` business-flow examples; extend the
+  syntax-combo audit with flow, flow-create-state, and aggregate-invariant bug
+  classes; add the 0.21 schema tokens to the acceptance-boundary audit; remove
+  tautological registry tests and unreachable dead code in
+  `scripts/cellscript_ckb_release_gate.sh`.
+
+## 0.20.0 - 2026-06-28
 
 - Bring `cellc` CLI discovery and direct-source diagnostics closer to Rust's
   developer experience: top-level help now shows package commands plus direct
@@ -51,6 +133,9 @@
   source unit, and live local devnet stateful evidence passes issue, transfer,
   settle, and required negative cases for lifecycle data hash
   `0x394da78133cb2f5a5d6cd911feceeab9e97e6ad5d36c0e50f18be56653af85e5`.
+- Add Tutorial 13 for agentic `cellc` loops, documenting the
+  write-check-explain-fix workflow, `cellc-mcp` wrapper boundary, read-vs-write
+  rule, and the distinction between compiler evidence and CKB chain evidence.
 
 ## 0.17.0 - 2026-05-04
 

@@ -8,7 +8,7 @@ import HeroStatus from "../components/HeroStatus.astro";
 import SiteHeader from "../components/SiteHeader.astro";
 import BrandMark from "../components/BrandMark.astro";
 import { ClientRouter } from "astro:transitions";
-import { ArrowRight, Box, Check, ClipboardList, Copy, Cpu, FileArchive, FileCode2, PackageCheck, Search, ShieldCheck } from "lucide-astro";
+import { ArrowRight, Box, Check, ClipboardList, Copy, Cpu, FileArchive, FileCode2 } from "lucide-astro";
 
 const locale = defaultLocale;
 const t = translations[locale];
@@ -16,6 +16,7 @@ const heroProvenance = heroExamples.map((example) => ({
   id: example.id,
   view: provenanceForExample(example.id),
 }));
+const exampleCardSummaries = t.landing.exampleCardSummaries as Record<string, string>;
 const valueCardImages = [
   {
     light: "feature-cards/light-01-state-changes-explicit.png",
@@ -131,11 +132,11 @@ const workflowIconComponents = {
           </div>
           <h1 id="hero-title" data-i18n="hero.headline" aria-label={t.hero.headline}>{t.hero.headline}</h1>
           <p data-i18n="hero.subtitle">{t.hero.subtitle}</p>
-          <HeroStatus compact />
           <div class="hero-actions">
             <a class="button primary" href={`/playground?example=${heroExamples[0].id}`} data-i18n="hero.playground.cta">{t.hero.playground.cta}</a>
             <a class="button ghost" href={links.docs} data-i18n="hero.getStarted">{t.hero.getStarted}</a>
           </div>
+          <HeroStatus compact />
         </div>
 
         <div class="code-shell spotlight-card" data-code-tabs>
@@ -225,6 +226,7 @@ const workflowIconComponents = {
                   decoding="async"
                 />
               </picture>
+              <span class="value-index" aria-hidden="true">0{index + 1}</span>
               <div class="value-card-copy">
                 <h3 id={`value-card-${index}-title`} data-i18n={`landing.valueProps.${index}.0`}>{title}</h3>
                 <p id={`value-card-${index}-body`} data-i18n={`landing.valueProps.${index}.1`}>{body}</p>
@@ -275,70 +277,6 @@ const workflowIconComponents = {
         </div>
       </section>
 
-      <section class="section home-registry-section" aria-labelledby="home-registry-title">
-        <div class="home-registry-grid">
-          <div class="home-registry-copy">
-            <p class="home-registry-kicker">
-              <PackageCheck aria-hidden="true" />
-              <span data-i18n="landing.registryKicker">{t.landing.registryKicker}</span>
-            </p>
-            <h2 class="section-title" id="home-registry-title" data-i18n="landing.registryTitle">CellScript Registry</h2>
-            <p class="lead" data-i18n="landing.registryLead">{t.landing.registryLead}</p>
-            <div class="home-registry-actions">
-              <a class="button primary" href="/registry">
-                <span data-i18n="landing.registryBrowseCta">{t.landing.registryBrowseCta}</span>
-                <ArrowRight aria-hidden="true" />
-              </a>
-              <a class="button" href="/registry/submit" data-i18n="landing.registrySubmitCta">{t.landing.registrySubmitCta}</a>
-              <a class="button ghost" href="/learn" data-i18n="landing.registryLearnCta">{t.landing.registryLearnCta}</a>
-            </div>
-          </div>
-
-          <form class="home-registry-search spotlight-card" action="/registry" method="get" data-home-search>
-            <label for="home-registry-query" data-i18n="landing.registrySearchLabel">{t.landing.registrySearchLabel}</label>
-            <div class="home-registry-search-row">
-              <Search aria-hidden="true" />
-              <input
-                id="home-registry-query"
-                name="q"
-                type="search"
-                autocomplete="off"
-                placeholder={t.landing.registrySearchPlaceholder}
-                data-i18n-placeholder="landing.registrySearchPlaceholder"
-              />
-              <button type="submit" data-i18n-aria-label="landing.registrySearchSubmit" aria-label={t.landing.registrySearchSubmit}>
-                <ArrowRight aria-hidden="true" />
-              </button>
-            </div>
-            <p data-i18n="landing.registrySearchHint">{t.landing.registrySearchHint}</p>
-          </form>
-        </div>
-
-        <div class="home-registry-signals">
-          <article class="home-registry-signal">
-            <ShieldCheck aria-hidden="true" />
-            <div>
-              <h3 data-i18n="landing.registrySignals.0.0">{t.landing.registrySignals[0][0]}</h3>
-              <p data-i18n="landing.registrySignals.0.1">{t.landing.registrySignals[0][1]}</p>
-            </div>
-          </article>
-          <article class="home-registry-signal">
-            <ClipboardList aria-hidden="true" />
-            <div>
-              <h3 data-i18n="landing.registrySignals.1.0">{t.landing.registrySignals[1][0]}</h3>
-              <p data-i18n="landing.registrySignals.1.1">{t.landing.registrySignals[1][1]}</p>
-            </div>
-          </article>
-          <article class="home-registry-signal">
-            <FileArchive aria-hidden="true" />
-            <div>
-              <h3 data-i18n="landing.registrySignals.2.0">{t.landing.registrySignals[2][0]}</h3>
-              <p data-i18n="landing.registrySignals.2.1">{t.landing.registrySignals[2][1]}</p>
-            </div>
-          </article>
-        </div>
-      </section>
-
       <section class="section playground-section" aria-labelledby="playground-examples">
         <div class="section-copy landing-section-copy">
           <h2 class="section-title" id="playground-examples" data-i18n="landing.playgroundTitle">{t.landing.playgroundTitle}</h2>
@@ -371,6 +309,7 @@ const workflowIconComponents = {
                 </picture>
                 <div class="landing-example-copy">
                   <h3 data-i18n={`hero.exampleLabels.${example.id}`}>{t.hero.exampleLabels[example.id]}</h3>
+                  <p data-i18n={`landing.exampleCardSummaries.${example.id}`}>{exampleCardSummaries[example.id]}</p>
                 </div>
               </a>
             );
@@ -455,10 +394,6 @@ const workflowIconComponents = {
         document.querySelectorAll<HTMLElement>("[data-i18n-aria-label]").forEach((element) => {
           const value = getMessage(element.dataset.i18nAriaLabel ?? "", nextLocale);
           if (typeof value === "string") element.setAttribute("aria-label", value);
-        });
-        document.querySelectorAll<HTMLElement>("[data-i18n-placeholder]").forEach((element) => {
-          const value = getMessage(element.dataset.i18nPlaceholder ?? "", nextLocale);
-          if (typeof value === "string") element.setAttribute("placeholder", value);
         });
         document.querySelectorAll<HTMLMetaElement>("[data-i18n-content]").forEach((element) => {
           const value = getMessage(element.dataset.i18nContent ?? "", nextLocale);

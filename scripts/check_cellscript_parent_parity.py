@@ -55,19 +55,15 @@ SKIP_UNTRACKED_SUFFIXES = (
 EXPECTED_ALLOWED_DIFFS = {
     ".gitignore": (
         "Myelin ignores local Playwright artefacts and keeps flattened proposal paths visible.",
-        "640036cedcf651944103438f54489c93da449089f4c8228279000778b1b15e46",
+        "2b76e06725c5ebb13a97f460e0dae6c01190d9f29341dd49d6771bf6b720ea22",
     ),
     "crates/cellscript-ckb-adapter/Cargo.toml": (
         "Myelin's vendored depth needs a different ckb-sdk-rust sibling path.",
-        "8562c31efd99a956734779e52109fde8590519e67ab1a05c8b3991abd471cc05",
-    ),
-    "scripts/cellscript_ckb_release_gate.sh": (
-        "Myelin bootstraps VS Code extension dependencies before release-gate validation.",
-        "8abde4a5cd7d7af5a1eebfa1860c8789e5a7084d2af85976a8ff194bbc96955b",
+        "3dd356eb96df54fe4f3af01af70390ae5ca4065515a9f1bcf709f286d3e813ac",
     ),
     "scripts/cellscript_gate.sh": (
-        "Myelin resolves the sibling CKB checkout and shared Cargo target for local gates.",
-        "903bc130db07289515320f33198d4f8c0d0a1c772089a4a5f0803a7a2e9a32cd",
+        "Myelin resolves the sibling CKB checkout and shared Cargo target for local gates, and bootstraps VS Code extension dependencies.",
+        "5ee3d43f47692336bec8c4bbd91ffcfcc42795df08ece33cb8ff664cf6b319bf",
     ),
     "tools/ckb-tx-measure/Cargo.toml": (
         "Myelin's vendored depth needs a different sibling CKB path.",
@@ -151,19 +147,19 @@ EXPECTED_ALLOWED_DIFFS = {
     ),
     "website/src/data/registry-packages.json": (
         "Myelin regenerates registry package source_revision from the vendored commit.",
-        "31f3b043cc7c4d1ab0a5d8313e0e0c64d5a27b54cc90a4c0be26171290dbae62",
+        "d5ae7c6080748627fd53a78c46b087781618d7f004399b20ff24cd8dc7699539",
     ),
     "website/src/i18n/translations.ts": (
         "Myelin keeps homepage Registry copy required by the release tooling validator.",
-        "5ef611ef9eb3a8c0bc7ab5d509fd4ba2bd4f85dbcd69ed453338b10c36ae478d",
+        "7b676978188372456daecc10f0cf20dc2fcdcf75b37b91f19b7ed98daf665480",
     ),
     "website/src/pages/index.astro": (
         "Myelin keeps the homepage CellScript Registry boundary required by release validation.",
-        "3bc3f5fb7e6a46e842b59b2824291e2388c486607dbb7f413d5b3b02eb14b37e",
+        "a8bb171e071fe08f9735e68e12fc710320acf5d8e4942003b2c0c63fa0496c82",
     ),
     "website/src/styles/global.css": (
         "Myelin styles the homepage Registry boundary required by release validation.",
-        "f856ab18ca2d6a6c83a8d2ecb24579a22810fa4d6043e72eb8ad29474b074d3e",
+        "f5152a4b45d580329a133fcb6a23c54a6722fa39d548003232eeba8045364978",
     ),
 }
 

@@ -143,7 +143,12 @@ for (const token of [
   "assert_delta",
   "assert_distinct",
   "assert_singleton",
-  "retarget_type"
+  "retarget_type",
+  "module",
+  "enum",
+  "invariant",
+  "by",
+  "i32"
 ]) {
   if (!grammarText.includes(token)) {
     throw new Error(`grammar is missing current CellScript editor surface token: ${token}`);
@@ -160,7 +165,12 @@ for (const snippet of [
   "assert_delta",
   "assert_distinct",
   "assert_singleton",
-  "#[type_id"
+  "#[type_id",
+  "module ",
+  "use ",
+  "enum ",
+  "flow-edge-by-action",
+  "invariant "
 ]) {
   if (!snippetsText.includes(snippet)) {
     throw new Error(`snippets are missing current CellScript authoring surface: ${snippet}`);
@@ -175,9 +185,12 @@ for (const token of [
   "LanguageClient",
   "vscode-languageclient/node",
   ...requiredCommands,
-  "explain-assumptions",
-  "solve-tx",
-  "deploy-plan",
+  "explain",
+  "assumptions",
+  "tx",
+  "solve",
+  "deploy",
+  "plan",
   "profile",
   "audit-bundle",
   "cellc",

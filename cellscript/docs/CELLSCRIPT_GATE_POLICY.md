@@ -14,8 +14,8 @@ deciding whether a change is ready.
 
 | Mode | When to run | Evidence boundary |
 |---|---|---|
-| `dev` | Local development before pushing | Formatting, Rust check, strict backend quick audit, syntax-combination quick audit, whitespace diff check |
-| `ci` | Pull requests, pushes, and routine merge readiness | Full Rust tests, clippy, strict backend CI audit, syntax-combination CI audit through the strict backend runner, package verification, script syntax checks |
+| `dev` | Local development before pushing | Formatting, Rust check, strict backend quick audit, syntax-combination quick audit, skill-pack freshness, README-linked CellScript doc Status freshness, local markdown link check, whitespace diff check |
+| `ci` | Pull requests, pushes, and routine merge readiness | Full Rust tests, clippy, strict backend CI audit, syntax-combination CI audit through the strict backend runner, package verification, skill-pack and CellScript doc Status freshness, local markdown link check, script syntax checks |
 | `backend` | Changes touching IR, codegen, assembler, ABI, ELF, or RISC-V behavior | Full Rust tests, clippy, and strict backend full audit, including stateful CKB scenarios |
 | `release` | Nightly/stable release candidates and any production CKB claim | `ci` plus tooling/docs boundary checks, VS Code validation, builder-backed CKB production acceptance, and stateful scenario/action coverage |
 | `release-quick` | Wrapper compatibility and local compile-only preflight | `ci` plus compile-only production acceptance; not external live/devnet evidence |
@@ -60,8 +60,27 @@ Use these only when you need a focused failure:
 ./scripts/cellscript_strict_backend_audit.sh ci
 ./scripts/cellscript_strict_backend_audit.sh full
 ./scripts/ckb_cellscript_acceptance.sh --production --stateful-scenarios
-./scripts/cellscript_0_14_scope_audit.sh
 ```
+
+`./scripts/cellscript_0_14_scope_audit.sh` is a historical standalone audit
+from the 0.14 release line. It is not invoked by any current gate mode and is
+retained for manual 0.14-compat debugging only; it is not part of the 0.21
+release-evidence boundary.
+
+The following ecosystem/bridge scripts are standalone manual tools that are
+**not** wired into any gate mode and are **not** part of the release-evidence
+boundary. They require sibling checkouts (`../ckb`, `../CellFabric`) or external
+runtimes and are documented in their respective guides for focused, opt-in use:
+
+- `./scripts/cellscript_ckb_ecosystem_reuse_gate.sh` — CKB-ecosystem reuse
+  checks; see `docs/CELLSCRIPT_CKB_ADAPTER.md`.
+- `./scripts/cellscript_ckb_adapter_acceptance.sh` — adapter acceptance against
+  a sibling CKB checkout; see `docs/CELLSCRIPT_CKB_STD_COMPAT.md`.
+- `./scripts/cellscript_cellfabric_bridge_smoke.sh` — CellFabric bridge smoke
+  test; see `docs/CELLSCRIPT_CELLFABRIC_BRIDGE.md`.
+
+These must not be described as gating evidence, and passing one does not imply
+any release-gate mode passed.
 
 Passing one component does not imply the corresponding higher-level gate passed.
 For example, CKB acceptance proves selected transaction behavior, while the

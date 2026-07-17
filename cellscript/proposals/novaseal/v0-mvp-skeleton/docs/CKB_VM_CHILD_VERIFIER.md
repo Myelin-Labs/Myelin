@@ -42,7 +42,7 @@ The staged ELF used by this run is:
 ```text
 target/novaseal-btc-verifier-riscv-shell-release.elf
 size_bytes=187816
-sha256=fb9093cd772873a992018cd2b357bf4e39884af5b48981c8fa65ebbf919f10c9
+sha256=54f26ee955ab3ecbbacc3f5eef20ad3ffee9125c14241e8ea44b382618af2391
 ```
 
 ## Evidence Level

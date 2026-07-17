@@ -38,6 +38,13 @@ npm run build
 ```
 
 The build runs registry data generation, Astro type checking, and static site generation. Output is written to `dist/`.
+When building the website repository outside the main CellScript checkout, set
+`CELLSCRIPT_REPO_ROOT` to a CellScript checkout so the playground examples and
+docs can be embedded:
+
+```bash
+CELLSCRIPT_REPO_ROOT=/path/to/CellScript npm run build
+```
 
 ## Registry Data
 
@@ -76,6 +83,10 @@ python3 scripts/fetch-github-data.py
 ```
 
 The GitHub Actions workflow in this repo runs the same refresh on a schedule.
+When that workflow commits changed activity data, it also dispatches the
+website build workflow explicitly. This is required because commits made by a
+workflow token do not reliably trigger a second workflow through the normal
+push event.
 
 ## Design Notes
 

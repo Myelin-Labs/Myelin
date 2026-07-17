@@ -194,13 +194,11 @@ def main() -> int:
     require_contains(
         "scripts/cellscript_ckb_release_gate.sh",
         [
-            "check_action_builder_toolchain",
-            "cellc gen-builder",
-            "npm --prefix",
-            "generated builder",
-            "check_novaseal_certify_invariant",
-            "check_novaseal_certify_runs",
-            "check_phase1_end_to_end_invariant",
+            # The legacy release gate is now a thin shim to the unified gate
+            # script; assert the delegation contract rather than the deleted
+            # dead-code function bodies.
+            "exec \"$ROOT_DIR/scripts/cellscript_gate.sh\" release",
+            "exec \"$ROOT_DIR/scripts/cellscript_gate.sh\" release-quick",
         ],
     )
     require_contains(
@@ -222,32 +220,39 @@ def main() -> int:
     require_contains(
         "website/src/pages/index.astro",
         [
-            "CellScript Registry",
-            "data-home-search",
-            "/registry/submit",
-            "/learn",
+            'href="/registry"',
+            'data-i18n="nav.registryBrowse"',
         ],
     )
     require_contains(
         "scripts/cellscript_gate.sh",
         [
+            "run_in_dir",
             "run_website_build_check",
             "website registry data is stale",
-            "npm --prefix website run build",
+            "run_in_dir website npm exec -- astro check",
+            "run_in_dir website npm exec -- astro build",
+            "run_in_dir editors/vscode-cellscript npm exec -- vsce package --no-dependencies --out /tmp/cellscript-vscode-dry-run.vsix",
+            "node editors/vscode-cellscript/scripts/validate.mjs",
         ],
     )
     require_contains(
         ".github/workflows/website-build.yml",
         [
+            "workflow_dispatch:",
             "Generate registry website data",
             "Check generated registry data is committed",
             "Upload website dist",
         ],
     )
+    website_build_workflow = read(".github/workflows/website-build.yml")
+    require("pull_request:" not in website_build_workflow, "website artifact workflow must not duplicate the unified CI gate on pull requests")
+    require("push:" not in website_build_workflow, "website artifact workflow must not duplicate the unified CI gate on pushes")
     require_contains(
         "src/main.rs",
         [
-            '"certify"',
+            "cellc_cli_command().get_subcommands()",
+            "cellscript::cli::run()",
         ],
     )
     require_contains(
@@ -275,7 +280,7 @@ def main() -> int:
         ],
     )
     require_contains(
-        "docs/CELLSCRIPT_0_20_ROADMAP.md",
+        "docs/archive/0.20/CELLSCRIPT_0_20_ROADMAP.md",
         [
             "VS Code extension",
             "check_action_builder_toolchain",

@@ -36,6 +36,15 @@ jobs:
       - name: Install website dependencies
         run: npm ci
 
+      - name: Check out CellScript examples
+        uses: actions/checkout@v4
+        with:
+          repository: CellScript-Labs/CellScript
+          path: cellscript-source
+          sparse-checkout: |
+            docs/wiki
+            examples
+
       - name: Generate registry website data
         run: npm run prepare:registry
 
@@ -49,6 +58,8 @@ jobs:
           fi
 
       - name: Build website
+        env:
+          CELLSCRIPT_REPO_ROOT: ${{ github.workspace }}/cellscript-source
         run: npm run build
 
       - name: Upload website dist

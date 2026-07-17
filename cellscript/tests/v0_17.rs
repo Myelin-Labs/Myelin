@@ -696,7 +696,7 @@ fn strict_0_17_accepts_xudt_group_amount_aggregate_when_runtime_helper_is_called
         .iter()
         .find(|plan| plan.category == "aggregate-invariant")
         .expect("aggregate invariant ProofPlan record");
-    assert_eq!(aggregate_plan.codegen_coverage_status, "gap:runtime-helper-required");
+    assert_eq!(aggregate_plan.codegen_coverage_status, "covered");
     assert!(
         aggregate_plan.coverage.iter().any(|coverage| coverage == "runtime_helper:xudt::require_group_amount_conserved"),
         "{aggregate_plan:#?}"
@@ -705,7 +705,7 @@ fn strict_0_17_accepts_xudt_group_amount_aggregate_when_runtime_helper_is_called
         aggregate_plan
             .input_output_relation_checks
             .iter()
-            .any(|check| check.contains("runtime-helper-required:xudt::require_group_amount_conserved")),
+            .any(|check| check.contains("checked-runtime:xudt::require_group_amount_conserved")),
         "{aggregate_plan:#?}"
     );
     assert!(
@@ -757,7 +757,7 @@ fn strict_0_17_accepts_xudt_group_amount_delta_aggregates_when_runtime_helpers_a
         .iter()
         .find(|plan| plan.feature == "assert_delta:group_outputs<IckbToken>.amount:minted")
         .expect("mint delta aggregate ProofPlan record");
-    assert_eq!(mint_delta.codegen_coverage_status, "gap:runtime-helper-required");
+    assert_eq!(mint_delta.codegen_coverage_status, "covered");
     assert!(
         mint_delta.coverage.iter().any(|coverage| coverage == "runtime_helper:xudt::require_group_amount_minted"),
         "{mint_delta:#?}"
@@ -766,7 +766,7 @@ fn strict_0_17_accepts_xudt_group_amount_delta_aggregates_when_runtime_helpers_a
         mint_delta
             .input_output_relation_checks
             .iter()
-            .any(|check| check.contains("runtime-helper-required:xudt::require_group_amount_minted")),
+            .any(|check| check.contains("checked-runtime:xudt::require_group_amount_minted")),
         "{mint_delta:#?}"
     );
 
@@ -774,7 +774,7 @@ fn strict_0_17_accepts_xudt_group_amount_delta_aggregates_when_runtime_helpers_a
         .iter()
         .find(|plan| plan.feature == "assert_delta:group_inputs<IckbToken>.amount:burned")
         .expect("burn delta aggregate ProofPlan record");
-    assert_eq!(burn_delta.codegen_coverage_status, "gap:runtime-helper-required");
+    assert_eq!(burn_delta.codegen_coverage_status, "covered");
     assert!(
         burn_delta.coverage.iter().any(|coverage| coverage == "runtime_helper:xudt::require_group_amount_burned"),
         "{burn_delta:#?}"
@@ -783,7 +783,7 @@ fn strict_0_17_accepts_xudt_group_amount_delta_aggregates_when_runtime_helpers_a
         burn_delta
             .input_output_relation_checks
             .iter()
-            .any(|check| check.contains("runtime-helper-required:xudt::require_group_amount_burned")),
+            .any(|check| check.contains("checked-runtime:xudt::require_group_amount_burned")),
         "{burn_delta:#?}"
     );
 

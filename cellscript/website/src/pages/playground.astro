@@ -21,7 +21,7 @@ import { playgroundExamples, exampleFullSources, exampleGroups } from "../data/s
 import { translations } from "../i18n/translations";
 import SiteHeader from "../components/SiteHeader.astro";
 import { ClientRouter } from "astro:transitions";
-import { BookOpen, Check, ChevronDown, Copy, Download, FilePlus, RefreshCw, Trash2, Upload } from "lucide-astro";
+import { BookOpen, Check, ChevronDown, Copy, Download, FilePlus, Play, Trash2, Upload } from "lucide-astro";
 
 // The locale is resolved client-side from localStorage (see the inline
 // init script below), so the server renders the English fallback and
@@ -122,15 +122,10 @@ if (ungroupedPlaygroundExamples.length > 0) {
             </div>
           </div>
         </details>
-        <div class="pg-compile-control">
-          <span class="pg-compile-status" data-compile-status data-state="idle" role="status" aria-live="polite">
-            <span class="pg-compile-dot" aria-hidden="true"></span>
-            <span class="pg-compile-label" data-compile-label>{t.playground.compile}</span>
-          </span>
-          <button class="pg-icon-btn pg-compile-refresh" type="button" data-compile data-i18n-aria-label="playground.compileAria" data-i18n-title="playground.compileAria" aria-label={t.playground.compileAria} title={t.playground.compileAria}>
-            <RefreshCw class="pg-compile-icon" aria-hidden="true" />
-          </button>
-        </div>
+        <button class="pg-action-btn pg-compile-btn" type="button" data-compile data-i18n-aria-label="playground.compileAria" aria-label={t.playground.compileAria}>
+          <Play class="pg-compile-icon" aria-hidden="true" />
+          <span class="pg-compile-label" data-compile-label data-i18n="playground.compile">{t.playground.compile}</span>
+        </button>
       </div>
     </div>
 
@@ -439,7 +434,6 @@ if (ungroupedPlaygroundExamples.length > 0) {
       const pgMain = document.querySelector<HTMLElement>("[data-pg-main]");
       const mobileViewBtns = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-mobile-view-btn]"));
       const compileBtn = document.querySelector<HTMLButtonElement>("[data-compile]");
-      const compileStatus = document.querySelector<HTMLElement>("[data-compile-status]");
       const compileLabel = document.querySelector<HTMLElement>("[data-compile-label]");
       const railBody = document.querySelector<HTMLElement>("[data-rail-body]");
       const railLoading = railBody?.querySelector<HTMLElement>('[data-rail-view="loading"]');
@@ -469,7 +463,6 @@ if (ungroupedPlaygroundExamples.length > 0) {
       );
       const outputTabs = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-output-tab]"));
       let compileTimer: number | undefined;
-      let compileSpinnerTimer: number | undefined;
       let currentDiagnostics: CompileDiagnostic[] = [];
       let highlightFrame: number | undefined;
       let repositionFloatingTools = () => {};
@@ -1536,7 +1529,6 @@ source_roots = ["src"]
       let hoverTimer: number | undefined;
       const cleanupPlayground = () => {
         window.clearTimeout(compileTimer);
-        window.clearTimeout(compileSpinnerTimer);
         window.clearTimeout(hoverTimer);
         if (highlightFrame !== undefined) {
           window.cancelAnimationFrame(highlightFrame);
@@ -1572,38 +1564,16 @@ source_roots = ["src"]
         hoverTimer = window.setTimeout(() => requestLanguage("hover"), 260);
       };
 
-      // ---- Live compile status ----
-      type CompileState = "idle" | "stale" | "compiling" | "ready" | "error";
+      // ---- Compile button state ----
+      type CompileState = "idle" | "compiling" | "ready" | "error";
       let lastElapsed = 0;
-      const clearCompileSpinner = () => {
-        window.clearTimeout(compileSpinnerTimer);
-        compileSpinnerTimer = undefined;
-        compileStatus?.removeAttribute("data-waiting");
-        compileBtn?.removeAttribute("data-waiting");
-      };
-
       const setCompileState = (state: CompileState) => {
-        if (!compileLabel) return;
-        compileStatus?.setAttribute("data-state", state);
-        compileBtn?.setAttribute("data-state", state);
-        if (state === "compiling") {
-          clearCompileSpinner();
-          compileSpinnerTimer = window.setTimeout(() => {
-            compileStatus?.setAttribute("data-waiting", "true");
-            compileBtn?.setAttribute("data-waiting", "true");
-          }, 150);
-        } else {
-          clearCompileSpinner();
-        }
+        if (!compileBtn || !compileLabel) return;
+        compileBtn.dataset.state = state;
         if (state === "idle") compileLabel.textContent = pg("compile");
-        else if (state === "stale") compileLabel.textContent = pg("stale");
         else if (state === "compiling") compileLabel.textContent = pg("compiling");
         else if (state === "ready") compileLabel.textContent = fmt(pg("compiledIn"), { ms: String(lastElapsed) });
-        else if (state === "error") {
-          const counts = diagnosticCounts(currentDiagnostics);
-          const total = counts.errors || currentDiagnostics.length;
-          compileLabel.textContent = total > 0 ? fmt(pg("errorsBadge"), { n: String(total) }) : pg("failed");
-        }
+        else if (state === "error") compileLabel.textContent = pg("failed");
       };
 
       const renderMetadata = (data: any) => {
@@ -1887,11 +1857,6 @@ source_roots = ["src"]
         });
       };
 
-      const runCompileNow = () => {
-        window.clearTimeout(compileTimer);
-        doCompile();
-      };
-
       compileWorker.addEventListener("message", (event) => {
         const { id, type, payload, elapsed, version } = event.data || {};
         if (type === "language-result" && typeof id === "number") {
@@ -1932,9 +1897,9 @@ source_roots = ["src"]
       }, { signal });
 
       const scheduleCompile = () => {
-        setCompileState("stale");
+        setCompileState("idle");
         window.clearTimeout(compileTimer);
-        compileTimer = window.setTimeout(doCompile, 150);
+        compileTimer = window.setTimeout(doCompile, 300);
       };
 
       const markEditorChanged = () => {
@@ -2244,14 +2209,16 @@ source_roots = ["src"]
 
       // ---- Compile button: manual trigger + keyboard shortcut ----
       compileBtn?.addEventListener("click", () => {
-        runCompileNow();
+        window.clearTimeout(compileTimer);
+        doCompile();
       }, { signal });
 
       // Ctrl/Cmd+Enter forces a compile from anywhere on the page.
       window.addEventListener("keydown", (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
           e.preventDefault();
-          runCompileNow();
+          window.clearTimeout(compileTimer);
+          doCompile();
         }
       }, { signal });
 
@@ -2338,7 +2305,6 @@ source_roots = ["src"]
             setWorkspace(makeExampleWorkspace(id), path, path);
             updateExampleLesson(id);
             exampleMenu?.removeAttribute("open");
-            runCompileNow();
           }
         }, { signal });
       });
@@ -2381,18 +2347,18 @@ source_roots = ["src"]
         renderFileTree();
         updateWorkspaceChrome();
         updateExampleLesson(currentExampleId);
-        // Refresh compile status for the current state, and the
+        // Refresh compile-button label for the current state, and the
         // status bar text (re-render the last result if any).
-        const state = (compileStatus?.dataset.state ?? "idle") as CompileState;
+        const state = (compileBtn?.dataset.state ?? "idle") as CompileState;
         if (state === "ready") compileLabel && (compileLabel.textContent = fmt(pg("compiledIn"), { ms: String(lastElapsed) }));
         else setCompileState(state);
-        if (workerReady) runCompileNow();
+        if (workerReady) doCompile();
       };
       window.addEventListener("cellscript:locale-change", applyLocaleStrings, { signal });
       applyLocaleStrings();
 
       updateHighlight();
-      runCompileNow();
+      doCompile();
       };
     </script>
     <script is:inline type="module" data-astro-rerun>

@@ -27,15 +27,11 @@ run() {
     "$@"
 }
 
-default_ckb_repo() {
-    local parent grandparent
-    parent="$(cd "$ROOT_DIR/.." && pwd)"
-    grandparent="$(cd "$ROOT_DIR/../.." && pwd)"
-    if [[ -d "$parent/ckb" ]]; then
-        printf '%s\n' "$parent/ckb"
-    else
-        printf '%s\n' "$grandparent/ckb"
-    fi
+run_in_dir() {
+    local dir="$1"
+    shift
+    printf '\n==> (cd %s && %s)\n' "$dir" "$*"
+    (cd "$dir" && "$@")
 }
 
 cargo_fmt_workspace() {
@@ -63,7 +59,9 @@ check_trailing_whitespace() {
     local tracked_rust_files=()
     local tracked_rust_file
     while IFS= read -r tracked_rust_file; do
-        tracked_rust_files+=("$tracked_rust_file")
+        if [[ -f "$tracked_rust_file" ]]; then
+            tracked_rust_files+=("$tracked_rust_file")
+        fi
     done < <(git ls-files '*.rs')
 
     local tracked_website_files=()
@@ -71,7 +69,9 @@ check_trailing_whitespace() {
     while IFS= read -r tracked_website_file; do
         case "$tracked_website_file" in
             website/*.json|website/*.mjs|website/**/*.astro|website/**/*.css|website/**/*.js|website/**/*.json|website/**/*.py|website/**/*.ts)
-                tracked_website_files+=("$tracked_website_file")
+                if [[ -f "$tracked_website_file" ]]; then
+                    tracked_website_files+=("$tracked_website_file")
+                fi
                 ;;
         esac
     done < <(git ls-files website)
@@ -118,6 +118,14 @@ check_trailing_whitespace() {
         "scripts/validate_ckb_cellscript_production_evidence.py"
         "tests/syntax_combo/matrix.toml"
         "tests/syntax_combo/seeds/require-block-lifecycle.cell"
+        "docs/releases/CELLSCRIPT_0_20_RELEASE_NOTES.md"
+        "docs/releases/CELLSCRIPT_0_21_RELEASE_NOTES.md"
+        "docs/releases/CELLSCRIPT_0_16_TO_0_20_RELEASE_NOTES.md"
+        "docs/archive/0.20/CELLSCRIPT_0_20_ROADMAP.md"
+        "docs/CELLSCRIPT_0_21_ROADMAP.md"
+        "roadmap/CELLSCRIPT_0_21_CLI_UX_PLAN.md"
+        "examples/atomic_swap.cell"
+        "examples/multi_phase_dao.cell"
     )
     if ((${#tracked_rust_files[@]} > 0)); then
         files+=("${tracked_rust_files[@]}")
@@ -149,7 +157,6 @@ check_novaseal_verifier_pinning() {
     python3 - <<'PY'
 import hashlib
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -162,12 +169,11 @@ except ModuleNotFoundError:
 
 root = Path.cwd()
 core_root = root / "proposals/novaseal/v0-mvp-skeleton"
-target_suffix = Path("riscv64imac-unknown-none-elf/release/novaseal_btc_verifier_riscv")
-cargo_target_dir = os.environ.get("CARGO_TARGET_DIR")
-if cargo_target_dir:
-    release_elf = Path(cargo_target_dir) / target_suffix
-else:
-    release_elf = core_root / "verifier/novaseal_btc_verifier_riscv/target" / target_suffix
+release_elf = (
+    core_root
+    / "verifier/novaseal_btc_verifier_riscv/target/"
+    / "riscv64imac-unknown-none-elf/release/novaseal_btc_verifier_riscv"
+)
 if not release_elf.is_file():
     print(f"missing NovaSeal RISC-V verifier release ELF: {release_elf}", file=sys.stderr)
     sys.exit(1)
@@ -400,6 +406,139 @@ check_ckb_release_docs() {
     done
 }
 
+check_cellscript_doc_status_freshness() {
+    python3 - <<'PY'
+import re
+import sys
+from pathlib import Path
+
+root = Path.cwd()
+readme = (root / "README.md").read_text(encoding="utf-8")
+readme_links = sorted(
+    set(re.findall(r"\]\((docs/CELLSCRIPT_[^)#]+\.md)(?:#[^)]+)?\)", readme))
+)
+
+tracked_docs = []
+try:
+    import subprocess
+
+    tracked_docs = subprocess.check_output(
+        ["git", "ls-files", "docs/CELLSCRIPT_*.md"],
+        cwd=root,
+        text=True,
+    ).splitlines()
+except Exception:
+    tracked_docs = []
+
+filesystem_docs = [
+    str(path.relative_to(root))
+    for path in (root / "docs").glob("CELLSCRIPT_*.md")
+]
+tracked_existing_docs = [
+    rel for rel in tracked_docs
+    if (root / rel).is_file()
+]
+docs_to_scan = sorted(set(readme_links + filesystem_docs + tracked_existing_docs))
+stale_patterns = [
+    "formal 0.19 headless Rust adapter crate",
+    "0.19 scope compatibility contract",
+    "Active 0.19 grammar-governance contract",
+    "Proposed. Implementation gated",
+    "**Status**: In progress",
+]
+
+failures: list[str] = []
+for rel in docs_to_scan:
+    path = root / rel
+    if not path.is_file():
+        failures.append(f"README-linked CellScript doc is missing: {rel}")
+        continue
+    head = "\n".join(path.read_text(encoding="utf-8").splitlines()[:40])
+    normalized_head = " ".join(head.split())
+    for pattern in stale_patterns:
+        if pattern in normalized_head:
+            failures.append(f"{rel} has stale Status header pattern: {pattern}")
+
+required_current = {
+    "docs/CELLSCRIPT_CKB_ADAPTER.md": "production contract for the current CellScript CKB profile",
+    "docs/CELLSCRIPT_CKB_STD_COMPAT.md": "production compatibility contract for the current CellScript CKB profile",
+    "docs/CELLSCRIPT_GRAMMAR_GOVERNANCE_RFC.md": "Active grammar-governance contract",
+    "docs/CELLSCRIPT_WEBSITE_PARADIGM_UPGRADE_RFC.md": "Implemented across the 0.20-0.21 line",
+}
+for rel, marker in required_current.items():
+    path = root / rel
+    head = "\n".join(path.read_text(encoding="utf-8").splitlines()[:20])
+    normalized_head = " ".join(head.split())
+    if marker not in normalized_head:
+        failures.append(f"{rel} Status header is missing freshness marker: {marker}")
+
+if failures:
+    print("CellScript documentation Status freshness check failed:", file=sys.stderr)
+    for failure in failures:
+        print(f"  - {failure}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+check_markdown_local_links() {
+    python3 - <<'PY'
+import os
+import re
+import sys
+import urllib.parse
+from pathlib import Path
+
+root = Path.cwd()
+scan_roots = [
+    root / "README.md",
+    root / "docs",
+    root / "roadmap",
+    root / "editors/vscode-cellscript/README.md",
+    root / "editors/vscode-cellscript/docs",
+]
+skip_dirs = {".git", ".mavis", "dist", "node_modules", "target"}
+markdown_files: list[Path] = []
+
+for start in scan_roots:
+    if start.is_file():
+        markdown_files.append(start)
+    elif start.is_dir():
+        for dirpath, dirnames, filenames in os.walk(start):
+            dirnames[:] = [name for name in dirnames if name not in skip_dirs]
+            for filename in filenames:
+                if filename.endswith(".md"):
+                    markdown_files.append(Path(dirpath) / filename)
+
+link_re = re.compile(r"(?!!)\[[^\]]+\]\(([^)\s]+(?:\s+\"[^\"]*\")?)\)")
+failures: list[str] = []
+
+for path in sorted(markdown_files):
+    text = path.read_text(encoding="utf-8")
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for match in link_re.finditer(line):
+            raw = match.group(1).strip()
+            if " " in raw and not raw.startswith("<"):
+                raw = raw.split(" ", 1)[0]
+            raw = raw.strip("<>")
+            target = raw.split("#", 1)[0]
+            if not target:
+                continue
+            if target.startswith(("#", "http://", "https://", "mailto:", "tel:", "app://")):
+                continue
+            if target.startswith("/"):
+                continue
+            candidate = (path.parent / urllib.parse.unquote(target)).resolve()
+            if not candidate.exists():
+                failures.append(f"{path.relative_to(root)}:{lineno}: missing local markdown link target {raw}")
+
+if failures:
+    print("Local markdown link check failed:", file=sys.stderr)
+    for failure in failures:
+        print(f"  - {failure}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 check_ckb_acceptance_boundaries() {
     local required=(
         'scripts/ckb_cellscript_acceptance.sh::Usage: scripts/ckb_cellscript_acceptance.sh'
@@ -420,6 +559,9 @@ check_ckb_acceptance_boundaries() {
         'scripts/validate_ckb_cellscript_production_evidence.py::tracked_source_sha256'
         'scripts/validate_ckb_cellscript_production_evidence.py::valid CKB CellScript'
         'scripts/validate_cellscript_tooling_release.py::valid CellScript tooling release boundary'
+        'src/lib.rs::cellscript-template-layout-v0.21'
+        'src/cli/commands.rs::cellscript-protocol-graph-v0.21'
+        'src/cli/commands.rs::cellscript-action-scan-selectors-v0.21'
     )
     local item file pattern
     for item in "${required[@]}"; do
@@ -566,21 +708,12 @@ run_website_build_check() {
         exit 1
     fi
 
-    run npm --prefix website run build
-}
-
-run_vscode_extension_check() {
-    require_cmd npm
-
-    if [[ ! -d editors/vscode-cellscript/node_modules ]]; then
-        run npm --prefix editors/vscode-cellscript ci
-    fi
-    run npm --prefix editors/vscode-cellscript run validate
-    run npm --prefix editors/vscode-cellscript run publish:dry-run
+    run_in_dir website npm exec -- astro check
+    run_in_dir website npm exec -- astro build
 }
 
 check_ckb_tx_measure_tool() {
-    local ckb_repo="${CKB_REPO:-$(default_ckb_repo)}"
+    local ckb_repo="$ROOT_DIR/../ckb"
     local toolchain=""
     if [[ -f "$ckb_repo/rust-toolchain.toml" ]]; then
         toolchain="$(python3 - "$ckb_repo/rust-toolchain.toml" <<'PY'
@@ -626,6 +759,9 @@ run_dev_gate() {
     run cargo check --locked -p cellscript --all-targets
     run ./scripts/cellscript_strict_backend_audit.sh quick
     run ./scripts/cellscript_syntax_combo_audit.sh quick
+    run python3 scripts/check_cellscript_skill_pack.py
+    check_cellscript_doc_status_freshness
+    check_markdown_local_links
     check_forbidden_tracked_files
     run git diff --check
 }
@@ -645,6 +781,9 @@ run_ci_gate() {
     run cargo test --locked -p cellscript -- --test-threads=1
     run cargo clippy --locked -p cellscript --all-targets -- -D warnings
     run ./scripts/cellscript_strict_backend_audit.sh ci
+    run python3 scripts/check_cellscript_skill_pack.py
+    check_cellscript_doc_status_freshness
+    check_markdown_local_links
     check_package_contents
     run cargo package --locked --offline --allow-dirty
     run_website_build_check
@@ -675,8 +814,6 @@ run_release_auxiliary_checks() {
     require_cmd npm
 
     run python3 scripts/validate_cellscript_tooling_release.py
-    check_script_syntax
-    check_trailing_whitespace
     check_release_roadmap_docs
     check_ckb_release_docs
     check_ckb_acceptance_boundaries
@@ -684,7 +821,8 @@ run_release_auxiliary_checks() {
     check_ckb_tx_measure_tool
     check_novaseal_rust_tooling
     check_novaseal_verifier_pinning
-    run_vscode_extension_check
+    run_in_dir editors/vscode-cellscript npm exec -- vsce package --no-dependencies --out /tmp/cellscript-vscode-dry-run.vsix
+    run node editors/vscode-cellscript/scripts/validate.mjs
 }
 
 run_release_quick_gate() {

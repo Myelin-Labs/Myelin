@@ -63,7 +63,6 @@ High-value active references include:
 - `CELLSCRIPT_ENTRY_WITNESS_ABI.md`
 - `CELLSCRIPT_EXAMPLE_BUSINESS_FLOWS.md`
 - `CELLSCRIPT_LINEAR_OWNERSHIP.md`
-- `CELLSCRIPT_METADATA_SYSTEM_AUDIT.md`
 - `CELLSCRIPT_OUTPUT_BINDINGS.md`
 - `CELLSCRIPT_RUNTIME_ERROR_CODES.md`
 - `CELLSCRIPT_SCHEDULER_HINTS.md`
@@ -72,14 +71,10 @@ High-value active references include:
 
 - `docs/spec/` contains normative or semi-normative specifications. The 0.16
   operational semantics live there.
-- `docs/0.20/` contains branch-local audit and investigation material for the
-  current `nightly-0.20` line. It is not part of any prior release contract.
-  Current contents: `compiler_swarm_audit.md`,
-  `CELLSCRIPT_0_20_DOB_EVO_SWARM_AUDIT.md`,
-  `CELLSCRIPT_MULTI_FILE_AUDIT_V2.md`, and
-  `CELLSCRIPT_MULTI_FILE_PROJECT_SUPPORT_AUDIT.md` (superseded by the v2
-  audit), plus `CELLSCRIPT_PROTOCOL_MULTI_FILE_EVIDENCE.md` for the
-  evidence-gated NovaSeal/iCKB/DobEvo protocol-source boundary.
+- `docs/0.20/` now keeps only release-facing evidence material for the 0.20
+  line, including `CELLSCRIPT_PROTOCOL_MULTI_FILE_EVIDENCE.md` for the
+  evidence-gated NovaSeal/iCKB/DobEvo protocol-source boundary. Superseded
+  0.20 audit notes have been removed from the main branch.
 
 ## Examples
 
@@ -96,23 +91,26 @@ bundled `.cell` examples. These are not release notes.
 may point to release notes and active reference docs, but they should not
 duplicate full release notes.
 
-Active later-stage roadmap notes that live under `docs/` because they are tied
-to branch-specific evidence or forward design:
+Archived later-stage roadmap notes that live under `docs/archive/` because they
+are tied to historical branch-specific evidence:
 
 - `archive/0.17/CELLSCRIPT_0_17_ROADMAP.md`
-- `CELLSCRIPT_0_18_ROADMAP.md`
-- `CELLSCRIPT_0_19_ROADMAP.md`
-- `releases/CELLSCRIPT_0_19_RELEASE_NOTES.md`
-- `CELLSCRIPT_0_20_ROADMAP.md`
+- `archive/0.18/CELLSCRIPT_0_18_ROADMAP.md`
+- `archive/0.19/CELLSCRIPT_0_19_ROADMAP.md`
+- `archive/0.20/CELLSCRIPT_0_20_ROADMAP.md`
+- `releases/CELLSCRIPT_0_16_TO_0_20_RELEASE_NOTES.md`
+
+Active later-stage roadmap notes that live under `docs/` because they are tied
+to current branch-specific evidence or forward design:
+
 - `CELLSCRIPT_0_21_ROADMAP.md`
-- `CELLSCRIPT_CKB_ECOSYSTEM_REUSE_AUDIT.md` for 0.19 CKB ecosystem reuse scope
 - `CELLSCRIPT_CKB_STD_COMPAT.md` for 0.19 ckb-std compatibility scope
 - `CELLSCRIPT_GRAMMAR_GOVERNANCE_RFC.md` and
   `CELLSCRIPT_SYNTAX_COMBO_AUDIT_METHODOLOGY.md` for 0.19 grammar/syntax
   governance scope
 - `CELLSCRIPT_REGISTRY_PHASE1.md` for the 0.19 package/deployment identity
   registry closure and 0.20 handoff boundary
-- `CELLSCRIPT_0_20_ROADMAP.md` for generated TypeScript action builders,
+- `archive/0.20/CELLSCRIPT_0_20_ROADMAP.md` for generated TypeScript action builders,
   live-chain registry verification, stateful flow evidence, and the bounded
   CellFabric JSON bridge
 - `CELLSCRIPT_0_21_ROADMAP.md` for semantic closure, authenticated compiler

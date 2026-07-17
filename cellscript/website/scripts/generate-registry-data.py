@@ -106,10 +106,29 @@ def merge_heads(repo_root: Path) -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
+def git_head_revision(repo_root: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip() or None
+
+
 def git_revision(path: Path) -> str | None:
     repo_root = git_repo_root(path)
     if repo_root is None:
         return None
+
+    revision = git_head_revision(repo_root)
+    if revision:
+        return revision
 
     revision = git_log_revision(path, repo_root)
     if revision:

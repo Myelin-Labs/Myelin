@@ -12,11 +12,17 @@ use ckb_types::{
     H160, H256,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::Path};
+use serde_json::Value;
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 pub const ACTION_PLAN_POLICY: &str = "cellscript-action-builder-plan-v1";
 pub const ADAPTER_CONTRACT_SCHEMA: &str = "cellscript-ckb-adapter-contract-v0.19";
 pub const ACTION_ACCEPTANCE_REPORT_SCHEMA: &str = "cellscript-ckb-action-acceptance-report-v0.19";
+pub const ACTION_SCAN_SELECTORS_SCHEMA: &str = "cellscript-action-scan-selectors-v0.21";
 pub const SCRIPT_EVIDENCE_SCHEMA: &str = "cellscript-ckb-script-evidence-v0.19";
 pub const SCRIPT_REF_EVIDENCE_SCHEMA: &str = "cellscript-ckb-script-ref-evidence-v0.19";
 pub const SCRIPT_CODE_DEP_EVIDENCE_SCHEMA: &str = "cellscript-ckb-script-code-dep-evidence-v0.19";
@@ -28,6 +34,10 @@ pub struct ActionPlan {
     pub policy: String,
     pub action: String,
     pub artifact_hash: Option<String>,
+    #[serde(default)]
+    pub metadata_hash: Option<String>,
+    #[serde(default)]
+    pub action_scan_selectors: Option<ActionScanSelectors>,
     pub transaction_draft: TransactionDraft,
     pub adapter_contract: AdapterContract,
 }
@@ -37,6 +47,73 @@ pub struct TransactionDraft {
     pub state: String,
     pub can_submit: bool,
     pub requires_packed_materialization: bool,
+    #[serde(default)]
+    pub metadata_hash: Option<String>,
+    #[serde(default)]
+    pub fee_shannons: Option<u64>,
+    #[serde(default)]
+    pub inputs: Vec<ActionInputDraft>,
+    #[serde(default)]
+    pub outputs: Vec<ActionOutputDraft>,
+    #[serde(default)]
+    pub outputs_data: Vec<String>,
+    #[serde(default)]
+    pub witnesses: Vec<ActionWitnessDraft>,
+    #[serde(default)]
+    pub cell_deps: Vec<ActionCellDepDraft>,
+    #[serde(default)]
+    pub header_deps: Vec<String>,
+    #[serde(default)]
+    pub lineage: Vec<ActionLineageDraft>,
+    #[serde(default, alias = "scanSelectorEvidence")]
+    pub scan_selector_evidence: Vec<ScanSelectorEvidenceDraft>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionScanSelectors {
+    pub schema: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub selector_count: Option<usize>,
+    #[serde(default)]
+    pub selectors: Vec<ActionScanSelectorDraft>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionScanSelectorDraft {
+    #[serde(default)]
+    pub selector_index: Option<usize>,
+    #[serde(default)]
+    pub ckb_source: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub binding: Option<String>,
+    #[serde(default)]
+    pub feature: Option<String>,
+    #[serde(default)]
+    pub component: Option<String>,
+    #[serde(default)]
+    pub script_field: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScanSelectorEvidenceDraft {
+    pub selector_index: usize,
+    pub status: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub binding: Option<String>,
+    #[serde(default)]
+    pub feature: Option<String>,
+    #[serde(default)]
+    pub component: Option<String>,
+    #[serde(default)]
+    pub script_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,6 +122,79 @@ pub struct AdapterContract {
     pub compiler_core_dependency: String,
     pub transaction_realizer: String,
     pub resolved_tx_required_fields: Vec<String>,
+    #[serde(default)]
+    pub acceptance_report_template: Option<AcceptanceReportTemplate>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcceptanceReportTemplate {
+    #[serde(default)]
+    pub metadata_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionInputDraft {
+    pub previous_output: OutPointDraft,
+    #[serde(default)]
+    pub since: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionOutputDraft {
+    pub capacity: Value,
+    pub lock: ScriptDraft,
+    #[serde(rename = "type", default)]
+    pub type_script: Option<ScriptDraft>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScriptDraft {
+    pub code_hash: String,
+    pub hash_type: String,
+    #[serde(default)]
+    pub args: String,
+    #[serde(default)]
+    pub args_parts: Vec<ScriptArgsPartDraft>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScriptArgsPartDraft {
+    #[serde(alias = "encoding")]
+    pub kind: String,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionCellDepDraft {
+    pub out_point: OutPointDraft,
+    pub dep_type: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutPointDraft {
+    pub tx_hash: String,
+    pub index: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionLineageDraft {
+    pub from: OutPointDraft,
+    pub to_output_index: u32,
+    pub relation: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ActionWitnessDraft {
+    Hex(String),
+    WitnessArgs {
+        #[serde(default)]
+        lock: Option<String>,
+        #[serde(default)]
+        input_type: Option<String>,
+        #[serde(default)]
+        output_type: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -292,7 +442,37 @@ pub fn parse_action_plan(bytes: &[u8]) -> Result<ActionPlan> {
             bail!("adapter contract is missing required field {required}");
         }
     }
+    validate_action_scan_selectors_schema(&plan)?;
     Ok(plan)
+}
+
+fn validate_action_scan_selectors_schema(plan: &ActionPlan) -> Result<()> {
+    let Some(scan_selectors) = plan.action_scan_selectors.as_ref() else {
+        return Ok(());
+    };
+    if scan_selectors.schema != ACTION_SCAN_SELECTORS_SCHEMA {
+        bail!("unsupported action_scan_selectors schema {}", scan_selectors.schema);
+    }
+    if scan_selectors.source.as_deref() != Some("transaction_runtime_input_requirements") {
+        bail!("action_scan_selectors.source must be transaction_runtime_input_requirements, got {:?}", scan_selectors.source);
+    }
+    if let Some(selector_count) = scan_selectors.selector_count {
+        if selector_count != scan_selectors.selectors.len() {
+            bail!(
+                "action_scan_selectors.selector_count {} does not match selectors length {}",
+                selector_count,
+                scan_selectors.selectors.len()
+            );
+        }
+    }
+    let mut indexes = HashMap::new();
+    for (fallback_index, selector) in scan_selectors.selectors.iter().enumerate() {
+        let selector_index = selector.selector_index.unwrap_or(fallback_index);
+        if indexes.insert(selector_index, fallback_index).is_some() {
+            bail!("action_scan_selectors contains duplicate selector_index {selector_index}");
+        }
+    }
+    Ok(())
 }
 
 pub fn load_deployment_manifest(path: impl AsRef<Path>) -> Result<DeploymentManifest> {
@@ -559,6 +739,372 @@ pub fn build_deployment_manifest_from_evidence(
             dep_type: "code".to_string(),
             out_point,
         }],
+    }
+}
+
+pub fn resolve_materialized_action_plan(plan: &ActionPlan) -> Result<ResolvedActionTx> {
+    resolve_materialized_action_plan_with_manifest(plan, None)
+}
+
+pub fn resolve_materialized_action_plan_with_manifest(
+    plan: &ActionPlan,
+    manifest: Option<&DeploymentManifest>,
+) -> Result<ResolvedActionTx> {
+    if !has_materialized_action_draft(&plan.transaction_draft) {
+        bail!(
+            "ActionPlan '{}' is a semantic template and contains no materialized CKB inputs/outputs; \
+             a builder runtime must resolve live cells and fill transaction_draft.inputs, outputs, outputs_data, witnesses, cell_deps, and lineage",
+            plan.action
+        );
+    }
+    if plan.transaction_draft.outputs.len() != plan.transaction_draft.outputs_data.len() {
+        bail!(
+            "materialized ActionPlan outputs/outputs_data length mismatch: {} outputs, {} outputs_data",
+            plan.transaction_draft.outputs.len(),
+            plan.transaction_draft.outputs_data.len()
+        );
+    }
+    validate_scan_selector_evidence(plan)?;
+
+    let metadata_hash = plan
+        .metadata_hash
+        .clone()
+        .or_else(|| plan.transaction_draft.metadata_hash.clone())
+        .or_else(|| plan.adapter_contract.acceptance_report_template.as_ref().and_then(|template| template.metadata_hash.clone()))
+        .ok_or_else(|| anyhow::anyhow!("materialized ActionPlan is missing metadata_hash"))?;
+
+    let inputs = plan.transaction_draft.inputs.iter().map(parse_action_input_draft).collect::<Result<Vec<_>>>()?;
+    let outputs = plan
+        .transaction_draft
+        .outputs
+        .iter()
+        .zip(plan.transaction_draft.outputs_data.iter())
+        .enumerate()
+        .map(|(index, (output, data))| parse_action_output_draft(index, output, data))
+        .collect::<Result<Vec<_>>>()?;
+    let witnesses = plan.transaction_draft.witnesses.iter().map(parse_action_witness_draft).collect::<Result<Vec<_>>>()?;
+    let mut cell_deps = plan.transaction_draft.cell_deps.iter().map(parse_action_cell_dep_draft).collect::<Result<Vec<_>>>()?;
+    if let Some(manifest) = manifest {
+        add_manifest_cell_deps(&mut cell_deps, &outputs, manifest)?;
+    }
+    let header_deps = plan
+        .transaction_draft
+        .header_deps
+        .iter()
+        .enumerate()
+        .map(|(index, dep)| parse_byte32_hex(&format!("header_deps[{index}]"), dep).map(|bytes| bytes.pack()))
+        .collect::<Result<Vec<_>>>()?;
+    let lineage = plan.transaction_draft.lineage.iter().map(parse_action_lineage_draft).collect::<Result<Vec<_>>>()?;
+
+    Ok(ResolvedActionTx {
+        metadata_hash,
+        artifact_hash: plan.artifact_hash.clone(),
+        action_selector: plan.action.clone(),
+        inputs,
+        outputs,
+        witnesses,
+        cell_deps,
+        header_deps,
+        lineage,
+        fee_shannons: plan.transaction_draft.fee_shannons.unwrap_or(0),
+    })
+}
+
+fn validate_scan_selector_evidence(plan: &ActionPlan) -> Result<()> {
+    let evidence = &plan.transaction_draft.scan_selector_evidence;
+    let Some(scan_selectors) = plan.action_scan_selectors.as_ref() else {
+        if !evidence.is_empty() {
+            bail!("transaction_draft.scan_selector_evidence was supplied without action_scan_selectors");
+        }
+        return Ok(());
+    };
+    if scan_selectors.selectors.is_empty() {
+        if !evidence.is_empty() {
+            bail!("transaction_draft.scan_selector_evidence was supplied but action_scan_selectors declares no selectors");
+        }
+        return Ok(());
+    }
+    if evidence.len() != scan_selectors.selectors.len() {
+        bail!(
+            "transaction_draft.scan_selector_evidence length {} does not match action_scan_selectors.selector_count {}",
+            evidence.len(),
+            scan_selectors.selectors.len()
+        );
+    }
+    let selectors_by_index = scan_selectors
+        .selectors
+        .iter()
+        .enumerate()
+        .map(|(fallback_index, selector)| (selector.selector_index.unwrap_or(fallback_index), selector))
+        .collect::<HashMap<_, _>>();
+    let mut seen_selector_indexes = HashSet::new();
+    for item in evidence {
+        if !seen_selector_indexes.insert(item.selector_index) {
+            bail!("transaction_draft.scan_selector_evidence contains duplicate selector_index {}", item.selector_index);
+        }
+        let selector = selectors_by_index.get(&item.selector_index).ok_or_else(|| {
+            anyhow::anyhow!(
+                "transaction_draft.scan_selector_evidence selector_index {} is not declared by action_scan_selectors",
+                item.selector_index
+            )
+        })?;
+        if item.status != "resolved" {
+            bail!(
+                "transaction_draft.scan_selector_evidence status for selector {} must be 'resolved', got '{}'",
+                item.selector_index,
+                item.status
+            );
+        }
+        compare_scan_selector_evidence_field(item.selector_index, "source", item.source.as_deref(), selector.ckb_source.as_deref())?;
+        compare_scan_selector_evidence_field(item.selector_index, "role", item.role.as_deref(), selector.role.as_deref())?;
+        compare_scan_selector_evidence_field(item.selector_index, "binding", item.binding.as_deref(), selector.binding.as_deref())?;
+        compare_scan_selector_evidence_field(item.selector_index, "feature", item.feature.as_deref(), selector.feature.as_deref())?;
+        compare_scan_selector_evidence_field(
+            item.selector_index,
+            "component",
+            item.component.as_deref(),
+            selector.component.as_deref(),
+        )?;
+        compare_scan_selector_evidence_field(
+            item.selector_index,
+            "script_field",
+            item.script_field.as_deref(),
+            selector.script_field.as_deref(),
+        )?;
+    }
+    for selector_index in selectors_by_index.keys() {
+        if !seen_selector_indexes.contains(selector_index) {
+            bail!(
+                "transaction_draft.scan_selector_evidence is missing selector_index {} declared by action_scan_selectors",
+                selector_index
+            );
+        }
+    }
+    Ok(())
+}
+
+fn compare_scan_selector_evidence_field(
+    selector_index: usize,
+    field: &str,
+    actual: Option<&str>,
+    expected: Option<&str>,
+) -> Result<()> {
+    match (actual, expected) {
+        (Some(actual), Some(expected)) if actual == expected => Ok(()),
+        (Some(actual), Some(expected)) => bail!(
+            "transaction_draft.scan_selector_evidence.{field} mismatch for selector {selector_index}: got '{actual}', expected '{expected}'"
+        ),
+        (None, Some(expected)) => bail!(
+            "transaction_draft.scan_selector_evidence.{field} missing for selector {selector_index}: expected '{expected}'"
+        ),
+        (Some(actual), None) => bail!(
+            "transaction_draft.scan_selector_evidence.{field} unexpected for selector {selector_index}: got '{actual}', expected null"
+        ),
+        (None, None) => Ok(()),
+    }
+}
+
+fn has_materialized_action_draft(draft: &TransactionDraft) -> bool {
+    !draft.inputs.is_empty()
+        || !draft.outputs.is_empty()
+        || !draft.outputs_data.is_empty()
+        || !draft.witnesses.is_empty()
+        || !draft.cell_deps.is_empty()
+        || !draft.header_deps.is_empty()
+        || !draft.lineage.is_empty()
+}
+
+fn parse_action_input_draft(input: &ActionInputDraft) -> Result<CellInput> {
+    let previous_output = parse_out_point_draft("inputs[].previous_output", &input.previous_output)?;
+    let since = parse_optional_u64("inputs[].since", input.since.as_ref())?.unwrap_or(0);
+    Ok(CellInput::new_builder().previous_output(previous_output).since(since).build())
+}
+
+fn parse_action_output_draft(index: usize, output: &ActionOutputDraft, data: &str) -> Result<CellOutputWithData> {
+    let capacity = parse_required_u64(&format!("outputs[{index}].capacity"), &output.capacity)?;
+    let lock = parse_script_draft(&format!("outputs[{index}].lock"), &output.lock)?;
+    let type_script =
+        output.type_script.as_ref().map(|script| parse_script_draft(&format!("outputs[{index}].type"), script)).transpose()?;
+    let mut builder = CellOutput::new_builder().capacity(capacity).lock(lock);
+    if let Some(script) = type_script {
+        builder = builder.type_(Some(script).pack());
+    }
+    Ok(CellOutputWithData { output: builder.build(), data: Bytes::from(parse_hex_bytes(&format!("outputs_data[{index}]"), data)?) })
+}
+
+fn parse_action_witness_draft(witness: &ActionWitnessDraft) -> Result<WitnessArgs> {
+    match witness {
+        ActionWitnessDraft::Hex(hex) => {
+            let bytes = parse_hex_bytes("witnesses[]", hex)?;
+            WitnessArgs::from_slice(&bytes).map_err(|error| anyhow::anyhow!("invalid serialized WitnessArgs in witnesses[]: {error}"))
+        }
+        ActionWitnessDraft::WitnessArgs { lock, input_type, output_type } => {
+            let mut builder = WitnessArgs::new_builder();
+            if let Some(lock) = lock {
+                builder = builder.lock(Some(Bytes::from(parse_hex_bytes("witnesses[].lock", lock)?)).pack());
+            }
+            if let Some(input_type) = input_type {
+                builder = builder.input_type(Some(Bytes::from(parse_hex_bytes("witnesses[].input_type", input_type)?)).pack());
+            }
+            if let Some(output_type) = output_type {
+                builder = builder.output_type(Some(Bytes::from(parse_hex_bytes("witnesses[].output_type", output_type)?)).pack());
+            }
+            Ok(builder.build())
+        }
+    }
+}
+
+fn parse_action_cell_dep_draft(dep: &ActionCellDepDraft) -> Result<CellDep> {
+    let out_point = parse_out_point_draft("cell_deps[].out_point", &dep.out_point)?;
+    let dep_type = parse_dep_type("cell_deps[].dep_type", &dep.dep_type)?;
+    Ok(CellDep::new_builder().out_point(out_point).dep_type(dep_type).build())
+}
+
+fn parse_action_lineage_draft(edge: &ActionLineageDraft) -> Result<LiveOutputLineage> {
+    Ok(LiveOutputLineage {
+        from: parse_out_point_draft("lineage[].from", &edge.from)?,
+        to_output_index: edge.to_output_index,
+        relation: edge.relation.clone(),
+    })
+}
+
+fn parse_out_point_draft(label: &str, out_point: &OutPointDraft) -> Result<OutPoint> {
+    let tx_hash = parse_byte32_hex(&format!("{label}.tx_hash"), &out_point.tx_hash)?;
+    let index = parse_required_u64(&format!("{label}.index"), &out_point.index)?;
+    let index = u32::try_from(index).map_err(|_| anyhow::anyhow!("{label}.index does not fit in u32"))?;
+    Ok(OutPoint::new_builder().tx_hash(tx_hash.pack()).index(index).build())
+}
+
+fn parse_script_draft(label: &str, script: &ScriptDraft) -> Result<Script> {
+    let code_hash = parse_byte32_hex(&format!("{label}.code_hash"), &script.code_hash)?;
+    let hash_type = parse_hash_type(&format!("{label}.hash_type"), &script.hash_type)?;
+    let args = parse_script_args_draft(label, script)?;
+    Ok(Script::new_builder().code_hash(code_hash.pack()).hash_type(hash_type).args(Bytes::from(args).pack()).build())
+}
+
+fn parse_script_args_draft(label: &str, script: &ScriptDraft) -> Result<Vec<u8>> {
+    if script.args_parts.is_empty() {
+        return parse_hex_bytes(&format!("{label}.args"), &script.args);
+    }
+    let args = script.args.trim();
+    if !args.is_empty() && args != "0x" {
+        bail!("{label}.args cannot be combined with {label}.args_parts; put every ScriptArgs byte in args_parts");
+    }
+    let mut bytes = Vec::new();
+    for (index, part) in script.args_parts.iter().enumerate() {
+        bytes.extend(parse_script_args_part(&format!("{label}.args_parts[{index}]"), part)?);
+    }
+    Ok(bytes)
+}
+
+fn parse_script_args_part(label: &str, part: &ScriptArgsPartDraft) -> Result<Vec<u8>> {
+    match normalise_ckb_tag(&part.kind).as_str() {
+        "hex" | "bytes" => {
+            let value = value_as_str(label, &part.value)?;
+            parse_hex_bytes(&format!("{label}.value"), value)
+        }
+        "utf8" | "text" => Ok(value_as_str(label, &part.value)?.as_bytes().to_vec()),
+        "u8" => {
+            let value = parse_required_u64(&format!("{label}.value"), &part.value)?;
+            let byte = u8::try_from(value).map_err(|_| anyhow::anyhow!("{label}.value does not fit in u8"))?;
+            Ok(vec![byte])
+        }
+        "u32le" => {
+            let value = parse_required_u64(&format!("{label}.value"), &part.value)?;
+            let value = u32::try_from(value).map_err(|_| anyhow::anyhow!("{label}.value does not fit in u32"))?;
+            Ok(value.to_le_bytes().to_vec())
+        }
+        "u64le" => Ok(parse_required_u64(&format!("{label}.value"), &part.value)?.to_le_bytes().to_vec()),
+        _ => bail!("unsupported {label}.kind '{}'; expected hex, utf8, u8, u32_le, or u64_le", part.kind),
+    }
+}
+
+fn value_as_str<'a>(label: &str, value: &'a Value) -> Result<&'a str> {
+    value.as_str().ok_or_else(|| anyhow::anyhow!("{label}.value must be a string"))
+}
+
+fn parse_byte32_hex(label: &str, value: &str) -> Result<[u8; 32]> {
+    let bytes = parse_hex_bytes(label, value)?;
+    if bytes.len() != 32 {
+        bail!("{label} must be 32 bytes, got {}", bytes.len());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn parse_hex_bytes(label: &str, value: &str) -> Result<Vec<u8>> {
+    let hex = value.trim().strip_prefix("0x").unwrap_or(value.trim());
+    if hex.len() % 2 != 0 {
+        bail!("{label} hex must have an even number of digits");
+    }
+    hex::decode(hex).map_err(|error| anyhow::anyhow!("invalid {label} hex: {error}"))
+}
+
+fn parse_required_u64(label: &str, value: &Value) -> Result<u64> {
+    parse_optional_u64(label, Some(value))?.ok_or_else(|| anyhow::anyhow!("{label} is required"))
+}
+
+fn parse_optional_u64(label: &str, value: Option<&Value>) -> Result<Option<u64>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        Value::Null => Ok(None),
+        Value::Number(number) => number.as_u64().map(Some).ok_or_else(|| anyhow::anyhow!("{label} must be a non-negative u64")),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed =
+                if let Some(hex) = trimmed.strip_prefix("0x") { u64::from_str_radix(hex, 16) } else { trimmed.parse::<u64>() }
+                    .map_err(|error| anyhow::anyhow!("invalid {label}: {error}"))?;
+            Ok(Some(parsed))
+        }
+        _ => bail!("{label} must be a u64 number or string"),
+    }
+}
+
+fn parse_hash_type(label: &str, value: &str) -> Result<ScriptHashType> {
+    match normalise_ckb_tag(value).as_str() {
+        "data" => Ok(ScriptHashType::Data),
+        "type" => Ok(ScriptHashType::Type),
+        "data1" => Ok(ScriptHashType::Data1),
+        "data2" => Ok(ScriptHashType::Data2),
+        _ => bail!("unknown {label} '{}'", value),
+    }
+}
+
+fn parse_dep_type(label: &str, value: &str) -> Result<DepType> {
+    match normalise_ckb_tag(value).as_str() {
+        "code" => Ok(DepType::Code),
+        "depgroup" => Ok(DepType::DepGroup),
+        _ => bail!("unknown {label} '{}'", value),
+    }
+}
+
+fn normalise_ckb_tag(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace(['_', '-'], "")
+}
+
+fn add_manifest_cell_deps(cell_deps: &mut Vec<CellDep>, outputs: &[CellOutputWithData], manifest: &DeploymentManifest) -> Result<()> {
+    let resolver = ManifestCellDepResolver::from_manifest(manifest)?;
+    for output in outputs {
+        add_manifest_cell_dep(cell_deps, resolver.resolve_for_script(&output.output.lock()));
+        if let Some(type_script) = output.output.type_().to_opt() {
+            add_manifest_cell_dep(cell_deps, resolver.resolve_for_script(&type_script));
+        }
+    }
+    Ok(())
+}
+
+fn add_manifest_cell_dep(cell_deps: &mut Vec<CellDep>, dep: Option<CellDep>) {
+    let Some(dep) = dep else {
+        return;
+    };
+    if !cell_deps.iter().any(|existing| existing.as_slice() == dep.as_slice()) {
+        cell_deps.push(dep);
     }
 }
 
@@ -1361,15 +1907,14 @@ impl CellScriptAdapter {
         load_deployment_manifest(path)
     }
 
-    /// Resolve an action plan into a CKB transaction candidate.
+    /// Resolve a materialized action plan into a CKB transaction candidate.
     ///
-    /// This is a convenience wrapper around `build_action_transaction`
-    /// for the common case of using `sample_resolved_action_tx`-style inputs.
-    /// For full control, construct `ResolvedActionTx` directly.
-    pub fn resolve_action(&self, _plan: &ActionPlan) -> Result<ResolvedActionTx> {
-        // TODO: full action resolution with live-cell collection.
-        // Current implementation requires the caller to construct ResolvedActionTx manually.
-        bail!("full action resolution with live-cell collection is not yet implemented; construct ResolvedActionTx manually and use build_action_transaction()")
+    /// Compiler-produced `ActionPlan` templates still fail closed here until a
+    /// builder runtime fills the concrete inputs, outputs, witnesses, CellDeps,
+    /// output data, and lineage. The method does not infer protocol semantics
+    /// or select live cells from action names.
+    pub fn resolve_action(&self, plan: &ActionPlan) -> Result<ResolvedActionTx> {
+        resolve_materialized_action_plan(plan)
     }
 
     // ---- Node interaction helpers ----
@@ -1478,16 +2023,29 @@ pub fn sample_action_plan() -> ActionPlan {
         policy: ACTION_PLAN_POLICY.to_string(),
         action: "mint".to_string(),
         artifact_hash: Some("0".repeat(64)),
+        metadata_hash: Some("1".repeat(64)),
+        action_scan_selectors: None,
         transaction_draft: TransactionDraft {
             state: "resolved".to_string(),
             can_submit: true,
             requires_packed_materialization: false,
+            metadata_hash: None,
+            fee_shannons: Some(1_000),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            outputs_data: Vec::new(),
+            witnesses: Vec::new(),
+            cell_deps: Vec::new(),
+            header_deps: Vec::new(),
+            lineage: Vec::new(),
+            scan_selector_evidence: Vec::new(),
         },
         adapter_contract: AdapterContract {
             schema: ADAPTER_CONTRACT_SCHEMA.to_string(),
             compiler_core_dependency: "cellscript-core-v0.19".to_string(),
             transaction_realizer: "headless".to_string(),
             resolved_tx_required_fields: vec!["inputs".to_string(), "outputs".to_string(), "witnesses".to_string()],
+            acceptance_report_template: None,
         },
     }
 }
@@ -1591,6 +2149,129 @@ mod tests {
         assert!(!evidence.tx_pool_acceptance);
         assert_eq!(tx.outputs().len(), tx.outputs_data().len());
         assert_eq!(to_rpc_transaction(&tx).outputs.len(), 1);
+    }
+
+    #[test]
+    fn resolves_materialized_action_plan_into_packed_transaction_candidate() {
+        let plan = materialized_action_plan_json(true);
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let resolved = resolve_materialized_action_plan(&parsed).unwrap();
+
+        assert_eq!(resolved.action_selector, "mint");
+        assert_eq!(resolved.metadata_hash, "0".repeat(64));
+        assert_eq!(resolved.inputs.len(), 1);
+        assert_eq!(resolved.outputs.len(), 1);
+        assert_eq!(resolved.outputs[0].data, Bytes::from(vec![0x55u8; 16]));
+        assert_eq!(resolved.witnesses.len(), 1);
+        assert_eq!(resolved.cell_deps.len(), 1);
+        assert_eq!(resolved.lineage.len(), 1);
+        assert_eq!(resolved.fee_shannons, 1_000);
+
+        let (tx, evidence) = build_action_transaction(&resolved).unwrap();
+        assert_eq!(tx.inputs().len(), 1);
+        assert_eq!(tx.outputs().len(), tx.outputs_data().len());
+        assert_eq!(evidence.state, "ResolvedActionTx");
+        assert_eq!(evidence.outputs_data, 1);
+    }
+
+    #[test]
+    fn materialized_action_plan_constructs_variable_length_script_args_from_parts() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["outputs"][0]["lock"]["args"] = serde_json::json!("0x");
+        plan["transaction_draft"]["outputs"][0]["lock"]["args_parts"] = serde_json::json!([
+            { "kind": "utf8", "value": "CS" },
+            { "kind": "u8", "value": 7 },
+            { "kind": "u32_le", "value": 42 },
+            { "kind": "hex", "value": "0xaa55" }
+        ]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let resolved = resolve_materialized_action_plan(&parsed).unwrap();
+        let args = resolved.outputs[0].output.lock().args().raw_data();
+
+        assert_eq!(args, Bytes::from(vec![b'C', b'S', 7, 42, 0, 0, 0, 0xaa, 0x55]));
+    }
+
+    #[test]
+    fn materialized_action_plan_rejects_ambiguous_script_args_parts() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["outputs"][0]["lock"]["args"] = serde_json::json!("0xff");
+        plan["transaction_draft"]["outputs"][0]["lock"]["args_parts"] = serde_json::json!([{ "kind": "hex", "value": "0xaa" }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+
+        assert!(error.contains("args cannot be combined"), "{error}");
+    }
+
+    #[test]
+    fn resolve_action_template_fails_closed_until_runtime_fills_live_cells() {
+        let plan = serde_json::json!({
+            "policy": ACTION_PLAN_POLICY,
+            "action": "mint",
+            "artifact_hash": "1".repeat(64),
+            "transaction_draft": {
+                "state": "ActionPlan",
+                "can_submit": false,
+                "requires_packed_materialization": true
+            },
+            "adapter_contract": {
+                "schema": ADAPTER_CONTRACT_SCHEMA,
+                "compiler_core_dependency": "no-ckb-sdk-rust",
+                "transaction_realizer": "ckb-sdk-rust-or-CCC-adapter",
+                "resolved_tx_required_fields": ["outputs_data", "cell_deps", "lineage"]
+            }
+        });
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("semantic template"), "{error}");
+        assert!(error.contains("transaction_draft.inputs"), "{error}");
+    }
+
+    #[test]
+    fn materialized_action_plan_uses_manifest_to_complete_matching_cell_deps() {
+        let code_hash = [0x33u8; 32];
+        let tx_hash = [0xeeu8; 32];
+        let plan = materialized_action_plan_json(false);
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let manifest = DeploymentManifest {
+            schema: DEPLOYMENT_MANIFEST_SCHEMA.to_string(),
+            version: 1,
+            deployments: vec![DeploymentRef {
+                name: "mint-lock".to_string(),
+                code_hash: format!("0x{}", hex::encode(code_hash)),
+                hash_type: "data1".to_string(),
+                args: "0x".to_string(),
+                dep_type: "code".to_string(),
+                out_point: format!("0x{}:3", hex::encode(tx_hash)),
+            }],
+        };
+
+        let resolved = resolve_materialized_action_plan_with_manifest(&parsed, Some(&manifest)).unwrap();
+        assert_eq!(resolved.cell_deps.len(), 1);
+        assert_eq!(resolved.cell_deps[0].out_point().tx_hash().as_slice(), &tx_hash);
+        let resolved_index: u32 = resolved.cell_deps[0].out_point().index().unpack();
+        assert_eq!(resolved_index, 3u32);
+    }
+
+    #[test]
+    fn materialized_action_plan_requires_scan_selector_evidence_when_selectors_are_declared() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"].as_object_mut().expect("transaction draft").remove("scan_selector_evidence");
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("scan_selector_evidence length 0"), "{error}");
+        assert!(error.contains("action_scan_selectors.selector_count 1"), "{error}");
+    }
+
+    #[test]
+    fn materialized_action_plan_rejects_mismatched_scan_selector_role() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["scan_selector_evidence"][0]["role"] = serde_json::json!("wrong-role");
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("scan_selector_evidence.role mismatch"), "{error}");
+        assert!(error.contains("transaction-output"), "{error}");
     }
 
     #[test]
@@ -2149,5 +2830,477 @@ mod tests {
         let manifest = build_deployment_manifest_from_evidence(&evidence, &[0xabu8; 32], 0);
         assert_eq!(manifest.deployments.len(), 1);
         assert_eq!(manifest.deployments[0].name, "test-token");
+    }
+
+    fn materialized_action_plan_json(include_cell_dep: bool) -> serde_json::Value {
+        let cell_deps = if include_cell_dep {
+            serde_json::json!([{
+                "out_point": {
+                    "tx_hash": format!("0x{}", hex::encode([0x22u8; 32])),
+                    "index": 1
+                },
+                "dep_type": "code"
+            }])
+        } else {
+            serde_json::json!([])
+        };
+        serde_json::json!({
+            "policy": ACTION_PLAN_POLICY,
+            "action": "mint",
+            "artifact_hash": "1".repeat(64),
+            "metadata_hash": "0".repeat(64),
+            "action_scan_selectors": {
+                "schema": ACTION_SCAN_SELECTORS_SCHEMA,
+                "source": "transaction_runtime_input_requirements",
+                "selector_count": 1,
+                "selectors": [{
+                    "selector_index": 0,
+                    "feature": "create-output:Token:create_Token",
+                    "component": "create-output-fields",
+                    "ckb_source": "Output",
+                    "role": "transaction-output",
+                    "binding": "create_Token",
+                    "script_field": null
+                }]
+            },
+            "transaction_draft": {
+                "state": "ActionPlan",
+                "can_submit": false,
+                "requires_packed_materialization": true,
+                "fee_shannons": 1_000,
+                "inputs": [{
+                    "previous_output": {
+                        "tx_hash": format!("0x{}", hex::encode([0x11u8; 32])),
+                        "index": "0x0"
+                    },
+                    "since": "0x0"
+                }],
+                "outputs": [{
+                    "capacity": 100_000_000_000u64,
+                    "lock": {
+                        "code_hash": format!("0x{}", hex::encode([0x33u8; 32])),
+                        "hash_type": "data1",
+                        "args": format!("0x{}", hex::encode([0x44u8; 20]))
+                    }
+                }],
+                "outputs_data": [format!("0x{}", hex::encode([0x55u8; 16]))],
+                "witnesses": [{
+                    "input_type": "0x6d696e74"
+                }],
+                "cell_deps": cell_deps,
+                "header_deps": [],
+                "lineage": [{
+                    "from": {
+                        "tx_hash": format!("0x{}", hex::encode([0x11u8; 32])),
+                        "index": 0
+                    },
+                    "to_output_index": 0,
+                    "relation": "state-continuation"
+                }],
+                "scan_selector_evidence": [{
+                    "selector_index": 0,
+                    "status": "resolved",
+                    "source": "Output",
+                    "role": "transaction-output",
+                    "binding": "create_Token",
+                    "feature": "create-output:Token:create_Token",
+                    "component": "create-output-fields",
+                    "script_field": null
+                }]
+            },
+            "adapter_contract": {
+                "schema": ADAPTER_CONTRACT_SCHEMA,
+                "compiler_core_dependency": "no-ckb-sdk-rust",
+                "transaction_realizer": "ckb-sdk-rust-or-CCC-adapter",
+                "resolved_tx_required_fields": ["outputs_data", "cell_deps", "lineage"]
+            }
+        })
+    }
+
+    fn manifest_with_single_deployment(code_hash: [u8; 32], hash_type: &str, dep_type: &str, out_point: &str) -> DeploymentManifest {
+        DeploymentManifest {
+            schema: DEPLOYMENT_MANIFEST_SCHEMA.to_string(),
+            version: 1,
+            deployments: vec![DeploymentRef {
+                name: "test-dep".to_string(),
+                code_hash: format!("0x{}", hex::encode(code_hash)),
+                hash_type: hash_type.to_string(),
+                args: "0x".to_string(),
+                dep_type: dep_type.to_string(),
+                out_point: out_point.to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn materialized_action_plan_args_parts_concatenates_all_kinds_in_order() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["outputs"][0]["lock"]["args"] = serde_json::json!("0x");
+        plan["transaction_draft"]["outputs"][0]["lock"]["args_parts"] = serde_json::json!([
+            { "kind": "utf8", "value": "CS" },
+            { "kind": "u8", "value": 7 },
+            { "kind": "u32_le", "value": 42 },
+            { "kind": "u64_le", "value": serde_json::json!(0x0102030405060708u64) },
+            { "kind": "hex", "value": "0xaa55" }
+        ]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let resolved = resolve_materialized_action_plan(&parsed).unwrap();
+        let args = resolved.outputs[0].output.lock().args().raw_data();
+
+        // utf8("CS") + u8(7) + u32_le(42) + u64_le(0x0102030405060708) + hex(aa55)
+        assert_eq!(args, Bytes::from(vec![b'C', b'S', 7, 42, 0, 0, 0, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0xaa, 0x55]));
+    }
+
+    #[test]
+    fn materialized_action_plan_rejects_unsupported_args_part_kind() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["outputs"][0]["lock"]["args"] = serde_json::json!("0x");
+        plan["transaction_draft"]["outputs"][0]["lock"]["args_parts"] = serde_json::json!([{ "kind": "u128", "value": "1" }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+
+        assert!(error.contains("unsupported"), "{error}");
+        assert!(error.contains("expected hex, utf8, u8, u32_le, or u64_le"), "{error}");
+    }
+
+    #[test]
+    fn materialized_action_plan_rejects_u8_overflow_args_part() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["outputs"][0]["lock"]["args"] = serde_json::json!("0x");
+        plan["transaction_draft"]["outputs"][0]["lock"]["args_parts"] = serde_json::json!([{ "kind": "u8", "value": 300 }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+
+        assert!(error.contains("does not fit in u8"), "{error}");
+    }
+
+    #[test]
+    fn materialized_action_plan_rejects_u32_overflow_args_part() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["outputs"][0]["lock"]["args"] = serde_json::json!("0x");
+        plan["transaction_draft"]["outputs"][0]["lock"]["args_parts"] =
+            serde_json::json!([{ "kind": "u32_le", "value": 4294967296u64 }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+
+        assert!(error.contains("does not fit in u32"), "{error}");
+    }
+
+    #[test]
+    fn materialized_action_plan_rejects_odd_length_hex_args_part() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["outputs"][0]["lock"]["args"] = serde_json::json!("0x");
+        plan["transaction_draft"]["outputs"][0]["lock"]["args_parts"] = serde_json::json!([{ "kind": "hex", "value": "0xabc" }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+
+        assert!(error.contains("even number of digits"), "{error}");
+    }
+
+    #[test]
+    fn materialized_action_plan_rejects_non_string_args_part_value() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["outputs"][0]["lock"]["args"] = serde_json::json!("0x");
+        plan["transaction_draft"]["outputs"][0]["lock"]["args_parts"] = serde_json::json!([{ "kind": "utf8", "value": 7 }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+
+        assert!(error.contains("value must be a string"), "{error}");
+    }
+
+    #[test]
+    fn manifest_resolver_rejects_invalid_code_hash_hex() {
+        let manifest = DeploymentManifest {
+            schema: DEPLOYMENT_MANIFEST_SCHEMA.to_string(),
+            version: 1,
+            deployments: vec![DeploymentRef {
+                name: "bad-hex".to_string(),
+                code_hash: "0xnothex".to_string(),
+                hash_type: "type".to_string(),
+                args: "0x".to_string(),
+                dep_type: "code".to_string(),
+                out_point: format!("0x{}:0", hex::encode([0xeeu8; 32])),
+            }],
+        };
+        let error = ManifestCellDepResolver::from_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("invalid code_hash hex"), "{error}");
+    }
+
+    #[test]
+    fn manifest_resolver_rejects_unknown_hash_type() {
+        let code_hash = blake2b_256([0xf0u8; 64]);
+        let manifest = manifest_with_single_deployment(code_hash, "data3", "code", &format!("0x{}:0", hex::encode([0xeeu8; 32])));
+        let error = ManifestCellDepResolver::from_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("unknown hash_type 'data3'"), "{error}");
+    }
+
+    #[test]
+    fn manifest_resolver_rejects_malformed_out_point() {
+        let code_hash = blake2b_256([0xf1u8; 64]);
+        // Missing the colon-delimited index suffix.
+        let manifest = manifest_with_single_deployment(code_hash, "type", "code", "0xdeadbeef");
+        let error = ManifestCellDepResolver::from_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("invalid out_point format"), "{error}");
+        assert!(error.contains("expected 0x<hash>:<index>"), "{error}");
+    }
+
+    #[test]
+    fn manifest_resolver_rejects_unknown_dep_type() {
+        let code_hash = blake2b_256([0xf2u8; 64]);
+        let manifest = manifest_with_single_deployment(code_hash, "type", "delegate", &format!("0x{}:0", hex::encode([0xeeu8; 32])));
+        let error = ManifestCellDepResolver::from_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("unknown dep_type 'delegate'"), "{error}");
+    }
+
+    #[test]
+    fn manifest_resolver_rejects_non_u32_out_point_index() {
+        let code_hash = blake2b_256([0xf3u8; 64]);
+        let manifest =
+            manifest_with_single_deployment(code_hash, "type", "code", &format!("0x{}:not-a-number", hex::encode([0xeeu8; 32])));
+        let error = ManifestCellDepResolver::from_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("invalid out_point index"), "{error}");
+    }
+
+    #[test]
+    fn scan_selector_evidence_rejects_evidence_without_declared_selectors() {
+        let mut plan = materialized_action_plan_json(true);
+        // Drop the declared selectors but keep the runtime evidence: the adapter must
+        // fail closed rather than silently accepting evidence it cannot match.
+        plan["action_scan_selectors"] = serde_json::Value::Null;
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("scan_selector_evidence was supplied without action_scan_selectors"), "{error}");
+    }
+
+    #[test]
+    fn scan_selector_evidence_rejects_length_mismatch() {
+        let mut plan = materialized_action_plan_json(true);
+        // Declare one selector (the default) but supply two evidence rows.
+        plan["transaction_draft"]["scan_selector_evidence"] = serde_json::json!([
+            { "selector_index": 0, "status": "resolved", "source": "Output", "role": "transaction-output", "binding": "create_Token", "feature": "create-output:Token:create_Token", "component": "create-output-fields", "script_field": null },
+            { "selector_index": 0, "status": "resolved", "source": "Output", "role": "transaction-output", "binding": "create_Token", "feature": "create-output:Token:create_Token", "component": "create-output-fields", "script_field": null }
+        ]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("does not match action_scan_selectors.selector_count"), "{error}");
+    }
+
+    #[test]
+    fn scan_selector_evidence_rejects_undeclared_selector_index() {
+        let mut plan = materialized_action_plan_json(true);
+        // The declared selectors only include index 0; evidence for index 7 is undeclared.
+        plan["transaction_draft"]["scan_selector_evidence"] = serde_json::json!([{
+            "selector_index": 7,
+            "status": "resolved",
+            "source": "Output",
+            "role": "transaction-output",
+            "binding": "create_Token",
+            "feature": "create-output:Token:create_Token",
+            "component": "create-output-fields",
+            "script_field": null
+        }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("selector_index 7 is not declared by action_scan_selectors"), "{error}");
+    }
+
+    #[test]
+    fn scan_selector_evidence_rejects_duplicate_selector_index_even_with_matching_length() {
+        let mut plan = materialized_action_plan_json(true);
+        let mut second_selector = plan["action_scan_selectors"]["selectors"][0].clone();
+        second_selector["selector_index"] = serde_json::json!(1);
+        second_selector["binding"] = serde_json::json!("create_Token_again");
+        plan["action_scan_selectors"]["selector_count"] = serde_json::json!(2);
+        plan["action_scan_selectors"]["selectors"].as_array_mut().unwrap().push(second_selector);
+        let evidence = plan["transaction_draft"]["scan_selector_evidence"][0].clone();
+        plan["transaction_draft"]["scan_selector_evidence"] = serde_json::json!([evidence.clone(), evidence]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("duplicate selector_index 0"), "{error}");
+    }
+
+    #[test]
+    fn scan_selector_evidence_rejects_missing_declared_field() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["scan_selector_evidence"][0].as_object_mut().unwrap().remove("source");
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("scan_selector_evidence.source missing"), "{error}");
+    }
+
+    #[test]
+    fn scan_selector_evidence_rejects_unresolved_status() {
+        let mut plan = materialized_action_plan_json(true);
+        // Status must be exactly "resolved"; a pending scan must fail closed.
+        plan["transaction_draft"]["scan_selector_evidence"] = serde_json::json!([{
+            "selector_index": 0,
+            "status": "pending",
+            "source": "Output",
+            "role": "transaction-output",
+            "binding": "create_Token",
+            "feature": "create-output:Token:create_Token",
+            "component": "create-output-fields",
+            "script_field": null
+        }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("must be 'resolved'"), "{error}");
+    }
+
+    #[test]
+    fn scan_selector_evidence_rejects_field_mismatch_source() {
+        let mut plan = materialized_action_plan_json(true);
+        // The declared selector reports ckb_source = "Output"; evidence disagrees.
+        plan["transaction_draft"]["scan_selector_evidence"] = serde_json::json!([{
+            "selector_index": 0,
+            "status": "resolved",
+            "source": "Input",
+            "role": "transaction-output",
+            "binding": "create_Token",
+            "feature": "create-output:Token:create_Token",
+            "component": "create-output-fields",
+            "script_field": null
+        }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("scan_selector_evidence.source mismatch"), "{error}");
+    }
+
+    #[test]
+    fn scan_selector_evidence_rejects_field_mismatch_binding() {
+        let mut plan = materialized_action_plan_json(true);
+        // The declared selector binds to "create_Token"; evidence names a different binding.
+        plan["transaction_draft"]["scan_selector_evidence"] = serde_json::json!([{
+            "selector_index": 0,
+            "status": "resolved",
+            "source": "Output",
+            "role": "transaction-output",
+            "binding": "create_Wei",
+            "feature": "create-output:Token:create_Token",
+            "component": "create-output-fields",
+            "script_field": null
+        }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("scan_selector_evidence.binding mismatch"), "{error}");
+    }
+
+    #[test]
+    fn materialized_action_plan_fails_closed_on_empty_semantic_template() {
+        // A semantic-template ActionPlan with no materialised inputs/outputs/cell_deps
+        // must fail closed and instruct the builder runtime to resolve live cells.
+        let plan = serde_json::json!({
+            "policy": ACTION_PLAN_POLICY,
+            "action": "mint",
+            "artifact_hash": "1".repeat(64),
+            "metadata_hash": "0".repeat(64),
+            "transaction_draft": {
+                "state": "ActionPlan",
+                "can_submit": false,
+                "requires_packed_materialization": true
+            },
+            "adapter_contract": {
+                "schema": ADAPTER_CONTRACT_SCHEMA,
+                "compiler_core_dependency": "no-ckb-sdk-rust",
+                "transaction_realizer": "ckb-sdk-rust-or-CCC-adapter",
+                "resolved_tx_required_fields": ["outputs_data", "cell_deps", "lineage"]
+            }
+        });
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("a builder runtime must resolve live cells"), "{error}");
+        assert!(error.contains("ActionPlan 'mint'"), "{error}");
+    }
+
+    #[test]
+    fn manifest_resolver_rejects_short_out_point_tx_hash() {
+        let code_hash = blake2b_256([0xf4u8; 64]);
+        // out_point tx_hash is only 16 bytes; resolver must reject it.
+        let manifest = manifest_with_single_deployment(code_hash, "type", "code", &format!("0x{}:0", hex::encode([0xeeu8; 16])));
+        let error = ManifestCellDepResolver::from_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("out_point tx_hash for test-dep must be 32 bytes"), "{error}");
+    }
+
+    #[test]
+    fn manifest_resolver_rejects_invalid_out_point_tx_hash_hex() {
+        let code_hash = blake2b_256([0xf5u8; 64]);
+        // out_point tx_hash is not valid hex.
+        let manifest = manifest_with_single_deployment(code_hash, "type", "code", "0xnothex:0");
+        let error = ManifestCellDepResolver::from_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("invalid out_point tx_hash for test-dep"), "{error}");
+    }
+
+    #[test]
+    fn scan_selector_evidence_rejects_field_mismatch_feature() {
+        let mut plan = materialized_action_plan_json(true);
+        // The declared selector reports feature "create-output:Token:create_Token";
+        // evidence names a different feature.
+        plan["transaction_draft"]["scan_selector_evidence"] = serde_json::json!([{
+            "selector_index": 0,
+            "status": "resolved",
+            "source": "Output",
+            "role": "transaction-output",
+            "binding": "create_Token",
+            "feature": "create-output:Token:create_Wei",
+            "component": "create-output-fields",
+            "script_field": null
+        }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("scan_selector_evidence.feature mismatch"), "{error}");
+    }
+
+    #[test]
+    fn scan_selector_evidence_rejects_field_mismatch_component() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["scan_selector_evidence"] = serde_json::json!([{
+            "selector_index": 0,
+            "status": "resolved",
+            "source": "Output",
+            "role": "transaction-output",
+            "binding": "create_Token",
+            "feature": "create-output:Token:create_Token",
+            "component": "consume-input-fields",
+            "script_field": null
+        }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("scan_selector_evidence.component mismatch"), "{error}");
+    }
+
+    #[test]
+    fn scan_selector_evidence_rejects_field_mismatch_role() {
+        let mut plan = materialized_action_plan_json(true);
+        plan["transaction_draft"]["scan_selector_evidence"] = serde_json::json!([{
+            "selector_index": 0,
+            "status": "resolved",
+            "source": "Output",
+            "role": "transaction-input",
+            "binding": "create_Token",
+            "feature": "create-output:Token:create_Token",
+            "component": "create-output-fields",
+            "script_field": null
+        }]);
+
+        let parsed = parse_action_plan(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+        let error = resolve_materialized_action_plan(&parsed).unwrap_err().to_string();
+        assert!(error.contains("scan_selector_evidence.role mismatch"), "{error}");
     }
 }

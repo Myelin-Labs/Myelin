@@ -1,6 +1,6 @@
 # CellScript 0.16 → 0.20 Release Notes
 
-Status: Covers every shipping change from `v0.16.0` to `v0.20.0-rc.2`.
+Status: Covers every shipping change from `v0.16.0` to `v0.20.0`.
 Audience: CellScript contract authors, transaction builder integrators,
 and CKB tool consumers.
 
@@ -65,11 +65,12 @@ Package compilation loads the entry package and local path-dependency
 includes dependency `.cell` files, `Cell.toml`, and `Cell.lock`.
 File-backed LSP diagnostics use the package graph.
 
-Cross-file function-call linking is still deferred and fail-closed.
-The supported reuse pattern is shared schema / type imports that
-compile into each entry artifact; cross-file helpers are inlined
-into the entry artifact with stable internal labels. There is no
-ELF linker and no cross-script runtime linkage. The NovaSeal
+Cross-file type/schema imports and helper calls are supported as
+compile-time reuse inside one entry artifact. Imported helper bodies
+are resolved from loaded modules and inlined with stable internal
+labels, including aliased imports, fully-qualified calls,
+same-basename dependency helpers, and transitive helper calls. There
+is no ELF linker and no cross-script runtime linkage. The NovaSeal
 `fungible-xudt-profile-v0` package demonstrates the pattern; iCKB
 and DobEvo are held back from this refactor because their sources do
 not expose a natural shared-schema boundary right now.
@@ -467,18 +468,18 @@ slice, iCKB production equivalence with the original iCKB family
 
 ## Cross-References
 
-- Open direction: `docs/CELLSCRIPT_0_20_ROADMAP.md` and the
+- Open direction: `docs/archive/0.20/CELLSCRIPT_0_20_ROADMAP.md` and the
   planning draft for the next line at `docs/CELLSCRIPT_0_21_ROADMAP.md`.
 - Public registry RFC thread:
   [Package Management for CellScript: A Go-style, GitHub-based
   Package Management Registry for CKB Contracts](https://talk.nervos.org/t/rfc-cellscript-go-github-ckb/10238).
-- Historical per-version drafts (project-internal):
+- Historical per-version draft:
   `docs/releases/CELLSCRIPT_0_19_RELEASE_NOTES.internal.md` and
-  `docs/releases/CELLSCRIPT_0_20_RELEASE_NOTES.internal.md`.
+  final 0.20 notes in `docs/releases/CELLSCRIPT_0_20_RELEASE_NOTES.md`.
 - Per-version patch notes that are published on their own:
   `docs/releases/CELLSCRIPT_0_16_1_RELEASE_NOTES.md` and
   `docs/releases/CELLSCRIPT_0_16_2_RELEASE_NOTES.md`.
-- Compile-history reference: `git log v0.16.0..v0.20.0-rc.2`.
+- Compile-history reference: `git log v0.16.0..v0.20.0`.
 
 ## Where I Stand
 
@@ -494,11 +495,11 @@ narrative above lands in something concrete:
   compile target, ~234 LoC, gated so the wasm32 build cannot
   pull native I/O), and `examples/ckb-sdk-builder` (the scaffold
   for the generated TypeScript builder workflow).
-- **Tests (`tests/`).** 19 test files, ~40 k LoC. The
-  per-version suite (`v0_14` through `v0_18`), the CLI surface
-  (`cli.rs`), the CKB compat suite, the iCKB differential
-  matrix (`ickb_diff.rs` and the 75-row committed matrix), and
-  the registry / deployment acceptance flows.
+- **Tests (`tests/`).** The main branch has retired the old version-labelled
+  integration suites. Active coverage now centres on the CLI surface
+  (`cli.rs`), examples, the CKB compat suite, the iCKB differential matrix
+  (`ickb_diff.rs` and the committed matrix), and the registry / deployment
+  acceptance flows.
 - **Scripts (`scripts/`).** ~24 k LoC across the unified
   `cellscript_gate.sh` modes (`dev` / `ci` / `backend` /
   `release` / `release-quick`), the CKB acceptance harness

@@ -5,7 +5,13 @@ import { Marked, Renderer } from "marked";
 import { renderSource } from "./highlight";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..", "..", "..");
+const repoRootCandidates = [
+  process.env.CELLSCRIPT_REPO_ROOT,
+  resolve(here, "..", "..", ".."),
+].filter((candidate): candidate is string => Boolean(candidate));
+const repoRoot =
+  repoRootCandidates.find((candidate) => existsSync(resolve(candidate, "docs", "wiki"))) ??
+  repoRootCandidates[0];
 const wikiRoot = resolve(repoRoot, "docs", "wiki");
 
 const docsOrder = [
@@ -13,16 +19,17 @@ const docsOrder = [
   "Tutorial-01-Getting-Started.md",
   "Tutorial-02-Language-Basics.md",
   "Tutorial-03-Resources-and-Cell-Effects.md",
+  "Tutorial-09-Action-Model-and-Canonical-Syntax.md",
+  "Tutorial-10-Standard-Library.md",
+  "Tutorial-11-Scoped-Invariants-and-ProofPlan.md",
+  "Cookbook-Recipes.md",
   "Tutorial-04-Packages-and-CLI-Workflow.md",
   "Tutorial-05-CKB-Target-Profiles.md",
   "Tutorial-06-Metadata-Verification-and-Production-Gates.md",
   "Tutorial-07-LSP-and-Tooling.md",
   "Tutorial-08-Bundled-Example-Contracts.md",
-  "Tutorial-09-Action-Model-and-0-13-Syntax.md",
-  "Tutorial-10-Standard-Library.md",
-  "Tutorial-11-Scoped-Invariants-and-ProofPlan.md",
-  "Cookbook-Recipes.md",
   "Tutorial-12-Phase1-Registry-End-to-End.md",
+  "Tutorial-13-Agentic-Loops-and-cellscript-mcp.md",
   "CKB-Glossary.md",
 ] as const;
 

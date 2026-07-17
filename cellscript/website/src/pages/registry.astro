@@ -3,6 +3,7 @@ import "../styles/global.css";
 import "../styles/registry.css";
 import SiteHeader from "../components/SiteHeader.astro";
 import { ClientRouter } from "astro:transitions";
+import { links } from "../data/site";
 import { defaultLocale, translations } from "../i18n/translations";
 import { Check, CircleDot, Mail } from "lucide-astro";
 
@@ -61,12 +62,18 @@ const title = `CellScript Registry — ${t.comingSoon.title}`;
               return (
                 <div class:list={["registry-phase", `registry-phase-${state}`]}>
                   <span class="registry-phase-dot"><PhaseIcon aria-hidden="true" /></span>
-                  <span class="registry-phase-label" data-i18n={`comingSoon.phases.${index}.label`}>{phase.label}</span>
-                  <strong class="registry-phase-title" data-i18n={`comingSoon.phases.${index}.title`}>{phase.title}</strong>
-                  <p class="registry-phase-caption" data-i18n={`comingSoon.phases.${index}.caption`}>{phase.caption}</p>
+                  <span class="registry-phase-label">{phase.label}</span>
+                  <strong class="registry-phase-title">{phase.title}</strong>
+                  <p class="registry-phase-caption">{phase.caption}</p>
                 </div>
               );
             })}
+          </div>
+
+          <div class="registry-coming-soon-actions">
+            <a class="registry-button primary" href="/registry/submit" data-i18n="comingSoon.tryLocalCta">{t.comingSoon.tryLocalCta}</a>
+            <a class="registry-button" href={links.docs} data-i18n="comingSoon.ctaWiki">{t.comingSoon.ctaWiki}</a>
+            <a class="registry-button" href={links.source} target="_blank" rel="noopener noreferrer" data-i18n="comingSoon.ctaSource">{t.comingSoon.ctaSource}</a>
           </div>
         </div>
 
