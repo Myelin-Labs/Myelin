@@ -251,6 +251,59 @@ serialisation rule. That is the point: the off-chain path can be made as fast
 as host hardware allows, *without* diverging from what the chain would
 verify.
 
+## Standing on shoulders: credit where it is due
+
+Myelin would not exist without the body of work xxuejie (Xuejie Xiao)
+published on running real computation inside CKB-VM. We want to be explicit
+about what is his and what is ours, because the line matters.
+
+**What is entirely xxuejie's:**
+
+- The *Teeworlds on CKB* experiment — proving a 60 Hz multiplayer game tick
+  loop runs in CKB-VM as one chunk per transaction
+  ([post](https://xuejie.space/2026_06_16_teeworlds_on_ckb/)). This includes
+  the RISC-V replayer binary, the fixture builder, and all the in-VM
+  optimisation work (fixed-point math, custom collision, musl/libcxx ports,
+  libc stripping). Myelin reuses that binary **unchanged** — we did not write
+  a line of it.
+- The *fat / thin transactions* framework
+  ([post](https://xuejie.space/2026_06_24_fat_transactions/)) — the insight
+  that a transaction's witness, input/output, and data are independent
+  expansion axes. This framework shaped our discipline of keeping scheduler
+  policy in the witness axis and payload in the data axis.
+- The *One Hour One Life* port
+  ([post](https://xuejie.space/2026_06_29_porting_one_hour_one_life_game_loop_to_ckb/))
+  — proving a persistent crafting world runs on CKB-VM, and surfacing the
+  need for a chained world-state hash across chunks. This directly informed
+  our decision to make the session state root a first-class, incrementally
+  computed commitment.
+- The *Archipelagos* design
+  ([post](https://xuejie.space/2026_06_30_archipelago/)) — the exploration
+  of sharding a world that does not fit in one chunk into typed islands with
+  a customs border. This is the most directly generative of his posts for
+  us: it validated that the typed-cell conflict-domain model we were already
+  building maps naturally onto multi-domain sessions, and it pushed us to
+  think about session-level composition evidence.
+
+**What is Myelin's:**
+
+- The off-chain session runtime itself: CellDAG inter-transaction parallel
+  scheduling, the dual-engine closed-validator finality, the CKB-style
+  projection layer, the court bundle, the DA evidence path.
+- The typed-cell model — a runtime-side type system
+  (`TypedCellDecl`, `ConflictKeySpec`, `compute_conflict_hash`) that is
+  Myelin's own development, not in upstream CellScript.
+- The witness bridge that connects the CellScript compiler's generic
+  witnesses to Myelin's typed conflict domains at runtime.
+- All host-side optimisations described above.
+
+The clean way to state it: xxuejie proved *what CKB-VM can do* and, in each
+post, named the next layer as future work. Myelin builds *that layer* — the
+off-chain session runtime — and the design pressures his experiments surfaced
+directly shaped which runtime features we built first. We reuse his replayer
+binary as our reference workload; we do not compete with or claim to extend
+his in-VM work.
+
 ## The reference workload
 
 The flagship workload is a real CKB-VM binary running through Myelin's
@@ -262,10 +315,6 @@ tape, projects each chunk to CKB, and produces a court bundle. The measured
 run is fully reproducible from the
 [runbook](https://github.com/Myelin-Network/Myelin/blob/main/docs/tutorials/teeworlds-end-to-end.md):
 `tape_bytes: 2162`, `vm_cycles: 15,139,695`, `court_checks: 22`.
-
-The replayer binary and the in-VM optimisation work are xxuejie's; Myelin
-reuses that artifact unchanged and builds the session runtime above it — the
-scheduling, finality, projection, and dispute layer.
 
 ## What ships today
 
@@ -281,31 +330,41 @@ scheduling, finality, projection, and dispute layer.
 - A published [concurrency & optimisation plan](https://github.com/Myelin-Network/Myelin/blob/main/docs/operations/concurrency-optimization-plan.md)
   documenting every host-side optimisation and its effect.
 
-## What informs the roadmap
+## Roadmap
 
-Two design pressures have shaped what Myelin builds next, and both build on
-typed cells:
+Myelin's roadmap is driven by the needs of the session runtime itself —
+making the typed-cell scheduler deeper, the court evidence richer, and the
+session composition story explicit. Two near-term directions, both internal
+to Myelin's architecture:
 
-- **Persistent worlds need a transit cell.** A crafting-style game (or a
-  sharded order book, or a multi-tenant IoT batch) needs to carry a slice of
-  state — one player, one shard — across a chunk boundary without
-  re-committing the whole world. Myelin's `CellTx` and typed-cell model
-  already support this; the near-term work is to name a first-class
-  **transit-cell pattern**, validate it, and let the CellDAG schedule transit
-  cells independently of the world-root commit.
-- **Worlds that do not fit one chunk need typed islands.** When a workload
-  spans multiple rule sets (different type scripts with different logic),
-  each is an "island" with its own conflict domain, and cross-island movement
-  flows through transit cells. Myelin's typed-cell model already models this
-  — a `TypedCellDecl` per type script is an island, and the CellDAG already
-  schedules by conflict domain. The medium-term work is a session-level
-  **composition manifest** that records which typed domains a session touched
-  and which outputs crossed borders, lifted to the same court-visible shape
-  as the single-chunk bundle.
+- **Per-participant state commitment.** Today a session commit rolls the
+  full session state root. For workloads with many independent participants
+  (a game with many players, an IoT batch with many gateways, a sharded order
+  book), this is heavier than necessary: each participant's state could be
+  committed and scheduled independently via its own typed conflict domain,
+  so the CellDAG can run participant-local transitions in parallel without
+  re-committing the whole world. The CellTx shape and `ConflictKeySpec` model
+  already support scoping a conflict key to a single participant; the work is
+  to make that a first-class, validated commit path. (We note that the
+  generality of this problem — fine-grained state crossing a chunk boundary —
+  was surfaced concretely by xuejie's [OHOL port](https://xuejie.space/2026_06_29_porting_one_hour_one_life_game_loop_to_ckb/);
+  our solution is Myelin's own design on top of the typed-cell substrate.)
 
-Neither requires changing CKB-VM, the `CellTx` shape, or the typed-cell
-model. They are naming, validating, and aggregating patterns the runtime
-already supports.
+- **Session-level composition evidence.** When a session spans multiple
+  typed domains (different type scripts with different logic and conflict
+  rules), the interesting unit of audit is not a single chunk but the *set
+  of domains the session touched and the transitions between them*. Myelin's
+  typed-cell model already models each domain as a `TypedCellDecl` and
+  schedules cross-domain transactions by conflict hash; the work is to
+  aggregate that into a session-level manifest that a court or auditor can
+  read as a unit, at the same evidence tier as the single-chunk court bundle.
+  (The value of explicit domain-composition evidence was reinforced by
+  xuejie's [Archipelagos post](https://xuejie.space/2026_06_30_archipelago/);
+  the manifest design and its court-visible shape are Myelin's own.)
+
+Both build on substrate Myelin already ships (typed cells, CellDAG, conflict
+domains, court bundle). Neither requires changing CKB-VM, the `CellTx` shape,
+or the typed-cell model.
 
 ## What Myelin does **not** claim
 
