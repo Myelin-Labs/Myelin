@@ -191,24 +191,36 @@ impl SegmentWriter {
         let segment_id = *self.current_segment_id.lock();
         let size = *offset_guard;
 
-        // Compute Merkle root over ordered chunks in the segment.
+        // F-02 seal binding: snapshot the chunk boundaries under the SAME
+        // critical section that holds the file/offset guards, so the root is
+        // computed over exactly the chunks that belong to this segment. The
+        // previous code dropped file_guard/offset_guard here and then
+        // `compute_merkle_root` re-locked `current_chunks` separately — a
+        // TOCTOU window in which a concurrent `append` could land a chunk in
+        // the soon-to-be-sealed segment's chunk list while the file was
+        // already considered sealed. We also drain the snapshot out of the
+        // critical section and compute the root from it without re-locking.
+        let chunk_snapshot = self.current_chunks.lock().clone();
+        let cell_count = chunk_snapshot.len() as u32;
         drop(file_guard);
         drop(offset_guard);
 
-        let merkle_root = self.compute_merkle_root(segment_id, size)?;
+        let merkle_root = self.compute_merkle_root_from_snapshot(segment_id, size, &chunk_snapshot)?;
 
         let meta = SegmentMeta {
             segment_id,
             size,
-            cell_count: self.current_chunks.lock().len() as u32,
+            cell_count,
             merkle_root,
             sealed: true,
             created_at: Self::deterministic_timestamp(),
             sealed_at: Some(Self::deterministic_timestamp()),
         };
 
-        // Save metadata
+        // Save metadata and chunk index together so a sealed segment always
+        // carries the boundaries its root was computed over.
         self.save_segment_meta(&meta)?;
+        self.save_chunk_index(segment_id, &chunk_snapshot)?;
 
         // Close current segment
         let mut file_guard = self.current_file.lock();
@@ -248,11 +260,17 @@ impl SegmentWriter {
         Ok(())
     }
 
-    /// Compute Merkle root for segment
-    fn compute_merkle_root(&self, segment_id: u32, size: u64) -> Result<[u8; 32]> {
+    /// Compute a Merkle root over a caller-supplied chunk snapshot, without
+    /// touching `current_chunks`. This is the seal-binding path: the snapshot
+    /// is taken under the file/offset critical section so it cannot drift.
+    fn compute_merkle_root_from_snapshot(
+        &self,
+        segment_id: u32,
+        size: u64,
+        chunk_ranges: &[AppendRecord],
+    ) -> Result<[u8; 32]> {
         let path = self.segment_path(segment_id);
         let mut file = File::open(path)?;
-        let chunk_ranges = self.current_chunks.lock().clone();
 
         if chunk_ranges.is_empty() && size > 0 {
             return Err(StateError::Database("Cannot compute segment root without append chunk boundaries".to_string()));
@@ -260,8 +278,8 @@ impl SegmentWriter {
 
         let mut chunks = Vec::with_capacity(chunk_ranges.len());
         for AppendRecord { offset, length } in chunk_ranges {
-            let mut buffer = vec![0u8; length as usize];
-            file.seek(SeekFrom::Start(offset))?;
+            let mut buffer = vec![0u8; *length as usize];
+            file.seek(SeekFrom::Start(*offset))?;
             file.read_exact(&mut buffer)?;
             chunks.push(buffer);
         }
@@ -363,21 +381,26 @@ impl SegmentReader {
 
     /// Read data from a segment
     pub fn read(&self, segment_id: u32, offset: u64, length: u32) -> Result<Vec<u8>> {
-        let mut files = self.files.lock();
+        // F-16 cache contention fix: take the LRU lock only for the cache
+        // lookup / file-open, clone the handle, and DROP the lock before doing
+        // any disk I/O. Previously the lock was held across seek + read_exact,
+        // which serialized all readers behind a single slow disk read.
+        let mut file_clone = {
+            let mut files = self.files.lock();
+            // Get or open file
+            let file = if let Some(f) = files.get(&segment_id) {
+                f
+            } else {
+                let path = self.segment_path(segment_id);
+                let file = File::open(path).map_err(|_| StateError::SegmentNotFound(segment_id))?;
+                files.put(segment_id, file);
+                files.get(&segment_id).unwrap()
+            };
+            file.try_clone()?
+        }; // files lock released here
 
-        // Get or open file
-        let file = if let Some(f) = files.get(&segment_id) {
-            f
-        } else {
-            let path = self.segment_path(segment_id);
-            let file = File::open(path).map_err(|_| StateError::SegmentNotFound(segment_id))?;
-            files.put(segment_id, file);
-            files.get(&segment_id).unwrap()
-        };
-
-        // Read data
+        // Read data outside the cache lock.
         let mut buffer = vec![0u8; length as usize];
-        let mut file_clone = file.try_clone()?;
         file_clone.seek(SeekFrom::Start(offset))?;
         file_clone.read_exact(&mut buffer)?;
 
@@ -389,6 +412,34 @@ impl SegmentReader {
         let path = self.segment_meta_path(segment_id);
         let data = std::fs::read(path).map_err(|_| StateError::SegmentNotFound(segment_id))?;
         decode_segment_meta(&data)
+    }
+
+    /// Verify that a sealed segment's persisted `merkle_root` is
+    /// cryptographically bound to the actual chunk bytes on disk.
+    ///
+    /// F-02 seal binding: `SegmentMeta.sealed` is just a boolean written by
+    /// the writer, and `merkle_root` is a field that could in principle be
+    /// constructed arbitrarily. This method re-reads the chunk index and the
+    /// segment file, recomputes the root, and checks it equals the persisted
+    /// `merkle_root`. Returns `Ok(true)` when the binding holds, `Ok(false)`
+    /// when the segment is unsealed (nothing to bind), and `Err` when the
+    /// segment claims to be sealed but the recomputed root diverges — i.e.
+    /// the on-disk bytes were mutated after sealing.
+    pub fn verify_seal_binding(&self, segment_id: u32) -> Result<bool> {
+        let meta = self.load_meta(segment_id)?;
+        if !meta.sealed {
+            return Ok(false);
+        }
+        let chunk_index = SegmentWriter::load_chunk_index(&self.base_dir, segment_id)?;
+        let builder = self.build_merkle_builder(segment_id, &chunk_index)?;
+        let computed_root = builder.build();
+        if computed_root != meta.merkle_root {
+            return Err(StateError::InvalidProof(format!(
+                "segment {segment_id} seal binding broken: persisted merkle_root {:?} != recomputed {:?} (segment file mutated after seal)",
+                meta.merkle_root, computed_root
+            )));
+        }
+        Ok(true)
     }
 
     fn build_merkle_builder(&self, segment_id: u32, chunk_index: &[AppendRecord]) -> Result<MerkleTreeBuilder> {
@@ -640,5 +691,42 @@ mod tests {
         assert_eq!(proof.chunk_length, length);
         assert_eq!(proof.chunk_data, chunk_b);
         assert!(proof.verify().unwrap());
+    }
+
+    #[test]
+    fn test_verify_seal_binding_accepts_intact_segment() {
+        let tmp = TempDir::new().unwrap();
+        let writer = SegmentWriter::new(tmp.path()).unwrap();
+        writer.append(&[0xAA; 64]).unwrap();
+        writer.append(&[0xBB; 96]).unwrap();
+        let meta = writer.seal().unwrap();
+
+        let reader = SegmentReader::new(tmp.path()).unwrap();
+        assert!(reader.verify_seal_binding(meta.segment_id).expect("intact segment should bind"));
+    }
+
+    #[test]
+    fn test_verify_seal_binding_rejects_mutated_segment_file() {
+        // F-02 regression: `SegmentMeta.sealed` is a boolean the writer sets,
+        // and `merkle_root` is a persisted field. Without binding the root to
+        // the bytes on disk, mutating the segment file after seal would be
+        // undetectable. `verify_seal_binding` recomputes the root from disk
+        // and must reject a mutated file.
+        let tmp = TempDir::new().unwrap();
+        let writer = SegmentWriter::new(tmp.path()).unwrap();
+        writer.append(&[0xAA; 64]).unwrap();
+        writer.append(&[0xBB; 96]).unwrap();
+        let meta = writer.seal().unwrap();
+
+        // Tamper with the segment file bytes after sealing.
+        let segment_path = tmp.path().join(format!("segment_{:08}.dat", meta.segment_id));
+        let mut bytes = std::fs::read(&segment_path).unwrap();
+        // Flip a byte inside the first chunk (offset 0) — not metadata.
+        bytes[0] ^= 0xFF;
+        std::fs::write(&segment_path, bytes).unwrap();
+
+        let reader = SegmentReader::new(tmp.path()).unwrap();
+        let result = reader.verify_seal_binding(meta.segment_id);
+        assert!(matches!(result, Err(StateError::InvalidProof(_))), "mutated segment must fail seal binding: {result:?}");
     }
 }

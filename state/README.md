@@ -6,50 +6,49 @@ Finite Cell state and local data-availability storage for Myelin sessions.
 
 This crate manages Cell state and data-availability artefacts:
 
-- **Cell Indexing**: OutPoint → Segment pointer mapping
-- **Segment Storage**: 1GB append-only files with mmap
-- **DA Proofs**: NMT/KZG commitments and sampling verification
-- **Reorg Support**: SpendJournal for K-deep rollback
+- **Cell Indexing**: RocksDB-backed `CellDB` mapping OutPoint → `CellMeta`,
+  plus a `ScriptIndex` (lock_hash / type_hash → OutPoints).
+- **State Root**: an incremental MuHash accumulator (`CellStateTree`) —
+  O(1) per insert/remove, no full re-hash over the cell set.
+- **Segment Storage**: append-only segment files (1 GB each) written via
+  ordinary `std::fs::File` I/O.
+- **DA Proofs**: a conventional Merkle tree over ordered chunk payloads,
+  with an explicit upgrade path to NMT/KZG for namespaced sampling later.
 
 ## Architecture
 
 ```
 state/
-├── kv/              # KV abstraction layer (RocksDB backend)
-│   ├── mod.rs       # KV trait (get/put/batch/snapshot)
-│   └── rocksdb_impl.rs
-├── index/           # Cell indexing
-│   ├── cell_db.rs   # CellID → SegmentPtr
-│   └── script_index.rs # lock/type → CellIDs
-├── store/           # Data availability storage
-│   ├── segment.rs   # Segment file management (1GB segments)
-│   ├── proof.rs     # NMT/KZG commitments and sampling
-│   └── writer.rs    # Sequential writer
-└── reorg/           # DAG reorg support
-    └── spend_journal.rs # K-deep rollback log
+├── cell_tree.rs       # CellStateTree: incremental MuHash state root + CellEntry
+├── index/             # RocksDB-backed indexes
+│   ├── cell_db.rs     # CellDB: OutPoint -> CellMeta, spend set, spend journal CF
+│   └── script_index.rs # ScriptIndex: lock/type hash -> OutPoints + SegmentInfo
+├── molecule.rs        # Molecule encoding helpers for state artefacts
+└── store/             # Data-availability storage
+    ├── segment.rs     # SegmentWriter / SegmentReader / SegmentMeta (1 GB segments)
+    └── proof.rs       # MerkleTreeBuilder, SegmentProof, compute_segment_root
 ```
 
 ## Design Principles
 
-⚠️ **Big data never enters DB**: Cell data always goes to Segment files (mmap), RocksDB only stores indexes.
-
-- **Hot Index**: RocksDB (CellIndexEntry with segment pointers)
-- **Cold Data**: Append-only segment files (1GB each)
-- **DAG-Aware**: State inherits from selected parent, SpendJournal for reorg
+- **Hot index, cold data**: RocksDB stores only indexes and metadata;
+  large Cell payloads go to append-only segment files.
+- **Incremental root**: `CellStateTree` keeps the MuHash accumulator up
+  to date on every insert/remove, so `root()` is O(1).
+- **Deterministic by design**: no RNG, no wall-clock dependence in the
+  state path — finality evidence must be reproducible.
 
 ## Column Families (RocksDB)
 
 | CF | Key | Value | Purpose |
 |----|-----|-------|---------|
-| `cells` | OutPoint(36B) | CellIndexEntry | Cell index → Segment pointer |
-| `cells_by_lock` | LockHash(32B) | Vec\<OutPoint\> | Lock inverted index |
-| `segments` | SegmentID(4B) | SegmentMeta | Segment metadata (nmt_root) |
-| `spend_journal` | BlockHash(32B) | Vec\<CellChange\> | K-deep rollback log |
+| `cells` | OutPoint (36 B) | `CellMeta` | Live cell index |
+| `spent` | OutPoint (36 B) | spend marker | Spent-output tracking for conflict detection |
+| `spend_journal` | Block hash (32 B) | cell-change record | Historical metadata for rollback queries |
 
 ## Boundary
 
-This crate is not a CKB store/freezer fork. It stores and proves Myelin's finite
-session Cell state, including the local DA evidence used by the Session L2
-readiness path. Use `../README.md` and `../docs/MYELIN_ARCHITECTURE.md` for the
-current protocol positioning.
-
+This crate is not a CKB store/freezer fork. It stores and proves Myelin's
+finite session Cell state, including the local DA evidence used by the
+Session L2 readiness path. Use `../README.md` and the root architecture
+notes for the current protocol positioning.

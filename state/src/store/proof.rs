@@ -189,17 +189,24 @@ fn hash_internal(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 }
 
 fn build_next_level(level: &[[u8; 32]]) -> Vec<[u8; 32]> {
-    let mut next_level = Vec::with_capacity(level.len().div_ceil(2));
-    for chunk in level.chunks(2) {
-        let hash = if chunk.len() == 2 { hash_internal(&chunk[0], &chunk[1]) } else { chunk[0] };
-        next_level.push(hash);
-    }
-    next_level
+    use rayon::prelude::*;
+    // Each parent hash depends only on its own pair of children, so hashing
+    // within a level parallelizes trivially. `par_chunks(2)` preserves order
+    // (rayon collects in iteration order), keeping the root byte-identical to
+    // the serial implementation.
+    level
+        .par_chunks(2)
+        .map(|chunk| if chunk.len() == 2 { hash_internal(&chunk[0], &chunk[1]) } else { chunk[0] })
+        .collect()
 }
 
 pub fn compute_merkle_root_from_leaves(leaves: &[[u8; 32]]) -> [u8; 32] {
     if leaves.is_empty() {
-        return [0u8; 32];
+        // Domain-separated empty root so a size-0 segment cannot be
+        // confused with the all-zero "unwritten" sentinel used elsewhere.
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"myelin-empty-merkle-root/v1");
+        return *hasher.finalize().as_bytes();
     }
 
     let mut level = leaves.to_vec();
@@ -353,5 +360,31 @@ mod tests {
 
         assert_eq!(decoded, proof);
         assert!(decoded.verify().unwrap());
+    }
+
+    #[test]
+    fn test_parallel_merkle_root_matches_serial_implementation() {
+        // The parallel `build_next_level` (rayon par_chunks) must produce a
+        // byte-identical root to the serial pairwise hash. Build a leaf set
+        // large enough to exercise multiple levels and odd/even boundaries.
+        let leaves: Vec<[u8; 32]> = (0..1000u32).map(|i| blake3::hash(&i.to_le_bytes()).into()).collect();
+
+        // Reference: serial pairwise hash, level by level.
+        let mut serial_level = leaves.clone();
+        while serial_level.len() > 1 {
+            let mut next = Vec::with_capacity(serial_level.len().div_ceil(2));
+            for chunk in serial_level.chunks(2) {
+                let hash = if chunk.len() == 2 { hash_internal(&chunk[0], &chunk[1]) } else { chunk[0] };
+                next.push(hash);
+            }
+            serial_level = next;
+        }
+        let serial_root = serial_level[0];
+
+        // Parallel path under test.
+        let parallel_root = compute_merkle_root_from_leaves(&leaves);
+
+        assert_eq!(parallel_root, serial_root, "parallel and serial Merkle roots must match");
+        assert_ne!(parallel_root, [0u8; 32]);
     }
 }

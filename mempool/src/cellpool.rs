@@ -125,28 +125,57 @@ impl CellPool {
     pub fn add(&self, tx: CellTx, fee: u64, cycles: u64) -> Result<[u8; 32]> {
         let wtxid = myelin_exec::celltx::sighash::compute_wtxid(&tx);
 
+        // Take the write lock once and hold it across the existence check,
+        // size check, conflict scan, dependency scan, and insert. This closes
+        // the F-05 TOCTOU race where `max_size` could be exceeded (and a
+        // double-spend could slip in) between the prior separate read/write
+        // acquisitions. The checks are inlined here rather than delegated to
+        // `check_conflicts`/`find_dependencies` because those helpers take
+        // their own read locks, which would deadlock against this write lock
+        // (parking_lot RwLock is non-reentrant). Lock order is txs -> spent
+        // -> stats, matching `remove`.
+        let mut txs = self.txs.write();
+        let mut spent = self.spent_outputs.write();
+        let mut stats = self.stats.write();
+
         // Check if already exists
-        if self.txs.read().contains_key(&wtxid) {
+        if txs.contains_key(&wtxid) {
             return Err(MempoolError::TxExists(wtxid));
         }
 
         // Check pool size
-        if self.txs.read().len() >= self.max_size {
+        if txs.len() >= self.max_size {
             return Err(MempoolError::MempoolFull(self.max_size));
         }
 
-        // Check for conflicts (double-spend)
-        let conflicts = self.check_conflicts(&tx)?;
+        // Check for conflicts (double-spend) — inlined `check_conflicts`
+        let mut conflicts = Vec::new();
+        for input in &tx.inputs {
+            if let Some(existing_wtxid) = spent.get(&input.previous_output) {
+                conflicts.push(*existing_wtxid);
+            }
+        }
         if !conflicts.is_empty() {
-            // Try RBF with deterministic conflict resolution
+            // Release our locks and let RBF take its own (it re-enters add).
+            drop(txs);
+            drop(spent);
+            drop(stats);
             return self.try_replace_by_fee(&tx, wtxid, fee, cycles, &conflicts);
         }
 
         // Compute score
         let score = self.scorer.compute_score(&tx, fee, cycles);
 
-        // Build dependencies
-        let dependencies = self.find_dependencies(&tx);
+        // Build dependencies — inlined `find_dependencies`
+        let mut dep_set: BTreeSet<[u8; 32]> = BTreeSet::new();
+        for input in &tx.inputs {
+            for (parent_wtxid, parent_entry) in txs.iter() {
+                if input.previous_output.tx_hash == parent_entry.tx.id() {
+                    dep_set.insert(*parent_wtxid);
+                }
+            }
+        }
+        let dependencies: Vec<[u8; 32]> = dep_set.into_iter().collect();
 
         // Create entry
         let entry = PoolEntry {
@@ -159,11 +188,6 @@ impl CellPool {
             dependencies: dependencies.clone(),
             dependents: Vec::new(),
         };
-
-        // Add to pool
-        let mut txs = self.txs.write();
-        let mut spent = self.spent_outputs.write();
-        let mut stats = self.stats.write();
 
         // Update spent outputs
         for input in &tx.inputs {
@@ -246,21 +270,6 @@ impl CellPool {
         self.stats.read().clone()
     }
 
-    /// Check for conflicting transactions
-    fn check_conflicts(&self, tx: &CellTx) -> Result<Vec<[u8; 32]>> {
-        let spent = self.spent_outputs.read();
-        let mut conflicts = Vec::new();
-
-        for input in &tx.inputs {
-            if let Some(existing_wtxid) = spent.get(&input.previous_output) {
-                conflicts.push(*existing_wtxid);
-            }
-        }
-
-        Ok(conflicts)
-    }
-
-    /// Try to replace by fee (RBF)
     /// Try to replace conflicting transactions with RBF
     ///
     /// Uses deterministic conflict resolution:
@@ -310,24 +319,6 @@ impl CellPool {
         // Add new transaction
         self.stats.write().rbf_count += 1;
         self.add(tx.clone(), fee, cycles)
-    }
-
-    /// Find dependencies (parent transactions in pool)
-    fn find_dependencies(&self, tx: &CellTx) -> Vec<[u8; 32]> {
-        let txs = self.txs.read();
-        let mut deps = BTreeSet::new();
-
-        for input in &tx.inputs {
-            // Check if input is produced by a transaction in pool
-            for (parent_wtxid, parent_entry) in txs.iter() {
-                let parent_txid = parent_entry.tx.id();
-                if input.previous_output.tx_hash == parent_txid {
-                    deps.insert(*parent_wtxid);
-                }
-            }
-        }
-
-        deps.into_iter().collect()
     }
 
     /// Deterministic timestamp placeholder.

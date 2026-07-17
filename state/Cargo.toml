@@ -22,6 +22,7 @@ myelin-muhash = { path = "../crypto/muhash" }
 
 # Concurrency
 parking_lot = "0.12"
+rayon = "1.10"
 
 # Errors
 thiserror = "1.0"

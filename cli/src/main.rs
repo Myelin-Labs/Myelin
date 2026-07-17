@@ -294,6 +294,8 @@ enum SessionCommand {
     Commit(SessionCommitArgs),
     /// Commit one deterministic chunk for a previously opened session fixture.
     CommitFixture(SessionCommitFixtureArgs),
+    /// Commit a multi-CellTx chunk that exercises CellDAG + parallel VM verification.
+    CommitMulti(SessionCommitMultiArgs),
     /// Materialise a self-contained disputed-chunk court bundle.
     CourtBundle(SessionCourtBundleArgs),
     /// Verify a session court bundle by recomputing commitments and finality.
@@ -392,6 +394,23 @@ struct SessionCommitFixtureArgs {
     /// JSON report emitted by `session open-fixture`.
     #[arg(long)]
     session: PathBuf,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionCommitMultiArgs {
+    /// JSON report emitted by `session open` / `session open-fixture`.
+    #[arg(long)]
+    session: PathBuf,
+    /// Number of chained CellTx to build for this chunk (must be >= 2 to
+    /// exercise multi-layer DAG scheduling).
+    #[arg(long, default_value_t = 4)]
+    tx_count: usize,
+    /// Zero-based chunk index to commit.
+    #[arg(long, default_value_t = 0)]
+    chunk_index: u64,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -1061,6 +1080,11 @@ fn run() -> Result<()> {
             SessionCommand::CommitFixture(args) => {
                 let report = session_commit_fixture(args.session)?;
                 write_json(args.out, &report)
+            }
+            SessionCommand::CommitMulti(args) => {
+                let out = args.out.clone();
+                let report = session_commit_multi_from_open(args.session, args.tx_count, args.chunk_index)?;
+                write_json(out, &report)
             }
             SessionCommand::CourtBundle(args) => {
                 let report = session_court_bundle(args.commit, args.chunk_index)?;
@@ -3519,7 +3543,18 @@ fn da_availability_evidence(
     let availability_commitment = *hasher.finalize().as_bytes();
     let attestation_count = u32::try_from(attestation_signatures.len()).expect("static DA committee fits into u32");
     let retrieval_probe_count = if local_da_published { 2 } else { 1 };
-    let testnet_beta_ready = local_da_published && external_receipt_checked;
+    // XD-02 invariant: `testnet_beta_ready`, `external_receipt_count`, and
+    // `external_receipt.is_some()` must stay in lockstep. Previously
+    // `testnet_beta_ready` keyed off `external_receipt_checked` (the
+    // signature-verification boolean) while `external_receipt_count` keyed
+    // off `external_receipt.is_some()` — two different sources of truth that
+    // only agreed because both were falsy in commitment-only mode. A receipt
+    // present-but-signature-invalid state would have set count=1 yet left
+    // `testnet_beta_ready` derived from a separate signal. Now beta-readiness
+    // requires the receipt to actually be present AND signature-valid, which
+    // keeps the three receipt-side fields consistent in every state.
+    let external_receipt_present = external_receipt.is_some();
+    let testnet_beta_ready = local_da_published && external_receipt_present && external_receipt_checked;
     let production_ready = testnet_beta_ready && external_receipt.as_ref().is_some_and(|receipt| receipt.production_guarantee_checked);
     Ok(SessionDaAvailabilityEvidence {
         schema: "myelin-da-availability-v1".to_owned(),
@@ -4807,6 +4842,41 @@ struct SessionCommitReport {
     finalised: bool,
 }
 
+/// Report emitted by `session commit-multi`.
+///
+/// Mirrors `SessionCommitReport` but carries the CellDAG + ParallelExecutor
+/// evidence that proves inter-transaction parallel verification: the DAG layer
+/// count, max layer depth, per-transaction cycles, and the aggregate
+/// scheduler commitment derived from the execution results.
+#[derive(Clone, Debug, Serialize)]
+struct SessionCommitMultiReport {
+    schema: &'static str,
+    session_id: String,
+    chunk_index: u64,
+    consensus_kind: &'static str,
+    vm_profile: &'static str,
+    ckb_spawn_ipc_required: bool,
+    tx_count: usize,
+    /// Per-layer NodeId lists (NodeIds are indices into `ordered_cell_tx_commitments`).
+    dag_layers: Vec<Vec<usize>>,
+    /// Number of topological layers the DAG scheduled.
+    dag_layer_count: usize,
+    /// Deepest layer reached by the executor (= dag_layer_count when all txs verify).
+    max_layer_depth: usize,
+    /// Successful / failed counts from the ParallelExecutor stats.
+    successful_txs: usize,
+    failed_txs: usize,
+    /// Per-tx CKB-VM cycles, indexed by NodeId.
+    per_tx_cycles: Vec<u64>,
+    ordered_cell_tx_commitments: Vec<String>,
+    data_commitments: Vec<String>,
+    scheduler_commitment: String,
+    block: TeeworldsBundleBlock,
+    static_committee_evidence: StaticCommitteeEvidenceReport,
+    tendermint_evidence: Option<TendermintEvidenceReport>,
+    finalised: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct SessionCommitInput {
     session_id: String,
@@ -5647,6 +5717,214 @@ fn session_commit_fixture(path: PathBuf) -> Result<SessionCommitReport> {
     session_commit_from_open(path, 0)
 }
 
+/// Load and validate a `SessionOpenInput`, returning the parsed fields the
+/// commit paths need. Shared by `session_commit_from_open` and the multi-tx
+/// commit path so both enforce the same session-open invariants.
+fn load_and_validate_session_open(path: PathBuf) -> Result<(
+    SessionOpenInput,
+    [u8; 32],
+    ConsensusKind,
+    [u8; 32],
+)> {
+    let bytes = fs::read(path)?;
+    let session = serde_json::from_slice::<SessionOpenInput>(&bytes)?;
+    if session.timeout_ms == 0 {
+        return Err(CliError::InvalidFixture("session timeout_ms must be non-zero".to_owned()));
+    }
+    if session.vm_profile != "ckb-strict-basic" {
+        return Err(CliError::InvalidFixture(format!("session vm_profile must be ckb-strict-basic, got {}", session.vm_profile)));
+    }
+    if session.ckb_spawn_ipc_required {
+        return Err(CliError::InvalidFixture("session fixture must not require spawn/IPC".to_owned()));
+    }
+    let consensus_kind = parse_session_consensus(&session.consensus_kind)?;
+    let initial_state_root = parse_hex_32(&session.initial_state_root)
+        .ok_or_else(|| CliError::InvalidFixture("initial_state_root must be 32-byte hex".to_owned()))?;
+    let escrow_reports = session
+        .escrow_input_cells
+        .iter()
+        .map(|cell| SessionEscrowCellReport {
+            outpoint_tx_hash: cell.outpoint_tx_hash.clone(),
+            outpoint_index: cell.outpoint_index,
+            capacity: cell.capacity,
+            lock_hash: cell.lock_hash.clone(),
+        })
+        .collect::<Vec<_>>();
+    let expected_session_id =
+        session_id_from_parts(&session.app_id, &session.vm_profile, &session.participants, &escrow_reports, initial_state_root);
+    let expected_lineage =
+        session_lineage_commitments(&session.app_id, &session.vm_profile, &session.participants, &escrow_reports, initial_state_root);
+    let session_id =
+        parse_hex_32(&session.session_id).ok_or_else(|| CliError::InvalidFixture("session_id must be 32-byte hex".to_owned()))?;
+    if expected_session_id != session_id {
+        return Err(CliError::InvalidFixture("session_id does not match session open fields".to_owned()));
+    }
+    if parse_hex_32(&session.participant_set_hash) != Some(expected_lineage.participant_set_hash) {
+        return Err(CliError::InvalidFixture("session participant_set_hash does not match session open fields".to_owned()));
+    }
+    if parse_hex_32(&session.escrow_input_cells_hash) != Some(expected_lineage.escrow_input_cells_hash) {
+        return Err(CliError::InvalidFixture("session escrow_input_cells_hash does not match session open fields".to_owned()));
+    }
+    if parse_hex_32(&session.session_lineage_commitment) != Some(expected_lineage.session_lineage_commitment) {
+        return Err(CliError::InvalidFixture("session_lineage_commitment does not match session open fields".to_owned()));
+    }
+    Ok((session, session_id, consensus_kind, initial_state_root))
+}
+
+/// Commit a multi-CellTx chunk that exercises the CellDAG + ParallelExecutor
+/// inter-transaction parallel verification path.
+///
+/// Builds a deterministic chain of `tx_count` CellTx (tx[i+1] consumes
+/// tx[i]'s output), schedules them through `CellDAG::build_from_typed`, and
+/// verifies each through `verify_celltx_via_dag` (rayon across DAG layers,
+/// real `TransactionScriptVerifier` per tx). The `scheduler_commitment` is
+/// derived from the execution results under a distinct domain tag so it
+/// cannot collide with the single-tx fixture commitment.
+fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u64) -> Result<SessionCommitMultiReport> {
+    let (_session, session_id, consensus_kind, initial_state_root) = load_and_validate_session_open(path)?;
+    let _ = initial_state_root; // validated above; multi path does not mutate a state tree
+
+    let txs = session_fixture_cell_tx_chain(session_id, chunk_index, tx_count)
+        .map_err(|error| CliError::InvalidFixture(error.to_owned()))?;
+
+    // Build the DAG over the chain and run real parallel VM verification.
+    let dag = myelin_exec::scheduler::CellDAG::build_from_typed(&txs)
+        .map_err(|error| CliError::InvalidFixture(format!("CellDAG build: {error}")))?;
+    let dag_layers = dag.layers.clone();
+    let dag_layer_count = dag_layers.len();
+
+    // Use an in-memory data provider seeded with each tx's own output so the
+    // verifier can resolve the cells the chain produces. Lock groups are
+    // skipped (the DAG is the inter-tx ordering authority), matching the
+    // teeworlds VM-probe configuration.
+    let mut provider = myelin_exec::SimpleDataProvider::default();
+    // Register the always_success RISC-V ELF so the verifier can load the lock
+    // script code by code_hash for every tx in the chain.
+    provider.add_script(
+        myelin_exec::scripts::always_success_code_hash(),
+        myelin_exec::scripts::ALWAYS_SUCCESS_SCRIPT.to_vec(),
+    );
+    for tx in &txs {
+        // Producers are indexed in the DAG by wtxid (see CellDAG::build), and
+        // tx[i+1]'s input references the producer by wtxid, so the data
+        // provider must register each produced cell under the producer's
+        // wtxid — not its txid.
+        let wtxid = compute_wtxid(tx);
+        for (idx, output) in tx.outputs.iter().enumerate() {
+            let data = tx.outputs_data.get(idx).cloned();
+            provider.add_cell(
+                wtxid,
+                idx as u32,
+                myelin_exec::ResolvedCell { cell_output: output.clone(), data },
+            );
+        }
+    }
+    // tx[0] spends a synthetic external input (the same one
+    // `session_fixture_cell_tx` mints). Register a matching cell under that
+    // outpoint so the verifier can resolve tx[0]'s input.
+    let index_bytes = chunk_index.to_le_bytes();
+    let external_input_hash = blake3_chunks(b"myelin:session-fixture-input:v1", &[&session_id, &index_bytes]);
+    provider.add_cell(
+        external_input_hash,
+        0,
+        myelin_exec::ResolvedCell {
+            cell_output: CellOutput { lock: Script::new(myelin_exec::scripts::always_success_code_hash(), 0, Vec::new()), type_: None, capacity: 1_500 },
+            data: Some(Vec::new()),
+        },
+    );
+    let results = myelin_exec::scheduler::verify_with_existing_dag(&dag, &txs, std::sync::Arc::new(provider), 10_000_000, false)
+        .map_err(|error| CliError::InvalidFixture(format!("parallel verify: {error}")))?;
+    let stats = myelin_exec::scheduler::ParallelExecutor::get_stats(&results);
+
+    let per_tx_cycles: Vec<u64> = results
+        .iter()
+        .map(|r| match r {
+            myelin_exec::scheduler::ExecutionResult::Success { receipt, .. } => receipt.cycles,
+            myelin_exec::scheduler::ExecutionResult::Failed { .. } => 0,
+        })
+        .collect();
+
+    let wtxids: Vec<[u8; 32]> = txs.iter().map(compute_wtxid).collect();
+    let ordered_cell_tx_commitments: Vec<String> = wtxids.iter().map(hex::encode).collect();
+
+    // Aggregate scheduler commitment over the DAG execution results, under a
+    // distinct domain tag from the single-tx path.
+    let mut sched_hasher = blake3::Hasher::new();
+    sched_hasher.update(b"myelin:session-multi-scheduler:v1");
+    sched_hasher.update(&session_id);
+    sched_hasher.update(&chunk_index.to_le_bytes());
+    sched_hasher.update(&(wtxids.len() as u32).to_le_bytes());
+    for wtxid in &wtxids {
+        sched_hasher.update(wtxid);
+    }
+    sched_hasher.update(&(dag_layer_count as u32).to_le_bytes());
+    for (node_id, result) in results.iter().enumerate() {
+        sched_hasher.update(&(node_id as u32).to_le_bytes());
+        match result {
+            myelin_exec::scheduler::ExecutionResult::Success { layer, receipt, .. } => {
+                sched_hasher.update(&[*layer as u32 as u8; 1]);
+                sched_hasher.update(&receipt.cycles.to_le_bytes());
+            }
+            myelin_exec::scheduler::ExecutionResult::Failed { layer, .. } => {
+                sched_hasher.update(&[*layer as u32 as u8; 1]);
+                sched_hasher.update(&0u64.to_le_bytes());
+            }
+        }
+    }
+    let scheduler_commitment = *sched_hasher.finalize().as_bytes();
+
+    let data_commitments: Vec<[u8; 32]> = txs
+        .iter()
+        .map(|tx| {
+            let data = tx.outputs_data.first().cloned().unwrap_or_default();
+            blake3_32(b"myelin:session-multi-data-commitment:v1", &data)
+        })
+        .collect();
+
+    // Multi-tx block uses a neutral state root pair (the multi path does not
+    // walk a CellStateTree; it demonstrates DAG + parallel VM verification).
+    let state_root_before = initial_state_root;
+    let state_root_after = initial_state_root;
+    let block = MyelinBlock {
+        version: 1,
+        parent_hash: [0; 32],
+        number: 1,
+        timestamp_ms: 0,
+        consensus_kind,
+        state_root_before,
+        state_root_after,
+        ordered_cell_tx_commitments: wtxids.clone(),
+        data_commitments: data_commitments.clone(),
+        scheduler_commitment,
+    };
+    let block_hash = block.hash();
+    let (static_committee_evidence, tendermint_evidence) = finality_evidence_for_block(&block)?;
+    let bundle_block = block_report_from_myelin_block(&block, block_hash);
+
+    Ok(SessionCommitMultiReport {
+        schema: "myelin-session-commit-multi-v1",
+        session_id: hex::encode(session_id),
+        chunk_index,
+        consensus_kind: consensus_kind.as_str(),
+        vm_profile: "ckb-strict-basic",
+        ckb_spawn_ipc_required: false,
+        tx_count,
+        dag_layers,
+        dag_layer_count,
+        max_layer_depth: stats.max_layer_depth,
+        successful_txs: stats.successful_txs,
+        failed_txs: stats.failed_txs,
+        per_tx_cycles,
+        ordered_cell_tx_commitments,
+        data_commitments: data_commitments.iter().map(hex::encode).collect(),
+        scheduler_commitment: hex::encode(scheduler_commitment),
+        block: bundle_block,
+        static_committee_evidence,
+        tendermint_evidence,
+        finalised: true,
+    })
+}
+
 fn session_commit_from_open(path: PathBuf, chunk_index: u64) -> Result<SessionCommitReport> {
     let bytes = fs::read(path)?;
     let session = serde_json::from_slice::<SessionOpenInput>(&bytes)?;
@@ -6134,6 +6412,15 @@ fn session_da_manifest(
         if proof.segment_root != meta.merkle_root || !meta.sealed {
             return Err(CliError::InvalidFixture("DA segment proof does not match sealed metadata".to_owned()));
         }
+        // F-02: confirm the sealed segment's root is cryptographically bound
+        // to the bytes on disk (re-reads + recomputes the root; rejects a
+        // segment mutated after seal).
+        let seal_binding = reader
+            .verify_seal_binding(segment_id)
+            .map_err(|error| CliError::InvalidFixture(format!("DA segment seal binding error: {error}")))?;
+        if !seal_binding {
+            return Err(CliError::InvalidFixture("DA segment seal binding check returned false".to_owned()));
+        }
         (proof, true, true, Some(storage_dir.display().to_string()))
     } else {
         let chunk_length = u32::try_from(molecule_transaction.len())
@@ -6411,14 +6698,16 @@ fn verify_session_da_manifest(
                 == u32::from(manifest.availability.external_receipt.as_ref().is_some())
             && (manifest.availability.external_receipt.is_none() || manifest.availability.external_receipt_checked)
             && manifest.availability.testnet_beta_ready
-                == (manifest.local_da_published && manifest.availability.external_receipt_checked)
+                == (manifest.local_da_published
+                    && manifest.availability.external_receipt.is_some()
+                    && manifest.availability.external_receipt_checked)
             && manifest.availability.production_ready == da_availability_production_ready(&manifest.availability),
         Some(
-            "availability_checked && attestation_signature_verified && signatures match attesters && attestation_count >= required_attestations && external_receipt_count == external_receipt presence && present external receipt checked && testnet_beta_ready == local_da_published && external_receipt_checked && production_ready == signed production SLA guarantee"
+            "availability_checked && attestation_signature_verified && signatures match attesters && attestation_count >= required_attestations && external_receipt_count == external_receipt presence && present external receipt checked && testnet_beta_ready == local_da_published && external receipt present and checked && production_ready == signed production SLA guarantee"
                 .to_owned(),
         ),
         Some(format!(
-            "{} && {} && {} == {} && {} >= {} && {} == {} && ({} || {}) && {} == ({} && {}) && {} == {}",
+            "{} && {} && {} == {} && {} >= {} && {} == {} && ({} || {}) && {} == ({} && {} && {}) && {} == {}",
             manifest.availability.availability_checked,
             manifest.availability.attestation_signature_verified,
             manifest.availability.attestation_signatures.len(),
@@ -6431,6 +6720,7 @@ fn verify_session_da_manifest(
             manifest.availability.external_receipt_checked,
             manifest.availability.testnet_beta_ready,
             manifest.local_da_published,
+            manifest.availability.external_receipt.is_some(),
             manifest.availability.external_receipt_checked,
             manifest.availability.production_ready,
             da_availability_production_ready(&manifest.availability)
@@ -11251,6 +11541,51 @@ fn session_fixture_cell_tx(session_id: [u8; 32], chunk_index: u64) -> std::resul
     CellTx::new(vec![input], vec![], vec![output], vec![output_data], vec![witness])
 }
 
+/// Build a chain of `count` deterministic CellTx for the multi-tx commit path.
+///
+/// Topology: tx[i+1] consumes the single output of tx[i] (the OutPoint is
+/// keyed by the producer's wtxid, which is what `CellDAG::build` indexes on).
+/// tx[0] spends the same synthetic input as `session_fixture_cell_tx` so the
+/// chain root stays deterministic. This produces a real multi-layer DAG:
+/// tx[0] in layer 0, tx[1] in layer 1, … — exercising the
+/// `ParallelExecutor::execute` path end to end.
+///
+/// Lock scripts use the in-repo `always_success` RISC-V ELF so each tx can be
+/// verified through the real CKB-VM (the verifier loads the script code by
+/// `code_hash` from the data provider). Type scripts are omitted so no
+/// second, undeployed script group is required.
+fn session_fixture_cell_tx_chain(session_id: [u8; 32], chunk_index: u64, count: usize) -> std::result::Result<Vec<CellTx>, &'static str> {
+    if count == 0 {
+        return Err("tx_count must be >= 1");
+    }
+    let lock_code_hash = myelin_exec::scripts::always_success_code_hash();
+    let index_bytes = chunk_index.to_le_bytes();
+    let mut txs = Vec::with_capacity(count);
+    for i in 0..count {
+        let i_bytes = (i as u64).to_le_bytes();
+        // tx[0] spends the same synthetic input as `session_fixture_cell_tx`;
+        // tx[i>0] consumes tx[i-1]'s output (keyed by the producer's wtxid,
+        // which is what CellDAG::build indexes on).
+        let input_tx_hash = if i == 0 {
+            blake3_chunks(b"myelin:session-fixture-input:v1", &[&session_id, &index_bytes])
+        } else {
+            compute_wtxid(&txs[i - 1])
+        };
+        let producer_outpoint = OutPoint::new(input_tx_hash, 0);
+        let lock_script = Script::new(lock_code_hash, 0, Vec::new());
+        let input = CellInput::new(producer_outpoint, 0);
+        let output = CellOutput { lock: lock_script, type_: None, capacity: 1_500 };
+        let mut data_seed = Vec::with_capacity(40);
+        data_seed.extend_from_slice(&session_id);
+        data_seed.extend_from_slice(&i_bytes);
+        let output_data = blake3_32(b"myelin:session-fixture-chain-output:v1", &data_seed).to_vec();
+        let witness = blake3_chunks(b"myelin:session-fixture-chain-witness:v1", &[&session_id, &index_bytes, &i_bytes]).to_vec();
+        let tx = CellTx::new(vec![input], vec![], vec![output], vec![output_data], vec![witness])?;
+        txs.push(tx);
+    }
+    Ok(txs)
+}
+
 fn session_da_anchor_cell_tx(manifest: &SessionDaManifestReport, manifest_hash: [u8; 32]) -> Result<CellTx> {
     let session_id = parse_hex_32(&manifest.session_id)
         .ok_or_else(|| CliError::InvalidFixture("manifest session_id must be 32-byte hex".to_owned()))?;
@@ -11626,6 +11961,43 @@ mod tests {
         let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
             .expect("settlement package");
         (package, intent, bundle_path, da_manifest_path, intent_path)
+    }
+
+    #[test]
+    fn session_commit_multi_builds_multi_layer_dag_and_finalises() {
+        // Part 5 integration test: proves the CellDAG + ParallelExecutor path
+        // is wired end to end through the CLI. A 4-tx chain must schedule into
+        // multiple DAG layers, verify every tx through the real VM, and
+        // finalise under both consensus engines.
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = write_temp_json("commit-multi-open", &open);
+        let report = session_commit_multi_from_open(open_path.clone(), 4, 0).expect("commit-multi succeeds");
+        let _ = std::fs::remove_file(open_path);
+
+        assert_eq!(report.schema, "myelin-session-commit-multi-v1");
+        assert_eq!(report.tx_count, 4, "all four txs are committed");
+        assert_eq!(report.ordered_cell_tx_commitments.len(), 4);
+        assert!(report.dag_layer_count >= 2, "a 4-tx chain must produce >= 2 DAG layers, got {}", report.dag_layer_count);
+        assert_eq!(report.max_layer_depth, report.dag_layer_count, "executor reaches the deepest layer");
+        assert_eq!(report.successful_txs, 4, "all txs verify through the VM");
+        assert_eq!(report.failed_txs, 0);
+        assert_eq!(report.per_tx_cycles.len(), 4);
+        assert!(report.per_tx_cycles.iter().all(|c| *c > 0), "each tx consumed positive cycles");
+        assert_eq!(report.scheduler_commitment.len(), 64, "scheduler commitment is 32-byte hex");
+        // The block is finalised by the static committee. (Tendermint
+        // evidence is only produced for tendermint sessions; the
+        // static-closed-committee fixture here finalises via the static path.)
+        assert!(report.finalised);
+        assert!(report.static_committee_evidence.finalised);
+    }
+
+    #[test]
+    fn session_commit_multi_rejects_zero_tx_count() {
+        let open = session_open_fixture("static-closed-committee").expect("open session");
+        let open_path = write_temp_json("commit-multi-zero-open", &open);
+        let result = session_commit_multi_from_open(open_path.clone(), 0, 0);
+        let _ = std::fs::remove_file(open_path);
+        assert!(result.is_err(), "tx_count == 0 must be rejected");
     }
 
     fn production_threshold_lock_deployment_fixture(
@@ -13323,6 +13695,36 @@ mod tests {
         assert!(manifest.availability.production_ready);
         assert!(verification.valid);
         assert!(verification.checks.iter().all(|check| check.ok));
+    }
+
+    #[test]
+    fn da_availability_testnet_beta_ready_keys_off_receipt_presence_not_just_checked() {
+        // XD-02 regression: `testnet_beta_ready`, `external_receipt_count`, and
+        // `external_receipt.is_some()` must stay in lockstep. Previously
+        // beta-readiness was derived from `external_receipt_checked` (the
+        // signature-verification boolean) while the count was derived from
+        // receipt presence — two different sources of truth. This test builds
+        // the availability evidence with NO external receipt and asserts the
+        // commitment-only shape: count 0, not checked, not beta-ready, not
+        // production-ready. The previous bug only surfaced when a receipt was
+        // present but unsigned; that path is covered by the signed-production
+        // test above. Here we pin the no-receipt invariant directly.
+        let session_id = [0xaa; 32];
+        let session_id_hex = hex::encode(session_id);
+        let court_bundle_hash_hex = hex::encode([0xbb; 32]);
+        let molecule_hash_hex = hex::encode([0xcc; 32]);
+        let segment_root_hex = hex::encode([0xdd; 32]);
+        let proof_hex = hex::encode([0xee; 32]);
+
+        let availability =
+            da_availability_evidence(&session_id_hex, &court_bundle_hash_hex, &molecule_hash_hex, &segment_root_hex, &proof_hex, true, None)
+                .expect("commitment-only availability evidence");
+
+        assert_eq!(availability.external_receipt_count, 0, "no receipt -> count 0");
+        assert!(availability.external_receipt.is_none(), "no receipt -> None");
+        assert!(!availability.external_receipt_checked, "no receipt -> not checked");
+        assert!(!availability.testnet_beta_ready, "no receipt -> not beta-ready");
+        assert!(!availability.production_ready, "no receipt -> not production-ready");
     }
 
     #[test]

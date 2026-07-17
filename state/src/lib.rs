@@ -8,7 +8,7 @@
 //! This crate implements the state layer for Cell transactions, including:
 //! - **Cell indexing**: CellDB (OutPoint → CellMeta)
 //! - **Script indexing**: ScriptIndex (lock_hash/type_hash → Cells)
-//! - **DA storage**: Segment files with NMT/KZG commitments
+//! - **DA storage**: Segment files with Merkle commitments (NMT/KZG is a future upgrade path)
 //! - **Sampling proofs**: Data availability verification
 
 #![allow(missing_docs)]

@@ -292,33 +292,45 @@ impl TypedCellStore for InMemoryTypedCellStore {
 
 /// Compute stable conflict hash.
 ///
-/// `blake3(domain || code_hash || hash_type || args || conflict_key_value)`
+/// `blake3(domain || code_hash || hash_type || len(args) || args || len(conflict_key_value) || conflict_key_value)`
 ///
 /// Does NOT change when cell data is updated.
 /// Used by CellDAG conflict detection.
+///
+/// Length prefixes are inserted between variable-length fields so that
+/// `(args="X", conflict_key_value="")` cannot collide with
+/// `(args="", conflict_key_value="X")` — the same canonical form used by
+/// `Script::hash_v1` and `encode_conflict_key_value_composite`.
 pub fn compute_conflict_hash(type_script: &Script, conflict_key_value: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"myelin-typed-cell/conflict-hash/v1");
     hasher.update(&type_script.code_hash);
     hasher.update(&[type_script.hash_type]);
+    hasher.update(&(type_script.args.len() as u32).to_le_bytes());
     hasher.update(&type_script.args);
+    hasher.update(&(conflict_key_value.len() as u32).to_le_bytes());
     hasher.update(conflict_key_value);
     *hasher.finalize().as_bytes()
 }
 
 /// Compute typed data hash.
 ///
-/// `blake3(domain || code_hash || hash_type || args || data)`
+/// `blake3(domain || code_hash || hash_type || len(args) || args || len(data) || data)`
 ///
 /// Changes with every data update.
 /// Named `typed_data_hash` (not `cell_state_hash`) because it does NOT
 /// include lock/capacity — only type script identity + data.
+///
+/// Length prefixes prevent `(args="X", data="")` from colliding with
+/// `(args="", data="X")` — see `compute_conflict_hash` for the same rule.
 pub fn compute_typed_data_hash(type_script: &Script, data: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"myelin-typed-cell/typed-data-hash/v1");
     hasher.update(&type_script.code_hash);
     hasher.update(&[type_script.hash_type]);
+    hasher.update(&(type_script.args.len() as u32).to_le_bytes());
     hasher.update(&type_script.args);
+    hasher.update(&(data.len() as u32).to_le_bytes());
     hasher.update(data);
     *hasher.finalize().as_bytes()
 }
@@ -756,16 +768,30 @@ pub fn cell_tx_estimated_serialized_size(tx: &CellTx) -> u64 {
 /// Operation/source semantic constraints are enforced later by the scheduler
 /// consumer when decoding the full payload for conflict or admission decisions.
 pub fn is_cellscript_scheduler_witness_bytes(witness: &[u8]) -> bool {
-    decode_cellscript_scheduler_witness_molecule_unchecked(witness).ok().is_some_and(|w| {
+    // Native 7-field Myelin witness path.
+    if decode_cellscript_scheduler_witness_molecule_unchecked(witness).ok().is_some_and(|w| {
         w.magic == 0xCE11
             && w.version == CELLSCRIPT_SCHEDULER_WITNESS_VERSION
             && w.access_count <= MAX_CELLSCRIPT_ACCESS_COUNT
             && w.access_count as usize == w.accesses.len()
-    })
+    }) {
+        return true;
+    }
+    // Legacy 9-field cellscript compiler witness path (translated on decode).
+    super::witness_bridge::CellscriptLegacyWitness::decode(witness)
+        .ok()
+        .is_some_and(|w| w.magic == 0xCE11 && w.version == CELLSCRIPT_SCHEDULER_WITNESS_VERSION && w.accesses.len() <= MAX_CELLSCRIPT_ACCESS_COUNT as usize)
 }
 
 fn is_cellscript_scheduler_witness_candidate_bytes(witness: &[u8]) -> bool {
-    decode_cellscript_scheduler_witness_molecule_unchecked(witness)
+    // Native 7-field Myelin witness.
+    if decode_cellscript_scheduler_witness_molecule_unchecked(witness)
+        .is_ok_and(|decoded| decoded.magic == 0xCE11 && decoded.version == CELLSCRIPT_SCHEDULER_WITNESS_VERSION)
+    {
+        return true;
+    }
+    // Legacy 9-field cellscript compiler witness.
+    super::witness_bridge::CellscriptLegacyWitness::decode(witness)
         .is_ok_and(|decoded| decoded.magic == 0xCE11 && decoded.version == CELLSCRIPT_SCHEDULER_WITNESS_VERSION)
 }
 
@@ -972,18 +998,18 @@ fn validate_cellscript_scheduler_witness_header_and_body(
     Ok(witness)
 }
 
-fn scheduler_molecule_pack_number(value: usize) -> [u8; 4] {
+pub(super) fn scheduler_molecule_pack_number(value: usize) -> [u8; 4] {
     (value as u32).to_le_bytes()
 }
 
-fn scheduler_molecule_unpack_number(bytes: &[u8], ty: &'static str) -> Result<usize, String> {
+pub(super) fn scheduler_molecule_unpack_number(bytes: &[u8], ty: &'static str) -> Result<usize, String> {
     if bytes.len() < 4 {
         return Err(format!("{ty}: expected at least 4 bytes for number, got {}", bytes.len()));
     }
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize)
 }
 
-fn scheduler_molecule_encode_table(fields: &[Vec<u8>]) -> Vec<u8> {
+pub(super) fn scheduler_molecule_encode_table(fields: &[Vec<u8>]) -> Vec<u8> {
     let header_size = 4 * (fields.len() + 1);
     let total_size = header_size + fields.iter().map(Vec::len).sum::<usize>();
     let mut out = Vec::with_capacity(total_size);
@@ -1000,7 +1026,7 @@ fn scheduler_molecule_encode_table(fields: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-fn scheduler_molecule_decode_table<'a>(bytes: &'a [u8], expected_fields: usize, ty: &'static str) -> Result<Vec<&'a [u8]>, String> {
+pub(super) fn scheduler_molecule_decode_table<'a>(bytes: &'a [u8], expected_fields: usize, ty: &'static str) -> Result<Vec<&'a [u8]>, String> {
     if bytes.len() < 8 {
         return Err(format!("{ty}: table header is too short: {}", bytes.len()));
     }
@@ -1113,9 +1139,45 @@ pub fn decode_cellscript_scheduler_witness_for_tx(
     tx: &CellTx,
     bytes: &[u8],
 ) -> Result<CellScriptSchedulerWitness, CellScriptSchedulerWitnessError> {
-    let witness = decode_cellscript_scheduler_witness(bytes)?;
-    validate_cellscript_scheduler_witness_against_transaction(tx, &witness)?;
-    Ok(witness)
+    // Schema-discriminating decode: try the native Myelin 7-field witness
+    // first (the fast path for witnesses Myelin itself emits), and fall back
+    // to the cellscript compiler's legacy 9-field format when the native
+    // decoder rejects the bytes. The legacy path recomputes conflict_hash /
+    // typed_data_hash from the tx's concrete cells (see `witness_bridge`).
+    match decode_cellscript_scheduler_witness(bytes) {
+        Ok(witness) => {
+            validate_cellscript_scheduler_witness_against_transaction(tx, &witness)?;
+            Ok(witness)
+        }
+        Err(native_err) => {
+            // Fall back to the legacy 9-field cellscript format.
+            let legacy = super::witness_bridge::CellscriptLegacyWitness::decode(bytes)?;
+            let witness = super::witness_bridge::translate_legacy_witness_for_tx(tx, &legacy)?;
+            validate_cellscript_scheduler_witness_against_transaction(tx, &witness)
+                .map_err(|_| native_err)?;
+            Ok(witness)
+        }
+    }
+}
+
+/// Schema-discriminating decode WITHOUT transaction-shape validation.
+///
+/// Used by the scheduler path (`decoded_cellscript_scheduler_witnesses_with_legacy`)
+/// which only needs the decoded conflict hashes, not admission validation.
+/// Native 7-field witnesses decode directly; legacy 9-field witnesses are
+/// translated via the bridge recomputing conflict_hash/typed_data_hash from
+/// the tx's concrete cells.
+pub fn decode_cellscript_scheduler_witness_for_tx_unvalidated(
+    tx: &CellTx,
+    bytes: &[u8],
+) -> Result<CellScriptSchedulerWitness, CellScriptSchedulerWitnessError> {
+    match decode_cellscript_scheduler_witness(bytes) {
+        Ok(witness) => Ok(witness),
+        Err(_native_err) => {
+            let legacy = super::witness_bridge::CellscriptLegacyWitness::decode(bytes)?;
+            super::witness_bridge::translate_legacy_witness_for_tx(tx, &legacy)
+        }
+    }
 }
 
 /// Produce a trusted scheduler access summary from authenticated compiled metadata.
@@ -1771,6 +1833,26 @@ impl CellTx {
         &self,
     ) -> impl Iterator<Item = Result<CellScriptSchedulerWitness, CellScriptSchedulerWitnessError>> + '_ {
         self.cellscript_scheduler_witnesses().map(decode_cellscript_scheduler_witness)
+    }
+
+    /// Decode all CellScript scheduler witnesses with schema discrimination:
+    /// native 7-field Myelin witnesses decode directly; legacy cellscript
+    /// 9-field witnesses are translated via the bridge, recomputing
+    /// `conflict_hash` / `typed_data_hash` from this transaction's concrete
+    /// cells. This is the path the CellDAG scheduler uses so that real
+    /// cellscript-compiled witnesses feed typed conflict edges.
+    ///
+    /// Unlike `decode_cellscript_scheduler_witness_for_tx`, this does NOT run
+    /// full transaction-shape validation (bounds checks etc.) — the scheduler
+    /// only needs the decoded conflict hashes, and admission validation is a
+    /// separate explicit step. This mirrors the original
+    /// `decoded_cellscript_scheduler_witnesses` behaviour (decode-only).
+    pub fn decoded_cellscript_scheduler_witnesses_with_legacy(
+        &self,
+    ) -> Vec<Result<CellScriptSchedulerWitness, CellScriptSchedulerWitnessError>> {
+        self.cellscript_scheduler_witnesses()
+            .map(|bytes| decode_cellscript_scheduler_witness_for_tx_unvalidated(self, bytes))
+            .collect()
     }
 
     /// Decode and validate all CellScript scheduler witnesses against this transaction.
