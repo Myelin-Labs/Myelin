@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Myelin">
+  <defs>
+    <linearGradient id="g-left" x1="34" y1="22" x2="34" y2="106" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7dd8fc" />
+      <stop offset="0.5" stop-color="#38bdf8" />
+      <stop offset="1" stop-color="#22d3ee" />
+    </linearGradient>
+    <linearGradient id="g-right" x1="94" y1="22" x2="94" y2="106" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#c4b5fd" />
+      <stop offset="0.5" stop-color="#a78bfa" />
+      <stop offset="1" stop-color="#8b5cf6" />
+    </linearGradient>
+    <linearGradient id="g-bridge" x1="0" y1="22" x2="0" y2="106" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22d3ee" />
+      <stop offset="0.5" stop-color="#6366f1" />
+      <stop offset="1" stop-color="#a855f7" />
+    </linearGradient>
+  </defs>
+
+  <rect width="128" height="128" rx="22" fill="#050816" />
+
+  <g stroke="url(#g-bridge)" stroke-width="11" stroke-linecap="round" fill="none">
+    <line x1="34" y1="22" x2="94" y2="106" />
+    <line x1="94" y1="22" x2="34" y2="106" />
+  </g>
+
+  <line x1="34" y1="22" x2="34" y2="106" stroke="url(#g-left)" stroke-width="14" stroke-linecap="round" />
+  <line x1="94" y1="22" x2="94" y2="106" stroke="url(#g-right)" stroke-width="14" stroke-linecap="round" />
+</svg>

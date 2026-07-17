@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">Myelin session court bundle evidence preview</title>
+  <desc id="desc">A generated preview of a valid Myelin session court bundle verification report with CKB-compatible projection fields.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#050816"/>
+      <stop offset="0.48" stop-color="#081333"/>
+      <stop offset="1" stop-color="#120a2c"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#49a6ff"/>
+      <stop offset="1" stop-color="#8d5cff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#030716" flood-opacity="0.55"/>
+    </filter>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0v40" fill="none" stroke="#849fff" stroke-opacity="0.11" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="720" fill="url(#bg)"/>
+  <rect width="1280" height="720" fill="url(#grid)"/>
+  <rect x="64" y="58" width="1152" height="604" rx="14" fill="#07122d" fill-opacity="0.9" stroke="#849fff" stroke-opacity="0.28" filter="url(#shadow)"/>
+  <rect x="64" y="58" width="1152" height="72" rx="14" fill="#0c1a42"/>
+  <rect x="64" y="124" width="1152" height="6" fill="url(#accent)"/>
+
+  <text x="96" y="103" fill="#f5f7ff" font-family="Outfit, Arial, sans-serif" font-size="30" font-weight="700">Session court bundle verification</text>
+  <text x="786" y="101" fill="#62e0ff" font-family="'JetBrains Mono', monospace" font-size="17">fixture report preview</text>
+  <rect x="1018" y="78" width="150" height="34" rx="6" fill="#0f2c44" stroke="#62e0ff" stroke-opacity="0.55"/>
+  <text x="1040" y="101" fill="#62e0ff" font-family="'JetBrains Mono', monospace" font-size="17" font-weight="700">valid: true</text>
+
+  <g font-family="'JetBrains Mono', monospace" font-size="18">
+    <text x="96" y="178" fill="#8d9bd0">schema</text>
+    <text x="364" y="178" fill="#f5f7ff">myelin-session-court-bundle-v1</text>
+    <text x="96" y="220" fill="#8d9bd0">consensus_kind</text>
+    <text x="364" y="220" fill="#f5f7ff">static-closed-committee</text>
+    <text x="96" y="262" fill="#8d9bd0">vm_profile</text>
+    <text x="364" y="262" fill="#f5f7ff">ckb-strict-basic</text>
+    <text x="96" y="304" fill="#8d9bd0">projection</text>
+    <text x="364" y="304" fill="#62e0ff">ckb-compatible, possible</text>
+    <text x="96" y="346" fill="#8d9bd0">finalised</text>
+    <text x="364" y="346" fill="#62e0ff">true, quorum_weight 2</text>
+    <text x="96" y="388" fill="#8d9bd0">checks</text>
+    <text x="364" y="388" fill="#62e0ff">21 passed</text>
+  </g>
+
+  <g>
+    <rect x="740" y="158" width="410" height="254" rx="10" fill="#0a1536" stroke="#849fff" stroke-opacity="0.26"/>
+    <text x="768" y="195" fill="#f5f7ff" font-family="Outfit, Arial, sans-serif" font-size="22" font-weight="700">Projection fields</text>
+    <g font-family="'JetBrains Mono', monospace" font-size="15">
+      <text x="768" y="236" fill="#8d9bd0">source_txid</text>
+      <text x="768" y="261" fill="#c5cef8">993041994cb6e41e...46018c5d29dadb09</text>
+      <text x="768" y="302" fill="#8d9bd0">ckb_raw_tx_hash</text>
+      <text x="768" y="327" fill="#c5cef8">5285aa5702ecaf0b...13b54385427ccabb</text>
+      <text x="768" y="368" fill="#8d9bd0">molecule_transaction_bytes</text>
+      <text x="1008" y="368" fill="#62e0ff">438</text>
+    </g>
+  </g>
+
+  <g>
+    <rect x="96" y="434" width="1054" height="160" rx="10" fill="#050b20" stroke="#849fff" stroke-opacity="0.22"/>
+    <text x="124" y="472" fill="#8d9bd0" font-family="'JetBrains Mono', monospace" font-size="16">state_root_before</text>
+    <text x="356" y="472" fill="#c5cef8" font-family="'JetBrains Mono', monospace" font-size="16">a621f2ef4d16cbea35f25fad4031e442d3322cbe1569aa90300aff47b6612c51</text>
+    <text x="124" y="514" fill="#8d9bd0" font-family="'JetBrains Mono', monospace" font-size="16">state_root_after</text>
+    <text x="356" y="514" fill="#c5cef8" font-family="'JetBrains Mono', monospace" font-size="16">4319d21aea34d5b692d0789275cdd842332fe59ea7cc5919fc3ab968716b88bf</text>
+    <text x="124" y="556" fill="#8d9bd0" font-family="'JetBrains Mono', monospace" font-size="16">challenge_payload_hash</text>
+    <text x="356" y="556" fill="#c5cef8" font-family="'JetBrains Mono', monospace" font-size="16">6f5e0811dee3caeb57a598f02f5118015201f7b219a8acac035c61fe6e779dbf</text>
+  </g>
+
+  <rect x="96" y="616" width="1054" height="2" fill="url(#accent)"/>
+  <text x="96" y="641" fill="#6875aa" font-family="'JetBrains Mono', monospace" font-size="14">myelin-cli session verify-court-bundle --bundle session-court-bundle.json --out session-court-verify.json</text>
+</svg>

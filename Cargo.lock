@@ -1024,6 +1024,7 @@ dependencies = [
  "myelin-muhash",
  "parking_lot",
  "proptest",
+ "rayon",
  "rocksdb",
  "serde",
  "tempfile",
