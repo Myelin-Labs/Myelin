@@ -178,8 +178,8 @@ flowchart LR
 
 Today Myelin sits at **Tier 2**. See the
 [claim ladder](docs/security/claim-ladder.md) for the full boundary, and
-[Continuing the Teeworlds-on-CKB line](docs/releases/teeworlds-lineage.md)
-for how this relates to xuejie's work.
+[Introducing Myelin](docs/releases/nervos-talk-introducing-myelin.md)
+for the long-form narrative.
 
 ## Where Myelin fits in the research line
 
@@ -188,7 +188,7 @@ real-time logic runs inside CKB-VM and explicitly deferred the
 session/trust/dispute layer. Myelin builds exactly that layer — the off-chain
 runtime above a verified chunk. We do **not** improve on the in-VM work; we
 reuse the replayer binary unchanged. See
-[Continuing the Teeworlds-on-CKB line](docs/releases/teeworlds-lineage.md)
+[Introducing Myelin](docs/releases/nervos-talk-introducing-myelin.md)
 for the full positioning, and
 [*Teeworlds reproducibility*](MYELIN_TEEWORLDS_REPRODUCIBILITY.md) for the
 measured values (`tape_bytes: 2162`, `vm_cycles: 15,139,695`,
