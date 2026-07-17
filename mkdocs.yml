@@ -186,6 +186,7 @@ nav:
   - Releases & positioning:
       - releases/index.md
       - Continuing the Teeworlds-on-CKB line: releases/teeworlds-lineage.md
+      - Following the game-loop line (Nervos Talk draft): releases/nervos-talk-following-the-game-loop-line.md
 
 validation:
   links:

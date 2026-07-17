@@ -8,3 +8,7 @@ not security claims — for the latter, see the
 - [Continuing the Teeworlds-on-CKB line](teeworlds-lineage.md) — how Myelin
   builds on xxuejie's *Teeworlds on CKB* experiment, what we add, and what we
   deliberately do not claim.
+- [Following the game-loop line](nervos-talk-following-the-game-loop-line.md) —
+  a Nervos Talk draft engaging with xuejie's fat/thin-transactions, OHOL, and
+  Archipelago posts: what each means for Myelin's roadmap (transit cells,
+  witness-axis policy, composition manifests).
