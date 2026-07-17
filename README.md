@@ -156,7 +156,7 @@ scripts/myelin_production_gate.sh
 | `mempool/` | Cell transaction pool and deterministic conflict scoring. |
 | `consensus/` | Static closed committee and Tendermint-style weighted precommit finality. |
 | `cli/` | Command-line fixtures and report generation for CellTx, session, DA, settlement, and submission flows. |
-| `cellscript/` | Local CellScript fork, including the `typed-cell` target profile. |
+| `cellscript/` | CellScript compiler, vendored in sync with upstream (0.21.1). Myelin's typed-cell model lives in `exec/`, not in a compiler fork. |
 | `docs/` and `MYELIN_*.md` | Architecture notes, evidence reports, positioning, and rehearsal records. |
 | `website/` | Myelin marketing/docs landing site (Astro). |
 
