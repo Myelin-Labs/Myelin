@@ -185,8 +185,7 @@ nav:
       - Diagram gallery: reference/architecture-diagrams.md
   - Releases & positioning:
       - releases/index.md
-      - Continuing the Teeworlds-on-CKB line: releases/teeworlds-lineage.md
-      - Following the game-loop line (Nervos Talk draft): releases/nervos-talk-following-the-game-loop-line.md
+      - Introducing Myelin (Nervos Talk draft): releases/nervos-talk-introducing-myelin.md
 
 validation:
   links:

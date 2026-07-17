@@ -201,7 +201,7 @@ Start with these documents when reviewing the protocol state:
 - `MYELIN_PRODUCTION_GATE.md` · `MYELIN_PRODUCTION_REHEARSAL_REPORT.md`
 - `MYELIN_TEEWORLDS_REPRODUCIBILITY.md` · `MYELIN_USE_CASE_POSITIONING.md`
 - `docs/MYELIN_ARCHITECTURE.md` · `docs/TEEWORLDS_FIXTURE.md`
-- [`docs/releases/teeworlds-lineage.md`](docs/releases/teeworlds-lineage.md) — how Myelin continues the Teeworlds-on-CKB line
+- [`docs/releases/nervos-talk-introducing-myelin.md`](docs/releases/nervos-talk-introducing-myelin.md) — the canonical public introduction (Nervos Talk draft)
 
 For CellScript upstream parity:
 
