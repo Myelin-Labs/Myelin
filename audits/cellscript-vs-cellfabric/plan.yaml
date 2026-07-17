@@ -1,0 +1,312 @@
+version: 1
+plan:
+  name: "CellScript vs CellFabric — 架构与配合分析"
+  max_concurrency: 3
+  max_consecutive_failures: 2
+  max_cycles: 5
+  auto_reject_retries: 1
+
+tasks:
+  - id: cellscript-side
+    title: "CellScript 侧深度调研"
+    assigned_to: coder
+    max_retries: 1
+    verify_skip_reason: |
+      调研报告，非生产代码改动；最终综合任务与 owner 都会复核。
+    prompt: |-
+      你的任务：从 CellScript 仓库（`/Users/arthur/RustroverProjects/CellScript`）的视角，调研它如何理解
+      "自己 vs CellFabric"，以及它现有的 CellFabric 配合面。这是一份"侧写"报告，给 owner
+      用来与 CellFabric 侧对照，不是给 CellScript 上游提的 PR。
+
+      ## 必读文件（按顺序读，做笔记）
+
+      1. `/Users/arthur/RustroverProjects/CellScript/README.md`（项目自述，重点读 target profiles、
+         与 CKB 的关系、与 L2/上层的关系）
+      2. `/Users/arthur/RustroverProjects/CellScript/AGENTS.md`（与本任务无直接关系，可跳过核心内容）
+      3. `/Users/arthur/RustroverProjects/CellScript/src/lib.rs`（顶层 module map）
+      4. CellScript 0.14 release notes / scope 文档（路径在 docs/releases/，先 `ls docs/releases/`）——
+         重点看里面怎么界定 "Action Builder, CellFabric, CCC integration" 这些 scope 边界
+      5. `/Users/arthur/RustroverProjects/CellScript/scripts/cellscript_cellfabric_bridge_smoke.sh`
+         全文（理解 CellScript 端的桥接 smoke 走的是什么路径）
+      6. `/Users/arthur/RustroverProjects/CellScript/scripts/cellscript_0_14_scope_audit.sh` 全文
+         （理解 CellScript 自己如何 audit 自己的 scope 不越界）
+      7. CellScript 端的 fabric-intent 输出代码：
+         - `src/cli/commands.rs`（看 `cellfabric_intent_envelope_json` 附近的代码，约 10140-10280 行）
+         - 搜 `cellfabric` / `fabric_intent` / `fabric-intent` 在 `src/` 下的所有出现
+      8. `crates/cellscript-ckb-adapter/` 下的关键模块（理解 CellScript → CKB 怎么编译、metadata 怎么 emit）
+      9. CellScript 端 `examples/` 下的一个 CKB 例子（看 `cellc action build --fabric-intent` 出来的 JSON 长什么样）
+
+      ## 必做的发现
+
+      在你的报告里，每条结论都要带 file:line 证据，不要凭印象。
+
+      - **CellScript 是什么**（用 3-5 句话讲清楚 layer、target、scope）
+      - **CellScript 跟 CKB 怎么对接**（type script / lock script / RISC-V 编译路径，metadata 怎么 emit）
+      - **CellScript 跟 CellFabric 现有 bridge 的 CellScript 端实现细节**：
+        - `cellc action build --fabric-intent` 走的是哪条 CLI 路径
+        - envelope JSON schema `cellscript-cellfabric-intent-envelope-v0.20` 的关键字段
+        - `bridge_boundary` 三个 flag 是什么语义
+        - `cellfabric_intent_template` 包含什么
+        - `cellscript_core_dependency: no-cell-fabric-rust-crate` 是不是设计上 CellScript
+          故意不依赖 CellFabric crate？为什么这样选（这关系到能不能 cargo 互相 import）
+      - **CellScript 自己怎么界定 scope 不越界**（看 0.14 release notes 和 scope audit）——
+        哪些事是 CellScript 负责的，哪些事 CellScript 拒绝做
+      - **CellScript 端的 runtime / settlement 路径**：CellScript 编译出来的 .elf 怎么变成 CKB
+        transaction？metadata → cell deps 怎么映射？cellc 本身能直接 emit tx bytes 吗？
+      - **Myelin 的关系**（重要，Myelin 仓库是 owner 的当前 workspace）：
+        - Myelin vendors CellScript 在 `cellscript/` 子目录
+        - Myelin 怎么用 CellScript 编译产物（看 `/Users/arthur/RustroverProjects/Myelin/AGENTS.md`
+          和 `MYELIN_*.md` 里提到 CellScript 的地方）
+        - Myelin 有没有在 `cellc` 上加 fabric-intent 输出？Myelin 的 typed-cell 目标 profile
+          跟 CellFabric 怎么对应？
+
+      ## 输出
+
+      把报告写到 `/Users/arthur/RustroverProjects/Myelin/audits/cellscript-vs-cellfabric/CELLSCRIPT_SIDE.md`。
+
+      结构建议（不强求，但请保持段落清晰、可被综合任务 grep 引用）：
+
+      ```
+      # CellScript 侧 — 自述与对 CellFabric 的现有配合面
+
+      ## 1. CellScript 是什么（一段话）
+      ## 2. CellScript → CKB 的编译路径
+      ## 3. CellScript → CellFabric 的现有 bridge（CellScript 端）
+         ### 3.1 入口：`cellc action build --fabric-intent`
+         ### 3.2 envelope schema 关键字段
+         ### 3.3 边界设计：为什么 no-cell-fabric-rust-crate
+         ### 3.4 0.14 release 怎么 audit 这条边界
+      ## 4. CellScript 的 scope 边界（什么它做、什么它不做）
+      ## 5. CellScript 跟 Myelin 的关系
+      ## 6. CellScript 的对外公共面（哪些 crate、哪些 binary、哪些 JSON schema）
+      ## 7. 配合面观察（从 CellScript 视角看 CellFabric — 给 owner 综合用）
+      ```
+
+      每节都引用 file:line。如果发现 CellScript 文档或代码自相矛盾，直接指出。
+
+      ## 不要做
+
+      - 不要改任何代码
+      - 不要给 CellScript 上游提建议（这是 owner 综合用的内部材料）
+      - 不要试图运行 cargo build / test（除非某个 smoke 脚本对理解至关重要）
+      - 不要在 report 里写"v1 / v2 / 改进版"这种版本叙事（CellScript 还在 alpha，所有交付就是单一份）
+      - 不要把 CellScript 没做的事解读为 CellScript "想要"做某事——按现状写
+
+      ## 停止条件
+
+      报告写到指定路径、引用了所有关键 file:line、覆盖了上面 7 个必做的发现。
+    output:
+      path: /Users/arthur/RustroverProjects/Myelin/audits/cellscript-vs-cellfabric/CELLSCRIPT_SIDE.md
+      min_lines: 200
+
+  - id: cellfabric-side
+    title: "CellFabric 侧深度调研"
+    assigned_to: coder
+    max_retries: 1
+    verify_skip_reason: |
+      调研报告，非生产代码改动；最终综合任务与 owner 都会复核。
+    prompt: |-
+      你的任务：从 CellFabric 仓库（`/Users/arthur/RustroverProjects/CellFabric`）的视角，调研它
+      如何理解"自己 vs CellScript"，以及它现有的 CellScript 配合面。这是一份"侧写"报告，给 owner
+      用来与 CellScript 侧对照。
+
+      ## 必读文件（按顺序读，做笔记）
+
+      1. `/Users/arthur/RustroverProjects/CellFabric/README.md`（重点读 System Model、
+         Architecture Invariants、Current Boundaries、Module Map）
+      2. `/Users/arthur/RustroverProjects/CellFabric/AGENTS.md`（与本任务无直接关系，可跳过）
+      3. `/Users/arthur/RustroverProjects/CellFabric/docs/principles-tutorial.md`（全读，看 Core
+         Objects、Auth Binding、Data Flow）
+      4. `/Users/arthur/RustroverProjects/CellFabric/docs/red-lines.md`（全读 — CellFabric 的
+         "red lines"，跟 CellScript 0.14 scope audit 是同一种东西）
+      5. `/Users/arthur/RustroverProjects/CellFabric/docs/cellscript-bridge.md`（全读 — bridge
+         的 CellFabric 侧文档）
+      6. `/Users/arthur/RustroverProjects/CellFabric/docs/development-roadmap.md`（理解 CellFabric
+         自己的 roadmap，看 bridge 这一块写到哪里了）
+      7. `/Users/arthur/RustroverProjects/CellFabric/src/cellscript_bridge.rs`（import 侧实现）
+      8. `/Users/arthur/RustroverProjects/CellFabric/src/cellscript_amm.rs`（AMM-specific import，
+         跟通用 import 的差别）
+      9. `/Users/arthur/RustroverProjects/CellFabric/src/amm.rs` 里的 `AmmPoolBatchCompiler`、
+         `AmmSwapPolicy`（理解 AMM 路径为什么是"完整"、通用路径为什么是"不完整"）
+      10. `/Users/arthur/RustroverProjects/CellFabric/src/lib.rs`（顶层 module map）
+      11. `/Users/arthur/RustroverProjects/CellFabric/scripts/cellscript_amm_flow_smoke.sh`
+          全文（看 AMM 端的桥接 smoke 走的什么）
+      12. `examples/cellscript_flow.rs` 和 `examples/cellscript_import.rs`（理解 dev 侧使用方式）
+
+      ## 必做的发现
+
+      在你的报告里，每条结论都要带 file:line 证据，不要凭印象。
+
+      - **CellFabric 是什么**（用 3-5 句话讲清楚 layer、target、scope、phase）
+      - **CellFabric 的核心模型**：IntentBody / SignedIntent、IntentDag、Bundle、SoftConfirmation、
+        SettlementPlan、SettlementFinalityEvidence 之间的数据流
+      - **CellFabric 的核心 invariant**（架构 / 安全 / reentrancy / double-spend 4 组）
+      - **CellFabric 现有 CellScript 配合面的实现细节**：
+        - `import_cellscript_intent_envelope` 走的是哪条路径
+        - `CellScriptAppConflictPolicy` 做什么
+        - `CellScriptRuntimeBuilderCompiler` 为什么返回 `UnsupportedSettlementAction`
+          —— 这是 bridge 的关键缺口
+        - AMM 路径为什么更完整：`AmmPoolBatchCompiler` 怎么工作；为什么 AMM 是
+          "完整闭环" 而通用 CellScript 是 "import + 不 compile"
+        - `http` feature 暴露的 `POST /cellscript/import` 和 `POST /cellscript/import/amm-swap`
+      - **CellFabric 的 scope 边界**（red-lines.md）：CellFabric 拒绝做什么、为什么拒绝；
+        跟 CellScript 0.14 scope audit 的"边界设计"是同一种思路
+      - **CellFabric 的 Obyte 关系**：CellFabric 借鉴 Obyte 的什么、不借鉴什么；
+        跟"借鉴 CellScript 编译产物"是不是同一种"借鉴不依赖"
+      - **Myelin 的关系**（重要）：owner 当前 workspace `/Users/arthur/RustroverProjects/Myelin` 跟
+        CellFabric 之间有没有任何交叉？CellFabric 的 docs/CellScript 关系里提没提 Myelin？
+        （在 Myelin 仓库和 CellFabric 仓库两边都搜 "Myelin"）
+
+      ## 输出
+
+      把报告写到 `/Users/arthur/RustroverProjects/Myelin/audits/cellscript-vs-cellfabric/CELLFABRIC_SIDE.md`。
+
+      结构建议（不强求，但请保持段落清晰、可被综合任务 grep 引用）：
+
+      ```
+      # CellFabric 侧 — 自述与对 CellScript 的现有配合面
+
+      ## 1. CellFabric 是什么（一段话）
+      ## 2. CellFabric 核心模型
+         ### 2.1 数据流
+         ### 2.2 关键类型
+         ### 2.3 invariant 分组
+      ## 3. CellFabric 现有 CellScript 配合面
+         ### 3.1 通用 import：`import_cellscript_intent_envelope`
+         ### 3.2 app conflict policy
+         ### 3.3 runtime builder compiler 的缺口
+         ### 3.4 AMM 路径的完整闭环
+         ### 3.5 HTTP endpoint
+      ## 4. CellFabric 的 scope 边界（red lines）
+      ## 5. CellFabric 跟 Obyte 的关系
+      ## 6. CellFabric 跟 Myelin 的关系
+      ## 7. CellFabric 的对外公共面（哪些 crate、哪些 binary、哪些 HTTP route、哪些 JSON schema）
+      ## 8. 配合面观察（从 CellFabric 视角看 CellScript — 给 owner 综合用）
+      ```
+
+      每节都引用 file:line。如果发现 CellFabric 文档或代码自相矛盾，直接指出。
+
+      ## 不要做
+
+      - 不要改任何代码
+      - 不要给 CellFabric 上游提建议（这是 owner 综合用的内部材料）
+      - 不要试图运行 cargo build / test（除非某个 smoke 脚本对理解至关重要）
+      - 不要在 report 里写"v1 / v2 / 改进版"这种版本叙事
+      - 不要把 CellFabric 没做的事解读为 CellFabric "想要"做某事——按现状写
+
+      ## 停止条件
+
+      报告写到指定路径、引用了所有关键 file:line、覆盖了上面 7 个必做的发现。
+    output:
+      path: /Users/arthur/RustroverProjects/Myelin/audits/cellscript-vs-cellfabric/CELLFABRIC_SIDE.md
+      min_lines: 200
+
+  - id: synthesize-comparison
+    title: "综合比较与配合分析"
+    assigned_to: coder
+    depends_on: [cellscript-side, cellfabric-side]
+    max_retries: 1
+    verify_skip_reason: |
+      最终综合报告；owner 会在 review 阶段人工核验。如果 owner 不满意会要求改写。
+    prompt: |-
+      你的任务：把两份侧写报告
+      `/Users/arthur/RustroverProjects/Myelin/audits/cellscript-vs-cellfabric/CELLSCRIPT_SIDE.md`
+      和
+      `/Users/arthur/RustroverProjects/Myelin/audits/cellscript-vs-cellfabric/CELLFABRIC_SIDE.md`
+      综合成一份**最终的比较 + 配合分析报告**。
+
+      Owner 是 Myelin 项目的架构师，正在思考 Myelin 跟这两个项目的关系。本报告要回答
+      三个问题（按重要性排序）：
+
+      1. **CellScript 和 CellFabric 各自是什么、各自在哪一层、各自解决什么问题**
+      2. **它们的核心区别是什么**（用结构化对比 + 叙述）
+      3. **它们配合的可能性 / 现状 / 下一步**（重点：现有 bridge 的实际深度、缺什么、
+         Myelin 该怎么参与）
+
+      ## 必读输入
+
+      - CELLSCRIPT_SIDE.md（worker A 的报告）
+      - CELLFABRIC_SIDE.md（worker B 的报告）
+      - 如果两份报告互相矛盾、或某条 claim 你无法从源文件验证，直接回去读源文件
+        （CellScript 仓库 `/Users/arthur/RustroverProjects/CellScript`、
+        CellFabric 仓库 `/Users/arthur/RustroverProjects/CellFabric`），
+        不要复制粘贴 worker 的未验证 claim
+
+      ## 不要做的事
+
+      - 不要在最终报告里写"v1 / v2 / 改进版"这种版本叙事
+      - 不要把现状的"缺口"包装成"机会"或者反过来；按现状写
+      - 不要给 Myelin、CellScript、CellFabric 任何上游提建议（这是 owner 用的内部材料）
+      - 不要做超过 600 行（如果写到 600 行还没讲完，砍细节；优先保留结构、对比、配合分析）
+      - 不要复述两份侧写里讲过的细节；侧写是给 owner 看的"原始材料"，本报告是 owner
+        拿出去给协作者/团队看的"成品"
+
+      ## 推荐结构
+
+      ```
+      # CellScript vs CellFabric — 架构与配合分析
+
+      ## TL;DR
+      （3-5 段。先讲清"是什么"再讲"区别"，最后讲"配合"。每段不超过 5 行。）
+
+      ## 1. 它们各自是什么
+      ### 1.1 CellScript
+      ### 1.2 CellFabric
+      ### 1.3 同一棵 CKB Cell 树上的不同高度
+
+      ## 2. 核心区别（结构化矩阵 + 段落叙述）
+      ### 2.1 对比矩阵
+      （一张表：维度 / CellScript / CellFabric / 谁更接近 L1）
+      ### 2.2 区别不是"谁更好"，是"层不同"
+      （叙述段。重点：编译时 vs 运行时、类型 vs 实例、单 cell vs cell 集合、
+      on-chain 验证 vs off-chain 排序、CKB script ↔ ckb-tx bytes 两种产出。）
+
+      ## 3. 现有配合面 — 它已经走通了多少
+      ### 3.1 桥接的形状
+      （一段：JSON envelope 级别的桥，不是 crate 级别的桥；CellScript
+      故意不依赖 CellFabric crate 的设计选择）
+      ### 3.2 已经能做什么
+      （带 file:line 引用；从两份侧写里抽）
+      ### 3.3 还缺什么 — 桥的接缝
+      （带 file:line 引用。重点：CellScriptRuntimeBuilderCompiler 返回
+      UnsupportedSettlementAction；通用 CellScript 路径没有 app settlement compiler。
+      AMM 路径的完整闭环可以单独一段。）
+      ### 3.4 谁负责 runtime builder
+      （重要判断：现在这个洞是 owner 设计的"Myelin 角色"吗？读 Myelin 的
+      /Users/arthur/RustroverProjects/Myelin/README.md 和 MYELIN_*.md 看 Myelin
+      有没有在做 CellScript → CKB tx 的编译）
+
+      ## 4. Myelin 跟两者的关系
+      ### 4.1 Myelin ↔ CellScript（vendored，typed-cell target）
+      ### 4.2 Myelin ↔ CellFabric（现状 — 有没有交叉？没有的话这是配合的机会窗口）
+      ### 4.3 Myelin 能不能做 bridge 的 runtime builder
+      （关键：Myelin 的 exec/、cellscript/ 已经在做 CellScript 的本地执行；
+      这部分有没有可能变成 CellFabric 的 CellScriptRuntimeBuilder 实现？）
+
+      ## 5. 配合的下一步（结构化提案）
+      （不要写成"应该这样做"，写成"现在这条接缝长这样，把它关上需要 X / Y / Z"。）
+      ### 5.1 立即能做的（不依赖任何新代码，只是把已有材料对齐）
+      ### 5.2 短期可行的（新增少量代码，半年内能落地）
+      ### 5.3 长期的（涉及协议变化）
+
+      ## 6. 风险与不变项
+      （两边的 red lines / scope boundaries 必须保留的不变项；
+      不要在配合里碰它们。）
+      ```
+
+      ## 写作风格
+
+      - 段落短、句子短；owner 是 L2 协议设计的熟手，不需要科普
+      - 每个结构性 claim 带 file:line 引用
+      - 不要写"v1 / v2 / 改进版"
+      - 不要在中文段落里突然插入英文整句（专有名词、crate 名、CLI flag 保留原文）
+      - 不要在标题里用 emoji
+
+      ## 停止条件
+
+      报告写到 `/Users/arthur/RustroverProjects/Myelin/audits/cellscript-vs-cellfabric/COMPARISON_AND_COLLABORATION.md`，
+      覆盖上面 6 节、每节不超过推荐行数、总长 < 600 行、所有结构性 claim 带 file:line 引用。
+    output:
+      path: /Users/arthur/RustroverProjects/Myelin/audits/cellscript-vs-cellfabric/COMPARISON_AND_COLLABORATION.md
+      max_lines: 600
+      min_lines: 200

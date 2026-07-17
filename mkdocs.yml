@@ -168,6 +168,7 @@ nav:
       - operations/index.md
       - CLI reference: operations/cli.md
       - Production gate: operations/production-gate.md
+      - Concurrency plan: operations/concurrency-optimization-plan.md
       - Local CKB devnet smoke: operations/devnet-smoke.md
   - Security & claims:
       - security/index.md
@@ -182,6 +183,9 @@ nav:
       - reference/index.md
       - Glossary: reference/glossary.md
       - Diagram gallery: reference/architecture-diagrams.md
+  - Releases & positioning:
+      - releases/index.md
+      - Continuing the Teeworlds-on-CKB line: releases/teeworlds-lineage.md
 
 validation:
   links:

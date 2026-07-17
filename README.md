@@ -1,41 +1,79 @@
 # Myelin
 
-Myelin is an experimental, CKB-aligned session runtime for finite Cell
-execution.
+<p align="center">
+  <strong>A CKB-aligned off-chain session runtime for finite Cell execution.</strong>
+</p>
 
-It is designed for applications that need fast off-chain state transitions, but
-still want those transitions to stay close to CKB's Cell Model and CKB-VM
-verification semantics.
+<p align="center">
+  Run high-throughput Cell transitions off-chain, keep them finite and typed,
+  and emit evidence that can be inspected and projected toward CKB-style
+  transaction contexts.
+</p>
 
-Myelin is not a CKB full-node fork, not a new L1, and not yet a finished
-permissionless L2. The current repository is a protocol seed: it keeps the
-execution, state, evidence, and session-finality pieces needed to test the
-shape of an off-chain Cell ledger.
+<p align="center">
+  <em>not a CKB full node · not a new L1 · not a finished permissionless L2</em>
+</p>
 
-## The Short Version
+---
 
-Myelin runs high-frequency Cell transitions off-chain, keeps them finite and
-typed, and emits evidence that can be inspected and, where possible, projected
-towards CKB-style transaction contexts.
+## What problem does Myelin solve?
 
-The current public claim should stay precise:
+CKB-VM is now powerful enough to run complex, real-time logic — [xxuejie's
+*Teeworlds on CKB* experiment](https://xuejie.space/2026_06_16_teeworlds_on_ckb/)
+proved a full multiplayer game can execute inside the VM as a single chunk.
+But proving *one chunk executes* is not the same as running *a session*:
+you still need to schedule many chunks, finalise them into a block, dispute
+a bad chunk, and project the result back to L1. That session-and-evidence
+layer is what xuejie explicitly deferred, and it is what Myelin builds.
 
-```text
-Myelin currently uses selectable closed-validator finality for session
-benchmarking and pressure testing. The CKB-style projection and future court
-path is what keeps it aligned with CKB semantics.
+Myelin is the off-chain runtime that sits **above** a single verified chunk:
+
+```mermaid
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "primaryColor": "#A5B4FC",
+    "primaryTextColor": "#1E293B",
+    "primaryBorderColor": "#4F46E5",
+    "lineColor": "#6366F1",
+    "secondaryColor": "#C7D2FE",
+    "tertiaryColor": "#C7D2FE",
+    "fontFamily": "Inter, system-ui, sans-serif",
+    "fontSize": "14px"
+  },
+  "flowchart": { "curve": "basis", "padding": 12 }
+}}%%
+flowchart LR
+    A["CellScript source"]:::source
+    B["typed-cell metadata<br/>+ VM artefact"]:::artefact
+    C["CellTx<br/>(Myelin)"]:::tx
+    D["CellDAG<br/>scheduler"]:::sched
+    E["Deterministic<br/>VM verification"]:::vm
+    F["Session Cell<br/>state root"]:::state
+    G["Evidence bundle<br/>(projection · DA ·<br/>court · settle)"]:::evidence
+
+    A --> B --> C --> D --> E --> F --> G
+    F --> C
+
+    classDef source   fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef artefact fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef tx       fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
+    classDef sched    fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef vm       fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
+    classDef state    fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef evidence fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
-## Why CKB Alignment Matters
+Every box on that spine is a real crate in this workspace.
 
-CKB uses the Cell Model, not an account model. A transaction consumes live
+## How it stays close to CKB
+
+CKB uses the **Cell Model**, not an account model: a transaction consumes live
 Cells and creates new Cells; state changes happen through Cell replacement.
-Cells can carry data, a lock script, and an optional type script, and scripts
-run in CKB-VM.
-
-Myelin follows that mental model. It does not try to hide session state inside
-an account-style contract. Instead, it treats off-chain execution as a finite
-Cell session that should be able to report:
+Cells carry data, a lock script, and an optional type script, and scripts run
+in CKB-VM. Myelin follows that mental model — it does not hide session state
+inside an account-style contract. Instead it treats off-chain execution as a
+**finite Cell session** that can always report:
 
 - what Cells were consumed or created,
 - which lock/type-script-like rules were checked,
@@ -43,189 +81,139 @@ Cell session that should be able to report:
 - whether the transition can be projected into a CKB-style context,
 - and which evidence would be relevant during a dispute.
 
+```mermaid
+%%{init: { "theme": "base", "themeVariables": { "primaryColor": "#A5B4FC", "primaryTextColor": "#1E293B", "primaryBorderColor": "#4F46E5", "lineColor": "#6366F1", "fontFamily": "Inter, system-ui, sans-serif", "fontSize": "13px" } }}%%
+flowchart TB
+    subgraph off["Off-chain session (Myelin)"]
+        direction LR
+        S1["CellTx batch"] --> S2["CellDAG<br/>parallel scheduling"] --> S3["CKB-VM<br/>verification"] --> S4["session block<br/>+ state root"]
+    end
+    subgraph l1["L1 (CKB)"]
+        direction LR
+        L1A["court script<br/>(future)"] -.-> L1B["disputed-chunk<br/>adjudication"]
+    end
+    S4 -->|"projection<br/>+ court bundle"| L1A
+    S4 -->|"DA commitment"| L1C["data availability<br/>(future external)"]
+
+    classDef off fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef l1  fill:#E0E7FF,stroke:#4F46E5,color:#1E293B;
+    class S1,S2,S3,S4 off;
+    class L1A,L1B,L1C l1;
+```
+
 Official CKB references:
+[docs map](https://docs.nervos.org/llms.txt) ·
+[Cell Model](https://docs.nervos.org/docs/ckb-fundamentals/cell-model) ·
+[CKB-VM](https://docs.nervos.org/docs/ckb-fundamentals/ckb-vm)
 
-- [CKB documentation map](https://docs.nervos.org/llms.txt)
-- [Cell Model](https://docs.nervos.org/docs/ckb-fundamentals/cell-model)
-- [CKB-VM](https://docs.nervos.org/docs/ckb-fundamentals/ckb-vm)
+## Demo
 
-## What Is In This Repository
+Two runnable demos, from zero-dependency to the full reference workload:
 
-| Path | Role |
-| --- | --- |
-| `cellscript/` | Local CellScript fork, including the `typed-cell` target profile. |
-| `exec/` | Cell transactions, script verification, VM/syscall glue, scheduler witnesses, and CellDAG scheduling. |
-| `state/` | Live Cell state roots and data-availability proof primitives. |
-| `mempool/` | Cell transaction pool and deterministic conflict scoring. |
-| `consensus/` | Static closed committee and Tendermint-style weighted precommit finality over session block hashes. |
-| `cli/` | Command-line fixtures and report generation for CellTx, session, DA, settlement, and submission flows. |
-| `website/` | Myelin marketing/docs landing site built with Astro. |
-| `docs/` and `MYELIN_*.md` | Architecture notes, evidence reports, positioning, and rehearsal records. |
+| | Demo | What it shows | Needs |
+| --- | --- | --- | --- |
+| ① | **[First run](docs/getting-started/first-run.md)** | CellTx → session open → commit → court bundle → DA manifest, all local | Rust only |
+| ② | **[Teeworlds end-to-end](docs/tutorials/teeworlds-end-to-end.md)** (flagship) | xxuejie's CKB-VM replayer through Myelin's verifier, chunked, projected to CKB, court bundle (22 checks) | teeworlds fork + built replayer |
 
-Support crates live under `core-utils/`, `crypto/`, and `math/`.
-
-## Protocol Shape
-
-```text
-CellScript source
-  -> typed-cell metadata + VM artefact
-  -> CellTx delta
-  -> CellDAG conflict scheduling
-  -> deterministic VM verification
-  -> committed session Cell state root
-  -> evidence bundle for projection, DA, court, and settlement checks
-```
-
-The default semantic profile for public demos should be:
-
-```text
-semantic_profile = "ckb-compatible"
-ckb_projection_possible = true
-```
-
-`myelin-native` is allowed for experiments, but it should not be the default
-evidence path.
-
-## Current Security Boundary
-
-Myelin's current fast paths use closed-validator finality. That is useful for
-benchmarking and pressure testing, but it is not a permissionless security
-claim.
-
-The claim ladder is:
-
-```text
-no projection report      -> designed to stay close to CKB semantics
-successful projection     -> projectable into a CKB-style transaction/context
-future exercised court    -> disputed chunk adjudicable by the CKB-aligned path
-```
-
-Static committee finality alone must not be marketed as permissionless L2
-security.
+To see the **CellDAG + parallel VM verification** path, run
+`session commit-multi` after the first-run demo (see the
+[concurrency plan](docs/operations/concurrency-optimization-plan.md)).
 
 ## Quick Start
 
-Prerequisites:
-
-- Rust toolchain compatible with the workspace `Cargo.toml`.
-- Python 3 for validation scripts.
-- Node.js/npm if you want to build the website.
-
-Run the focused Rust checks:
+Prerequisites: a Rust toolchain (1.85+), Python 3, and optionally Node.js/npm
+for the website.
 
 ```bash
+# verify the workspace builds and tests pass
 cargo check --locked --workspace --all-targets
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
+
+# generate a simple CellTx report
+cargo run -p myelin-cli -- celltx simple-report
+
+# open a deterministic session, commit a chunk, build + verify a court bundle
+cargo run -p myelin-cli -- session open-fixture --consensus static-closed-committee --out /tmp/open.json
+cargo run -p myelin-cli -- session commit-fixture --session /tmp/open.json --out /tmp/commit.json
+cargo run -p myelin-cli -- session court-bundle --commit /tmp/commit.json --chunk-index 0 --out /tmp/court.json
+cargo run -p myelin-cli -- session verify-court-bundle --bundle /tmp/court.json --out /tmp/court-verify.json
 ```
 
-Run the full local production gate:
+The full local production gate (broad; includes the Teeworlds acceptance gate
+when the teeworlds checkout is present):
 
 ```bash
 scripts/myelin_production_gate.sh
 ```
 
-That gate is intentionally broad. It checks Rust formatting and linting,
-executes focused workspace tests, exercises runtime smoke flows, runs Session L2
-open/commit/court/DA/settlement/package paths for both consensus engines, and
-then runs the Teeworlds acceptance gate when the Teeworlds checkout is present.
+## What is in this repository
 
-Run the narrower Teeworlds integration gate:
+| Path | Role |
+| --- | --- |
+| `exec/` | Cell transactions, script verification, VM/syscall glue, scheduler witnesses, and **CellDAG** conflict scheduling. |
+| `state/` | Live Cell state roots (incremental MuHash) and data-availability proof primitives. |
+| `mempool/` | Cell transaction pool and deterministic conflict scoring. |
+| `consensus/` | Static closed committee and Tendermint-style weighted precommit finality. |
+| `cli/` | Command-line fixtures and report generation for CellTx, session, DA, settlement, and submission flows. |
+| `cellscript/` | Local CellScript fork, including the `typed-cell` target profile. |
+| `docs/` and `MYELIN_*.md` | Architecture notes, evidence reports, positioning, and rehearsal records. |
+| `website/` | Myelin marketing/docs landing site (Astro). |
 
-```bash
-scripts/myelin_teeworlds_acceptance.sh
+Support crates live under `core-utils/`, `crypto/`, and `math/`.
+
+## Security boundary (read before relying on this)
+
+Myelin's current fast paths use **closed-validator finality** — useful for
+benchmarking and pressure testing, **not** a permissionless security claim.
+
+```mermaid
+%%{init: { "theme": "base", "themeVariables": { "primaryColor": "#A5B4FC", "primaryTextColor": "#1E293B", "primaryBorderColor": "#4F46E5", "lineColor": "#6366F1", "fontFamily": "Inter, system-ui, sans-serif", "fontSize": "13px" } }}%%
+flowchart LR
+    T0["Tier 0<br/>designed close<br/>to CKB"]:::reached --> T1["Tier 1<br/>projectable to<br/>CKB-style tx"]:::reached --> T2["Tier 2<br/>court-verifiable<br/>chunk shape"]:::reached --> T3["Tier 3<br/>on-chain court<br/>verdict"]:::future
+
+    classDef reached fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
+    classDef future  fill:#FECACA,stroke:#DC2626,color:#1E293B,stroke-dasharray: 4 3;
 ```
 
-## Useful CLI Entry Points
+Today Myelin sits at **Tier 2**. See the
+[claim ladder](docs/security/claim-ladder.md) for the full boundary, and
+[Continuing the Teeworlds-on-CKB line](docs/releases/teeworlds-lineage.md)
+for how this relates to xuejie's work.
 
-Generate a simple CellTx report:
+## Where Myelin fits in the research line
 
-```bash
-cargo run -p myelin-cli -- celltx simple-report
-```
+[xxuejie proved](https://xuejie.space/2026_06_16_teeworlds_on_ckb/) complex
+real-time logic runs inside CKB-VM and explicitly deferred the
+session/trust/dispute layer. Myelin builds exactly that layer — the off-chain
+runtime above a verified chunk. We do **not** improve on the in-VM work; we
+reuse the replayer binary unchanged. See
+[Continuing the Teeworlds-on-CKB line](docs/releases/teeworlds-lineage.md)
+for the full positioning, and
+[*Teeworlds reproducibility*](MYELIN_TEEWORLDS_REPRODUCIBILITY.md) for the
+measured values (`tape_bytes: 2162`, `vm_cycles: 15,139,695`,
+`court_checks: 22`).
 
-Generate a static-committee session fixture:
-
-```bash
-cargo run -p myelin-cli -- session open-fixture \
-  --consensus static-closed-committee \
-  --out reports/session-open.json
-```
-
-Commit and build a court bundle:
-
-```bash
-cargo run -p myelin-cli -- session commit-fixture \
-  --session reports/session-open.json \
-  --out reports/session-commit.json
-
-cargo run -p myelin-cli -- session court-bundle \
-  --commit reports/session-commit.json \
-  --chunk-index 0 \
-  --out reports/session-court-bundle.json
-
-cargo run -p myelin-cli -- session verify-court-bundle \
-  --bundle reports/session-court-bundle.json \
-  --out reports/session-court-verify.json
-```
-
-Create and verify DA evidence:
-
-```bash
-cargo run -p myelin-cli -- session da-manifest \
-  --bundle reports/session-court-bundle.json \
-  --storage-dir reports/session-da-store \
-  --out reports/session-da-manifest.json
-
-cargo run -p myelin-cli -- session verify-da-manifest \
-  --manifest reports/session-da-manifest.json \
-  --bundle reports/session-court-bundle.json \
-  --storage-dir reports/session-da-store \
-  --out reports/session-da-verify.json
-```
-
-## Website
-
-The Myelin website is a separate Astro project:
-
-```bash
-cd website
-npm install
-npm run dev
-npm run build
-```
-
-The site uses a blue-purple visual system inspired by the parent CellScript
-website, but it is a separate Myelin surface. Image areas are real, replaceable
-slots under `website/public/media/`.
-
-## Evidence And Reports
+## Evidence & reports
 
 Start with these documents when reviewing the protocol state:
 
-- `MYELIN_PRODUCTION_GATE.md`
-- `MYELIN_PRODUCTION_REHEARSAL_REPORT.md`
-- `MYELIN_SESSION_L2_PLAN.md`
-- `MYELIN_TEEWORLDS_REPRODUCIBILITY.md`
-- `MYELIN_USE_CASE_POSITIONING.md`
-- `docs/MYELIN_ARCHITECTURE.md`
-- `docs/TEEWORLDS_FIXTURE.md`
+- `MYELIN_PRODUCTION_GATE.md` · `MYELIN_PRODUCTION_REHEARSAL_REPORT.md`
+- `MYELIN_TEEWORLDS_REPRODUCIBILITY.md` · `MYELIN_USE_CASE_POSITIONING.md`
+- `docs/MYELIN_ARCHITECTURE.md` · `docs/TEEWORLDS_FIXTURE.md`
+- [`docs/releases/teeworlds-lineage.md`](docs/releases/teeworlds-lineage.md) — how Myelin continues the Teeworlds-on-CKB line
 
-For CellScript upstream parity, run:
+For CellScript upstream parity:
 
 ```bash
 scripts/check_cellscript_parent_parity.py
 ```
 
-It compares the vendored `cellscript/` tree against the parent `../CellScript`
-checkout, including nested CellScript repositories that Myelin vendors as flat
-directories.
+## Development notes
 
-## Development Notes
-
-- Keep CKB-related claims aligned with the official CKB docs.
+- Keep CKB-related claims aligned with the [official CKB docs](https://docs.nervos.org/llms.txt).
 - Prefer `ckb-compatible` evidence for public demos.
-- Do not describe closed-validator fast paths as permissionless L2 security.
+- Do **not** describe closed-validator fast paths as permissionless L2 security.
 - Keep generated reports out of commits unless they are intentional evidence
   artefacts.
 - Keep `cellscript/` changes auditable against the parent checkout.
