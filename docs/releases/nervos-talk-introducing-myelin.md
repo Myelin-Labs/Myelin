@@ -1,7 +1,8 @@
 # Introducing Myelin: a CKB-aligned off-chain Cell session runtime
 
 > **Draft Nervos Talk post.** This is the long-form introduction to Myelin —
-> what it is, why I built it, how it works, and where it is going.
+> what it is, why I built it, how it works, what ships today, and where it is
+> going. It is the canonical narrative; the README is the one-screen index.
 
 ---
 
@@ -17,7 +18,7 @@ verifier can adjudicate a single chunk without re-running the whole session.
 The closed-validator fast path ships today as a prototype; the permissionless
 path is the roadmap.
 
-Myelin is not a CKB full node, not a new L1, and not a finished
+Myelin is **not** a CKB full node, not a new L1, and not a finished
 permissionless L2. It is a protocol seed: the execution, state, evidence, and
 session-finality pieces needed to test the shape of an off-chain Cell ledger.
 
@@ -38,8 +39,7 @@ L1," a layer above the chunk has to answer five questions:
   the input shape?
 - **Data availability** — where does the evidence live?
 
-I built Myelin to be that layer — to treat off-chain execution as a finite
-Cell session that can always answer those five questions.
+I built Myelin to be that layer.
 
 ## The isomorphism principle: why I do not touch the VM
 
@@ -72,6 +72,20 @@ modified VM might not verify under CKB's, and the projection path would be
 meaningless. So every optimisation in Myelin lives strictly on the host side:
 scheduling, caching, finality, evidence packaging. The VM is the contract
 that keeps off-chain and on-chain honest with each other.
+
+Because it follows the Cell Model directly, a Myelin session can always
+report five things about any transition:
+
+- what Cells were consumed or created,
+- which lock/type-script-like rules were checked,
+- which VM/profile assumptions were used,
+- whether the transition can be projected into a CKB-style context,
+- and which evidence would be relevant during a dispute.
+
+Official CKB references I build against:
+[docs map](https://docs.nervos.org/llms.txt) ·
+[Cell Model](https://docs.nervos.org/docs/ckb-fundamentals/cell-model) ·
+[CKB-VM](https://docs.nervos.org/docs/ckb-fundamentals/ckb-vm).
 
 ## How Myelin works
 
@@ -132,14 +146,28 @@ flowchart TB
 ```
 
 Every box is a real crate in the workspace: `cellscript`, `myelin-exec`,
-`myelin-state`, `myelin-mempool`, `myelin-consensus`, `myelin-cli`.
+`myelin-state`, `myelin-mempool`, `myelin-consensus`, `myelin-cli`. Support
+crates live under `core-utils/`, `crypto/`, and `math/`.
+
+## What is in the repository
+
+| Path | Role |
+| --- | --- |
+| `exec/` | Cell transactions, script verification, VM/syscall glue, scheduler witnesses, and **CellDAG** conflict scheduling. |
+| `state/` | Live Cell state roots (incremental MuHash) and data-availability proof primitives. |
+| `mempool/` | Cell transaction pool and deterministic conflict scoring. |
+| `consensus/` | Static closed committee and Tendermint-style weighted precommit finality. |
+| `cli/` | Command-line fixtures and report generation for CellTx, session, DA, settlement, and submission flows. |
+| `cellscript/` | CellScript compiler, vendored in sync with upstream (0.21.1). The typed-cell model lives in `exec/`, not in a compiler fork. |
+| `docs/` and `MYELIN_*.md` | Architecture notes, evidence reports, positioning, and rehearsal records. |
+| `website/` | Marketing/docs landing site (Astro). |
 
 ## What I built
 
 ### 1. The typed-cell model
 
 A Cell in CKB carries data, a lock script, and an optional type script. The
-type script is what gives a Cell its *kind* — a token cell, an order cell, a
+type script gives a Cell its *kind* — a token cell, an order cell, a
 game-state cell. CKB verifies type scripts on chain, but the runtime has no
 structured way to reason about "this is a typed cell of kind X, with these
 conflict dimensions, this ownership, this mutability" before it hits the VM.
@@ -243,7 +271,8 @@ described above. Each item states the effect it achieves.
 
 None of the above changes a single VM instruction, cycle budget, or
 serialisation rule. The off-chain path can be made as fast as host hardware
-allows, without diverging from what the chain would verify.
+allows, without diverging from what the chain would verify. The full list is
+maintained in the [concurrency & optimisation plan](https://github.com/Myelin-Network/Myelin/blob/main/docs/operations/concurrency-optimization-plan.md).
 
 ## Acknowledgements
 
@@ -292,6 +321,19 @@ court bundle. The measured run is fully reproducible from the
 [runbook](https://github.com/Myelin-Network/Myelin/blob/main/docs/tutorials/teeworlds-end-to-end.md):
 `tape_bytes: 2162`, `vm_cycles: 15,139,695`, `court_checks: 22`.
 
+## Demos
+
+Two runnable demos, from zero-dependency to the full reference workload:
+
+| | Demo | What it shows | Needs |
+| --- | --- | --- | --- |
+| ① | **[First run](https://github.com/Myelin-Network/Myelin/blob/main/docs/getting-started/first-run.md)** | `CellTx → session open → commit → court bundle → DA manifest`, all local | Rust only |
+| ② | **[Teeworlds end-to-end](https://github.com/Myelin-Network/Myelin/blob/main/docs/tutorials/teeworlds-end-to-end.md)** (flagship) | xuejie's CKB-VM replayer through Myelin's verifier, chunked, projected to CKB, court bundle (22 checks) | teeworlds fork + built replayer |
+
+To see the **CellDAG + parallel VM verification** path in action, run
+`session commit-multi` after the first-run demo (see the
+[concurrency plan](https://github.com/Myelin-Network/Myelin/blob/main/docs/operations/concurrency-optimization-plan.md)).
+
 ## What ships today
 
 - The full off-chain runtime spine: `CellTx`, CellDAG + parallel VM
@@ -301,8 +343,7 @@ court bundle. The measured run is fully reproducible from the
   typed conflict edges in the CellDAG.
 - The reference workload running end to end (numbers above).
 - A zero-dependency session demo
-  ([first run](https://github.com/Myelin-Network/Myelin/blob/main/docs/getting-started/first-run.md)):
-  `CellTx → session open → commit → court bundle → DA manifest`, all local.
+  ([first run](https://github.com/Myelin-Network/Myelin/blob/main/docs/getting-started/first-run.md)).
 - A published [concurrency & optimisation plan](https://github.com/Myelin-Network/Myelin/blob/main/docs/operations/concurrency-optimization-plan.md)
   documenting every host-side optimisation and its effect.
 
@@ -363,22 +404,66 @@ flowchart LR
     classDef future  fill:#FECACA,stroke:#DC2626,color:#1E293B,stroke-dasharray: 4 3;
 ```
 
-## Try it
+## Quick Start
 
-The fastest path is the [first-run demo](https://github.com/Myelin-Network/Myelin/blob/main/docs/getting-started/first-run.md)
-(Rust only):
+Prerequisites: a Rust toolchain (1.85+), Python 3, and optionally Node.js/npm
+for the website.
 
 ```bash
+# verify the workspace builds and tests pass
+cargo check --locked --workspace --all-targets
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+
+# generate a simple CellTx report
 cargo run -p myelin-cli -- celltx simple-report
+
+# open a deterministic session, commit a chunk, build + verify a court bundle
 cargo run -p myelin-cli -- session open-fixture --consensus static-closed-committee --out /tmp/open.json
 cargo run -p myelin-cli -- session commit-fixture --session /tmp/open.json --out /tmp/commit.json
 cargo run -p myelin-cli -- session court-bundle --commit /tmp/commit.json --chunk-index 0 --out /tmp/court.json
 cargo run -p myelin-cli -- session verify-court-bundle --bundle /tmp/court.json --out /tmp/court-verify.json
 ```
 
+The full local production gate (broad; includes the Teeworlds acceptance gate
+when the teeworlds checkout is present):
+
+```bash
+scripts/myelin_production_gate.sh
+```
+
 For the flagship workload, the
 [teeworlds end-to-end runbook](https://github.com/Myelin-Network/Myelin/blob/main/docs/tutorials/teeworlds-end-to-end.md)
 builds the RISC-V replayer and runs it through Myelin end to end.
+
+## Evidence & reports
+
+When reviewing the protocol state, start with these documents:
+
+- `MYELIN_PRODUCTION_GATE.md` · `MYELIN_PRODUCTION_REHEARSAL_REPORT.md`
+- `MYELIN_TEEWORLDS_REPRODUCIBILITY.md` · `MYELIN_USE_CASE_POSITIONING.md`
+- `docs/MYELIN_ARCHITECTURE.md` · `docs/TEEWORLDS_FIXTURE.md`
+- [Claim ladder](https://github.com/Myelin-Network/Myelin/blob/main/docs/security/claim-ladder.md)
+- [Concurrency & optimisation plan](https://github.com/Myelin-Network/Myelin/blob/main/docs/operations/concurrency-optimization-plan.md)
+
+For CellScript upstream parity:
+
+```bash
+scripts/check_cellscript_parent_parity.py
+```
+
+It compares the vendored `cellscript/` tree against the parent `../CellScript`
+checkout, including nested CellScript repositories that Myelin vendors as flat
+directories.
+
+## Development notes
+
+- Keep CKB-related claims aligned with the [official CKB docs](https://docs.nervos.org/llms.txt).
+- Prefer `ckb-compatible` evidence for public demos.
+- Do **not** describe closed-validator fast paths as permissionless L2 security.
+- Keep generated reports out of commits unless they are intentional evidence
+  artefacts.
+- Keep `cellscript/` changes auditable against the parent checkout.
 
 ---
 
