@@ -202,7 +202,9 @@ The compiler is not vendored. Myelin owns its protocol fixtures and connects to 
 | Component | Locked version |
 | --- | --- |
 | CellScript release | `v0.22.0` |
-| CellScript peeled commit | `830b5971237401a74dd7848b200f48b4d2ed79f4` |
+| CellScript release base | `v0.22.0` / `830b5971237401a74dd7848b200f48b4d2ed79f4` |
+| CellScript pinned patch | `4c02e213ff8e50fa4760996dd962db58f6c45226` |
+| Entry witness placement | `WitnessArgs.input_type` via `cellscript-witnessargs-input-type-v2` |
 | Compiler CKB SDK | v5.1.0 at `1fbf3d4c9b35ef90bdb9e6621a8d26edde6325ce` |
 | Lock file | [`cellscript-adapter/cellscript-toolchain.lock.json`](cellscript-adapter/cellscript-toolchain.lock.json) |
 

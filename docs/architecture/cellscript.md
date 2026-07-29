@@ -6,9 +6,9 @@ CellScript is an independently versioned upstream compiler. Myelin does not vend
 
 ```text
 toolchain lock
-  -> exact upstream revision + compiler version + Rust toolchain
+  -> verified release base + exact patch revision + compiler version + Rust toolchain
 compiler attestation
-  -> executable BLAKE3 + version + source revision
+  -> executable BLAKE3 + release lineage + source revision
 compile request
   -> absolute source/output paths + target profile
 compile result
@@ -19,7 +19,7 @@ state binding
   -> concrete conflict hashes + raw-tx-bound SchedulerPlan
 ```
 
-Production requests use the `ckb` target profile. The adapter rechecks artifact and metadata digests before reading scheduling metadata.
+Production requests use the `ckb` target profile. The adapter requires the versioned `cellscript-witnessargs-input-type-v2` placement contract: the entry payload is carried in `WitnessArgs.input_type`, the runtime loads group input 0 and falls back to group output 0 for output-only type groups, and the lock field remains owned by the signing adapter. The adapter rechecks the exact target-profile witness ABI, artifact digest, and metadata digest before reading scheduling metadata.
 
 The compiler is allowed to say which transaction source/index an action accesses and whether the action is statically parallelizable. It is not allowed to provide the final logical key. A source-level binding such as `session`, `pool`, or `receipt` is diagnostic text only.
 
@@ -33,4 +33,4 @@ Every access is resolved by `myelin-state` from:
 
 Missing or inconsistent data fails admission. Scheduler metadata is not inserted into transaction witnesses, so it cannot change raw transaction identity or pretend to be a CKB witness ABI.
 
-The lock file is `cellscript-adapter/cellscript-toolchain.lock.json`. It currently pins upstream release `v0.22.0`, peeled source commit `830b5971237401a74dd7848b200f48b4d2ed79f4`, and the compiler's CKB SDK v5.1.0 path dependency at commit `1fbf3d4c9b35ef90bdb9e6621a8d26edde6325ce`. Myelin integration sources are under `fixtures/cellscript/`.
+The lock file is `cellscript-adapter/cellscript-toolchain.lock.json`. Lock schema v3 verifies release base `v0.22.0` at `830b5971237401a74dd7848b200f48b4d2ed79f4`, pins the reviewed witness-placement patch at `4c02e213ff8e50fa4760996dd962db58f6c45226`, and pins the compiler's CKB SDK v5.1.0 path dependency at `1fbf3d4c9b35ef90bdb9e6621a8d26edde6325ce`. The base tag is provenance, not a claim that the unreleased patch itself is tagged. Myelin integration sources are under `fixtures/cellscript/`.

@@ -66,11 +66,12 @@ CellScript is an independent upstream project connected only through `myelin-cel
 The adapter lock pins:
 
 - repository;
+- verified upstream release base and peeled base revision;
 - package version;
 - exact source revision;
 - independent Rust toolchain.
 
-An installation attestation binds that lock to a BLAKE3 digest of the executable. A compile result binds source, artifact, metadata, compiler version, and source revision. Production compilation accepts only the `ckb` target profile.
+An installation attestation binds that lock to a BLAKE3 digest of the executable. A compile result binds source, artifact, metadata, compiler version, and source revision. Production compilation accepts only the `ckb` target profile and the exact versioned witness ABI locked by Myelin. The current ABI places the CellScript entry payload in `WitnessArgs.input_type`, loads it from group input 0 with group output 0 as the output-only fallback, and leaves the `lock` field under signing-adapter ownership.
 
 For scheduling, the adapter reads the selected action's compiler metadata and produces an access template. Each access contains operation, syscall diagnostic, source class, and index. `binding` is never hashed into a conflict key. Myelin then resolves every access through authenticated state.
 

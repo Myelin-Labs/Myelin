@@ -13,6 +13,7 @@ CELLSCRIPT_BIN="${CELLSCRIPT_BIN:?set CELLSCRIPT_BIN to the attested parent Cell
 CELLSCRIPT_ATTESTATION="${CELLSCRIPT_ATTESTATION:?set CELLSCRIPT_ATTESTATION to its Myelin attestation JSON}"
 ALWAYS_SUCCESS_CODE_HASH="0x28e83a1277d48add8e72fadaa9248559e1b632bab2bd60b27955ebc4c03800a5"
 GENESIS_ALWAYS_SUCCESS_DEP_INDEX="${GENESIS_ALWAYS_SUCCESS_DEP_INDEX:-0x5}"
+GENESIS_MULTISIG_DEP_GROUP_INDEX="${GENESIS_MULTISIG_DEP_GROUP_INDEX:-0x1}"
 INITIAL_MINING_BLOCKS="${INITIAL_MINING_BLOCKS:-96}"
 COMMIT_MINING_BLOCKS="${COMMIT_MINING_BLOCKS:-8}"
 FEE_SHANNONS="${FEE_SHANNONS:-10000}"
@@ -20,6 +21,9 @@ DEPLOY_FEE_SHANNONS="${DEPLOY_FEE_SHANNONS:-500000}"
 MIN_FUNDING_CELL_CAPACITY_SHANNONS="${MIN_FUNDING_CELL_CAPACITY_SHANNONS:-10000000000}"
 CARRIER_CELL_CAPACITY_SHANNONS="${CARRIER_CELL_CAPACITY_SHANNONS:-42000000000}"
 SETTLEMENT_AUTHORITY_CELL_CAPACITY_SHANNONS="${SETTLEMENT_AUTHORITY_CELL_CAPACITY_SHANNONS:-30000000000}"
+REPLAY_PROBE_FUNDING_CELL_CAPACITY_SHANNONS="${REPLAY_PROBE_FUNDING_CELL_CAPACITY_SHANNONS:-70000000000}"
+SETTLEMENT_MULTISIG_SIGNER_0_SECRET_KEY="0x1111111111111111111111111111111111111111111111111111111111111111"
+SETTLEMENT_MULTISIG_SIGNER_1_SECRET_KEY="0x2222222222222222222222222222222222222222222222222222222222222222"
 CKB_SHANNONS_PER_BYTE=100000000
 
 require_cmd() {
@@ -95,11 +99,11 @@ carrier_type_args_hex() {
   echo "${payload_hash}${identity}"
 }
 
-entry_witness_hex() {
+entry_witness_payload_hex() {
   local source_path="$1"
   local action="$2"
   shift 2
-  local witness_hex
+  local entry_json
   local cmd=(
     "$CELLSCRIPT_BIN"
     entry-witness "$source_path"
@@ -110,8 +114,44 @@ entry_witness_hex() {
     cmd+=(--arg "$arg_hex")
   done
   cmd+=(--target-profile ckb --json)
-  witness_hex="$("${cmd[@]}" | jq -r '.witness_hex')"
-  echo "0x${witness_hex#0x}"
+  entry_json="$("${cmd[@]}")"
+  if ! jq -e '
+    .status == "ok"
+    and .abi == "cellscript-entry-witness-v1"
+    and .placement_abi == "cellscript-witnessargs-input-type-v2"
+    and .witness_args_field == "input_type"
+    and .witness_source == "group-input-0-then-group-output-0"
+  ' <<<"$entry_json" >/dev/null; then
+    jq . <<<"$entry_json" >&2
+    echo "CellScript returned an unsupported entry-witness placement contract" >&2
+    return 1
+  fi
+  echo "0x$(jq -r '.witness_hex' <<<"$entry_json")"
+}
+
+place_entry_witness_payload_hex() {
+  local payload_hex="$1"
+  local witness_json
+  witness_json="$(
+    cargo run --locked -q -p myelin-cellscript-adapter -- \
+      place-entry-witness-v2 "$payload_hex"
+  )"
+  if ! jq -e '
+    .placement_abi == "cellscript-witnessargs-input-type-v2"
+    and .witness_args_field == "input_type"
+    and .lock_field == "empty"
+  ' <<<"$witness_json" >/dev/null; then
+    jq . <<<"$witness_json" >&2
+    echo "Myelin adapter returned an unsupported entry-witness placement" >&2
+    return 1
+  fi
+  echo "0x$(jq -r '.witness_hex' <<<"$witness_json")"
+}
+
+entry_witness_hex() {
+  local payload_hex
+  payload_hex="$(entry_witness_payload_hex "$@")"
+  place_entry_witness_payload_hex "$payload_hex"
 }
 
 compile_carrier_verifiers() {
@@ -264,8 +304,8 @@ da_availability_external_receipt_checked="$(jq -r '.availability.external_receip
 da_availability_external_receipt="$(jq -r '.availability.external_receipt' "$WORKDIR/myelin/session-da.json")"
 da_manifest_molecule_hash="$(jq -r '.molecule_transaction_hash' "$WORKDIR/myelin/session-da.json")"
 da_manifest_segment_root="$(jq -r '.segment_root' "$WORKDIR/myelin/session-da.json")"
-if [[ "$da_availability_schema" != "myelin-da-availability-v1" || "$da_availability_mode" != "replicated-da-committee" ]]; then
-  echo "DA manifest did not expose replicated DA availability evidence" >&2
+if [[ "$da_availability_schema" != "myelin-da-availability-v1" || "$da_availability_mode" != "fixture-replicated-committee" ]]; then
+  echo "DA manifest did not expose fixture-replicated DA availability evidence" >&2
   exit 1
 fi
 if [[ "$da_availability_signature_scheme" != "secp256k1-recoverable-blake3-pubkey-hash20" ]]; then
@@ -325,6 +365,10 @@ settlement_authority_authentication_signature_verified="$(jq -r '.settlement_aut
 settlement_authority_authentication_hash="$(jq -r '.settlement_authority.authority_authentication.attestation_hash' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_lock_args="$(jq -r '.settlement_authority.authority_authentication.ckb_lock_args' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_lock_args_hash="$(jq -r '.settlement_authority.authority_authentication.ckb_lock_args_hash' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_multisig_require_first_n="$(jq -r '.settlement_authority.authority_authentication.ckb_multisig_require_first_n' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_multisig_participant_count="$(jq -r '.settlement_authority.authority_authentication.ckb_multisig_participant_pubkey_hashes | length' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_multisig_witness_config="$(jq -r '.settlement_authority.authority_authentication.ckb_multisig_witness_config' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_multisig_config_hash="$(jq -r '.settlement_authority.authority_authentication.ckb_multisig_config_hash' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_enforceable="$(jq -r '.settlement_authority.authority_authentication.ckb_enforceable' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_testnet_ready="$(jq -r '.settlement_authority.authority_authentication.testnet_beta_ready' "$WORKDIR/myelin/session-settlement-package.json")"
 settlement_authority_authentication_production_ready="$(jq -r '.settlement_authority.authority_authentication.production_ready' "$WORKDIR/myelin/session-settlement-package.json")"
@@ -368,12 +412,12 @@ if [[ "$settlement_authority_lock_binding" != "final-da-publication-lock-hash" ]
   echo "settlement package authority lock binding must target the final DA publication lock" >&2
   exit 1
 fi
-if [[ "$settlement_authority_authentication_schema" != "myelin-session-settlement-authority-auth-v2" || "$settlement_authority_authentication_mode" != "ckb-threshold-lock" ]]; then
-  echo "settlement authority must expose CKB threshold-lock authentication evidence" >&2
+if [[ "$settlement_authority_authentication_schema" != "myelin-session-settlement-authority-auth-v2" || "$settlement_authority_authentication_mode" != "ckb-secp256k1-blake160-multisig-all" ]]; then
+  echo "settlement authority must expose canonical CKB multisig authentication evidence" >&2
   exit 1
 fi
-if [[ "$settlement_authority_authentication_signature_scheme" != "secp256k1-recoverable-blake3-pubkey-hash20" ]]; then
-  echo "settlement authority authentication must expose the secp256k1 recoverable signature scheme" >&2
+if [[ "$settlement_authority_authentication_signature_scheme" != "secp256k1-recoverable-blake3-message-ckb-blake160-pubkey-hash" ]]; then
+  echo "settlement authority authentication must expose the CKB-blake160-bound secp256k1 signature scheme" >&2
   exit 1
 fi
 if [[ "$settlement_authority_authentication_participant_set_hash" != "$settlement_authority_participant_set_hash" ]]; then
@@ -396,8 +440,12 @@ if [[ "$settlement_authority_authentication_hash" == "null" || ${#settlement_aut
   echo "settlement authority authentication must expose a 32-byte attestation hash" >&2
   exit 1
 fi
-if [[ "$settlement_authority_lock_args" != 0x6d79656c696e2d617574682d7631* || "$settlement_authority_lock_args_hash" == "null" || ${#settlement_authority_lock_args_hash} -ne 64 ]]; then
-  echo "settlement authority authentication must expose threshold-lock args and lock-args hash" >&2
+if [[ ${#settlement_authority_lock_args} -ne 42 || "$settlement_authority_lock_args_hash" == "null" || ${#settlement_authority_lock_args_hash} -ne 64 || "${settlement_authority_lock_args#0x}" != "${settlement_authority_lock_args_hash:0:40}" ]]; then
+  echo "settlement authority authentication must expose canonical CKB multisig lock args and their config hash" >&2
+  exit 1
+fi
+if [[ "$settlement_authority_multisig_require_first_n" != "0" || "$settlement_authority_multisig_participant_count" != "3" || ${#settlement_authority_multisig_witness_config} -ne 130 || "$settlement_authority_multisig_config_hash" != "$settlement_authority_lock_args_hash" ]]; then
+  echo "settlement authority authentication must bind the complete canonical CKB multisig config" >&2
   exit 1
 fi
 if [[ "$settlement_authority_authentication_enforceable" != "false" || "$settlement_authority_authentication_testnet_ready" != "false" || "$settlement_authority_authentication_production_ready" != "false" ]]; then
@@ -441,7 +489,7 @@ mine "$INITIAL_MINING_BLOCKS" "initial"
 
 tip_hex="$(rpc '{"id":1,"jsonrpc":"2.0","method":"get_tip_header","params":[]}' | jq -r '.result.number')"
 tip_number="$((tip_hex))"
-required_reward_capacity="$((total_verifier_code_capacity + settlement_authority_capacity + DEPLOY_FEE_SHANNONS + MIN_FUNDING_CELL_CAPACITY_SHANNONS + (4 * CARRIER_CELL_CAPACITY_SHANNONS) + (4 * FEE_SHANNONS)))"
+required_reward_capacity="$((total_verifier_code_capacity + (2 * settlement_authority_capacity) + REPLAY_PROBE_FUNDING_CELL_CAPACITY_SHANNONS + DEPLOY_FEE_SHANNONS + MIN_FUNDING_CELL_CAPACITY_SHANNONS + (4 * CARRIER_CELL_CAPACITY_SHANNONS) + (4 * FEE_SHANNONS)))"
 reward_cells=""
 reward_capacity=0
 for block_number in $(seq 1 "$tip_number"); do
@@ -473,10 +521,17 @@ if ((reward_capacity < required_reward_capacity)); then
   exit 1
 fi
 
-genesis_tx_hash="$(
-  rpc '{"id":1,"jsonrpc":"2.0","method":"get_block_by_number","params":["0x0"]}' \
-    | jq -r '.result.transactions[0].hash'
+genesis_block_json="$(rpc '{"id":1,"jsonrpc":"2.0","method":"get_block_by_number","params":["0x0"]}')"
+genesis_tx_hash="$(jq -r '.result.transactions[0].hash' <<<"$genesis_block_json")"
+genesis_dep_group_tx_hash="$(jq -r '.result.transactions[1].hash' <<<"$genesis_block_json")"
+canonical_multisig_code_hash="$(
+  rpc '{"id":1,"jsonrpc":"2.0","method":"get_consensus","params":[]}' \
+    | jq -r '.result.secp256k1_blake160_multisig_all_type_hash'
 )"
+if [[ -z "$genesis_dep_group_tx_hash" || "$genesis_dep_group_tx_hash" == "null" || -z "$canonical_multisig_code_hash" || "$canonical_multisig_code_hash" == "null" ]]; then
+  echo "parent CKB genesis did not expose the canonical multisig DepGroup and consensus type hash" >&2
+  exit 1
+fi
 
 reward_inputs_json="$(
   jq -Rn '
@@ -491,8 +546,9 @@ reward_inputs_json="$(
     ]
   ' <<<"$reward_cells"
 )"
-funding_capacity="$((reward_capacity - total_verifier_code_capacity - settlement_authority_capacity - DEPLOY_FEE_SHANNONS))"
+funding_capacity="$((reward_capacity - total_verifier_code_capacity - (2 * settlement_authority_capacity) - REPLAY_PROBE_FUNDING_CELL_CAPACITY_SHANNONS - DEPLOY_FEE_SHANNONS))"
 funding_capacity_hex="$(printf '0x%x' "$funding_capacity")"
+replay_probe_funding_capacity_hex="$(printf '0x%x' "$REPLAY_PROBE_FUNDING_CELL_CAPACITY_SHANNONS")"
 deploy_request_path="$WORKDIR/verifier-deploy-send-transaction.json"
 deploy_response_path="$WORKDIR/verifier-deploy-send-transaction-response.json"
 deploy_get_tx_path="$WORKDIR/verifier-deploy-get-transaction-response.json"
@@ -505,12 +561,14 @@ jq -n \
   --arg da_final_verifier_code_capacity "$da_final_verifier_code_capacity_hex" \
   --arg settlement_final_verifier_code_capacity "$settlement_final_verifier_code_capacity_hex" \
   --arg settlement_authority_capacity "$settlement_authority_capacity_hex" \
+  --arg replay_probe_funding_capacity "$replay_probe_funding_capacity_hex" \
   --arg da_verifier_elf "$da_verifier_elf_hex" \
   --arg settlement_verifier_elf "$settlement_verifier_elf_hex" \
   --arg da_final_verifier_elf "$da_final_verifier_elf_hex" \
   --arg settlement_final_verifier_elf "$settlement_final_verifier_elf_hex" \
   --arg settlement_authority_data "$settlement_authority_data" \
   --arg settlement_authority_lock_args "$settlement_authority_lock_args" \
+  --arg canonical_multisig_code_hash "$canonical_multisig_code_hash" \
   --arg lock "$ALWAYS_SUCCESS_CODE_HASH" \
   --arg genesis_tx "$genesis_tx_hash" \
   --arg dep_index "$GENESIS_ALWAYS_SUCCESS_DEP_INDEX" \
@@ -559,9 +617,19 @@ jq -n \
             capacity: $settlement_authority_capacity,
             lock: { code_hash: $lock, hash_type: "data", args: $settlement_authority_lock_args },
             type: null
+          },
+          {
+            capacity: $settlement_authority_capacity,
+            lock: { code_hash: $canonical_multisig_code_hash, hash_type: "type", args: $settlement_authority_lock_args },
+            type: null
+          },
+          {
+            capacity: $replay_probe_funding_capacity,
+            lock: { code_hash: $lock, hash_type: "data", args: $settlement_authority_lock_args },
+            type: null
           }
         ],
-        outputs_data: ["0x", $da_verifier_elf, $settlement_verifier_elf, $da_final_verifier_elf, $settlement_final_verifier_elf, $settlement_authority_data],
+        outputs_data: ["0x", $da_verifier_elf, $settlement_verifier_elf, $da_final_verifier_elf, $settlement_final_verifier_elf, $settlement_authority_data, $settlement_authority_data, "0x"],
         witnesses: ($inputs | map("0x"))
       },
       "passthrough"
@@ -623,14 +691,25 @@ if [[ "$committed_settlement_authority_lock_args" != "$settlement_authority_lock
   echo "committed settlement authority cell lock args do not match declared threshold-lock args" >&2
   exit 1
 fi
+committed_canonical_settlement_authority_data="$(jq -r '.result.transaction.outputs_data[6]' "$deploy_get_tx_path")"
+committed_canonical_settlement_authority_lock_code_hash="$(jq -r '.result.transaction.outputs[6].lock.code_hash' "$deploy_get_tx_path")"
+committed_canonical_settlement_authority_lock_hash_type="$(jq -r '.result.transaction.outputs[6].lock.hash_type' "$deploy_get_tx_path")"
+if [[ "$committed_canonical_settlement_authority_data" != "$settlement_authority_data" || "$committed_canonical_settlement_authority_lock_code_hash" != "$canonical_multisig_code_hash" || "$committed_canonical_settlement_authority_lock_hash_type" != "type" ]]; then
+  echo "committed canonical settlement authority Cell does not match the parent CKB multisig system script" >&2
+  exit 1
+fi
 
 da_verifier_code_dep_index="0x1"
 settlement_verifier_code_dep_index="0x2"
 da_final_verifier_code_dep_index="0x3"
 settlement_final_verifier_code_dep_index="0x4"
 settlement_authority_tx_hash="$verifier_deploy_tx_hash"
-settlement_authority_output_index="0x5"
+legacy_settlement_authority_output_index="0x5"
+settlement_authority_output_index="0x6"
 settlement_authority_output_capacity_hex="$settlement_authority_capacity_hex"
+replay_probe_funding_tx_hash="$verifier_deploy_tx_hash"
+replay_probe_funding_output_index="0x7"
+replay_probe_funding_output_capacity_hex="$replay_probe_funding_capacity_hex"
 funding_tx_hash="$verifier_deploy_tx_hash"
 funding_output_capacity_hex="$funding_capacity_hex"
 
@@ -682,6 +761,29 @@ submit_and_verify_carrier() {
       exit 1
       ;;
   esac
+  local lock_code_hash="$ALWAYS_SUCCESS_CODE_HASH"
+  local lock_hash_type="data"
+  local lock_code_dep_tx_hash="$genesis_tx_hash"
+  local lock_code_dep_index="$GENESIS_ALWAYS_SUCCESS_DEP_INDEX"
+  local lock_code_dep_type="code"
+  local multisig_signer_args=()
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v2" ]]; then
+    lock_code_hash="$canonical_multisig_code_hash"
+    lock_hash_type="type"
+    lock_code_dep_tx_hash="$genesis_dep_group_tx_hash"
+    lock_code_dep_index="$GENESIS_MULTISIG_DEP_GROUP_INDEX"
+    lock_code_dep_type="dep_group"
+    multisig_signer_args+=(
+      --multisig-signer-secret-key "$SETTLEMENT_MULTISIG_SIGNER_0_SECRET_KEY"
+      --multisig-signer-secret-key "$SETTLEMENT_MULTISIG_SIGNER_1_SECRET_KEY"
+    )
+  fi
+  local output_lock_code_hash="$lock_code_hash"
+  local output_lock_hash_type="$lock_hash_type"
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-da-anchor-package-v2" ]]; then
+    output_lock_code_hash="$canonical_multisig_code_hash"
+    output_lock_hash_type="type"
+  fi
   local summary_suffix expected_readiness_mode expected_live_carrier_ready expected_final_l1_ready
   if [[ "$verifier_role" == "final-l1-script" ]]; then
     summary_suffix="final-script"
@@ -756,12 +858,15 @@ submit_and_verify_carrier() {
     ${authority_args[@]+"${authority_args[@]}"} \
     --carrier-capacity-shannons "$carrier_capacity" \
     --fee-shannons "$FEE_SHANNONS" \
-    --lock-code-hash "$ALWAYS_SUCCESS_CODE_HASH" \
-    --lock-hash-type data \
+    --lock-code-hash "$lock_code_hash" \
+    --lock-hash-type "$lock_hash_type" \
     --lock-args "$carrier_lock_args" \
     --output-lock-args "$output_lock_args" \
-    --lock-code-dep-tx-hash "$genesis_tx_hash" \
-    --lock-code-dep-index "$GENESIS_ALWAYS_SUCCESS_DEP_INDEX" \
+    --output-lock-code-hash "$output_lock_code_hash" \
+    --output-lock-hash-type "$output_lock_hash_type" \
+    --lock-code-dep-tx-hash "$lock_code_dep_tx_hash" \
+    --lock-code-dep-index "$lock_code_dep_index" \
+    --lock-code-dep-type "$lock_code_dep_type" \
     --verifier-code-hash "$verifier_code_hash_for_carrier" \
     --verifier-code-dep-tx-hash "$verifier_deploy_tx_hash" \
     --verifier-code-dep-index "$verifier_code_dep_index_for_carrier" \
@@ -787,8 +892,13 @@ submit_and_verify_carrier() {
     fi
     witness_args+=("$da_final_verifier_code_hash" "$da_anchor_final_type_args")
   fi
-  local witness_hex
-  witness_hex="$(entry_witness_hex "$verifier_source_path" "$verifier_action" "${witness_args[@]}")"
+  local witness_payload_hex witness_hex
+  witness_payload_hex="$(entry_witness_payload_hex "$verifier_source_path" "$verifier_action" "${witness_args[@]}")"
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v2" ]]; then
+    witness_hex="$witness_payload_hex"
+  else
+    witness_hex="$(place_entry_witness_payload_hex "$witness_payload_hex")"
+  fi
 
   if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v2" ]]; then
     local session_id_hash settlement_identity_hash competing_payload competing_identity_hash competing_type_args
@@ -824,7 +934,7 @@ PY
     competing_identity_hash="$(ckb_hash_hex "$competing_payload")"
     competing_type_args="${session_id_hash}${competing_identity_hash#0x}"
     competing_output_capacity="$carrier_capacity"
-    competing_change_capacity="$((input_capacity + authority_input_capacity - (2 * competing_output_capacity) - FEE_SHANNONS))"
+    competing_change_capacity="$((REPLAY_PROBE_FUNDING_CELL_CAPACITY_SHANNONS + authority_input_capacity - (2 * competing_output_capacity) - FEE_SHANNONS))"
     if ((competing_change_capacity <= 0)); then
       echo "$label input capacity is too small for competing final settlement rejection probe" >&2
       exit 1
@@ -833,21 +943,39 @@ PY
     local competing_request_path="$WORKDIR/${label}-competing-final-settlement-send-transaction.json"
     local competing_response_path="$WORKDIR/${label}-competing-final-settlement-send-transaction-response.json"
     local competing_summary_path="$WORKDIR/${label}-competing-final-settlement-rejection-summary.json"
+    local competing_witness_hex
+    competing_witness_hex="$(place_entry_witness_payload_hex "$witness_payload_hex")"
     jq \
-      --arg witness "$witness_hex" \
+      --arg witness "$competing_witness_hex" \
       --arg change_capacity "$competing_change_capacity_hex" \
       --arg carrier_capacity "$carrier_capacity_hex" \
       --arg verifier_code_hash "$verifier_code_hash_for_carrier" \
       --arg competing_type_args "$competing_type_args" \
       --arg competing_payload "$competing_payload" \
+      --arg funding_tx "$replay_probe_funding_tx_hash" \
+      --arg funding_index "$replay_probe_funding_output_index" \
+      --arg authority_tx "$settlement_authority_tx_hash" \
+      --arg authority_index "$legacy_settlement_authority_output_index" \
+      --arg always_success_code_hash "$ALWAYS_SUCCESS_CODE_HASH" \
+      --arg genesis_tx "$genesis_tx_hash" \
+      --arg always_success_dep_index "$GENESIS_ALWAYS_SUCCESS_DEP_INDEX" \
+      --arg lock_args "$settlement_authority_lock_args" \
       '{
         id: 1,
         jsonrpc: "2.0",
         method: "send_transaction",
         params: [
           (.send_transaction_request_json.params[0]
-            | .witnesses = [$witness]
+            | .inputs[0].previous_output = { tx_hash: $funding_tx, index: $funding_index }
+            | .inputs[1].previous_output = { tx_hash: $authority_tx, index: $authority_index }
+            | .cell_deps[1] = {
+                out_point: { tx_hash: $genesis_tx, index: $always_success_dep_index },
+                dep_type: "code"
+              }
+            | .witnesses = [$witness, "0x", $witness]
+            | .outputs[0].lock = { code_hash: $always_success_code_hash, hash_type: "data", args: $lock_args }
             | .outputs[1].capacity = $change_capacity
+            | .outputs[1].lock = { code_hash: $always_success_code_hash, hash_type: "data", args: $lock_args }
             | .outputs += [{
                 capacity: $carrier_capacity,
                 lock: .outputs[0].lock,
@@ -865,9 +993,13 @@ PY
       echo "$label competing final settlement was unexpectedly accepted by CKB" >&2
       exit 1
     fi
-    if ! jq -e '.error and (.error.message | test("TransactionFailedToVerify|Script|Validation"; "i"))' "$competing_response_path" >/dev/null; then
+    if ! jq -e '
+      .error
+      and (.error.message | test("TransactionFailedToVerify|Script|Validation"; "i"))
+      and (.error.data | test("Outputs\\[[02]\\]\\.Type"))
+    ' "$competing_response_path" >/dev/null; then
       jq . "$competing_response_path" >&2
-      echo "$label competing final settlement did not produce the expected script-verification rejection" >&2
+      echo "$label competing final settlement was not rejected by a settlement Type script" >&2
       exit 1
     fi
     jq -n \
@@ -913,23 +1045,31 @@ PY
     ${authority_args[@]+"${authority_args[@]}"} \
     --carrier-capacity-shannons "$carrier_capacity" \
     --fee-shannons "$FEE_SHANNONS" \
-    --lock-code-hash "$ALWAYS_SUCCESS_CODE_HASH" \
-    --lock-hash-type data \
+    --lock-code-hash "$lock_code_hash" \
+    --lock-hash-type "$lock_hash_type" \
     --lock-args "$carrier_lock_args" \
     --output-lock-args "$output_lock_args" \
-    --lock-code-dep-tx-hash "$genesis_tx_hash" \
-    --lock-code-dep-index "$GENESIS_ALWAYS_SUCCESS_DEP_INDEX" \
+    --output-lock-code-hash "$output_lock_code_hash" \
+    --output-lock-hash-type "$output_lock_hash_type" \
+    --lock-code-dep-tx-hash "$lock_code_dep_tx_hash" \
+    --lock-code-dep-index "$lock_code_dep_index" \
+    --lock-code-dep-type "$lock_code_dep_type" \
     --verifier-code-hash "$verifier_code_hash_for_carrier" \
     --verifier-code-dep-tx-hash "$verifier_deploy_tx_hash" \
     --verifier-code-dep-index "$verifier_code_dep_index_for_carrier" \
     --verifier-source "$verifier_source_path" \
     --verifier-role "$verifier_role" \
     --witness "$witness_hex" \
+    ${multisig_signer_args[@]+"${multisig_signer_args[@]}"} \
     --outputs-validator passthrough \
     --rpc-url "$RPC_URL" \
     --submit \
-    --require-accepted \
     --out "$submission_path"
+  if [[ "$(jq -r '.accepted_by_rpc' "$submission_path")" != "true" ]]; then
+    jq . "$submission_path" >&2
+    echo "$label carrier transaction was rejected by the parent CKB RPC" >&2
+    exit 1
+  fi
   jq '.send_transaction_request_json' "$submission_path" >"$request_path"
 
   local pre_submit_evidence_cell_dep_lock_matches

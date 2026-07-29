@@ -81,11 +81,11 @@ run_step "Run myelin-mempool tests" cargo test --locked -p myelin-mempool
 run_step "Run myelin-consensus tests" cargo test --locked -p myelin-consensus
 
 # 7. CellScript is an independently versioned upstream toolchain. Test the
-# adapter and, by default, reproduce the exact locked 0.22 release compiler and
+# adapter and, by default, reproduce the exact locked 0.22 patch revision and
 # compile every Myelin-owned integration fixture through it.
 run_step "Test CellScript process adapter" cargo test --locked -p myelin-cellscript-adapter
 if [[ "${RUN_CELLSCRIPT_TOOLCHAIN}" == "1" ]]; then
-  run_step "Reproduce locked CellScript 0.22 compiler and compile Myelin fixtures" \
+  run_step "Reproduce locked CellScript 0.22 patch revision and compile Myelin fixtures" \
     "${SCRIPT_DIR}/myelin_cellscript_toolchain_gate.sh"
 else
   printf '\n==> Skip locked CellScript toolchain reproduction because RUN_CELLSCRIPT_TOOLCHAIN=%s\n' \
@@ -96,7 +96,7 @@ fi
 # This deploys all four verifier artefacts, submits valid carrier/final-script
 # transactions, and requires tamper/replay probes to be rejected by CKB.
 if [[ "${RUN_CKB_DEVNET}" == "1" ]]; then
-  CELLSCRIPT_TOOLCHAIN_ROOT="${CELLSCRIPT_TOOLCHAIN_ROOT:-/tmp/myelin-cellscript-toolchain-v0.22.0}"
+  CELLSCRIPT_TOOLCHAIN_ROOT="${CELLSCRIPT_TOOLCHAIN_ROOT:-/tmp/myelin-cellscript-toolchain-4c02e213}"
   CELLSCRIPT_BIN="${CELLSCRIPT_BIN:-${CELLSCRIPT_TOOLCHAIN_ROOT}/CellScript/target/release/cellc}"
   CELLSCRIPT_ATTESTATION="${CELLSCRIPT_ATTESTATION:-${CELLSCRIPT_TOOLCHAIN_ROOT}/myelin-evidence/compiler-attestation.json}"
   CKB_DEVNET_WORKDIR="$(mktemp -d "${OUTPUT_DIR}/ckb-devnet.XXXXXX")"

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-use myelin_cellscript_adapter::{build_and_attest, CellScriptInstallation, CompileRequest};
+use myelin_cellscript_adapter::{
+    build_and_attest, place_entry_payload_in_empty_witness_args, CellScriptInstallation, CompileRequest, ENTRY_WITNESS_PLACEMENT_ABI,
+};
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
 fn main() -> ExitCode {
@@ -46,7 +48,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             })?;
             println!("{}", serde_json::to_string(&result)?);
         }
-        _ => return Err("usage: myelin-cellscript-adapter build-attest <source-root> <output> | verify <binary> <attestation> | compile <binary> <attestation> <source> <artifact> [entry-action]".into()),
+        Some("place-entry-witness-v2") => {
+            let payload_hex = args.next().ok_or("missing payload-hex")?;
+            reject_extra(args)?;
+            let payload = hex::decode(payload_hex.strip_prefix("0x").unwrap_or(&payload_hex))?;
+            let witness = place_entry_payload_in_empty_witness_args(&payload)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "myelin-cellscript-entry-witness-placement-v1",
+                    "placement_abi": ENTRY_WITNESS_PLACEMENT_ABI,
+                    "witness_args_field": "input_type",
+                    "lock_field": "empty",
+                    "witness_hex": hex::encode(witness),
+                })
+            );
+        }
+        _ => return Err("usage: myelin-cellscript-adapter build-attest <source-root> <output> | verify <binary> <attestation> | compile <binary> <attestation> <source> <artifact> [entry-action] | place-entry-witness-v2 <payload-hex>".into()),
     }
     Ok(())
 }

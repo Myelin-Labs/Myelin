@@ -15,6 +15,12 @@ use std::{
     process::Command,
 };
 
+/// Versioned CellScript placement contract admitted by this adapter.
+pub const ENTRY_WITNESS_PLACEMENT_ABI: &str = "cellscript-witnessargs-input-type-v2";
+
+/// Exact CKB target-profile witness ABI admitted by this adapter revision.
+pub const TARGET_PROFILE_WITNESS_ABI: &str = "ckb-molecule-witness-args-input-type-v2+cellscript-entry-witness-v1+raw-v1-compat";
+
 /// Embedded compiler source and toolchain lock.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -23,14 +29,18 @@ pub struct ToolchainLock {
     pub schema: String,
     /// Canonical upstream repository.
     pub repository: String,
-    /// Exact annotated release tag whose peeled commit is `source_revision`.
-    pub release_tag: String,
+    /// Annotated upstream release tag on which the pinned patch revision is based.
+    pub release_base_tag: String,
+    /// Exact peeled commit of `release_base_tag`.
+    pub release_base_revision: String,
     /// Exact package version expected from `cellc --version`.
     pub package_version: String,
     /// Exact upstream Git revision.
     pub source_revision: String,
     /// Rust toolchain used by the independent compiler workspace.
     pub rust_toolchain: String,
+    /// Exact witness ABI required from the compiler's CKB target profile.
+    pub target_profile_witness_abi: String,
     /// Exact top-level compiler metadata schema.
     pub metadata_schema_version: u32,
     /// Exact source-metadata component schema.
@@ -53,7 +63,7 @@ impl ToolchainLock {
     /// Load the lock committed with this adapter.
     pub fn embedded() -> Result<Self, AdapterError> {
         let lock: Self = serde_json::from_str(include_str!("../cellscript-toolchain.lock.json")).map_err(AdapterError::Json)?;
-        if lock.schema != "myelin-cellscript-toolchain-lock-v2" {
+        if lock.schema != "myelin-cellscript-toolchain-lock-v3" {
             return Err(AdapterError::Attestation("unsupported toolchain lock schema".to_owned()));
         }
         if lock.repository != "https://github.com/CellScript-Labs/CellScript" {
@@ -66,10 +76,16 @@ impl ToolchainLock {
         {
             return Err(AdapterError::Attestation("toolchain lock CKB SDK identity is invalid".to_owned()));
         }
-        if lock.source_revision.len() != 40 || !lock.source_revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(AdapterError::Attestation("toolchain lock source revision must be a 40-character Git hash".to_owned()));
+        if [lock.release_base_revision.as_str(), lock.source_revision.as_str()]
+            .into_iter()
+            .any(|revision| revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(AdapterError::Attestation("toolchain lock source revisions must be 40-character Git hashes".to_owned()));
         }
-        if lock.release_tag != format!("v{}", lock.package_version) || lock.rust_toolchain.is_empty() {
+        if lock.release_base_tag != format!("v{}", lock.package_version)
+            || lock.rust_toolchain.is_empty()
+            || lock.target_profile_witness_abi.is_empty()
+        {
             return Err(AdapterError::Attestation("toolchain lock version fields must not be empty".to_owned()));
         }
         if lock.metadata_schema_version == 0
@@ -79,8 +95,44 @@ impl ToolchainLock {
         {
             return Err(AdapterError::Attestation("toolchain lock metadata schema versions must be nonzero".to_owned()));
         }
+        if lock.target_profile_witness_abi != TARGET_PROFILE_WITNESS_ABI {
+            return Err(AdapterError::Attestation(
+                "toolchain lock target-profile witness ABI is not admitted by this adapter".to_owned(),
+            ));
+        }
         Ok(lock)
     }
+}
+
+/// Serialize an empty-lock CKB `WitnessArgs` whose `input_type` carries one
+/// CellScript entry payload.
+///
+/// This narrow helper is used by the parent-CKB acceptance path, whose lock
+/// script requires no signature. A signing adapter must instead preserve its
+/// existing `lock` field while placing the payload in `input_type`.
+pub fn place_entry_payload_in_empty_witness_args(payload: &[u8]) -> Result<Vec<u8>, AdapterError> {
+    if payload.is_empty() {
+        return Err(AdapterError::InvalidRequest("entry witness payload must not be empty".to_owned()));
+    }
+    let encoded_bytes_size =
+        payload.len().checked_add(4).ok_or_else(|| AdapterError::InvalidRequest("entry witness payload is too large".to_owned()))?;
+    let table_size = encoded_bytes_size
+        .checked_add(16)
+        .ok_or_else(|| AdapterError::InvalidRequest("entry witness payload is too large".to_owned()))?;
+    let payload_size =
+        u32::try_from(payload.len()).map_err(|_| AdapterError::InvalidRequest("entry witness payload is too large".to_owned()))?;
+    let table_size =
+        u32::try_from(table_size).map_err(|_| AdapterError::InvalidRequest("entry witness payload is too large".to_owned()))?;
+
+    let mut witness = Vec::with_capacity(table_size as usize);
+    witness.extend_from_slice(&table_size.to_le_bytes());
+    witness.extend_from_slice(&16_u32.to_le_bytes()); // lock: None
+    witness.extend_from_slice(&16_u32.to_le_bytes()); // input_type: Some(Bytes)
+    witness.extend_from_slice(&table_size.to_le_bytes()); // output_type: None
+                                                          // Molecule FixVec<Byte> stores the item count, not the encoded FixVec size.
+    witness.extend_from_slice(&payload_size.to_le_bytes());
+    witness.extend_from_slice(payload);
+    Ok(witness)
 }
 
 /// Local proof that a particular compiler binary was built from the locked source.
@@ -91,14 +143,18 @@ pub struct CompilerAttestation {
     pub schema: String,
     /// Canonical upstream repository checked while building.
     pub repository: String,
-    /// Exact release tag checked while building.
-    pub release_tag: String,
+    /// Upstream release-base tag checked while building.
+    pub release_base_tag: String,
+    /// Exact peeled release-base revision checked while building.
+    pub release_base_revision: String,
     /// Package version reported by the compiler.
     pub package_version: String,
     /// Exact source revision checked by the attester.
     pub source_revision: String,
     /// Exact Rust toolchain used for the build.
     pub rust_toolchain: String,
+    /// Exact CKB target-profile witness ABI checked after compilation.
+    pub target_profile_witness_abi: String,
     /// Canonical CKB SDK repository checked while resolving the upstream workspace.
     pub ckb_sdk_repository: String,
     /// Exact CKB SDK release tag checked while resolving the upstream workspace.
@@ -160,6 +216,8 @@ pub struct CompiledArtifact {
     pub metadata: PathBuf,
     /// Compiler-emitted target profile.
     pub target_profile: String,
+    /// Compiler-emitted witness ABI for the target profile.
+    pub target_profile_witness_abi: String,
 }
 
 /// Concrete CKB source selected by compiler scheduling metadata.
@@ -314,6 +372,7 @@ struct CompilerMetadataEnvelope {
 #[derive(Debug, Deserialize)]
 struct CompilerTargetProfile {
     name: String,
+    witness_abi: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,14 +400,16 @@ impl CellScriptInstallation {
         let lock = ToolchainLock::embedded()?;
         let attestation: CompilerAttestation =
             serde_json::from_slice(&fs::read(attestation_path).map_err(AdapterError::Io)?).map_err(AdapterError::Json)?;
-        if attestation.schema != "myelin-cellscript-compiler-attestation-v2" {
+        if attestation.schema != "myelin-cellscript-compiler-attestation-v3" {
             return Err(AdapterError::Attestation("unsupported attestation schema".to_owned()));
         }
         if attestation.repository != lock.repository
-            || attestation.release_tag != lock.release_tag
+            || attestation.release_base_tag != lock.release_base_tag
+            || attestation.release_base_revision != lock.release_base_revision
             || attestation.package_version != lock.package_version
             || attestation.source_revision != lock.source_revision
             || attestation.rust_toolchain != lock.rust_toolchain
+            || attestation.target_profile_witness_abi != lock.target_profile_witness_abi
             || attestation.ckb_sdk_repository != lock.ckb_sdk_repository
             || attestation.ckb_sdk_release_tag != lock.ckb_sdk_release_tag
             || attestation.ckb_sdk_source_revision != lock.ckb_sdk_source_revision
@@ -416,6 +477,11 @@ impl CellScriptInstallation {
         if metadata_json.pointer("/target_profile/name").and_then(serde_json::Value::as_str) != Some(request.target_profile) {
             return Err(AdapterError::CompilerProtocol("artifact metadata has the wrong target profile".to_owned()));
         }
+        if metadata_json.pointer("/target_profile/witness_abi").and_then(serde_json::Value::as_str)
+            != Some(self.lock.target_profile_witness_abi.as_str())
+        {
+            return Err(AdapterError::CompilerProtocol("artifact metadata has the wrong target-profile witness ABI".to_owned()));
+        }
         Ok(CompiledArtifact {
             compiler_version: self.lock.package_version.clone(),
             compiler_revision: self.lock.source_revision.clone(),
@@ -429,6 +495,7 @@ impl CellScriptInstallation {
             artifact,
             metadata,
             target_profile: target_profile.to_owned(),
+            target_profile_witness_abi: self.lock.target_profile_witness_abi.clone(),
         })
     }
 }
@@ -450,6 +517,7 @@ impl CompiledArtifact {
             serde_json::from_slice(&fs::read(&self.metadata).map_err(AdapterError::Io)?).map_err(AdapterError::Json)?;
         if metadata.compiler_version != self.compiler_version
             || metadata.target_profile.name != self.target_profile
+            || metadata.target_profile.witness_abi != self.target_profile_witness_abi
             || metadata.metadata_schema_version != self.metadata_schema_version
             || metadata.source_metadata_schema_version != self.source_metadata_schema_version
             || metadata.artifact_metadata_schema_version != self.artifact_metadata_schema_version
@@ -591,11 +659,23 @@ pub fn build_and_attest(source_root: &Path) -> Result<(PathBuf, CompilerAttestat
     if revision != lock.source_revision {
         return Err(AdapterError::Attestation(format!("source revision {revision} does not match lock {}", lock.source_revision)));
     }
-    let tagged_revision = git_stdout(source_root, &["rev-parse", &format!("{}^{{commit}}", lock.release_tag)])?;
-    if tagged_revision != lock.source_revision {
+    let tagged_revision = git_stdout(source_root, &["rev-parse", &format!("{}^{{commit}}", lock.release_base_tag)])?;
+    if tagged_revision != lock.release_base_revision {
         return Err(AdapterError::Attestation(format!(
-            "release tag {} resolves to {tagged_revision}, expected {}",
-            lock.release_tag, lock.source_revision
+            "release-base tag {} resolves to {tagged_revision}, expected {}",
+            lock.release_base_tag, lock.release_base_revision
+        )));
+    }
+    let based_on_release = Command::new("git")
+        .arg("-C")
+        .arg(source_root)
+        .args(["merge-base", "--is-ancestor", &lock.release_base_revision, &lock.source_revision])
+        .status()
+        .map_err(AdapterError::Io)?;
+    if !based_on_release.success() {
+        return Err(AdapterError::Attestation(format!(
+            "source revision {} is not based on release {} ({})",
+            lock.source_revision, lock.release_base_tag, lock.release_base_revision
         )));
     }
     let origin = git_stdout(source_root, &["remote", "get-url", "origin"])?;
@@ -655,12 +735,14 @@ pub fn build_and_attest(source_root: &Path) -> Result<(PathBuf, CompilerAttestat
     verify_version(&binary, &lock.package_version)?;
     let host_target = rustc_host_target(&lock.rust_toolchain)?;
     let attestation = CompilerAttestation {
-        schema: "myelin-cellscript-compiler-attestation-v2".to_owned(),
+        schema: "myelin-cellscript-compiler-attestation-v3".to_owned(),
         repository: lock.repository,
-        release_tag: lock.release_tag,
+        release_base_tag: lock.release_base_tag,
+        release_base_revision: lock.release_base_revision,
         package_version: lock.package_version,
         source_revision: revision,
         rust_toolchain: lock.rust_toolchain,
+        target_profile_witness_abi: lock.target_profile_witness_abi,
         ckb_sdk_repository: lock.ckb_sdk_repository,
         ckb_sdk_release_tag: lock.ckb_sdk_release_tag,
         ckb_sdk_source_revision: ckb_sdk_revision,
@@ -798,6 +880,7 @@ mod tests {
             artifact,
             metadata: metadata_path,
             target_profile: "ckb".to_owned(),
+            target_profile_witness_abi: "ckb-molecule-witness-args-input-type-v2+cellscript-entry-witness-v1+raw-v1-compat".to_owned(),
         }
     }
 
@@ -813,7 +896,10 @@ mod tests {
                 "source_metadata_schema_version": 1,
                 "artifact_metadata_schema_version": 1,
                 "constraints_metadata_schema_version": 1,
-                "target_profile": { "name": "ckb" },
+                "target_profile": {
+                    "name": "ckb",
+                    "witness_abi": "ckb-molecule-witness-args-input-type-v2+cellscript-entry-witness-v1+raw-v1-compat"
+                },
                 "actions": [{
                     "name": "check",
                     "effect_class": "ReadOnly",
@@ -852,7 +938,10 @@ mod tests {
             "source_metadata_schema_version": 1,
             "artifact_metadata_schema_version": 1,
             "constraints_metadata_schema_version": 1,
-            "target_profile": { "name": "ckb" },
+            "target_profile": {
+                "name": "ckb",
+                "witness_abi": "ckb-molecule-witness-args-input-type-v2+cellscript-entry-witness-v1+raw-v1-compat"
+            },
             "actions": [{
                 "name": "update",
                 "effect_class": "Mutating",
@@ -869,5 +958,49 @@ mod tests {
 
         fs::write(&compiled.metadata, serde_json::to_vec_pretty(&metadata).unwrap()).unwrap();
         assert!(compiled.scheduler_template("update").is_err());
+    }
+
+    #[test]
+    fn scheduler_template_rejects_wrong_target_witness_abi() {
+        let dir = tempfile::tempdir().unwrap();
+        let compiled = compiled_artifact(
+            dir.path(),
+            serde_json::json!({
+                "compiler_version": "0.22.0",
+                "metadata_schema_version": 55,
+                "source_metadata_schema_version": 1,
+                "artifact_metadata_schema_version": 1,
+                "constraints_metadata_schema_version": 1,
+                "target_profile": {
+                    "name": "ckb",
+                    "witness_abi": "raw-entry-payload-only"
+                },
+                "actions": []
+            }),
+        );
+        let error = compiled.scheduler_template("check").unwrap_err();
+        assert!(error.to_string().contains("target profile"));
+    }
+
+    #[test]
+    fn embedded_lock_pins_release_base_patch_revision_and_witness_abi() {
+        let lock = ToolchainLock::embedded().unwrap();
+        assert_eq!(lock.schema, "myelin-cellscript-toolchain-lock-v3");
+        assert_eq!(lock.release_base_tag, "v0.22.0");
+        assert_ne!(lock.release_base_revision, lock.source_revision);
+        assert_eq!(lock.target_profile_witness_abi, TARGET_PROFILE_WITNESS_ABI);
+    }
+
+    #[test]
+    fn empty_lock_entry_payload_uses_witness_args_input_type() {
+        let payload = b"CSARGv1\0entry";
+        let witness = place_entry_payload_in_empty_witness_args(payload).unwrap();
+        assert_eq!(u32::from_le_bytes(witness[0..4].try_into().unwrap()) as usize, witness.len());
+        assert_eq!(u32::from_le_bytes(witness[4..8].try_into().unwrap()), 16);
+        assert_eq!(u32::from_le_bytes(witness[8..12].try_into().unwrap()), 16);
+        assert_eq!(u32::from_le_bytes(witness[12..16].try_into().unwrap()) as usize, witness.len());
+        assert_eq!(u32::from_le_bytes(witness[16..20].try_into().unwrap()) as usize, payload.len());
+        assert_eq!(&witness[20..], payload);
+        assert!(place_entry_payload_in_empty_witness_args(&[]).is_err());
     }
 }

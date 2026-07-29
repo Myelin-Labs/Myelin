@@ -910,10 +910,10 @@ struct SessionCarrierSubmissionArgs {
     /// Transaction fee in shannons.
     #[arg(long)]
     fee_shannons: u64,
-    /// Funding and change lock script code hash.
+    /// Funding input lock script code hash. Outputs default to the same code hash.
     #[arg(long)]
     lock_code_hash: String,
-    /// Funding and change lock script hash type.
+    /// Funding input lock script hash type. Outputs default to the same hash type.
     #[arg(long, default_value = "data")]
     lock_hash_type: String,
     /// Funding input lock script args.
@@ -922,6 +922,12 @@ struct SessionCarrierSubmissionArgs {
     /// Carrier and change output lock script args. Defaults to `--lock-args`.
     #[arg(long)]
     output_lock_args: Option<String>,
+    /// Carrier and change output lock code hash. Defaults to `--lock-code-hash`.
+    #[arg(long)]
+    output_lock_code_hash: Option<String>,
+    /// Carrier and change output lock hash type. Defaults to `--lock-hash-type`.
+    #[arg(long)]
+    output_lock_hash_type: Option<String>,
     /// Funding lock script code dep tx hash.
     #[arg(long)]
     lock_code_dep_tx_hash: String,
@@ -10017,10 +10023,16 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     let verifier_dep_index_u32 = ckb_quantity_index_arg(&verifier_dep_index, "verifier-code-dep-index")?;
     let input_tx_hash_bytes = ckb_byte32_arg(&input_tx_hash, "input-tx-hash")?;
     let lock_code_hash_bytes = ckb_byte32_arg(&lock_code_hash, "lock-code-hash")?;
+    let output_lock_code_hash = args.output_lock_code_hash.as_deref().unwrap_or(&lock_code_hash);
+    let output_lock_code_hash = normalize_ckb_tx_hash(output_lock_code_hash)
+        .ok_or_else(|| CliError::InvalidFixture("output-lock-code-hash must be 32-byte hex".to_owned()))?;
+    let output_lock_code_hash_bytes = ckb_byte32_arg(&output_lock_code_hash, "output-lock-code-hash")?;
     let lock_dep_tx_hash_bytes = ckb_byte32_arg(&lock_dep_tx_hash, "lock-code-dep-tx-hash")?;
     let verifier_code_hash_bytes = ckb_byte32_arg(&verifier_code_hash, "verifier-code-hash")?;
     let verifier_dep_tx_hash_bytes = ckb_byte32_arg(&verifier_dep_tx_hash, "verifier-code-dep-tx-hash")?;
     let lock_hash_type = ckb_script_hash_type_arg(&args.lock_hash_type, "lock-hash-type")?;
+    let output_lock_hash_type =
+        ckb_script_hash_type_arg(args.output_lock_hash_type.as_deref().unwrap_or(&args.lock_hash_type), "output-lock-hash-type")?;
     let lock_dep_type = match args.lock_code_dep_type.as_str() {
         "code" => DepType::Code,
         "dep_group" | "dep-group" => DepType::DepGroup,
@@ -10145,9 +10157,13 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     };
     let output_lock_args_bytes = decode_hex_bytes(&output_lock_args)
         .ok_or_else(|| CliError::InvalidFixture("output lock args are not valid hex".to_owned()))?;
-    if canonical_multisig.is_some() && !output_lock_args.eq_ignore_ascii_case(&lock_args) {
+    if canonical_multisig.is_some()
+        && (!output_lock_args.eq_ignore_ascii_case(&lock_args)
+            || output_lock_code_hash_bytes != lock_code_hash_bytes
+            || output_lock_hash_type != lock_hash_type)
+    {
         return Err(CliError::InvalidFixture(
-            "final L1 settlement canonical CKB multisig requires output lock args to equal the authority/funding input lock args"
+            "final L1 settlement canonical CKB multisig requires output lock code hash, hash type, and args to equal the authority/funding input lock"
                 .to_owned(),
         ));
     }
@@ -10180,7 +10196,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
             "live {verifier_role} submission requires --verifier-source to point to a readable CellScript source file"
         )));
     }
-    let lock_script = Script::new(lock_code_hash_bytes, lock_hash_type, output_lock_args_bytes);
+    let lock_script = Script::new(output_lock_code_hash_bytes, output_lock_hash_type, output_lock_args_bytes);
     let carrier_type_script = Script::new(verifier_code_hash_bytes, 4, carrier_type_args_bytes);
     let mut inputs = vec![CellInput::new(OutPoint::new(input_tx_hash_bytes, input_index_u32), 0)];
     if let Some((_, _, authority_tx_hash_bytes, authority_index_u32, _)) = &authority_input {
@@ -17990,6 +18006,8 @@ mod tests {
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
             output_lock_args: None,
+            output_lock_code_hash: Some(format!("0x{}", "37".repeat(32))),
+            output_lock_hash_type: Some("type".to_owned()),
             lock_code_dep_tx_hash: format!("0x{}", "34".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             lock_code_dep_type: "code".to_owned(),
@@ -18042,6 +18060,10 @@ mod tests {
         assert_eq!(report["ckb_transaction_json"]["outputs"][1]["capacity"], format!("0x{change_capacity:x}"));
         assert_eq!(report["ckb_transaction_json"]["outputs_data"][0], payload);
         assert_eq!(report["ckb_transaction_json"]["outputs_data"][1], "0x");
+        for output in report["ckb_transaction_json"]["outputs"].as_array().expect("outputs") {
+            assert_eq!(output["lock"]["code_hash"], format!("0x{}", "37".repeat(32)));
+            assert_eq!(output["lock"]["hash_type"], "type");
+        }
         assert_eq!(report["carrier_verifier"]["cellscript_source_hash_algorithm"], "sha256");
         assert_eq!(report["carrier_verifier"]["cellscript_source_hash"], expected_verifier_source_hash);
         assert_eq!(report["carrier_verifier"]["code_dep"], report["ckb_transaction_json"]["cell_deps"][1]);
@@ -18082,6 +18104,8 @@ mod tests {
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
             output_lock_args: None,
+            output_lock_code_hash: None,
+            output_lock_hash_type: None,
             lock_code_dep_tx_hash: format!("0x{}", "44".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             lock_code_dep_type: "code".to_owned(),
@@ -18151,6 +18175,8 @@ mod tests {
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
             output_lock_args: None,
+            output_lock_code_hash: None,
+            output_lock_hash_type: None,
             lock_code_dep_tx_hash: format!("0x{}", "b4".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             lock_code_dep_type: "code".to_owned(),
@@ -18206,6 +18232,8 @@ mod tests {
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
             output_lock_args: None,
+            output_lock_code_hash: None,
+            output_lock_hash_type: None,
             lock_code_dep_tx_hash: format!("0x{}", "bf".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             lock_code_dep_type: "code".to_owned(),
@@ -18268,6 +18296,8 @@ mod tests {
             lock_hash_type: "type".to_owned(),
             lock_args: authority_lock_args.clone(),
             output_lock_args: None,
+            output_lock_code_hash: None,
+            output_lock_hash_type: None,
             lock_code_dep_tx_hash: format!("0x{}", "d4".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             lock_code_dep_type: "dep_group".to_owned(),
@@ -18366,6 +18396,8 @@ mod tests {
             lock_hash_type: "type".to_owned(),
             lock_args: authority_lock_args.clone(),
             output_lock_args: None,
+            output_lock_code_hash: None,
+            output_lock_hash_type: None,
             lock_code_dep_tx_hash: lock_dep_tx_hash.clone(),
             lock_code_dep_index: lock_dep_index.clone(),
             lock_code_dep_type: "dep_group".to_owned(),
@@ -18520,6 +18552,8 @@ mod tests {
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
             output_lock_args: None,
+            output_lock_code_hash: None,
+            output_lock_hash_type: None,
             lock_code_dep_tx_hash: lock_dep_tx_hash.clone(),
             lock_code_dep_index: lock_dep_index.clone(),
             lock_code_dep_type: "code".to_owned(),
@@ -18705,6 +18739,8 @@ mod tests {
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
             output_lock_args: None,
+            output_lock_code_hash: None,
+            output_lock_hash_type: None,
             lock_code_dep_tx_hash: lock_dep_tx_hash,
             lock_code_dep_index: lock_dep_index,
             lock_code_dep_type: "code".to_owned(),
@@ -18757,6 +18793,8 @@ mod tests {
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
             output_lock_args: None,
+            output_lock_code_hash: None,
+            output_lock_hash_type: None,
             lock_code_dep_tx_hash: format!("0x{}", "84".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             lock_code_dep_type: "code".to_owned(),
@@ -18807,6 +18845,8 @@ mod tests {
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
             output_lock_args: None,
+            output_lock_code_hash: None,
+            output_lock_hash_type: None,
             lock_code_dep_tx_hash: format!("0x{}", "54".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             lock_code_dep_type: "code".to_owned(),
