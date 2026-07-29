@@ -152,9 +152,15 @@ scheduler commitment
 Two selectable closed-validator engines exist:
 
 - `static-closed-committee` — quorum by configured weight;
-- `weighted-precommit` — height/round/precommit certificate with configured quorum power.
+- `tendermint` — deterministic proposer, proposal/prevote/precommit phases,
+  lock/valid-round rules, nil votes, round changes, equivocation rejection, and
+  a strictly-greater-than-two-thirds decision certificate.
 
 Both use real secp256k1 Schnorr signatures and separate signature domains. For the same workload, transaction identities and state roots must be identical; only certificate material differs. Neither engine is a permissionless-security claim.
+
+Tendermint round state is serializable for caller-managed WAL persistence.
+Networking, timeout scheduling, validator-set changes, and permissionless
+membership remain outside the deterministic finite-session engine.
 
 ## Projection and court evidence
 
@@ -170,6 +176,12 @@ The pure `myelin-exec` projector produces only the first two stages. `myelin-ckb
 Node and local VM cycle counts are both recorded but need not be numerically equal; both verdicts must succeed within the configured budget. `NodeAccepted` is not renamed to publication. `Committed` requires inclusion proof, while `Finalized` means only that the configured depth was reached without an observed reorg.
 
 Court-bundle verification currently checks internal reproducibility: payload and transaction bytes, state/scheduler/data commitments, canonical MyelinBlock hash, finality signatures, strict VM profile, and an honest wire-only projection claim. Therefore a locally `valid` bundle still has `court_verifiable = false`.
+
+DA manifests may embed a provider-neutral certificate. The certificate binds
+the exact session/chunk payload to independent provider and fault-domain
+quorum, retention, and auditor-signed retrieval probes. Fixture committee
+attestations and a single provider receipt cannot claim production readiness.
+See [`MYELIN_DA_DESIGN.md`](MYELIN_DA_DESIGN.md).
 
 DA and settlement workflows distinguish:
 

@@ -224,7 +224,7 @@ public-chain locator.
 ## What this smoke does NOT prove
 
 - **Not permissionless validator entry.** The smoke runs the
-  static-committee path; WeightedPrecommit is in the production gate but
+  static-committee path; Tendermint is in the production gate but
   the smoke uses static.
 - **Not production DA.** External DA SLA receipts are out of scope.
   Submission acceptance is reported separately; `l1_da_published`

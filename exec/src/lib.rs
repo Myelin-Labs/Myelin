@@ -111,15 +111,18 @@ pub use serialization::utils::{
 
 // Re-export molecule compatibility layer
 pub use serialization::molecule_compat::{
-    ckb_apply_type_id_args_to_output_molecule, ckb_apply_type_id_script_to_output_molecule, ckb_blake160, ckb_blake2b_256,
-    ckb_cell_data_hash, ckb_dep_group_cell_dep, ckb_epoch_number_with_fraction_from_full_value,
-    ckb_epoch_number_with_fraction_full_value, ckb_header_epoch_index, ckb_header_epoch_length, ckb_header_epoch_number,
-    ckb_header_epoch_start_block_number, ckb_header_hash_molecule, ckb_raw_transaction_hash_molecule, ckb_script_hash_molecule,
-    ckb_secp256k1_blake160_pubkey_hash, ckb_secp256k1_blake160_sighash_all_lock_script, ckb_secp256k1_blake160_sighash_all_type_hash,
+    ckb_apply_type_id_args_to_output_molecule, ckb_apply_type_id_script_to_output_molecule,
+    ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule, ckb_blake160, ckb_blake2b_256, ckb_cell_data_hash,
+    ckb_dep_group_cell_dep, ckb_epoch_number_with_fraction_from_full_value, ckb_epoch_number_with_fraction_full_value,
+    ckb_header_epoch_index, ckb_header_epoch_length, ckb_header_epoch_number, ckb_header_epoch_start_block_number,
+    ckb_header_hash_molecule, ckb_raw_transaction_hash_molecule, ckb_script_hash_molecule,
+    ckb_secp256k1_blake160_multisig_all_signing_message_molecule, ckb_secp256k1_blake160_pubkey_hash,
+    ckb_secp256k1_blake160_sighash_all_lock_script, ckb_secp256k1_blake160_sighash_all_type_hash,
     ckb_sighash_all_message_from_witness_args_molecule, ckb_sighash_all_message_molecule,
-    ckb_sighash_all_message_with_zeroed_witness_lock_molecule, ckb_sign_secp256k1_blake160_sighash_all_input_molecule,
-    ckb_sign_secp256k1_blake160_sighash_all_lock_group_molecule, ckb_sign_secp256k1_blake160_sighash_all_molecule,
-    ckb_transaction_witness_hash_molecule, ckb_type_id_args, ckb_type_id_script, ckb_verify_secp256k1_blake160_recoverable_signature,
+    ckb_sighash_all_message_with_zeroed_witness_lock_molecule, ckb_sign_secp256k1_blake160_multisig_all_molecule,
+    ckb_sign_secp256k1_blake160_sighash_all_input_molecule, ckb_sign_secp256k1_blake160_sighash_all_lock_group_molecule,
+    ckb_sign_secp256k1_blake160_sighash_all_molecule, ckb_transaction_witness_hash_molecule, ckb_type_id_args, ckb_type_id_script,
+    ckb_verify_secp256k1_blake160_multisig_all_molecule, ckb_verify_secp256k1_blake160_recoverable_signature,
     ckb_verify_secp256k1_blake160_sighash_all_lock_group_molecule, ckb_verify_secp256k1_blake160_sighash_all_molecule,
     ckb_verify_type_id_script_group_molecule, ckb_verify_type_id_script_molecule, deserialize_cell_dep_molecule,
     deserialize_cell_input_molecule, deserialize_cell_output_molecule, deserialize_ckb_header_molecule,
@@ -130,8 +133,9 @@ pub use serialization::molecule_compat::{
     serialize_ckb_raw_header_molecule, serialize_ckb_witness_args_molecule, serialize_outpoint_molecule,
     serialize_raw_transaction_molecule, serialize_resolved_cell_molecule, serialize_resolved_header_molecule,
     serialize_script_molecule, serialize_transaction_molecule, CkbEpochNumberWithFraction, CkbHeader, CkbRawHeader,
-    CkbSecp256k1Blake160SighashAllLockConfig, CkbWitnessArgs, MoleculeError, MoleculeSerializer, CKB_SCRIPT_HASH_TYPE_TYPE,
-    CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE, CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE, CKB_TYPE_ID_CODE_HASH,
+    CkbSecp256k1Blake160MultisigAllConfig, CkbSecp256k1Blake160MultisigAllLockConfig, CkbSecp256k1Blake160SighashAllLockConfig,
+    CkbWitnessArgs, MoleculeError, MoleculeSerializer, CKB_SCRIPT_HASH_TYPE_TYPE, CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE,
+    CKB_SECP256K1_MULTISIG_CONFIG_HEADER_SIZE, CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE, CKB_TYPE_ID_CODE_HASH,
 };
 
 /// Cell transaction version

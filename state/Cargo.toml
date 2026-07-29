@@ -15,6 +15,7 @@ rocksdb = { version = "0.24", default-features = false, features = ["snappy"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
+secp256k1.workspace = true
 
 # Hashing
 blake3 = "1.5"

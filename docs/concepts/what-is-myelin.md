@@ -37,7 +37,7 @@ second is what it **is** today.
 | **Finite Cell session** | State is a finite set of Cells inside one session; no unbounded global state. |
 | **Typed conflict scheduling** | CellDAG scheduler uses typed conflict hashes + read/write domains, not fee markets. |
 | **Deterministic CKB-VM verification** | Scripts run in a RISC-V-based VM with the same determinism contract as CKB. |
-| **Selectable finality** | Static closed committee *or* weighted-precommit, chosen per session. |
+| **Selectable finality** | Static closed committee *or* finite-session Tendermint, chosen per session. |
 | **CKB-style projection** | Every chunk ships a `CkbProjectionReport` showing whether it's projectable. |
 | **Single-chunk court path** | One disputed chunk is CKB-VM-verifiable on the L1; interactive bisection is a fallback. |
 | **Reference workload** | The Teeworlds-on-CKB replayer is the canonical pressure test. |
@@ -51,10 +51,10 @@ protocol surface makes them structurally out of scope:
   CKB client. It re-implements the parts of CKB it needs (Cell,
   CellTx, VM, syscalls) in its own workspace.
 - **Not a new L1.** Myelin does not run its own consensus on a
-  independent network. Finality is a closed committee or WeightedPrecommit
+  independent network. Finality is a closed committee or Tendermint
   BFT — explicitly not Nakamoto PoW.
 - **Not a permissionless L2 today.** The static-committee and
-  WeightedPrecommit engines both assume a known validator set. Until the
+  Tendermint engines both assume a known validator set. Until the
   L1 court path is implemented *and* exercised, Myelin should not be
   marketed as permissionless L2 security.
 - **Not a general smart-contract platform.** Myelin optimises for
@@ -147,7 +147,7 @@ proven:
   produces a CKB projection report with no deviation flags.
 - ✅ The Teeworlds replayer binary runs end-to-end through the VM
   probe.
-- ✅ Both finality engines (static committee, WeightedPrecommit) produce the
+- ✅ Both finality engines (static committee, Tendermint) produce the
   same session ID, CellTx commitments, scheduler commitment, and
   state roots on a single-validator or quorum-validator fixture.
 - ✅ The CKB devnet smoke test deploys DA-anchor and settlement

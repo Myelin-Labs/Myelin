@@ -50,7 +50,7 @@ pure projector remains wire-only; these commands emit
 
 The config file uses the same TOML schema documented in
 [Consensus engines](../architecture/consensus.md#static-closed-committee).
-The subcommand picks `static-closed-committee` or `weighted-precommit`
+The subcommand picks `static-closed-committee` or `tendermint`
 based on the `kind` field.
 
 ## `runtime` — end-to-end smoke
@@ -97,7 +97,7 @@ This is the largest subcommand surface. It maps 1:1 onto the
 
 | Flag | Used by | What it does |
 | --- | --- | --- |
-| `--consensus <kind>` | `open-fixture`, `commit-fixture` | `static-closed-committee` or `weighted-precommit`. |
+| `--consensus <kind>` | `open-fixture`, `commit-fixture` | `static-closed-committee` or `tendermint`. |
 | `--out <path>` | (most) | Where to write the report JSON. |
 | `--rpc-url <url>` | `submit-*`, `verify-submission-*` | CKB JSON-RPC endpoint. |
 | `--dry-run` | `submit-*` | Build the request without sending. |

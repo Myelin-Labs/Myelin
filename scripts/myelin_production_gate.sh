@@ -136,26 +136,36 @@ run_step "Smoke: myelin-cli static-closed-committee finalise" \
     --config "${COMMITTEE_CONFIG}" \
     --out "${COMMITTEE_REPORT}"
 
-WEIGHTED_PRECOMMIT_CONFIG="${OUTPUT_DIR}/weighted_precommit.toml"
-WEIGHTED_PRECOMMIT_REPORT="${OUTPUT_DIR}/weighted_precommit.json"
+WEIGHTED_PRECOMMIT_CONFIG="${OUTPUT_DIR}/tendermint.toml"
+WEIGHTED_PRECOMMIT_REPORT="${OUTPUT_DIR}/tendermint.json"
 cat > "${WEIGHTED_PRECOMMIT_CONFIG}" <<'EOF'
-kind = "weighted-precommit"
+kind = "tendermint"
 
-[weighted_precommit]
-quorum_power = 2
+[tendermint]
+quorum_power = 3
 
-[[weighted_precommit.validators]]
+[[tendermint.validators]]
 id = "validator-0"
 public_key = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 weight = 1
 
-[[weighted_precommit.validators]]
+[[tendermint.validators]]
 id = "validator-1"
 public_key = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
 weight = 1
+
+[[tendermint.validators]]
+id = "validator-2"
+public_key = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+weight = 1
+
+[[tendermint.validators]]
+id = "validator-3"
+public_key = "e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13"
+weight = 1
 EOF
 
-run_step "Smoke: myelin-cli weighted-precommit finalise" \
+run_step "Smoke: myelin-cli Tendermint finalise" \
   cargo run -p myelin-cli -- committee finalise-demo \
     --config "${WEIGHTED_PRECOMMIT_CONFIG}" \
     --out "${WEIGHTED_PRECOMMIT_REPORT}"
@@ -178,14 +188,14 @@ require(committee["consensus_kind"] == "static-closed-committee", "static commit
 require(committee["finalised"] is True, "static committee finalised")
 require(len(committee["signer_ids"]) >= 2, "static committee signer count")
 
-require(weighted_precommit["consensus_kind"] == "weighted-precommit", "weighted_precommit kind")
+require(weighted_precommit["consensus_kind"] == "tendermint", "Tendermint kind")
 require(weighted_precommit["finalised"] is True, "weighted_precommit finalised")
-require(len(weighted_precommit["signer_ids"]) >= 2, "weighted_precommit signer count")
+require(len(weighted_precommit["signer_ids"]) >= 3, "Tendermint signer count")
 require(weighted_precommit["certificate_step"] == "precommit", "weighted_precommit precommit")
 require(weighted_precommit["certificate_round"] == 0, "weighted_precommit round 0")
 print(json.dumps({
     "static_committee": committee["block_hash"],
-    "weighted-precommit": weighted_precommit["block_hash"],
+    "tendermint": weighted_precommit["block_hash"],
 }, indent=2, sort_keys=True))
 PY
 
@@ -199,9 +209,9 @@ run_step "Smoke: runtime smoke (static-closed-committee)" \
     --consensus static-closed-committee \
     --out "${RUNTIME_STATIC_REPORT}"
 
-run_step "Smoke: runtime smoke (weighted-precommit)" \
+run_step "Smoke: runtime smoke (tendermint)" \
   cargo run -p myelin-cli -- runtime smoke \
-    --consensus weighted-precommit \
+    --consensus tendermint \
     --out "${RUNTIME_WEIGHTED_PRECOMMIT_REPORT}"
 
 run_step "Validate runtime smoke reports" \
@@ -219,7 +229,7 @@ def require(condition, message):
 
 # Both reports must be in the v1 schema and finalised.
 for report, kind in ((static_report, "static-closed-committee"),
-                     (weighted_precommit_report, "weighted-precommit")):
+                     (weighted_precommit_report, "tendermint")):
     require(report["schema"] == "myelin-runtime-smoke-v2",
             f"{kind} schema must be myelin-runtime-smoke-v2")
     require(report["consensus_kind"] == kind, f"{kind} consensus_kind")
@@ -414,7 +424,7 @@ run_step "Session: dry-run settlement RPC submission (static-closed-committee)" 
 
 run_step "Session: open fixture (weighted-precommit)" \
   cargo run -p myelin-cli -- session open-fixture \
-    --consensus weighted-precommit \
+    --consensus tendermint \
     --out "${SESSION_OPEN_WEIGHTED_PRECOMMIT}"
 
 run_step "Session: commit fixture (weighted-precommit)" \
@@ -1174,7 +1184,7 @@ def require(condition, message):
     if not condition:
         raise SystemExit(f"production gate failed: {message}")
 
-for report, kind in ((open_static, "static-closed-committee"), (open_tm, "weighted-precommit")):
+for report, kind in ((open_static, "static-closed-committee"), (open_tm, "tendermint")):
     require(report["schema"] == "myelin-session-open-v2", f"{kind} session open schema")
     require(report["consensus_kind"] == kind, f"{kind} session open consensus")
     require(report["vm_profile"] == "ckb-strict-basic", f"{kind} session open vm profile")
@@ -1182,7 +1192,7 @@ for report, kind in ((open_static, "static-closed-committee"), (open_tm, "weight
     require(len(report["session_id"]) == 64, f"{kind} session id")
     require(len(report["escrow_input_cells"]) >= 1, f"{kind} escrow cells")
 
-for report, kind in ((commit_static, "static-closed-committee"), (commit_tm, "weighted-precommit")):
+for report, kind in ((commit_static, "static-closed-committee"), (commit_tm, "tendermint")):
     require(report["schema"] == "myelin-session-commit-v2", f"{kind} session commit schema")
     require(report["consensus_kind"] == kind, f"{kind} session commit consensus")
     require(report["vm_profile"] == "ckb-strict-basic", f"{kind} session commit vm profile")
@@ -1196,7 +1206,7 @@ for report, kind in ((commit_static, "static-closed-committee"), (commit_tm, "we
     require(report["block"]["block_hash"], f"{kind} block hash present")
 
 for report, verify, kind in ((court_static, verify_static, "static-closed-committee"),
-                             (court_tm, verify_tm, "weighted-precommit")):
+                             (court_tm, verify_tm, "tendermint")):
     require(report["schema"] == "myelin-session-court-bundle-v2", f"{kind} court schema")
     require(report["vm_profile"] == "ckb-strict-basic", f"{kind} court vm profile")
     require(report["ckb_spawn_ipc_required"] is False, f"{kind} court spawn/IPC")
@@ -1208,7 +1218,7 @@ for report, verify, kind in ((court_static, verify_static, "static-closed-commit
     require(all(check["ok"] for check in verify["checks"]), f"{kind} all court checks pass")
 
 for da, verify, court, kind in ((da_static, da_verify_static, court_static, "static-closed-committee"),
-                                (da_tm, da_verify_tm, court_tm, "weighted-precommit")):
+                                (da_tm, da_verify_tm, court_tm, "tendermint")):
     require(da["schema"] == "myelin-session-da-manifest-v2", f"{kind} DA schema")
     require(da["da_profile"] == "single-segment-merkle-v1", f"{kind} DA profile")
     require(da["payload_kind"] == "session-court-molecule-transaction", f"{kind} DA payload kind")
@@ -1221,7 +1231,7 @@ for da, verify, court, kind in ((da_static, da_verify_static, court_static, "sta
     require(da["proof_valid"] is True, f"{kind} DA proof valid")
     availability = da["availability"]
     require(availability["schema"] == "myelin-da-availability-v1", f"{kind} DA availability schema")
-    require(availability["mode"] == "replicated-da-committee", f"{kind} DA availability mode")
+    require(availability["mode"] == "fixture-replicated-committee", f"{kind} DA availability mode")
     require(availability["signature_scheme"] == "secp256k1-recoverable-blake3-pubkey-hash20", f"{kind} DA availability signature scheme")
     require(availability["required_attestations"] == 2, f"{kind} DA availability threshold")
     require(availability["attestation_count"] >= availability["required_attestations"], f"{kind} DA availability attestation count")
@@ -1249,7 +1259,7 @@ for da, verify, court, kind in ((da_static, da_verify_static, court_static, "sta
     require(all(check["ok"] for check in verify["checks"]), f"{kind} all DA checks pass")
 
 for anchor, verify, da, kind in ((da_anchor_static, da_anchor_verify_static, da_static, "static-closed-committee"),
-                                 (da_anchor_tm, da_anchor_verify_tm, da_tm, "weighted-precommit")):
+                                 (da_anchor_tm, da_anchor_verify_tm, da_tm, "tendermint")):
     require(anchor["schema"] == "myelin-session-da-anchor-package-v2", f"{kind} DA anchor schema")
     require(anchor["session_id"] == da["session_id"], f"{kind} DA anchor session binding")
     require(anchor["chunk_index"] == da["chunk_index"], f"{kind} DA anchor chunk binding")
@@ -1271,7 +1281,7 @@ for anchor, verify, da, kind in ((da_anchor_static, da_anchor_verify_static, da_
     require(all(check["ok"] for check in verify["checks"]), f"{kind} all DA anchor checks pass")
 
 for submit, anchor, kind in ((da_anchor_submit_static, da_anchor_static, "static-closed-committee"),
-                             (da_anchor_submit_tm, da_anchor_tm, "weighted-precommit")):
+                             (da_anchor_submit_tm, da_anchor_tm, "tendermint")):
     require(submit["schema"] == "myelin-session-da-anchor-submission-v2", f"{kind} DA anchor submit schema")
     require(submit["dry_run"] is True, f"{kind} DA anchor submit dry-run")
     require(submit["request_method"] == "send_transaction", f"{kind} DA anchor submit method")
@@ -1288,7 +1298,7 @@ for submit, anchor, kind in ((da_anchor_submit_static, da_anchor_static, "static
     require(submit["l1_da_published"] is False, f"{kind} DA anchor submit L1 marker")
 
 for settlement, verify, court, da, kind in ((settlement_static, settlement_verify_static, court_static, da_static, "static-closed-committee"),
-                                            (settlement_tm, settlement_verify_tm, court_tm, da_tm, "weighted-precommit")):
+                                            (settlement_tm, settlement_verify_tm, court_tm, da_tm, "tendermint")):
     require(settlement["schema"] == "myelin-session-settlement-intent-v2", f"{kind} settlement schema")
     require(settlement["kind"] == "disputed-close", f"{kind} settlement kind")
     require(settlement["session_id"] == court["session_id"], f"{kind} settlement session binding")
@@ -1335,7 +1345,7 @@ for settlement, verify, court, da, kind in ((settlement_static, settlement_verif
     require(all(check["ok"] for check in verify["checks"]), f"{kind} all settlement checks pass")
 
 for package, verify, settlement, court, da, kind in ((package_static, package_verify_static, settlement_static, court_static, da_static, "static-closed-committee"),
-                                                     (package_tm, package_verify_tm, settlement_tm, court_tm, da_tm, "weighted-precommit")):
+                                                     (package_tm, package_verify_tm, settlement_tm, court_tm, da_tm, "tendermint")):
     require(package["schema"] == "myelin-session-settlement-package-v2", f"{kind} settlement package schema")
     require(package["session_id"] == settlement["session_id"], f"{kind} package session binding")
     require(package["chunk_index"] == settlement["chunk_index"], f"{kind} package chunk binding")
@@ -1358,8 +1368,8 @@ for package, verify, settlement, court, da, kind in ((package_static, package_ve
     require(authority["escrow_input_cells_hash"] == package["escrow_input_cells_hash"], f"{kind} authority escrow binding")
     require(authority["session_lineage_commitment"] == package["session_lineage_commitment"], f"{kind} authority lineage binding")
     require(auth["schema"] == "myelin-session-settlement-authority-auth-v2", f"{kind} authority authentication schema")
-    require(auth["mode"] == "ckb-threshold-lock", f"{kind} authority authentication mode")
-    require(auth["signature_scheme"] == "secp256k1-recoverable-blake3-pubkey-hash20", f"{kind} authority authentication signature scheme")
+    require(auth["mode"] == "ckb-secp256k1-blake160-multisig-all", f"{kind} authority authentication mode")
+    require(auth["signature_scheme"] == "secp256k1-recoverable-blake3-message-ckb-blake160-pubkey-hash", f"{kind} authority authentication signature scheme")
     require(auth["threshold"] == 2, f"{kind} authority authentication threshold")
     require(auth["signer_count"] >= auth["threshold"], f"{kind} authority authentication signer count")
     require(len(auth["signer_pubkey_hashes"]) >= auth["threshold"], f"{kind} authority authentication pubkey-hash count")
@@ -1371,8 +1381,14 @@ for package, verify, settlement, court, da, kind in ((package_static, package_ve
     require(len(auth["message_hash"]) == 64, f"{kind} authority authentication message hash")
     require(len(auth["attestation_hash"]) == 64, f"{kind} authority authentication hash")
     require(auth["ckb_lock_args"].startswith("0x"), f"{kind} authority authentication lock args prefix")
-    require(len(auth["ckb_lock_args"]) > 2 and len(auth["ckb_lock_args"]) % 2 == 0, f"{kind} authority authentication lock args length")
-    require(bytes.fromhex(auth["ckb_lock_args"][2:]).startswith(b"myelin-auth-v1"), f"{kind} authority authentication lock args domain")
+    require(len(auth["ckb_lock_args"]) == 42, f"{kind} canonical multisig lock args are Blake160")
+    require(auth["ckb_multisig_require_first_n"] == 0, f"{kind} canonical multisig require_first_n")
+    require(len(auth["ckb_multisig_participant_pubkey_hashes"]) == 3, f"{kind} canonical multisig participant count")
+    require(all(len(pubkey_hash) == 40 for pubkey_hash in auth["ckb_multisig_participant_pubkey_hashes"]), f"{kind} canonical multisig participant hash length")
+    multisig_config = bytes.fromhex(auth["ckb_multisig_witness_config"].removeprefix("0x"))
+    require(multisig_config[:4] == bytes([0, 0, 2, 3]), f"{kind} canonical multisig config header")
+    require(len(multisig_config) == 64, f"{kind} canonical multisig config length")
+    require(len(auth["ckb_multisig_config_hash"]) == 64, f"{kind} canonical multisig config hash")
     require(len(auth["ckb_lock_args_hash"]) == 64, f"{kind} authority authentication lock args hash")
     require(len(bytes.fromhex(auth["ckb_lock_args_hash"])) == 32, f"{kind} authority authentication lock args hash hex")
     require("participant_signature_evidence" not in auth, f"{kind} default authority authentication has no participant signature evidence")
@@ -1391,7 +1407,7 @@ for package, verify, settlement, court, da, kind in ((package_static, package_ve
     require(all(check["ok"] for check in verify["checks"]), f"{kind} all package checks pass")
 
 for submit, package, kind in ((package_submit_static, package_static, "static-closed-committee"),
-                              (package_submit_tm, package_tm, "weighted-precommit")):
+                              (package_submit_tm, package_tm, "tendermint")):
     require(submit["schema"] == "myelin-session-settlement-submission-v2", f"{kind} settlement submit schema")
     require(submit["dry_run"] is True, f"{kind} settlement submit dry-run")
     require(submit["request_method"] == "send_transaction", f"{kind} settlement submit method")

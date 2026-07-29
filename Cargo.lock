@@ -1401,6 +1401,7 @@ dependencies = [
  "proptest",
  "rayon",
  "rocksdb",
+ "secp256k1",
  "serde",
  "tempfile",
  "thiserror 1.0.69",

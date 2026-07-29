@@ -1,247 +1,93 @@
-# Myelin Consensus Completeness
+# Myelin consensus completeness
 
-> Scope: the two selectable consensus engines that Myelin must support
-> for the finite-session boundary: `StaticClosedCommittee` and
-> `Tendermint` weighted precommit finality.
->
-> Both engines are wired through `ConsensusConfig` -> `SelectedConsensus`
-> -> `ConsensusEngine`. Both are reachable from the `myelin-cli
-> committee finalise-demo` entry point. Neither is a full peer-to-peer
-> network; both are closed-validator finality, intentionally narrow.
+## Scope
 
-## 1. Selectable engines
+Myelin exposes two finite-session, closed-validator engines:
 
 ```text
 ConsensusKind::StaticClosedCommittee
 ConsensusKind::Tendermint
 ```
 
-Selection is driven by the `kind` field of a TOML `ConsensusConfig`:
+Neither is a permissionless consensus claim. CKB remains the L1 custody,
+publication and court layer.
 
-```toml
-kind = "static-closed-committee"     # or "tendermint"
+## Static closed committee
 
-[static_committee]
-quorum_weight = 2
-[[static_committee.validators]]
-id = "validator-0"
-public_key = "0101010101010101010101010101010101010101010101010101010101010101"
-weight = 1
-...
+`StaticClosedCommittee` verifies a block-bound set of secp256k1 Schnorr
+signatures against configured validator weights. It rejects unknown or
+duplicate validators, zero weight, invalid keys/signatures, wrong block hashes,
+wrong engine selection, overflow, and sub-quorum certificates.
+
+## Tendermint
+
+The canonical config name is `tendermint`; `weighted-precommit` is accepted as
+a migration alias only. A Tendermint quorum must be strictly greater than two
+thirds of total voting power.
+
+The deterministic state machine implements:
+
+| Requirement | Implementation evidence |
+| --- | --- |
+| deterministic weighted proposer | `Tendermint::proposer_id(height, round)` |
+| signed proposal | proposal domain binds height, round, block, valid round and proposer |
+| signed prevote and precommit | vote domain binds height, round, step, block-or-nil and validator |
+| nil votes | `block_hash: Option<Hash32>` |
+| lock rule | `locked_value` and `locked_round` persist across round changes |
+| valid-round unlock | proposal `valid_round` requires retained greater-than-two-thirds prevotes |
+| round change | `advance_round` retains lock and valid value |
+| equivocation rejection | conflicting proposal/vote by one validator at one round/step returns `Equivocation` |
+| crash recovery shape | `TendermintRoundState` serializes and round-trips as a WAL record |
+| decision | greater-than-two-thirds precommits for one block produce `TendermintDecision` |
+| finalisation | `finalise_block_with_decision` rechecks height, block hash, vote signatures and power |
+
+```mermaid
+flowchart LR
+    P["Proposal"] --> VB["Prevote block"]
+    P --> VN["Prevote nil"]
+    VB --> PB["Precommit block + lock"]
+    VN --> PN["Precommit nil"]
+    PB --> D["Decision"]
+    PN --> R["Next round"]
+    R --> P
 ```
+
+The final portable certificate carries signed precommits. Proposal and prevote
+transitions are runtime/WAL evidence; they do not need to be duplicated in the
+final decision certificate.
+
+## Configuration
 
 ```toml
 kind = "tendermint"
 
 [tendermint]
-quorum_power = 2
+quorum_power = 3
+
 [[tendermint.validators]]
 id = "validator-0"
-public_key = "0101010101010101010101010101010101010101010101010101010101010101"
+public_key = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 weight = 1
-...
+
+# Three more equal-power validators omitted here; 3 of 4 reaches >2/3.
 ```
 
-`ConsensusConfig::from_toml_str` parses the TOML, normalizes the
-kind, validates the validator set, and returns a `ConsensusConfig`
-that `SelectedConsensus::from_config` turns into a real engine.
-
-## 2. StaticClosedCommittee — verified requirements
-
-The static closed committee is the simpler of the two engines. Each
-phase-one Myelin block is finalised by a `CommitteeCertificate` that
-collects deterministic `Signature64` values from a configured set of
-validators, weighted against a `quorum_weight` threshold.
-
-### 2.1 Requirement -> evidence
-
-| # | Requirement | Evidence |
-|---|---|---|
-| 1 | Deterministic committee config loading | `ConsensusConfig::from_toml_str` + `StaticClosedCommittee::new`; covered by `selected_consensus_loads_from_toml`. |
-| 2 | Validator public keys | `CommitteeValidator { id, public_key: [u8; 32], weight }`. `parse_hex_32` rejects any non-32-byte key. |
-| 3 | Validator weights | `weight: u64`; zero weight is rejected by `ZeroWeight`; overflow is checked with `checked_add`. |
-| 4 | Configurable quorum threshold | `quorum_weight: u64`; must be `> 0` and `<= total_weight`; enforced in `StaticClosedCommittee::new`. |
-| 5 | Deterministic certificate verification | `verify_certificate` re-derives the expected signature from the configured `public_key`, `validator_id`, and `block_hash`; covered by `static_committee_finalises_with_quorum`. |
-| 6 | Rejection of unknown validators | Covered by `static_committee_rejects_unknown_validator`; returns `ConsensusError::UnknownValidator`. |
-| 7 | Rejection of duplicate validator entries | Covered by `static_committee_rejects_duplicate_validator`; returns `ConsensusError::DuplicateValidator`. |
-| 8 | Rejection of invalid signatures | Covered by `static_committee_rejects_invalid_signature`; returns `ConsensusError::InvalidSignature`. |
-| 9 | Rejection of wrong block hash | Covered by `static_committee_rejects_wrong_block_hash`; returns `ConsensusError::WrongBlockHash`. |
-| 10 | Rejection of wrong height | Static closed committee certificates do not carry a height. The `consensus_kind` field on the block is the engine selector; a Tendermint-kind block is rejected by `selected_consensus_static_committee_does_not_accept_tendermint_kind_block`. |
-| 11 | Stable finalised block output | Covered by `static_committee_finalised_block_is_stable`. |
-
-### 2.2 CLI path
-
-```text
-myelin-cli committee finalise-demo --config <static.toml>
-```
-
-`cli/src/main.rs::finalise_static_demo` parses the TOML, builds a
-`StaticClosedCommittee`, signs a fixture precommit certificate for
-the configured validators, and calls
-`selected.finalise_block(block, certificate)`. The output
-`CommitteeDemoReport` records `consensus_kind =
-"static-closed-committee"`, the block hash, the quorum weight, the
-signer ids, and `finalised: true`.
-
-## 3. Tendermint — verified requirements
-
-Tendermint-style weighted precommit finality is a round-bound,
-height-bound, weighted quorum over a fixed validator set. The
-canonical certificate type is `TendermintPrecommitCertificate`,
-which carries `block_hash`, `height`, `round`, and a list of
-`CommitteeSignature`s.
-
-### 3.1 Requirement -> evidence
-
-| # | Requirement | Evidence |
-|---|---|---|
-| 1 | Height-bound certificate | `verify_precommit_certificate` checks `certificate.height == expected`; covered by `tendermint_rejects_wrong_height_and_round`. |
-| 2 | Round-bound certificate | `verify_precommit_certificate` checks `certificate.round == expected`; covered by `tendermint_rejects_wrong_height_and_round` and `tendermint_rejects_height_round_combination`. |
-| 3 | Block-hash-bound precommit set | `verify_precommit_certificate` checks `certificate.block_hash == expected`; covered by `tendermint_rejects_wrong_block_hash`. |
-| 4 | Validator-set-bound verification | Each signature must come from a configured validator; covered by `tendermint_rejects_unknown_validator`; returns `ConsensusError::UnknownValidator`. |
-| 5 | Weighted threshold verification | `signed_power >= quorum_power`; covered by `tendermint_rejects_below_quorum`; returns `ConsensusError::QuorumNotMet`. |
-| 6 | Duplicate validator handling | Covered by `tendermint_rejects_duplicate_validator`; returns `ConsensusError::DuplicateValidator`. |
-| 7 | Invalid signature rejection | Covered by `tendermint_rejects_invalid_signature`; returns `ConsensusError::InvalidSignature`. |
-| 8 | Nil / wrong block rejection | A Tendermint precommit under a `TENDERMINT_PRECOMMIT_DOMAIN` is bound to a specific `block_hash`. The CLI only emits precommits for the real `block.hash()`; nil precommits are out of scope for the closed-validator fast path. A wrong block hash is rejected by `tendermint_rejects_wrong_block_hash`. |
-| 9 | Equivocation detection | The Tendermint engine's closed-validator fast path does not implement full BFT equivocation evidence. The current invariant is structural: a validator is allowed at most one precommit per `(height, round, block_hash)` certificate, and a duplicate validator id in a single certificate is rejected. Cross-round or cross-height equivocation requires a separate evidence log; that work is not part of the phase-one deliverable. |
-| 10 | Deterministic certificate encoding / hashing | `block.hash()` and `deterministic_tendermint_precommit` are both `blake3` over Molecule-shaped byte encodings with explicit domain separation; covered by `tendermint_finalised_block_is_stable` and `block_hash_is_stable_across_calls`. |
-| 11 | Deterministic finality result | `finalise_block_with_precommit` re-derives the block hash and runs `verify_precommit_certificate`; covered by `tendermint_finalised_block_is_stable`. |
-| 12 | CLI path selecting Tendermint mode | `cli/src/main.rs::finalise_tendermint_demo` parses the TOML, builds a `Tendermint`, signs a fixture precommit for `round = 0`, and calls `engine.finalise_block_with_precommit(block, 0, cert)`. The output `CommitteeDemoReport` records `consensus_kind = "tendermint"`, the round, the certificate step, and `finalised: true`. |
-| 13 | Tendermint mode is not silently falling back to static committee mode | Covered by `tendermint_does_not_silently_fall_back_to_static_committee` and `selected_consensus_static_committee_does_not_accept_tendermint_kind_block`. The Tendermint signature domain is distinct from the static-committee signature domain, so a static certificate handed to the Tendermint engine is rejected as an `InvalidSignature`; a Tendermint-kind block handed to the static-committee engine is rejected as a `WrongEngine`. |
-
-### 3.2 Tendermint signature domain separation
-
-```text
-myelin:tendermint-precommit:v1 || height || round || validator_id || public_key || block_hash
-myelin:tendermint-precommit:v1:tail || height || round || validator_id || public_key || block_hash
-```
-
-This is intentionally distinct from the static-committee signature
-domain:
-
-```text
-myelin:static-committee-signature:v1 || validator_id || public_key || block_hash
-myelin:static-committee-signature:v1:tail || validator_id || public_key || block_hash
-```
-
-Domain separation is what makes `tendermint_does_not_silently_fall_back_to_static_committee`
-a true negative test, not a structural accident.
-
-## 4. CLI smoke test for both modes
-
-The CLI command for both engines is the same:
+## Validation
 
 ```bash
-myelin-cli committee finalise-demo --config <path/to/config.toml>
+cargo test --locked -p myelin-consensus
+cargo test --locked -p myelin-cli
 ```
 
-`scripts/myelin_production_gate.sh` exercises both modes and asserts:
+The focused Tendermint suite covers a successful full round, nil quorum and
+round advance, lock retention, equivocation, invalid proposer/signature,
+serializable state recovery, unsafe quorum rejection, and exact decision
+finalisation. CLI session and runtime tests execute the full round path and
+assert consensus-independent CellTx/state roots.
 
-```text
-require(committee["consensus_kind"] == "static-closed-committee", ...)
-require(committee["finalised"] is True, ...)
-require(committee["quorum_weight"] == 2, ...)
-require(len(committee["signer_ids"]) >= 2, ...)
+## Remaining network/runtime work
 
-require(tendermint["consensus_kind"] == "tendermint", ...)
-require(tendermint["finalised"] is True, ...)
-require(tendermint["quorum_weight"] == 2, ...)
-require(len(tendermint["signer_ids"]) >= 2, ...)
-```
-
-The full Myelin production gate also exercises the Tendermint mode in the same
-run, so a silent fallback to static committee would fail the gate.
-
-## 5. Legacy `verify_certificate` path is closed
-
-`Tendermint::verify_certificate` (the legacy `ConsensusEngine` API
-shape) now returns `Err(ConsensusError::LegacyCertificatePathUnsupported)`.
-A `CommitteeCertificate` carries no `(height, round)`, so it is
-not a structurally valid Tendermint precommit certificate. The
-typed `verify_precommit_certificate` API is the only path. This
-prevents callers from accidentally using the wrong API shape and
-silently finalising a block at `(height=0, round=0)`.
-
-Covered by `tendermint_does_not_silently_fall_back_to_static_committee`,
-which now also asserts the `LegacyCertificatePathUnsupported`
-return.
-
-## 6. Equivocation: explicit limitation
-
-Full BFT equivocation evidence is intentionally out of scope for
-this milestone. Myelin is a finite-session Cell ledger; the
-phase-one Tendermint engine is a closed-validator fast path used
-for benchmarking and pressure testing, not a permissionless BFT
-network.
-
-The current invariant is structural:
-
-```text
-- A validator is allowed at most one precommit per certificate.
-- A duplicate validator id in a single certificate is rejected
-  with ConsensusError::DuplicateValidator.
-- A precommit under the wrong (height, round, block_hash) is
-  rejected with WrongHeight / WrongRound / WrongBlockHash.
-- The legacy verify_certificate path returns
-  LegacyCertificatePathUnsupported so the typed precommit API
-  cannot be bypassed.
-```
-
-Cross-round or cross-height equivocation detection requires a
-separate evidence log and is recorded here as a future
-deliverable. This is the same scope as the README claim:
-
-```text
-"Myelin currently uses selectable closed-validator finality for
-session benchmarking and pressure testing; the L1 court/projection
-path is what makes it CKB-aligned."
-```
-
-## 7. Test inventory (consensus)
-
-```text
-cargo test -p myelin-consensus
-```
-
-22 tests, all passing as of this hardening pass:
-
-```text
-selected_consensus_static_committee_does_not_accept_tendermint_kind_block
-selected_consensus_rejects_wrong_engine_on_block
-static_committee_rejects_below_quorum
-block_hash_is_stable_across_calls
-static_committee_finalises_with_quorum
-static_committee_rejects_duplicate_validator
-static_committee_rejects_invalid_signature
-static_committee_finalised_block_is_stable
-static_committee_rejects_unknown_validator
-static_committee_rejects_wrong_block_hash
-tendermint_does_not_silently_fall_back_to_static_committee
-tendermint_finalised_block_is_stable
-tendermint_finalises_with_precommit_quorum
-tendermint_rejects_below_quorum
-tendermint_rejects_duplicate_validator
-tendermint_rejects_height_round_combination
-tendermint_rejects_invalid_signature
-selected_consensus_loads_from_toml
-tendermint_rejects_wrong_block_hash
-selected_tendermint_loads_from_toml
-tendermint_rejects_unknown_validator
-tendermint_rejects_wrong_height_and_round
-```
-
-## 7. Conclusion
-
-Both engines meet the audit requirements:
-
-```text
-- StaticClosedCommittee:  11/11 requirements met.
-- Tendermint:             11/12 requirements met, with the 12th
-                          (equivocation evidence) explicitly out
-                          of scope and documented.
-```
-
-The Tendermint mode is not a silent fallback to the static-committee
-mode. The CLI path is selectable, the certificates are
-domain-separated, and the test suite proves that a static-committee
-certificate is invalid as a Tendermint precommit and vice versa.
+The deterministic protocol core does not itself provide networking, peer
+authentication, timeout scheduling, durable filesystem/database WAL I/O,
+validator-set updates, evidence gossip/slashing, or permissionless membership.
+Those are explicit runtime/operations layers, not silently claimed features.

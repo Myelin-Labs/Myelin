@@ -27,7 +27,7 @@ cargo run -p myelin-cli -- session da-manifest \
   --out reports/session-da-manifest.json
 ```
 
-Use `--consensus weighted-precommit` on `open-fixture` to exercise the other closed-validator engine; the commit reads the selected kind from the v2 open report.
+Use `--consensus tendermint` on `open-fixture` to exercise the other closed-validator engine; the commit reads the selected kind from the v2 open report.
 
 Expected boundaries:
 

@@ -27,7 +27,7 @@ Two systems with very different jobs:
 | --- | --- | --- |
 | **State shape** | Finite Cell session set | Channel state + HTLCs |
 | **Execution** | CKB-VM-style verifier for typed scripts | TLC (Time-Locked Contracts) with simpler execution |
-| **Finality** | Static committee / WeightedPrecommit BFT | Off-chain channel updates, on-chain only on dispute |
+| **Finality** | Static committee / finite-session Tendermint | Off-chain channel updates, on-chain only on dispute |
 | **Throughput target** | Many chunks/second inside one session | Many payments/second inside one channel |
 | **Dispute path** | Single-chunk court bundle → CKB-VM verifier on L1 | Timelock + commitment + revocation on L1 |
 

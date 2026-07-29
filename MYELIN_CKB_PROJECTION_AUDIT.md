@@ -86,4 +86,4 @@ This does not establish a public-testnet court or permissionless L2 security. Se
 
 ## Remaining boundary
 
-The next credibility milestone is not another projection enum value. It is a public CKB testnet rehearsal that binds deployed code OutPoints, durable DA receipts, production key custody, threshold-lock enforcement, court economics, operator policy, committed transaction proofs, and reorg/finality monitoring into one reproducible evidence bundle.
+The next credibility milestone is not another projection enum value. It is a public CKB testnet rehearsal that binds canonical `secp256k1_blake160_multisig_all` system-script identity and exact witnesses, deployed court code OutPoints, provider-neutral DA certificates and live retrieval, production key custody, court economics, operator policy, committed transaction proofs, and reorg/finality monitoring into one reproducible evidence bundle.

@@ -47,6 +47,7 @@ export CKB_TESTNET_LOCK_HASH_TYPE=type
 export CKB_TESTNET_LOCK_ARGS=0x...
 export CKB_TESTNET_LOCK_DEP_TX_HASH=0x...
 export CKB_TESTNET_LOCK_DEP_INDEX=0x...
+export CKB_TESTNET_LOCK_DEP_TYPE=dep_group
 export CKB_TESTNET_DA_VERIFIER_CODE_HASH=0x...
 export CKB_TESTNET_DA_VERIFIER_DEP_TX_HASH=0x...
 export CKB_TESTNET_DA_VERIFIER_DEP_INDEX=0x...
@@ -57,6 +58,8 @@ export MYELIN_DA_RETRIEVAL_ENDPOINT=https://...
 export MYELIN_DA_AUDIT_LOG_COMMITMENT=0x...
 export MYELIN_DA_PROVIDER_PUBKEY_HASH=...
 export MYELIN_DA_PROVIDER_SIGNATURE=...
+export MYELIN_DA_CERTIFICATE="$MYELIN_REHEARSAL_DIR/provider-neutral-da-certificate.json"
+export MYELIN_DA_EVALUATION_EPOCH=...
 export MYELIN_COURT_VERIFIER_CODE_HASH=0x...
 export MYELIN_COURT_VERIFIER_CODE_DEP_TX_HASH=0x...
 export MYELIN_COURT_VERIFIER_CODE_DEP_INDEX=0x0
@@ -66,6 +69,12 @@ export MYELIN_AUTHORITY_SIGNER_0_PUBKEY_HASH=...
 export MYELIN_AUTHORITY_SIGNER_0_SIGNATURE=...
 export MYELIN_AUTHORITY_SIGNER_1_PUBKEY_HASH=...
 export MYELIN_AUTHORITY_SIGNER_1_SIGNATURE=...
+# Full canonical multisig participant order; signer 0/1 are the 2-of-3 subset.
+export MYELIN_AUTHORITY_PARTICIPANT_0_PUBKEY_HASH=...
+export MYELIN_AUTHORITY_PARTICIPANT_1_PUBKEY_HASH=...
+export MYELIN_AUTHORITY_PARTICIPANT_2_PUBKEY_HASH=...
+# These identify CKB's standard secp256k1_blake160_multisig_all type script
+# and its system-script dep-group, not a custom Myelin lock binary.
 export MYELIN_THRESHOLD_LOCK_CODE_HASH=0x...
 export MYELIN_THRESHOLD_LOCK_CODE_DEP_TX_HASH=0x...
 export MYELIN_THRESHOLD_LOCK_CODE_DEP_INDEX=0x0
@@ -211,13 +220,18 @@ cargo run -p myelin-cli -- session external-da-receipt \
 `--provider-secret-key` exists for disposable rehearsal keys only. Do not pass
 real provider or custody keys through shell history.
 
-Then build the durable DA manifest with the provider receipt:
+One receipt is rehearsal/testnet evidence only. For production DA, collect a
+provider-neutral certificate with independent provider/fault-domain quorum and
+auditor-signed retrieval probes as described in
+[`MYELIN_DA_DESIGN.md`](MYELIN_DA_DESIGN.md). Then build the durable manifest:
 
 ```bash
 cargo run -p myelin-cli -- session da-manifest \
   --bundle "$MYELIN_REHEARSAL_DIR/session-court.json" \
   --storage-dir "$MYELIN_REHEARSAL_DIR/session-da-store" \
   --external-da-receipt "$MYELIN_REHEARSAL_DIR/external-da-receipt.json" \
+  --da-certificate "$MYELIN_DA_CERTIFICATE" \
+  --da-evaluation-epoch "$MYELIN_DA_EVALUATION_EPOCH" \
   --out "$MYELIN_REHEARSAL_DIR/session-da.json"
 
 cargo run -p myelin-cli -- session verify-da-manifest \
@@ -231,8 +245,8 @@ Acceptance:
 
 ```text
 session-da-verify.json has valid = true
-session-da.json has availability.production_ready = true only if the receipt
-really carries signed production SLA fields
+session-da.json has availability.production_ready = true only if the sealed
+payload and provider-neutral certificate both verify
 ```
 
 If the receipt is not a real provider receipt, label it as rehearsal-provider
@@ -313,18 +327,24 @@ cargo run -p myelin-cli -- session authority-signature-evidence \
   --signature "$MYELIN_AUTHORITY_SIGNER_0_SIGNATURE" \
   --signer-pubkey-hash "$MYELIN_AUTHORITY_SIGNER_1_PUBKEY_HASH" \
   --signature "$MYELIN_AUTHORITY_SIGNER_1_SIGNATURE" \
+  --participant-pubkey-hash "$MYELIN_AUTHORITY_PARTICIPANT_0_PUBKEY_HASH" \
+  --participant-pubkey-hash "$MYELIN_AUTHORITY_PARTICIPANT_1_PUBKEY_HASH" \
+  --participant-pubkey-hash "$MYELIN_AUTHORITY_PARTICIPANT_2_PUBKEY_HASH" \
+  --require-first-n 0 \
   --out "$MYELIN_REHEARSAL_DIR/authority-signature-evidence.json"
 
 cargo run -p myelin-cli -- session threshold-lock-deployment-evidence \
   --package "$MYELIN_REHEARSAL_DIR/session-settlement-package.base.json" \
   --network ckb-testnet \
   --code-hash "$MYELIN_THRESHOLD_LOCK_CODE_HASH" \
-  --hash-type data2 \
+  --hash-type type \
   --code-dep-tx-hash "$MYELIN_THRESHOLD_LOCK_CODE_DEP_TX_HASH" \
   --code-dep-index "$MYELIN_THRESHOLD_LOCK_CODE_DEP_INDEX" \
+  --code-dep-type dep_group \
   --audited-source-hash "$MYELIN_THRESHOLD_LOCK_SOURCE_HASH" \
   --audit-report-hash "$MYELIN_THRESHOLD_LOCK_AUDIT_HASH" \
   --ckb-enforceable-checked \
+  --rpc-url "$CKB_TESTNET_RPC" \
   --testnet-beta-ready \
   --out "$MYELIN_REHEARSAL_DIR/threshold-lock-deployment.json"
 
@@ -375,6 +395,7 @@ cargo run -p myelin-cli -- session carrier-submission \
   --lock-args "$CKB_TESTNET_LOCK_ARGS" \
   --lock-code-dep-tx-hash "$CKB_TESTNET_LOCK_DEP_TX_HASH" \
   --lock-code-dep-index "$CKB_TESTNET_LOCK_DEP_INDEX" \
+  --lock-code-dep-type "$CKB_TESTNET_LOCK_DEP_TYPE" \
   --verifier-code-hash "$CKB_TESTNET_DA_VERIFIER_CODE_HASH" \
   --verifier-code-dep-tx-hash "$CKB_TESTNET_DA_VERIFIER_DEP_TX_HASH" \
   --verifier-code-dep-index "$CKB_TESTNET_DA_VERIFIER_DEP_INDEX" \
@@ -402,7 +423,13 @@ new gate.
 For the settlement carrier or final-script path, use the same command with the
 settlement package and settlement verifier. When rehearsing final-script
 settlement evidence, also provide the evidence cell dep and authority input
-arguments, and set:
+arguments. The authority input lock must be the canonical CKB
+`secp256k1_blake160_multisig_all` script (`hash_type=type`, system-script
+`dep_type=dep_group`, 20-byte config-hash args). First build the transaction
+without `--submit`, sign the reported `canonical_ckb_multisig.signing_message`
+externally with the threshold participants, then repeat
+`--multisig-signature 0x...` for each 65-byte recoverable signature. Live
+submission is rejected until the exact witness verifies locally. Also set:
 
 ```bash
 --verifier-role final-l1-script

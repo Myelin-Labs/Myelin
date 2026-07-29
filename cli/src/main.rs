@@ -9,18 +9,23 @@ use clap::{Args, Parser, Subcommand};
 use myelin_ckb_adapter::{parse_ckb_json_transaction, verify_projection, CkbEvidenceEngine, CkbEvidenceProjection, HttpCkbRpc};
 use myelin_consensus::{
     CommitteeCertificate, CommitteeSignature, CommitteeSigner, ConsensusConfig, ConsensusEngine, ConsensusKind, MyelinBlock,
-    SelectedConsensus, StaticClosedCommittee, StaticCommitteeConfig, WeightedPrecommit, WeightedPrecommitConfig,
+    SelectedConsensus, StaticClosedCommittee, StaticCommitteeConfig, TendermintDecision, TendermintStep, WeightedPrecommit,
+    WeightedPrecommitConfig,
 };
 use myelin_exec::{
-    build_cell_tx_execution_report, celltx::compute_wtxid, ckb_cell_data_hash, deserialize_transaction_molecule,
-    project_cell_tx_to_ckb, serialize_transaction_molecule, CellDep, CellInput, CellOutput, CellTx, CkbProjectionReport, DepType,
-    OutPoint, ProjectionStage, ResolvedCell, Script, ScriptVersion, SimpleDataProvider, TransactionScriptVerifier, VmSemantics,
-    CKB_SPAWN_IPC_SYSCALLS_ENABLED,
+    build_cell_tx_execution_report, celltx::compute_wtxid, ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule,
+    ckb_cell_data_hash, ckb_script_hash_molecule, ckb_secp256k1_blake160_multisig_all_signing_message_molecule,
+    ckb_secp256k1_blake160_pubkey_hash, ckb_sign_secp256k1_blake160_multisig_all_molecule,
+    ckb_verify_secp256k1_blake160_multisig_all_molecule, ckb_verify_secp256k1_blake160_recoverable_signature,
+    deserialize_transaction_molecule, parse_ckb_dep_group_data, project_cell_tx_to_ckb, serialize_ckb_witness_args_molecule,
+    serialize_transaction_molecule, CellDep, CellInput, CellOutput, CellTx, CkbProjectionReport,
+    CkbSecp256k1Blake160MultisigAllConfig, CkbWitnessArgs, DepType, OutPoint, ProjectionStage, ResolvedCell, Script, ScriptVersion,
+    SimpleDataProvider, TransactionScriptVerifier, VmSemantics, CKB_SPAWN_IPC_SYSCALLS_ENABLED,
 };
 use myelin_mempool::CellPool;
 use myelin_state::{
-    CellEntry, CellStateTree, MerkleTreeBuilder, SegmentProof, SegmentReader, SegmentWriter, StateTransitionContext,
-    StateTransitionEngine,
+    CellEntry, CellStateTree, DaCertificate, DaCertificateVerification, MerkleTreeBuilder, SegmentProof, SegmentReader, SegmentWriter,
+    StateTransitionContext, StateTransitionEngine,
 };
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -135,7 +140,7 @@ struct TeeworldsInspectArgs {
     #[arg(long, default_value_t = 262_144)]
     chunk_bytes: usize,
     /// Consensus engine for the finality evidence: "static-closed-committee"
-    /// (default) or "weighted-precommit".
+    /// (default) or "tendermint".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path.
@@ -155,7 +160,7 @@ struct TeeworldsBenchArgs {
     #[arg(long, default_value_t = 3)]
     runs: usize,
     /// Consensus engine for the finality evidence: "static-closed-committee"
-    /// (default) or "weighted-precommit".
+    /// (default) or "tendermint".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path.
@@ -190,7 +195,7 @@ struct TeeworldsBuildFixtureArgs {
     #[arg(long, default_value_t = 3)]
     runs: usize,
     /// Consensus engine for the finality evidence: "static-closed-committee"
-    /// (default) or "weighted-precommit".
+    /// (default) or "tendermint".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path for the combined report.
@@ -232,7 +237,7 @@ struct TeeworldsCourtBundleArgs {
     #[arg(long, default_value_t = 0)]
     chunk_index: usize,
     /// Consensus engine for the bundle evidence: "static-closed-committee"
-    /// (default) or "weighted-precommit".
+    /// (default) or "tendermint".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path.
@@ -276,7 +281,7 @@ enum RuntimeCommand {
 
 #[derive(Debug, Args)]
 struct RuntimeSmokeArgs {
-    /// Consensus engine: "static-closed-committee" (default) or "weighted-precommit".
+    /// Consensus engine: "static-closed-committee" (default) or "tendermint".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path.
@@ -446,7 +451,7 @@ struct SessionOpenArgs {
     /// Session timeout in milliseconds.
     #[arg(long, default_value_t = 60_000)]
     timeout_ms: u64,
-    /// Consensus engine: "static-closed-committee" (default) or "weighted-precommit".
+    /// Consensus engine: "static-closed-committee" (default) or "tendermint".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path.
@@ -456,7 +461,7 @@ struct SessionOpenArgs {
 
 #[derive(Debug, Args)]
 struct SessionOpenFixtureArgs {
-    /// Consensus engine: "static-closed-committee" (default) or "weighted-precommit".
+    /// Consensus engine: "static-closed-committee" (default) or "tendermint".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path.
@@ -540,6 +545,14 @@ struct SessionDaManifestArgs {
     /// Optional JSON receipt from an external DA provider.
     #[arg(long)]
     external_da_receipt: Option<PathBuf>,
+    /// Provider-neutral DA certificate containing a provider/fault-domain
+    /// quorum and signed retrieval probes.
+    #[arg(long)]
+    da_certificate: Option<PathBuf>,
+    /// Deterministic epoch at which --da-certificate is evaluated. Required
+    /// with --da-certificate; never inferred from wall-clock time.
+    #[arg(long, requires = "da_certificate")]
+    da_evaluation_epoch: Option<u64>,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -780,6 +793,9 @@ struct SessionCarrierSubmissionArgs {
     /// Funding lock script code dep output index as a CKB hex quantity.
     #[arg(long)]
     lock_code_dep_index: String,
+    /// Funding lock dependency kind. Canonical CKB multisig uses `dep_group`.
+    #[arg(long, default_value = "code")]
+    lock_code_dep_type: String,
     /// Deployed CellScript verifier code hash.
     #[arg(long)]
     verifier_code_hash: String,
@@ -798,6 +814,12 @@ struct SessionCarrierSubmissionArgs {
     /// Entry witness hex for the verifier.
     #[arg(long)]
     witness: String,
+    /// Disposable rehearsal-only secret key used to sign the exact canonical CKB multisig transaction. Repeat up to threshold.
+    #[arg(long = "multisig-signer-secret-key")]
+    multisig_signer_secret_keys: Vec<String>,
+    /// Externally produced 65-byte recoverable signature over the reported canonical CKB multisig signing message.
+    #[arg(long = "multisig-signature")]
+    multisig_signatures: Vec<String>,
     /// CKB outputs validator argument for send_transaction.
     #[arg(long, default_value = "passthrough")]
     outputs_validator: String,
@@ -881,6 +903,12 @@ struct SessionAuthoritySignatureEvidenceArgs {
     /// Participant authority recoverable secp256k1 signature when using external signing. Repeat with --signer-pubkey-hash.
     #[arg(long = "signature")]
     signatures: Vec<String>,
+    /// Ordered CKB Blake160 participant set committed by the standard multisig lock. Defaults to the signer set.
+    #[arg(long = "participant-pubkey-hash")]
+    participant_pubkey_hashes: Vec<String>,
+    /// Number of leading multisig participants whose signatures are mandatory.
+    #[arg(long, default_value_t = 0)]
+    require_first_n: u8,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -894,18 +922,24 @@ struct SessionThresholdLockDeploymentEvidenceArgs {
     /// CKB network: ckb-testnet or ckb-mainnet.
     #[arg(long, default_value = "ckb-testnet")]
     network: String,
-    /// Deployed threshold-lock code hash.
+    /// Canonical CKB `secp256k1_blake160_multisig_all` system-script type hash.
     #[arg(long)]
     code_hash: String,
-    /// Deployed threshold-lock hash type.
-    #[arg(long, default_value = "data2")]
+    /// Canonical multisig script hash type; must be `type` for checked evidence.
+    #[arg(long, default_value = "type")]
     hash_type: String,
     /// Deployed threshold-lock code dep tx hash.
     #[arg(long)]
     code_dep_tx_hash: String,
-    /// Deployed threshold-lock code dep output index.
+    /// Canonical multisig dep-group output index.
     #[arg(long, default_value = "0x0")]
     code_dep_index: String,
+    /// Dependency kind; canonical CKB multisig uses `dep_group`.
+    #[arg(long, default_value = "dep_group")]
+    code_dep_type: String,
+    /// CKB RPC endpoint used to derive checked system-script identity evidence.
+    #[arg(long)]
+    rpc_url: Option<String>,
     /// Audited threshold-lock source hash.
     #[arg(long)]
     audited_source_hash: String,
@@ -915,7 +949,7 @@ struct SessionThresholdLockDeploymentEvidenceArgs {
     /// Optional deployment policy. Defaults from network.
     #[arg(long)]
     deployment_policy: Option<String>,
-    /// Set after the deployed code dep and lock args have been checked.
+    /// Require the command to derive enforceability from the authoritative CKB node.
     #[arg(long)]
     ckb_enforceable_checked: bool,
     /// Set after public-chain testnet evidence has been checked.
@@ -1216,7 +1250,13 @@ fn run() -> Result<()> {
                 write_json(args.out, &report)
             }
             SessionCommand::DaManifest(args) => {
-                let report = session_da_manifest(args.bundle, args.storage_dir, args.external_da_receipt)?;
+                let report = session_da_manifest_with_certificate(
+                    args.bundle,
+                    args.storage_dir,
+                    args.external_da_receipt,
+                    args.da_certificate,
+                    args.da_evaluation_epoch,
+                )?;
                 write_json(args.out, &report)
             }
             SessionCommand::VerifyDaManifest(args) => {
@@ -1296,6 +1336,8 @@ fn run() -> Result<()> {
                     args.signer_secret_keys,
                     args.signer_pubkey_hashes,
                     args.signatures,
+                    args.participant_pubkey_hashes,
+                    args.require_first_n,
                 )?;
                 write_json(args.out, &report)
             }
@@ -1464,20 +1506,21 @@ fn finalise_static_demo(config: ConsensusConfig, selected: SelectedConsensus) ->
 }
 
 fn finalise_weighted_precommit_demo(config: ConsensusConfig, selected: SelectedConsensus) -> Result<CommitteeDemoReport> {
-    let weighted_precommit_config = config
-        .weighted_precommit
-        .ok_or_else(|| CliError::InvalidFixture("demo finality requires a weighted_precommit config".to_owned()))?;
+    let weighted_precommit_config =
+        config.tendermint.ok_or_else(|| CliError::InvalidFixture("demo finality requires a tendermint config".to_owned()))?;
     let weighted_precommit = WeightedPrecommit::new(weighted_precommit_config.clone())?;
     let block = demo_block(vec![[0xB1; 32]], ConsensusKind::WeightedPrecommit);
     let block_hash = block.hash();
     let height = block.number;
-    let round = 0;
     let signer_ids = weighted_precommit_quorum_signers(&weighted_precommit_config)?;
-    let signers = fixture_signers_for_ids(&signer_ids)?;
-    let certificate = weighted_precommit.precommit_certificate_from_signers(block_hash, height, round, &signers)?;
+    let voting_signers = fixture_signers_for_ids(&signer_ids)?;
+    let all_signer_ids = weighted_precommit_config.validators.iter().map(|validator| validator.id.clone()).collect::<Vec<_>>();
+    let all_signers = fixture_signers_for_ids(&all_signer_ids)?;
+    let decision = tendermint_decision_from_signers(&weighted_precommit, &block, &voting_signers, &all_signers)?;
+    let round = decision.round;
     match selected {
-        SelectedConsensus::WeightedPrecommit(engine) => {
-            engine.finalise_block_with_precommit(block, round, certificate)?;
+        SelectedConsensus::Tendermint(engine) => {
+            engine.finalise_block_with_decision(block, decision)?;
         }
         other => {
             return Err(myelin_consensus::ConsensusError::WrongEngine {
@@ -1524,6 +1567,33 @@ fn weighted_precommit_quorum_signers(config: &WeightedPrecommitConfig) -> Result
         }
     }
     Err(CliError::InvalidFixture("weighted_precommit config cannot satisfy quorum".to_owned()))
+}
+
+fn tendermint_decision_from_signers(
+    engine: &WeightedPrecommit,
+    block: &MyelinBlock,
+    voting_signers: &[CommitteeSigner],
+    all_signers: &[CommitteeSigner],
+) -> Result<TendermintDecision> {
+    let mut state = engine.new_round_state(block.number)?;
+    let proposer_id = engine.proposer_id(block.number, 0)?;
+    let proposer = all_signers
+        .iter()
+        .find(|signer| signer.validator_id() == proposer_id)
+        .ok_or_else(|| CliError::InvalidFixture(format!("no local Tendermint proposal key configured for {proposer_id}")))?;
+    let proposal = engine.proposal_from_signer(block.number, 0, block.hash(), None, proposer)?;
+    state.receive_proposal(engine, proposal)?;
+    let prevote_value = state.prevote_value(engine)?;
+    for signer in voting_signers {
+        let vote = engine.vote_from_signer(block.number, 0, TendermintStep::Prevote, prevote_value, signer)?;
+        state.receive_vote(engine, vote)?;
+    }
+    let precommit_value = state.precommit_value(engine)?;
+    for signer in voting_signers {
+        let vote = engine.vote_from_signer(block.number, 0, TendermintStep::Precommit, precommit_value, signer)?;
+        state.receive_vote(engine, vote)?;
+    }
+    state.decision.ok_or_else(|| CliError::InvalidFixture("Tendermint round did not reach a precommit decision".to_owned()))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1615,7 +1685,7 @@ struct TeeworldsBundleBlock {
     number: u64,
     /// Block timestamp in milliseconds.
     timestamp_ms: u64,
-    /// Consensus engine kind: "static-closed-committee" or "weighted-precommit".
+    /// Consensus engine kind: "static-closed-committee" or "tendermint".
     consensus_kind: String,
     /// State root before the block's transitions.
     state_root_before: String,
@@ -1638,7 +1708,7 @@ impl TeeworldsBundleBlock {
         };
         let consensus_kind = match self.consensus_kind.as_str() {
             "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
-            "weighted-precommit" => ConsensusKind::WeightedPrecommit,
+            "tendermint" | "weighted-precommit" => ConsensusKind::WeightedPrecommit,
             other => return Err(format!("unknown consensus_kind in bundle block: {other}")),
         };
         let ordered_cell_tx_commitments = self
@@ -1893,7 +1963,7 @@ fn inspect_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize, consensus: &str)
 fn parse_teeworlds_consensus(consensus: &str) -> Result<ConsensusKind> {
     match consensus {
         "static-closed-committee" => Ok(ConsensusKind::StaticClosedCommittee),
-        "weighted-precommit" => Ok(ConsensusKind::WeightedPrecommit),
+        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::WeightedPrecommit),
         other => Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     }
 }
@@ -2092,7 +2162,7 @@ fn teeworlds_court_bundle(
     }
     let consensus_kind = match consensus {
         "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
-        "weighted-precommit" => ConsensusKind::WeightedPrecommit,
+        "tendermint" | "weighted-precommit" => ConsensusKind::WeightedPrecommit,
         other => return Err(CliError::InvalidFixture(format!("unknown consensus engine for court-bundle: {other}"))),
     };
 
@@ -2193,32 +2263,29 @@ fn teeworlds_court_bundle(
             // committee's, so the two paths are not interchangeable.
             let weighted_precommit_engine = weighted_precommit_fixture_engine();
             let height = canonical_block.number;
-            let round = 0u32;
-            let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
-            let cert = weighted_precommit_engine
-                .precommit_certificate_from_signers(
-                    canonical_block_hash,
-                    height,
-                    round,
-                    &fixture_signers(&["validator-0", "validator-1"]),
-                )
-                .expect("weighted_precommit fixture certificate");
+            let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned(), "validator-2".to_owned()];
+            let voting_signers = fixture_signers(&["validator-0", "validator-1", "validator-2"]);
+            let all_signers = fixture_signers(&["validator-0", "validator-1", "validator-2", "validator-3"]);
+            let decision =
+                tendermint_decision_from_signers(&weighted_precommit_engine, &canonical_block, &voting_signers, &all_signers)
+                    .expect("Tendermint fixture decision");
+            let round = decision.round;
             weighted_precommit_engine
-                .finalise_block_with_precommit(canonical_block.clone(), round, cert.clone())
-                .expect("weighted_precommit fixture finality");
-            let signatures = cert
-                .signatures
+                .finalise_block_with_decision(canonical_block.clone(), decision.clone())
+                .expect("Tendermint fixture finality");
+            let signatures = decision
+                .precommits
                 .iter()
                 .map(|signature| CommitteeSignatureEvidenceReport {
                     validator_id: signature.validator_id.clone(),
-                    signature: hex::encode(signature.signature),
-                    signature_hash: hex::encode(blake3_32(b"myelin:weighted-precommit-signature-hash:v1", &signature.signature)),
+                    signature: hex::encode(&signature.signature),
+                    signature_hash: hex::encode(blake3_32(b"myelin:tendermint-signature-hash:v1", &signature.signature)),
                 })
                 .collect::<Vec<_>>();
             let weighted_precommit_evidence = WeightedPrecommitEvidenceReport {
                 consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
                 block_hash: hex::encode(canonical_block_hash),
-                quorum_power: 2,
+                quorum_power: 3,
                 height,
                 round,
                 signer_ids,
@@ -2504,9 +2571,7 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
     let signature_hashes_ok = match &bundle.weighted_precommit_evidence {
         Some(tm) => tm.signatures.iter().all(|signature| {
             decode_hex_field(&signature.signature, "signature")
-                .map(|bytes| {
-                    hex::encode(blake3_32(b"myelin:weighted-precommit-signature-hash:v1", &bytes)) == signature.signature_hash
-                })
+                .map(|bytes| hex::encode(blake3_32(b"myelin:tendermint-signature-hash:v1", &bytes)) == signature.signature_hash)
                 .unwrap_or(false)
         }),
         None => bundle.static_committee_evidence.signatures.iter().all(|signature| {
@@ -2546,38 +2611,41 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
     );
 
     if let Some(tm) = &bundle.weighted_precommit_evidence {
-        // WeightedPrecommit precommit certificate verification
+        // Verify the Tendermint decision certificate. Proposal/prevote
+        // transitions are executed by the runtime; the portable finality
+        // certificate carries the round's signed precommits.
         let weighted_precommit_engine = weighted_precommit_fixture_engine();
-        let signatures = tm
+        let precommits = tm
             .signatures
             .iter()
             .map(|signature| {
                 let bytes = parse_hex_64(&signature.signature)
-                    .ok_or_else(|| CliError::InvalidFixture("weighted_precommit signature must be 64-byte hex".to_owned()))?;
-                Ok(CommitteeSignature { validator_id: signature.validator_id.clone(), signature: bytes })
+                    .ok_or_else(|| CliError::InvalidFixture("Tendermint signature must be 64-byte hex".to_owned()))?;
+                Ok(myelin_consensus::TendermintVote {
+                    height: tm.height,
+                    round: tm.round,
+                    step: TendermintStep::Precommit,
+                    block_hash: Some(active_block_hash),
+                    validator_id: signature.validator_id.clone(),
+                    signature: bytes.to_vec(),
+                })
             })
             .collect::<Result<Vec<_>>>()?;
-        let certificate = myelin_consensus::WeightedPrecommitCertificate {
-            block_hash: active_block_hash,
-            height: tm.height,
-            round: tm.round,
-            signatures,
-        };
-        let certificate_ok =
-            weighted_precommit_engine.verify_precommit_certificate(active_block_hash, tm.height, tm.round, &certificate).is_ok();
+        let decision = TendermintDecision { height: tm.height, round: tm.round, block_hash: active_block_hash, precommits };
+        let certificate_ok = weighted_precommit_engine.finalise_block_with_decision(reconstructed_block.clone(), decision).is_ok();
         push_check(
             &mut checks,
             "weighted-precommit-certificate",
             certificate_ok,
-            Some(format!("quorum power {} height {} round {}", 2, tm.height, tm.round)),
+            Some(format!("quorum power {} height {} round {}", 3, tm.height, tm.round)),
             Some(format!("quorum power {}, finalised {}", tm.quorum_power, tm.finalised)),
             "WeightedPrecommit precommit certificate verifies against the phase-one fixture engine",
         );
         push_check(
             &mut checks,
             "weighted-precommit-quorum-power",
-            tm.quorum_power == 2,
-            Some("2".to_owned()),
+            tm.quorum_power == 3,
+            Some("3".to_owned()),
             Some(tm.quorum_power.to_string()),
             "bundle WeightedPrecommit quorum power matches the phase-one fixture engine",
         );
@@ -2799,18 +2867,20 @@ fn finalise_teeworlds_fixture_block(chunks: &[TeeworldsChunkReport], consensus_k
             let weighted_precommit_engine = weighted_precommit_fixture_engine();
             let block_hash = weighted_precommit_block.hash();
             let height = weighted_precommit_block.number;
-            let round = 0u32;
-            let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
-            let cert = weighted_precommit_engine
-                .precommit_certificate_from_signers(block_hash, height, round, &fixture_signers(&["validator-0", "validator-1"]))
-                .expect("weighted_precommit fixture certificate");
+            let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned(), "validator-2".to_owned()];
+            let voting_signers = fixture_signers(&["validator-0", "validator-1", "validator-2"]);
+            let all_signers = fixture_signers(&["validator-0", "validator-1", "validator-2", "validator-3"]);
+            let decision =
+                tendermint_decision_from_signers(&weighted_precommit_engine, &weighted_precommit_block, &voting_signers, &all_signers)
+                    .expect("Tendermint fixture decision");
+            let round = decision.round;
             weighted_precommit_engine
-                .finalise_block_with_precommit(weighted_precommit_block, round, cert)
-                .expect("weighted_precommit fixture finality");
+                .finalise_block_with_decision(weighted_precommit_block, decision)
+                .expect("Tendermint fixture finality");
             CommitteeDemoReport {
                 consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
                 block_hash: hex::encode(block_hash),
-                quorum_weight: 2,
+                quorum_weight: 3,
                 signer_ids,
                 certificate_height: height,
                 certificate_round: Some(round),
@@ -2830,8 +2900,11 @@ fn static_fixture_committee_config() -> StaticCommitteeConfig {
 
 fn weighted_precommit_fixture_config() -> WeightedPrecommitConfig {
     WeightedPrecommitConfig {
-        quorum_power: 2,
-        validators: fixture_signers(&["validator-0", "validator-1", "validator-2"]).iter().map(|signer| signer.validator(1)).collect(),
+        quorum_power: 3,
+        validators: fixture_signers(&["validator-0", "validator-1", "validator-2", "validator-3"])
+            .iter()
+            .map(|signer| signer.validator(1))
+            .collect(),
     }
 }
 
@@ -2842,6 +2915,7 @@ fn fixture_signers(ids: &[&str]) -> Vec<CommitteeSigner> {
                 "validator-0" => 1,
                 "validator-1" => 2,
                 "validator-2" => 3,
+                "validator-3" => 4,
                 other => panic!("unknown local fixture signer {other}"),
             };
             let mut secret_key = [0; 32];
@@ -2854,7 +2928,7 @@ fn fixture_signers(ids: &[&str]) -> Vec<CommitteeSigner> {
 fn fixture_signers_for_ids(ids: &[String]) -> Result<Vec<CommitteeSigner>> {
     ids.iter()
         .map(|id| match id.as_str() {
-            "validator-0" | "validator-1" | "validator-2" => Ok(fixture_signers(&[id.as_str()]).remove(0)),
+            "validator-0" | "validator-1" | "validator-2" | "validator-3" => Ok(fixture_signers(&[id.as_str()]).remove(0)),
             other => Err(CliError::InvalidFixture(format!("no local signing key configured for validator {other}"))),
         })
         .collect()
@@ -3435,6 +3509,8 @@ fn session_authority_signature_evidence(
     signer_secret_keys: Vec<String>,
     signer_pubkey_hashes: Vec<String>,
     signatures: Vec<String>,
+    participant_pubkey_hashes: Vec<String>,
+    require_first_n: u8,
 ) -> Result<SessionAuthoritySignatureEvidence> {
     let package = read_json_report::<SessionSettlementPackageReport>(&package_path)?;
     let auth = &package.settlement_authority.authority_authentication;
@@ -3460,7 +3536,7 @@ fn session_authority_signature_evidence(
             let mut derived_signatures = Vec::with_capacity(signer_secret_keys.len());
             for secret_key in &signer_secret_keys {
                 let (pubkey_hash, signature) =
-                    sign_recoverable_pubkey_hash20(&message_hash, secret_key, "authority signer secret key")?;
+                    sign_recoverable_ckb_pubkey_hash20(&message_hash, secret_key, "authority signer secret key")?;
                 derived_pubkey_hashes.push(pubkey_hash);
                 derived_signatures.push(signature);
             }
@@ -3483,6 +3559,14 @@ fn session_authority_signature_evidence(
             (pubkey_hashes, signatures)
         }
     };
+    let participant_pubkey_hashes = if participant_pubkey_hashes.is_empty() {
+        signer_pubkey_hashes.clone()
+    } else {
+        participant_pubkey_hashes
+            .iter()
+            .map(|value| bare_hex_20_arg(value, "authority multisig participant pubkey hash"))
+            .collect::<Result<Vec<_>>>()?
+    };
     normalize_authority_signature_evidence(
         SessionAuthoritySignatureEvidence {
             schema: "myelin-session-authority-signature-evidence-v2".to_owned(),
@@ -3493,6 +3577,8 @@ fn session_authority_signature_evidence(
             message_hash: auth.message_hash.clone(),
             signer_pubkey_hashes,
             signatures,
+            participant_pubkey_hashes,
+            require_first_n,
             attestation_hashes: Vec::new(),
             signature_verified: false,
             evidence_commitment_algorithm: String::new(),
@@ -3502,30 +3588,184 @@ fn session_authority_signature_evidence(
     )
 }
 
+#[derive(Debug)]
+struct CanonicalMultisigSystemEvidence {
+    node_chain: String,
+    consensus_type_hash: String,
+    dep_group_live: bool,
+    member_out_point: String,
+    member_data_hash: String,
+}
+
+fn ckb_rpc_result(rpc_url: &str, method: &str, params: Value) -> Result<Value> {
+    let response = post_json_rpc(
+        rpc_url,
+        &serde_json::json!({
+            "id": 1,
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }),
+    )?;
+    if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
+        return Err(CliError::InvalidFixture(format!("CKB RPC {method} returned error: {error}")));
+    }
+    response
+        .get("result")
+        .cloned()
+        .filter(|result| !result.is_null())
+        .ok_or_else(|| CliError::InvalidFixture(format!("CKB RPC {method} returned no result")))
+}
+
+fn script_from_ckb_rpc(value: &Value, label: &str) -> Result<Script> {
+    let code_hash = value
+        .get("code_hash")
+        .and_then(Value::as_str)
+        .and_then(normalize_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture(format!("{label} code_hash must be 32-byte hex")))?;
+    let code_hash = ckb_byte32_arg(&code_hash, label)?;
+    let hash_type = value
+        .get("hash_type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture(format!("{label} is missing hash_type")))?;
+    let hash_type = ckb_script_hash_type_arg(hash_type, label)?;
+    let args = value
+        .get("args")
+        .and_then(Value::as_str)
+        .and_then(decode_hex_bytes)
+        .ok_or_else(|| CliError::InvalidFixture(format!("{label} args must be hex")))?;
+    Ok(Script::new(code_hash, hash_type, args))
+}
+
+fn probe_canonical_multisig_system_script(
+    rpc_url: &str,
+    code_hash: &str,
+    code_dep_tx_hash: &str,
+    code_dep_index: &str,
+) -> Result<CanonicalMultisigSystemEvidence> {
+    let chain_info = ckb_rpc_result(rpc_url, "get_blockchain_info", serde_json::json!([]))?;
+    let node_chain = chain_info
+        .get("chain")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::InvalidFixture("CKB get_blockchain_info result is missing chain".to_owned()))?
+        .to_owned();
+    let consensus = ckb_rpc_result(rpc_url, "get_consensus", serde_json::json!([]))?;
+    let consensus_type_hash = consensus
+        .get("secp256k1_blake160_multisig_all_type_hash")
+        .and_then(Value::as_str)
+        .and_then(normalize_ckb_tx_hash)
+        .ok_or_else(|| {
+            CliError::InvalidFixture("CKB consensus does not expose secp256k1_blake160_multisig_all_type_hash".to_owned())
+        })?;
+    if !consensus_type_hash.eq_ignore_ascii_case(code_hash) {
+        return Err(CliError::InvalidFixture(format!(
+            "declared canonical multisig type hash {code_hash} does not match node consensus {consensus_type_hash}"
+        )));
+    }
+
+    let dep_out_point = serde_json::json!({ "tx_hash": code_dep_tx_hash, "index": code_dep_index });
+    let dep_group = ckb_rpc_result(rpc_url, "get_live_cell", serde_json::json!([dep_out_point, true]))?;
+    if dep_group.get("status").and_then(Value::as_str) != Some("live") {
+        return Err(CliError::InvalidFixture("canonical multisig dep-group Cell is not live".to_owned()));
+    }
+    let dep_group_data = dep_group
+        .pointer("/cell/data/content")
+        .and_then(Value::as_str)
+        .and_then(decode_hex_bytes)
+        .ok_or_else(|| CliError::InvalidFixture("canonical multisig dep-group Cell has no readable data".to_owned()))?;
+    let members = parse_ckb_dep_group_data(&dep_group_data)
+        .map_err(|error| CliError::InvalidFixture(format!("canonical multisig dep-group data is invalid: {error}")))?;
+    for member in members {
+        let member_tx_hash = byte32_hex(&member.tx_hash);
+        let member_index = format!("0x{:x}", member.index);
+        let member_out_point = serde_json::json!({ "tx_hash": member_tx_hash, "index": member_index });
+        let member_cell = ckb_rpc_result(rpc_url, "get_live_cell", serde_json::json!([member_out_point, true]))?;
+        if member_cell.get("status").and_then(Value::as_str) != Some("live") {
+            continue;
+        }
+        let Some(type_script_value) = member_cell.pointer("/cell/output/type").filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let type_script = script_from_ckb_rpc(type_script_value, "canonical multisig system Cell type script")?;
+        let type_hash = ckb_script_hash_molecule(&type_script).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+        if byte32_hex(&type_hash).eq_ignore_ascii_case(code_hash) {
+            let member_data_hash = member_cell
+                .pointer("/cell/data/hash")
+                .and_then(Value::as_str)
+                .and_then(normalize_ckb_tx_hash)
+                .ok_or_else(|| CliError::InvalidFixture("canonical multisig system Cell is missing data hash".to_owned()))?;
+            return Ok(CanonicalMultisigSystemEvidence {
+                node_chain,
+                consensus_type_hash,
+                dep_group_live: true,
+                member_out_point: format!("{member_tx_hash}:{member_index}"),
+                member_data_hash,
+            });
+        }
+    }
+    Err(CliError::InvalidFixture("dep-group does not contain the consensus secp256k1_blake160_multisig_all system Cell".to_owned()))
+}
+
 fn session_threshold_lock_deployment_evidence(
     args: SessionThresholdLockDeploymentEvidenceArgs,
 ) -> Result<SessionThresholdLockDeploymentEvidence> {
     let package = read_json_report::<SessionSettlementPackageReport>(&args.package)?;
     let auth = &package.settlement_authority.authority_authentication;
     let deployment_policy = args.deployment_policy.unwrap_or_else(|| match args.network.as_str() {
-        "ckb-mainnet" => "mainnet-production-threshold-lock-v1".to_owned(),
-        _ => "testnet-beta-threshold-lock-v1".to_owned(),
+        "ckb-mainnet" => "ckb-system-multisig-mainnet-v1".to_owned(),
+        "ckb-dev" => "ckb-system-multisig-devnet-v1".to_owned(),
+        _ => "ckb-system-multisig-testnet-v1".to_owned(),
     });
+    let code_hash = normalize_ckb_tx_hash(&args.code_hash)
+        .ok_or_else(|| CliError::InvalidFixture("canonical multisig code_hash must be 32-byte hex".to_owned()))?;
+    let code_dep_tx_hash = normalize_ckb_tx_hash(&args.code_dep_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("canonical multisig code_dep_tx_hash must be 32-byte hex".to_owned()))?;
+    let code_dep_index = ckb_quantity_arg(&args.code_dep_index, "canonical multisig code_dep_index")?;
+    let checked = if args.ckb_enforceable_checked {
+        if args.hash_type != "type" || !matches!(args.code_dep_type.as_str(), "dep_group" | "dep-group") {
+            return Err(CliError::InvalidFixture(
+                "checked canonical CKB multisig evidence requires hash_type=type and code_dep_type=dep_group".to_owned(),
+            ));
+        }
+        let rpc_url = args.rpc_url.as_deref().ok_or_else(|| {
+            CliError::InvalidFixture("--ckb-enforceable-checked requires --rpc-url so evidence is derived from a CKB node".to_owned())
+        })?;
+        Some(probe_canonical_multisig_system_script(rpc_url, &code_hash, &code_dep_tx_hash, &code_dep_index)?)
+    } else {
+        None
+    };
+    if args.testnet_beta_ready
+        && checked
+            .as_ref()
+            .is_none_or(|evidence| args.network != "ckb-testnet" || !evidence.node_chain.to_ascii_lowercase().contains("testnet"))
+    {
+        return Err(CliError::InvalidFixture("testnet_beta_ready requires checked evidence from a CKB testnet node".to_owned()));
+    }
     normalize_threshold_lock_deployment_evidence(
         SessionThresholdLockDeploymentEvidence {
             schema: "myelin-session-threshold-lock-deployment-v2".to_owned(),
             network: args.network,
-            code_hash: args.code_hash,
+            code_hash,
             hash_type: args.hash_type,
-            code_dep_tx_hash: args.code_dep_tx_hash,
-            code_dep_index: args.code_dep_index,
+            code_dep_tx_hash,
+            code_dep_index,
+            code_dep_type: args.code_dep_type.replace('-', "_"),
             audited_source_hash: args.audited_source_hash,
             audit_report_hash: args.audit_report_hash,
             deployment_policy,
             ckb_lock_args_hash: auth.ckb_lock_args_hash.clone(),
             threshold: auth.threshold,
             signer_pubkey_hashes: auth.signer_pubkey_hashes.clone(),
-            ckb_enforceable_checked: args.ckb_enforceable_checked,
+            multisig_participant_pubkey_hashes: auth.ckb_multisig_participant_pubkey_hashes.clone(),
+            multisig_require_first_n: auth.ckb_multisig_require_first_n,
+            multisig_config_hash: auth.ckb_multisig_config_hash.clone(),
+            node_chain: checked.as_ref().map(|evidence| evidence.node_chain.clone()).unwrap_or_default(),
+            consensus_multisig_type_hash: checked.as_ref().map(|evidence| evidence.consensus_type_hash.clone()).unwrap_or_default(),
+            dep_group_live: checked.as_ref().is_some_and(|evidence| evidence.dep_group_live),
+            system_script_member_out_point: checked.as_ref().map(|evidence| evidence.member_out_point.clone()),
+            system_script_data_hash: checked.as_ref().map(|evidence| evidence.member_data_hash.clone()),
+            system_script_identity_checked: checked.is_some(),
+            ckb_enforceable_checked: checked.is_some(),
             testnet_beta_ready: args.testnet_beta_ready,
             production_ready: args.production_ready,
             evidence_commitment_algorithm: String::new(),
@@ -3590,6 +3830,24 @@ fn sign_recoverable_pubkey_hash20(message_hash: &[u8; 32], secret_key_hex: &str,
     Ok((hex::encode(pubkey_hash), hex::encode(signature_bytes)))
 }
 
+fn sign_recoverable_ckb_pubkey_hash20(message_hash: &[u8; 32], secret_key_hex: &str, label: &str) -> Result<(String, String)> {
+    let secret_key_bytes: [u8; 32] = decode_hex_bytes(secret_key_hex)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| CliError::InvalidFixture(format!("{label} must be a 32-byte hex secp256k1 secret key")))?;
+    let secret_key = SecretKey::from_slice(&secret_key_bytes)
+        .map_err(|_| CliError::InvalidFixture(format!("{label} is not a valid secp256k1 secret key")))?;
+    let secp = Secp256k1::new();
+    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+    let pubkey_hash = ckb_secp256k1_blake160_pubkey_hash(&public_key.serialize());
+    let message = Message::from_digest_slice(message_hash).expect("32-byte hash is a valid secp256k1 message digest");
+    let signature = secp.sign_ecdsa_recoverable(&message, &secret_key);
+    let (recovery_id, compact_signature) = signature.serialize_compact();
+    let mut signature_bytes = [0u8; 65];
+    signature_bytes[..64].copy_from_slice(&compact_signature);
+    signature_bytes[64] = recovery_id.to_i32() as u8;
+    Ok((hex::encode(pubkey_hash), hex::encode(signature_bytes)))
+}
+
 fn bare_hex_32_arg(value: &str, field: &str) -> Result<String> {
     let bytes = decode_hex_bytes(value).ok_or_else(|| CliError::InvalidFixture(format!("{field} must be 32-byte hex")))?;
     if bytes.len() != 32 {
@@ -3629,11 +3887,9 @@ fn external_da_receipt_production_guarantee_checked(
 
 fn da_availability_production_ready(availability: &SessionDaAvailabilityEvidence) -> bool {
     availability.testnet_beta_ready
-        && availability.external_receipt_checked
-        && availability
-            .external_receipt
-            .as_ref()
-            .is_some_and(|receipt| receipt.provider_signature_verified && receipt.production_guarantee_checked)
+        && availability.provider_neutral_certificate.as_ref().is_some_and(|evidence| {
+            evidence.verified && evidence.verification.certificate_commitment == evidence.certificate.commitment()
+        })
 }
 
 fn da_availability_evidence(
@@ -3644,6 +3900,7 @@ fn da_availability_evidence(
     proof_molecule_hex: &str,
     local_da_published: bool,
     external_receipt: Option<SessionExternalDaReceiptEvidence>,
+    provider_neutral_certificate: Option<SessionDaCertificateEvidence>,
 ) -> Result<SessionDaAvailabilityEvidence> {
     let session_id_bytes = parse_hex_32(session_id)
         .ok_or_else(|| CliError::InvalidFixture("DA availability session_id must be 32-byte hex".to_owned()))?;
@@ -3735,6 +3992,15 @@ fn da_availability_evidence(
         hasher.update(receipt.receipt_hash.as_bytes());
         hasher.update(receipt.receipt_commitment.as_bytes());
     }
+    if let Some(evidence) = provider_neutral_certificate.as_ref() {
+        hasher.update(&evidence.verification.blob_id);
+        hasher.update(&evidence.verification.certificate_commitment);
+        hasher.update(&evidence.evaluation_epoch.to_le_bytes());
+        hasher.update(&evidence.verification.provider_count.to_le_bytes());
+        hasher.update(&evidence.verification.fault_domain_count.to_le_bytes());
+        hasher.update(&evidence.verification.successful_probe_count.to_le_bytes());
+        hasher.update(&evidence.verification.probed_provider_count.to_le_bytes());
+    }
     let availability_commitment = *hasher.finalize().as_bytes();
     let attestation_count = u32::try_from(attestation_signatures.len()).expect("static DA committee fits into u32");
     let retrieval_probe_count = if local_da_published { 2 } else { 1 };
@@ -3749,11 +4015,12 @@ fn da_availability_evidence(
     // requires the receipt to actually be present AND signature-valid, which
     // keeps the three receipt-side fields consistent in every state.
     let external_receipt_present = external_receipt.is_some();
-    let testnet_beta_ready = local_da_published && external_receipt_present && external_receipt_checked;
-    let production_ready = testnet_beta_ready && external_receipt.as_ref().is_some_and(|receipt| receipt.production_guarantee_checked);
+    let certificate_verified = provider_neutral_certificate.as_ref().is_some_and(|evidence| evidence.verified);
+    let testnet_beta_ready = local_da_published && ((external_receipt_present && external_receipt_checked) || certificate_verified);
+    let production_ready = local_da_published && certificate_verified;
     Ok(SessionDaAvailabilityEvidence {
         schema: "myelin-da-availability-v1".to_owned(),
-        mode: "replicated-da-committee".to_owned(),
+        mode: if certificate_verified { "provider-neutral-quorum".to_owned() } else { "fixture-replicated-committee".to_owned() },
         committee_id: committee_id.to_owned(),
         signature_scheme: signature_scheme.to_owned(),
         required_attestations,
@@ -3765,11 +4032,12 @@ fn da_availability_evidence(
         external_receipt_count: u32::from(external_receipt.is_some()),
         external_receipt_checked,
         external_receipt,
+        provider_neutral_certificate,
         attester_pubkey_hashes,
         attestation_signatures,
         attestation_hashes,
         availability_commitment_algorithm:
-            "blake3(myelin:session-da-availability-commitment:v1,session_id,court_bundle_hash,payload_hash,segment_root,proof_molecule_hash,committee_id,attester_pubkey_hashes,attestation_signatures,attestation_hashes,provider_signed_external_receipt,provider_signed_production_sla_fields)"
+            "blake3(myelin:session-da-availability-commitment:v1,session_id,court_bundle_hash,payload_hash,segment_root,proof_molecule_hash,fixture_attestations,legacy_external_receipt,provider_neutral_da_certificate)"
                 .to_owned(),
         availability_commitment: hex::encode(availability_commitment),
         attestation_signature_verified: attestation_signature_verified && attestation_count >= required_attestations,
@@ -3819,13 +4087,18 @@ fn settlement_authority_requirement_with_deployment(
         authority.authority_authentication.signatures = signature_evidence.signatures.clone();
         authority.authority_authentication.attestation_hashes = signature_evidence.attestation_hashes.clone();
         authority.authority_authentication.signature_verified = signature_evidence.signature_verified;
-        let ckb_lock_args_bytes = settlement_authority_threshold_lock_args(
+        let multisig = settlement_authority_multisig_config(
             authority.authority_authentication.threshold,
-            &authority.authority_authentication.signer_pubkey_hashes,
-        );
-        authority.authority_authentication.ckb_lock_args = format!("0x{}", hex::encode(&ckb_lock_args_bytes));
-        authority.authority_authentication.ckb_lock_args_hash =
-            hex::encode(blake3_32(b"myelin:session-settlement-authority-threshold-lock-args:v1", &ckb_lock_args_bytes));
+            signature_evidence.require_first_n,
+            &signature_evidence.participant_pubkey_hashes,
+        )?;
+        authority.authority_authentication.ckb_multisig_require_first_n = signature_evidence.require_first_n;
+        authority.authority_authentication.ckb_multisig_participant_pubkey_hashes =
+            signature_evidence.participant_pubkey_hashes.clone();
+        authority.authority_authentication.ckb_multisig_witness_config = format!("0x{}", hex::encode(multisig.witness_config()));
+        authority.authority_authentication.ckb_multisig_config_hash = hex::encode(multisig.config_hash());
+        authority.authority_authentication.ckb_lock_args = format!("0x{}", hex::encode(multisig.lock_args()));
+        authority.authority_authentication.ckb_lock_args_hash = hex::encode(multisig.config_hash());
         authority.authority_authentication.participant_signature_evidence = Some(signature_evidence);
         authority.authority_authentication.attestation_hash =
             authority_authentication_attestation_hash(&authority.authority_authentication)?;
@@ -3904,24 +4177,29 @@ fn settlement_authority_authentication(
         signature_domain.as_bytes(),
         &[&authority_data_hash, &session_id, &participant_set_hash, &escrow_input_cells_hash, &session_lineage_commitment],
     );
-    let signature_scheme = "secp256k1-recoverable-blake3-pubkey-hash20";
     let threshold = 2;
+    let require_first_n = 0;
     let secp = Secp256k1::new();
     let message = Message::from_digest_slice(&message_hash).expect("blake3 hash is a valid secp256k1 message digest");
     let mut signer_pubkey_hashes = Vec::new();
+    let mut participant_pubkey_hashes = Vec::new();
     let mut signatures = Vec::new();
     let mut attestation_hashes = Vec::new();
     let mut signature_verified = true;
-    for secret_key_bytes in [[0x11u8; 32], [0x22u8; 32]] {
+    for (index, secret_key_bytes) in [[0x11u8; 32], [0x22u8; 32], [0x33u8; 32]].into_iter().enumerate() {
         let secret_key = SecretKey::from_slice(&secret_key_bytes).expect("static fixture secret key is valid");
         let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-        let pubkey_hash = secp256k1_pubkey_hash20(&public_key);
+        let pubkey_hash = ckb_secp256k1_blake160_pubkey_hash(&public_key.serialize());
+        participant_pubkey_hashes.push(hex::encode(pubkey_hash));
+        if index >= usize::try_from(threshold).expect("fixture threshold fits usize") {
+            continue;
+        }
         let signature = secp.sign_ecdsa_recoverable(&message, &secret_key);
         let (recovery_id, compact_signature) = signature.serialize_compact();
         let mut signature_bytes = [0u8; 65];
         signature_bytes[..64].copy_from_slice(&compact_signature);
         signature_bytes[64] = recovery_id.to_i32() as u8;
-        signature_verified &= secp256k1_signature_matches_pubkey_hash(&message_hash, &signature_bytes, &pubkey_hash);
+        signature_verified &= ckb_verify_secp256k1_blake160_recoverable_signature(&pubkey_hash, &signature_bytes, &message_hash);
         let attestation = blake3_chunks(
             b"myelin:session-settlement-authority-cell-signature-attestation:v1",
             &[&message_hash, &participant_set_hash, &pubkey_hash, &signature_bytes],
@@ -3930,15 +4208,17 @@ fn settlement_authority_authentication(
         signatures.push(hex::encode(signature_bytes));
         attestation_hashes.push(hex::encode(attestation));
     }
-    let ckb_lock_args_bytes = settlement_authority_threshold_lock_args(threshold, &signer_pubkey_hashes);
-    let ckb_lock_args_hash = blake3_32(b"myelin:session-settlement-authority-threshold-lock-args:v1", &ckb_lock_args_bytes);
+    let multisig = settlement_authority_multisig_config(threshold, require_first_n, &participant_pubkey_hashes)
+        .expect("generated authority multisig config is valid");
+    let ckb_lock_args = multisig.lock_args();
+    let ckb_multisig_config_hash = multisig.config_hash();
     let signer_count = u32::try_from(signatures.len()).expect("static signer fixture fits into u32");
     let signature_verified = signature_verified && signer_count >= threshold;
     let mut evidence = SessionAuthorityAuthenticationEvidence {
         schema: "myelin-session-settlement-authority-auth-v2".to_owned(),
-        mode: "ckb-threshold-lock".to_owned(),
+        mode: "ckb-secp256k1-blake160-multisig-all".to_owned(),
         signature_domain: signature_domain.to_owned(),
-        signature_scheme: signature_scheme.to_owned(),
+        signature_scheme: "secp256k1-recoverable-blake3-message-ckb-blake160-pubkey-hash".to_owned(),
         participant_set_hash: hex::encode(participant_set_hash),
         threshold,
         signer_count,
@@ -3948,11 +4228,17 @@ fn settlement_authority_authentication(
         attestation_hashes,
         attestation_hash: String::new(),
         signature_verified,
-        ckb_lock_args_algorithm: "0x6d79656c696e2d617574682d7631 || threshold_le_u32 || signer_count_le_u32 || signer_pubkey_hash20[]"
+        ckb_lock_args_algorithm:
+            "ckb_blake160(0x00 || require_first_n_u8 || threshold_u8 || participant_count_u8 || ckb_blake160_pubkey_hash20[])"
+                .to_owned(),
+        ckb_lock_args: format!("0x{}", hex::encode(ckb_lock_args)),
+        ckb_lock_args_hash: hex::encode(ckb_multisig_config_hash),
+        ckb_lock_policy: "final DA publication, funding, and settlement authority inputs use canonical CKB multisig lock args"
             .to_owned(),
-        ckb_lock_args: format!("0x{}", hex::encode(&ckb_lock_args_bytes)),
-        ckb_lock_args_hash: hex::encode(ckb_lock_args_hash),
-        ckb_lock_policy: "final DA publication and settlement authority cells must use these threshold-lock args".to_owned(),
+        ckb_multisig_require_first_n: require_first_n,
+        ckb_multisig_participant_pubkey_hashes: participant_pubkey_hashes,
+        ckb_multisig_witness_config: format!("0x{}", hex::encode(multisig.witness_config())),
+        ckb_multisig_config_hash: hex::encode(ckb_multisig_config_hash),
         participant_signature_evidence: None,
         threshold_lock_deployment: None,
         ckb_enforceable: false,
@@ -3984,6 +4270,12 @@ fn authority_authentication_attestation_hash(evidence: &SessionAuthorityAuthenti
     for attestation in &evidence.attestation_hashes {
         hasher.update(attestation.as_bytes());
     }
+    hasher.update(&[evidence.ckb_multisig_require_first_n]);
+    for participant in &evidence.ckb_multisig_participant_pubkey_hashes {
+        hasher.update(participant.as_bytes());
+    }
+    hasher.update(evidence.ckb_multisig_witness_config.as_bytes());
+    hasher.update(evidence.ckb_multisig_config_hash.as_bytes());
     hasher.update(&ckb_lock_args);
     hasher.update(&ckb_lock_args_hash);
     if let Some(deployment) = &evidence.threshold_lock_deployment {
@@ -4001,17 +4293,51 @@ fn authority_authentication_attestation_hash(evidence: &SessionAuthorityAuthenti
     Ok(hex::encode(*hasher.finalize().as_bytes()))
 }
 
-fn settlement_authority_threshold_lock_args(threshold: u32, signer_pubkey_hashes: &[String]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(b"myelin-auth-v1".len() + 8 + signer_pubkey_hashes.len() * 20);
-    bytes.extend_from_slice(b"myelin-auth-v1");
-    bytes.extend_from_slice(&threshold.to_le_bytes());
-    bytes.extend_from_slice(&u32::try_from(signer_pubkey_hashes.len()).expect("signer count fits u32").to_le_bytes());
-    for pubkey_hash in signer_pubkey_hashes {
-        let pubkey_hash_bytes = hex::decode(pubkey_hash).expect("generated signer pubkey hash is valid hex");
-        debug_assert_eq!(pubkey_hash_bytes.len(), 20);
-        bytes.extend_from_slice(&pubkey_hash_bytes);
+fn settlement_authority_multisig_config(
+    threshold: u32,
+    require_first_n: u8,
+    participant_pubkey_hashes: &[String],
+) -> Result<CkbSecp256k1Blake160MultisigAllConfig> {
+    let threshold =
+        u8::try_from(threshold).map_err(|_| CliError::InvalidFixture("authority multisig threshold must fit one byte".to_owned()))?;
+    let participants = participant_pubkey_hashes
+        .iter()
+        .map(|pubkey_hash| {
+            decode_hex_bytes(pubkey_hash)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| CliError::InvalidFixture("authority multisig participants must be 20-byte CKB Blake160 hex".to_owned()))
+        })
+        .collect::<Result<Vec<[u8; 20]>>>()?;
+    CkbSecp256k1Blake160MultisigAllConfig::new(require_first_n, threshold, participants)
+        .map_err(|error| CliError::InvalidFixture(error.to_string()))
+}
+
+fn validate_authority_canonical_multisig(
+    authority: &SessionAuthorityAuthenticationEvidence,
+) -> Result<CkbSecp256k1Blake160MultisigAllConfig> {
+    if authority.mode != "ckb-secp256k1-blake160-multisig-all" {
+        return Err(CliError::InvalidFixture(
+            "settlement authority must use canonical CKB secp256k1_blake160_multisig_all".to_owned(),
+        ));
     }
-    bytes
+    let config = settlement_authority_multisig_config(
+        authority.threshold,
+        authority.ckb_multisig_require_first_n,
+        &authority.ckb_multisig_participant_pubkey_hashes,
+    )?;
+    let witness_config = format!("0x{}", hex::encode(config.witness_config()));
+    let config_hash = hex::encode(config.config_hash());
+    let lock_args = format!("0x{}", hex::encode(config.lock_args()));
+    if !authority.ckb_multisig_witness_config.eq_ignore_ascii_case(&witness_config)
+        || !authority.ckb_multisig_config_hash.eq_ignore_ascii_case(&config_hash)
+        || !authority.ckb_lock_args.eq_ignore_ascii_case(&lock_args)
+        || !authority.ckb_lock_args_hash.eq_ignore_ascii_case(&config_hash)
+    {
+        return Err(CliError::InvalidFixture(
+            "settlement authority canonical CKB multisig config, config hash, and lock args are inconsistent".to_owned(),
+        ));
+    }
+    Ok(config)
 }
 
 fn normalize_threshold_lock_deployment_evidence(
@@ -4022,25 +4348,34 @@ fn normalize_threshold_lock_deployment_evidence(
         return Err(CliError::InvalidFixture("threshold-lock deployment evidence schema is not recognised".to_owned()));
     }
     deployment.network = deployment.network.trim().to_ascii_lowercase();
-    if !matches!(deployment.network.as_str(), "ckb-mainnet" | "ckb-testnet") {
-        return Err(CliError::InvalidFixture("threshold-lock deployment network must be ckb-mainnet or ckb-testnet".to_owned()));
+    if !matches!(deployment.network.as_str(), "ckb-mainnet" | "ckb-testnet" | "ckb-dev") {
+        return Err(CliError::InvalidFixture(
+            "canonical multisig deployment network must be ckb-mainnet, ckb-testnet, or ckb-dev".to_owned(),
+        ));
     }
     deployment.code_hash = normalize_ckb_tx_hash(&deployment.code_hash)
         .ok_or_else(|| CliError::InvalidFixture("threshold-lock deployment code_hash must be 32-byte hex".to_owned()))?;
     deployment.code_dep_tx_hash = normalize_ckb_tx_hash(&deployment.code_dep_tx_hash)
         .ok_or_else(|| CliError::InvalidFixture("threshold-lock deployment code_dep_tx_hash must be 32-byte hex".to_owned()))?;
     ckb_script_hash_type_arg(&deployment.hash_type, "threshold-lock deployment hash_type")?;
+    if deployment.hash_type != "type" {
+        return Err(CliError::InvalidFixture("canonical CKB multisig deployment hash_type must be type".to_owned()));
+    }
     deployment.code_dep_index = ckb_quantity_arg(&deployment.code_dep_index, "threshold-lock deployment code_dep_index")?;
+    deployment.code_dep_type = deployment.code_dep_type.replace('-', "_");
+    if deployment.code_dep_type != "dep_group" {
+        return Err(CliError::InvalidFixture("canonical CKB multisig deployment code_dep_type must be dep_group".to_owned()));
+    }
     deployment.audited_source_hash = normalize_ckb_tx_hash(&deployment.audited_source_hash)
         .ok_or_else(|| CliError::InvalidFixture("threshold-lock deployment audited_source_hash must be 32-byte hex".to_owned()))?;
     deployment.audit_report_hash = normalize_ckb_tx_hash(&deployment.audit_report_hash)
         .ok_or_else(|| CliError::InvalidFixture("threshold-lock deployment audit_report_hash must be 32-byte hex".to_owned()))?;
-    if deployment.deployment_policy != "mainnet-production-threshold-lock-v1"
-        && deployment.deployment_policy != "testnet-beta-threshold-lock-v1"
+    if deployment.deployment_policy != "ckb-system-multisig-mainnet-v1"
+        && deployment.deployment_policy != "ckb-system-multisig-testnet-v1"
+        && deployment.deployment_policy != "ckb-system-multisig-devnet-v1"
     {
         return Err(CliError::InvalidFixture(
-            "threshold-lock deployment deployment_policy must be mainnet-production-threshold-lock-v1 or testnet-beta-threshold-lock-v1"
-                .to_owned(),
+            "canonical multisig deployment policy must name the matching CKB system-script network".to_owned(),
         ));
     }
     if deployment.threshold != authority.threshold {
@@ -4049,6 +4384,14 @@ fn normalize_threshold_lock_deployment_evidence(
     if deployment.signer_pubkey_hashes != authority.signer_pubkey_hashes {
         return Err(CliError::InvalidFixture(
             "threshold-lock deployment signer_pubkey_hashes do not match authority signer set".to_owned(),
+        ));
+    }
+    if deployment.multisig_participant_pubkey_hashes != authority.ckb_multisig_participant_pubkey_hashes
+        || deployment.multisig_require_first_n != authority.ckb_multisig_require_first_n
+        || deployment.multisig_config_hash != authority.ckb_multisig_config_hash
+    {
+        return Err(CliError::InvalidFixture(
+            "canonical multisig deployment does not match the authority participant config".to_owned(),
         ));
     }
     if deployment.ckb_lock_args_hash != authority.ckb_lock_args_hash {
@@ -4061,9 +4404,9 @@ fn normalize_threshold_lock_deployment_evidence(
             "threshold-lock deployment signer_pubkey_hashes must all be 20-byte hex values".to_owned(),
         ));
     }
-    if deployment.ckb_enforceable_checked && !deployment.testnet_beta_ready {
+    if deployment.ckb_enforceable_checked && !deployment.testnet_beta_ready && deployment.network != "ckb-dev" {
         return Err(CliError::InvalidFixture(
-            "threshold-lock deployment cannot be enforceable without testnet_beta_ready evidence".to_owned(),
+            "public-chain canonical multisig deployment cannot be enforceable without testnet_beta_ready evidence".to_owned(),
         ));
     }
     if deployment.testnet_beta_ready && !deployment.ckb_enforceable_checked {
@@ -4071,11 +4414,24 @@ fn normalize_threshold_lock_deployment_evidence(
             "threshold-lock deployment testnet_beta_ready requires ckb_enforceable_checked".to_owned(),
         ));
     }
+    if deployment.ckb_enforceable_checked
+        && (!deployment.system_script_identity_checked
+            || !deployment.dep_group_live
+            || deployment.node_chain.is_empty()
+            || !deployment.consensus_multisig_type_hash.eq_ignore_ascii_case(&deployment.code_hash)
+            || deployment.system_script_member_out_point.is_none()
+            || deployment.system_script_data_hash.is_none())
+    {
+        return Err(CliError::InvalidFixture(
+            "ckb_enforceable_checked requires node-derived consensus type hash, live dep group, and matching system-script member"
+                .to_owned(),
+        ));
+    }
     if deployment.production_ready
         && !(deployment.ckb_enforceable_checked
             && deployment.testnet_beta_ready
             && deployment.network == "ckb-mainnet"
-            && deployment.deployment_policy == "mainnet-production-threshold-lock-v1")
+            && deployment.deployment_policy == "ckb-system-multisig-mainnet-v1")
     {
         return Err(CliError::InvalidFixture(
             "threshold-lock deployment production_ready requires checked mainnet production deployment evidence".to_owned(),
@@ -4144,6 +4500,14 @@ fn normalize_authority_signature_evidence(
             "authority signature evidence signer set must contain at least threshold signers".to_owned(),
         ));
     }
+    if evidence.participant_pubkey_hashes.is_empty() {
+        evidence.participant_pubkey_hashes = evidence.signer_pubkey_hashes.clone();
+    }
+    settlement_authority_multisig_config(evidence.threshold, evidence.require_first_n, &evidence.participant_pubkey_hashes)?;
+    let participant_set = evidence.participant_pubkey_hashes.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+    if participant_set.len() != evidence.participant_pubkey_hashes.len() {
+        return Err(CliError::InvalidFixture("authority multisig participant_pubkey_hashes must be unique and ordered".to_owned()));
+    }
     let signer_count = u32::try_from(evidence.signatures.len())
         .map_err(|_| CliError::InvalidFixture("authority signature evidence signer count overflows u32".to_owned()))?;
     let message_hash = parse_hex_32(&evidence.message_hash)
@@ -4164,6 +4528,11 @@ fn normalize_authority_signature_evidence(
                 "authority signature evidence signer_pubkey_hashes must not contain duplicates".to_owned(),
             ));
         }
+        if !participant_set.contains(pubkey_hash) {
+            return Err(CliError::InvalidFixture(
+                "authority signature evidence signer is not in the canonical CKB multisig participant set".to_owned(),
+            ));
+        }
         let pubkey_hash_bytes: [u8; 20] = hex::decode(pubkey_hash)
             .ok()
             .and_then(|bytes| bytes.try_into().ok())
@@ -4171,7 +4540,7 @@ fn normalize_authority_signature_evidence(
         let signature_bytes: [u8; 65] = hex::decode(signature).ok().and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| {
             CliError::InvalidFixture("authority signature evidence signatures must be 65-byte hex values".to_owned())
         })?;
-        if !secp256k1_signature_matches_pubkey_hash(&message_hash, &signature_bytes, &pubkey_hash_bytes) {
+        if !ckb_verify_secp256k1_blake160_recoverable_signature(&pubkey_hash_bytes, &signature_bytes, &message_hash) {
             return Err(CliError::InvalidFixture(
                 "authority signature evidence signature does not recover to the declared signer pubkey hash".to_owned(),
             ));
@@ -4218,6 +4587,10 @@ fn authority_signature_evidence_commitment(evidence: &SessionAuthoritySignatureE
     hasher.update(&evidence.threshold.to_le_bytes());
     hasher.update(&evidence.signer_count.to_le_bytes());
     hasher.update(evidence.message_hash.as_bytes());
+    hasher.update(&[evidence.require_first_n]);
+    for participant_pubkey_hash in &evidence.participant_pubkey_hashes {
+        hasher.update(participant_pubkey_hash.as_bytes());
+    }
     for pubkey_hash in &evidence.signer_pubkey_hashes {
         hasher.update(pubkey_hash.as_bytes());
     }
@@ -4245,6 +4618,7 @@ fn threshold_lock_deployment_commitment(deployment: &SessionThresholdLockDeploym
     hasher.update(deployment.hash_type.as_bytes());
     hasher.update(deployment.code_dep_tx_hash.as_bytes());
     hasher.update(deployment.code_dep_index.as_bytes());
+    hasher.update(deployment.code_dep_type.as_bytes());
     hasher.update(deployment.audited_source_hash.as_bytes());
     hasher.update(deployment.audit_report_hash.as_bytes());
     hasher.update(deployment.deployment_policy.as_bytes());
@@ -4253,6 +4627,17 @@ fn threshold_lock_deployment_commitment(deployment: &SessionThresholdLockDeploym
     for signer_pubkey_hash in &deployment.signer_pubkey_hashes {
         hasher.update(signer_pubkey_hash.as_bytes());
     }
+    for participant_pubkey_hash in &deployment.multisig_participant_pubkey_hashes {
+        hasher.update(participant_pubkey_hash.as_bytes());
+    }
+    hasher.update(&[deployment.multisig_require_first_n]);
+    hasher.update(deployment.multisig_config_hash.as_bytes());
+    hasher.update(deployment.node_chain.as_bytes());
+    hasher.update(deployment.consensus_multisig_type_hash.as_bytes());
+    hasher.update(&[u8::from(deployment.dep_group_live)]);
+    hasher.update(deployment.system_script_member_out_point.as_deref().unwrap_or("").as_bytes());
+    hasher.update(deployment.system_script_data_hash.as_deref().unwrap_or("").as_bytes());
+    hasher.update(&[u8::from(deployment.system_script_identity_checked)]);
     hasher.update(&[u8::from(deployment.ckb_enforceable_checked)]);
     hasher.update(&[u8::from(deployment.testnet_beta_ready)]);
     hasher.update(&[u8::from(deployment.production_ready)]);
@@ -5212,6 +5597,8 @@ struct SessionDaAvailabilityEvidence {
     external_receipt_count: u32,
     external_receipt_checked: bool,
     external_receipt: Option<SessionExternalDaReceiptEvidence>,
+    #[serde(default)]
+    provider_neutral_certificate: Option<SessionDaCertificateEvidence>,
     attester_pubkey_hashes: Vec<String>,
     attestation_signatures: Vec<String>,
     attestation_hashes: Vec<String>,
@@ -5221,6 +5608,16 @@ struct SessionDaAvailabilityEvidence {
     availability_checked: bool,
     testnet_beta_ready: bool,
     production_ready: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct SessionDaCertificateEvidence {
+    schema: String,
+    source: String,
+    evaluation_epoch: u64,
+    certificate: DaCertificate,
+    verification: DaCertificateVerification,
+    verified: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -5486,6 +5883,14 @@ struct SessionAuthorityAuthenticationEvidence {
     ckb_lock_args: String,
     ckb_lock_args_hash: String,
     ckb_lock_policy: String,
+    #[serde(default)]
+    ckb_multisig_require_first_n: u8,
+    #[serde(default)]
+    ckb_multisig_participant_pubkey_hashes: Vec<String>,
+    #[serde(default)]
+    ckb_multisig_witness_config: String,
+    #[serde(default)]
+    ckb_multisig_config_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     participant_signature_evidence: Option<SessionAuthoritySignatureEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5507,6 +5912,10 @@ struct SessionAuthoritySignatureEvidence {
     signer_pubkey_hashes: Vec<String>,
     signatures: Vec<String>,
     #[serde(default)]
+    participant_pubkey_hashes: Vec<String>,
+    #[serde(default)]
+    require_first_n: u8,
+    #[serde(default)]
     attestation_hashes: Vec<String>,
     #[serde(default)]
     signature_verified: bool,
@@ -5524,12 +5933,32 @@ struct SessionThresholdLockDeploymentEvidence {
     hash_type: String,
     code_dep_tx_hash: String,
     code_dep_index: String,
+    #[serde(default)]
+    code_dep_type: String,
     audited_source_hash: String,
     audit_report_hash: String,
     deployment_policy: String,
     ckb_lock_args_hash: String,
     threshold: u32,
     signer_pubkey_hashes: Vec<String>,
+    #[serde(default)]
+    multisig_participant_pubkey_hashes: Vec<String>,
+    #[serde(default)]
+    multisig_require_first_n: u8,
+    #[serde(default)]
+    multisig_config_hash: String,
+    #[serde(default)]
+    node_chain: String,
+    #[serde(default)]
+    consensus_multisig_type_hash: String,
+    #[serde(default)]
+    dep_group_live: bool,
+    #[serde(default)]
+    system_script_member_out_point: Option<String>,
+    #[serde(default)]
+    system_script_data_hash: Option<String>,
+    #[serde(default)]
+    system_script_identity_checked: bool,
     ckb_enforceable_checked: bool,
     testnet_beta_ready: bool,
     production_ready: bool,
@@ -6609,10 +7038,21 @@ fn verify_session_court_bundle(path: PathBuf) -> Result<SessionCourtBundleVerifi
     Ok(SessionCourtBundleVerificationReport { bundle: path.display().to_string(), valid, checks })
 }
 
+#[cfg(test)]
 fn session_da_manifest(
     bundle_path: PathBuf,
     storage_dir: Option<PathBuf>,
     external_da_receipt_path: Option<PathBuf>,
+) -> Result<SessionDaManifestReport> {
+    session_da_manifest_with_certificate(bundle_path, storage_dir, external_da_receipt_path, None, None)
+}
+
+fn session_da_manifest_with_certificate(
+    bundle_path: PathBuf,
+    storage_dir: Option<PathBuf>,
+    external_da_receipt_path: Option<PathBuf>,
+    da_certificate_path: Option<PathBuf>,
+    da_evaluation_epoch: Option<u64>,
 ) -> Result<SessionDaManifestReport> {
     let bundle_bytes = fs::read(&bundle_path)?;
     let bundle = serde_json::from_slice::<SessionCourtBundleInput>(&bundle_bytes)?;
@@ -6675,6 +7115,15 @@ fn session_da_manifest(
     let segment_root = hex::encode(proof.segment_root);
     let external_da_receipt =
         external_da_receipt_evidence(external_da_receipt_path, &bundle.molecule_transaction_hash, &segment_root)?;
+    let provider_neutral_certificate = da_certificate_evidence(
+        da_certificate_path,
+        da_evaluation_epoch,
+        &bundle.session_id,
+        bundle.chunk_index,
+        &bundle.molecule_transaction_hash,
+        proof.chunk_data.len(),
+        &segment_root,
+    )?;
     let availability = da_availability_evidence(
         &bundle.session_id,
         &hex::encode(court_bundle_hash),
@@ -6683,6 +7132,7 @@ fn session_da_manifest(
         &proof_molecule_hex,
         local_da_published,
         external_da_receipt,
+        provider_neutral_certificate,
     )?;
 
     Ok(SessionDaManifestReport {
@@ -6716,6 +7166,55 @@ fn session_da_manifest(
                 .to_owned()
         },
     })
+}
+
+fn da_certificate_evidence(
+    certificate_path: Option<PathBuf>,
+    evaluation_epoch: Option<u64>,
+    session_id: &str,
+    chunk_index: u64,
+    payload_hash: &str,
+    payload_len: usize,
+    segment_root: &str,
+) -> Result<Option<SessionDaCertificateEvidence>> {
+    let Some(path) = certificate_path else {
+        if evaluation_epoch.is_some() {
+            return Err(CliError::InvalidFixture("DA evaluation epoch requires a DA certificate".to_owned()));
+        }
+        return Ok(None);
+    };
+    let evaluation_epoch =
+        evaluation_epoch.ok_or_else(|| CliError::InvalidFixture("--da-certificate requires --da-evaluation-epoch".to_owned()))?;
+    let certificate = read_json_report::<DaCertificate>(&path)?;
+    let expected_session_id = parse_hex_32(session_id)
+        .ok_or_else(|| CliError::InvalidFixture("DA certificate session_id must be 32-byte hex".to_owned()))?;
+    let expected_payload_hash = parse_hex_32(payload_hash)
+        .ok_or_else(|| CliError::InvalidFixture("DA certificate payload hash must be 32-byte hex".to_owned()))?;
+    let expected_segment_root = parse_hex_32(segment_root)
+        .ok_or_else(|| CliError::InvalidFixture("DA certificate segment root must be 32-byte hex".to_owned()))?;
+    let expected_payload_len =
+        u64::try_from(payload_len).map_err(|_| CliError::InvalidFixture("DA certificate payload length exceeds u64".to_owned()))?;
+    if certificate.blob.session_id != expected_session_id
+        || certificate.blob.chunk_index != chunk_index
+        || certificate.blob.payload_hash != expected_payload_hash
+        || certificate.blob.payload_len != expected_payload_len
+        || certificate.blob.segment_root != expected_segment_root
+    {
+        return Err(CliError::InvalidFixture(
+            "DA certificate blob commitment does not match the session, chunk, payload, length, and sealed segment root".to_owned(),
+        ));
+    }
+    let verification = certificate
+        .verify(evaluation_epoch)
+        .map_err(|error| CliError::InvalidFixture(format!("DA certificate verification failed: {error}")))?;
+    Ok(Some(SessionDaCertificateEvidence {
+        schema: "myelin-provider-neutral-da-certificate-evidence-v1".to_owned(),
+        source: path.display().to_string(),
+        evaluation_epoch,
+        certificate,
+        verification,
+        verified: true,
+    }))
 }
 
 fn verify_session_da_manifest(
@@ -6892,6 +7391,7 @@ fn verify_session_da_manifest(
         &manifest.proof_molecule_hex,
         manifest.local_da_published,
         manifest.availability.external_receipt.clone(),
+        manifest.availability.provider_neutral_certificate.clone(),
     )?;
     push_check(
         &mut checks,
@@ -8264,6 +8764,8 @@ fn verify_session_settlement_package(
         }
         None => !package.settlement_authority.authority_authentication.production_ready,
     };
+    let canonical_authority_multisig_valid =
+        validate_authority_canonical_multisig(&package.settlement_authority.authority_authentication).is_ok();
     push_check(
         &mut checks,
         "settlement-authority-participant-signature-evidence",
@@ -8292,16 +8794,12 @@ fn verify_session_settlement_package(
                 == package.settlement_authority.authority_authentication.signer_pubkey_hashes.len()
             && package.settlement_authority.authority_authentication.signer_count
                 >= package.settlement_authority.authority_authentication.threshold
-            && package
-                .settlement_authority
-                .authority_authentication
-                .ckb_lock_args
-                .starts_with("0x6d79656c696e2d617574682d7631")
-            && hex::decode(&package.settlement_authority.authority_authentication.ckb_lock_args[2..]).is_ok()
+            && canonical_authority_multisig_valid
+            && package.settlement_authority.authority_authentication.ckb_lock_args.len() == 42
             && package.settlement_authority.authority_authentication.ckb_lock_args_hash.len() == 64
             && hex::decode(&package.settlement_authority.authority_authentication.ckb_lock_args_hash).is_ok(),
         Some(
-            "deployment flags match verified evidence && signature_verified && signatures match signer keys && signer_count >= threshold && threshold lock args present"
+            "deployment flags match verified evidence && signature_verified && signatures match signer keys && signer_count >= threshold && canonical CKB multisig config/lock args recompute"
                 .to_owned(),
         ),
         Some(format!(
@@ -8316,7 +8814,7 @@ fn verify_session_settlement_package(
             package.settlement_authority.authority_authentication.threshold,
             package.settlement_authority.authority_authentication.ckb_lock_args_hash
         )),
-        "settlement authority carries verified local threshold signatures and only claims deployed CKB enforcement when threshold-lock deployment evidence is bound into the attestation",
+        "settlement authority carries verified local lineage attestations and a canonical CKB multisig config; deployed enforcement is claimed only when deployment evidence is bound",
     );
     push_check(
         &mut checks,
@@ -8636,6 +9134,11 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
             "carrier-submission cannot combine --submit with --accepted-tx-hash; use the RPC result from --submit".to_owned(),
         ));
     }
+    if !args.multisig_signer_secret_keys.is_empty() && !args.multisig_signatures.is_empty() {
+        return Err(CliError::InvalidFixture(
+            "carrier-submission accepts either rehearsal multisig secret keys or external multisig signatures, not both".to_owned(),
+        ));
+    }
     let input_tx_hash = normalize_ckb_tx_hash(&args.input_tx_hash)
         .ok_or_else(|| CliError::InvalidFixture("input-tx-hash must be 32-byte hex".to_owned()))?;
     let lock_code_hash = normalize_ckb_tx_hash(&args.lock_code_hash)
@@ -8715,6 +9218,13 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     let verifier_code_hash_bytes = ckb_byte32_arg(&verifier_code_hash, "verifier-code-hash")?;
     let verifier_dep_tx_hash_bytes = ckb_byte32_arg(&verifier_dep_tx_hash, "verifier-code-dep-tx-hash")?;
     let lock_hash_type = ckb_script_hash_type_arg(&args.lock_hash_type, "lock-hash-type")?;
+    let lock_dep_type = match args.lock_code_dep_type.as_str() {
+        "code" => DepType::Code,
+        "dep_group" | "dep-group" => DepType::DepGroup,
+        other => {
+            return Err(CliError::InvalidFixture(format!("unsupported lock-code-dep-type: {other}; expected code or dep_group")));
+        }
+    };
     let lock_args = normalize_hex_arg(&args.lock_args, "lock-args")?;
     let output_lock_args = normalize_hex_arg(args.output_lock_args.as_deref().unwrap_or(&lock_args), "output-lock-args")?;
     let witness = normalize_hex_arg(&args.witness, "witness")?;
@@ -8799,6 +9309,20 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
             "final L1 settlement submission requires the final DA publication evidence CellDep".to_owned(),
         ));
     }
+    let canonical_multisig = expected_settlement_authority
+        .as_ref()
+        .map(|authority| validate_authority_canonical_multisig(&authority.authority_authentication))
+        .transpose()?;
+    if canonical_multisig.is_some() && (lock_hash_type != 1 || lock_dep_type != DepType::DepGroup) {
+        return Err(CliError::InvalidFixture(
+            "final L1 settlement canonical CKB multisig requires --lock-hash-type type and --lock-code-dep-type dep_group".to_owned(),
+        ));
+    }
+    if canonical_multisig.is_none() && (!args.multisig_signer_secret_keys.is_empty() || !args.multisig_signatures.is_empty()) {
+        return Err(CliError::InvalidFixture(
+            "canonical CKB multisig signer inputs are only valid for a final settlement package".to_owned(),
+        ));
+    }
     let authority_threshold_lock_identity_checked = expected_settlement_authority
         .as_ref()
         .is_none_or(|authority| lock_args.eq_ignore_ascii_case(&authority.authority_authentication.ckb_lock_args));
@@ -8818,9 +9342,16 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     };
     let output_lock_args_bytes = decode_hex_bytes(&output_lock_args)
         .ok_or_else(|| CliError::InvalidFixture("output lock args are not valid hex".to_owned()))?;
+    if canonical_multisig.is_some() && !output_lock_args.eq_ignore_ascii_case(&lock_args) {
+        return Err(CliError::InvalidFixture(
+            "final L1 settlement canonical CKB multisig requires output lock args to equal the authority/funding input lock args"
+                .to_owned(),
+        ));
+    }
     let carrier_type_args_bytes = decode_hex_bytes(&carrier_type_args)
         .ok_or_else(|| CliError::InvalidFixture("carrier type args are not valid hex".to_owned()))?;
     let witness_bytes = decode_hex_bytes(&witness).ok_or_else(|| CliError::InvalidFixture("witness is not valid hex".to_owned()))?;
+    let verifier_witness_bytes = witness_bytes.clone();
     let carrier_min_capacity_shannons = ckb_output_min_capacity_shannons(
         output_lock_args_bytes.len(),
         Some(carrier_type_args_bytes.len()),
@@ -8857,9 +9388,16 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         cell_deps.push(CellDep { out_point: OutPoint::new(*evidence_tx_hash_bytes, *evidence_index_u32), dep_type: DepType::Code });
     }
     cell_deps.extend([
-        CellDep { out_point: OutPoint::new(lock_dep_tx_hash_bytes, lock_dep_index_u32), dep_type: DepType::Code },
+        CellDep { out_point: OutPoint::new(lock_dep_tx_hash_bytes, lock_dep_index_u32), dep_type: lock_dep_type },
         CellDep { out_point: OutPoint::new(verifier_dep_tx_hash_bytes, verifier_dep_index_u32), dep_type: DepType::Code },
     ]);
+    let initial_witness = if let Some(multisig) = canonical_multisig.as_ref() {
+        let input_type = (!witness_bytes.is_empty()).then_some(witness_bytes.clone());
+        serialize_ckb_witness_args_molecule(&multisig.placeholder_witness(input_type, None))
+            .map_err(|error| CliError::InvalidFixture(error.to_string()))?
+    } else {
+        witness_bytes.clone()
+    };
     let mut tx = CellTx::new(
         inputs,
         cell_deps,
@@ -8868,10 +9406,74 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
             CellOutput { capacity: change_capacity, lock: lock_script, type_: None },
         ],
         vec![carrier_payload_bytes.clone(), vec![]],
-        vec![witness_bytes],
+        vec![initial_witness],
     )
     .map_err(|error| CliError::InvalidFixture(format!("carrier transaction construction failed: {error}")))?;
     tx.version = 0;
+    let mut canonical_multisig_report = None;
+    if let Some(multisig) = canonical_multisig.as_ref() {
+        let base_witness = CkbWitnessArgs::new(None, (!verifier_witness_bytes.is_empty()).then_some(verifier_witness_bytes), None);
+        let signing_message = ckb_secp256k1_blake160_multisig_all_signing_message_molecule(&tx, multisig, &base_witness, &[])
+            .map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+        let signatures = if !args.multisig_signer_secret_keys.is_empty() {
+            args.multisig_signer_secret_keys
+                .iter()
+                .map(|secret_key_hex| {
+                    let secret_key_bytes: [u8; 32] =
+                        decode_hex_bytes(secret_key_hex).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| {
+                            CliError::InvalidFixture(
+                                "multisig-signer-secret-key must be a 32-byte hex secp256k1 secret key".to_owned(),
+                            )
+                        })?;
+                    let secret_key = SecretKey::from_slice(&secret_key_bytes)
+                        .map_err(|_| CliError::InvalidFixture("multisig-signer-secret-key is invalid".to_owned()))?;
+                    ckb_sign_secp256k1_blake160_multisig_all_molecule(&tx, multisig, &base_witness, &secret_key, &[])
+                        .map_err(|error| CliError::InvalidFixture(error.to_string()))
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            args.multisig_signatures
+                .iter()
+                .map(|signature| {
+                    decode_hex_bytes(signature)
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .ok_or_else(|| CliError::InvalidFixture("multisig-signature must be exactly 65-byte hex".to_owned()))
+                })
+                .collect::<Result<Vec<[u8; 65]>>>()?
+        };
+        let mut locally_verified = false;
+        if !signatures.is_empty() {
+            let signed_witness =
+                ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule(&tx, multisig, &base_witness, &signatures, &[])
+                    .map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+            locally_verified =
+                ckb_verify_secp256k1_blake160_multisig_all_molecule(&multisig.lock_args(), &tx, multisig, &signed_witness, &[])
+                    .map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+            if !locally_verified {
+                return Err(CliError::InvalidFixture("assembled canonical CKB multisig witness failed local verification".to_owned()));
+            }
+            tx.witnesses[0] =
+                serialize_ckb_witness_args_molecule(&signed_witness).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+        }
+        if args.submit && !locally_verified {
+            return Err(CliError::InvalidFixture(
+                "live final settlement requires threshold signatures over the exact canonical CKB sighash_all message".to_owned(),
+            ));
+        }
+        canonical_multisig_report = Some(serde_json::json!({
+            "scheme": "secp256k1_blake160_multisig_all",
+            "require_first_n": multisig.require_first_n(),
+            "threshold": multisig.threshold(),
+            "participant_pubkey_hashes": multisig.pubkey_hashes().iter().map(hex::encode).collect::<Vec<_>>(),
+            "witness_config": format!("0x{}", hex::encode(multisig.witness_config())),
+            "config_hash": format!("0x{}", hex::encode(multisig.config_hash())),
+            "lock_args": format!("0x{}", hex::encode(multisig.lock_args())),
+            "signing_message": format!("0x{}", hex::encode(signing_message)),
+            "signature_count": signatures.len(),
+            "locally_verified": locally_verified,
+            "external_signing_required": signatures.is_empty()
+        }));
+    }
     let projection = project_cell_tx_to_ckb(&tx);
     let expected_ckb_raw_tx_hash = projection
         .ckb_raw_tx_hash
@@ -9144,7 +9746,8 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         && pre_submit_lock_code_dep_live == Some(true)
         && pre_submit_evidence_cell_dep_lock_matches == Some(true)
         && pre_submit_authority_input_lock_matches == Some(true)
-        && pre_submit_authority_input_threshold_lock_args_matches == Some(true);
+        && pre_submit_authority_input_threshold_lock_args_matches == Some(true)
+        && canonical_multisig_report.as_ref().and_then(|report| report.get("locally_verified")).and_then(Value::as_bool) == Some(true);
     let authority_threshold_lock_deployment_mode =
         if authority_threshold_lock_deployment_checked { Some("live-code-dep-and-authority-final-da-lock-preflight") } else { None };
     let evidence_cell_dep_report = evidence_cell_dep.as_ref().map(|(tx_hash, index, _, _, capacity)| {
@@ -9207,6 +9810,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         "authority_threshold_lock_identity_checked": authority_threshold_lock_identity_checked,
         "authority_threshold_lock_deployment_checked": authority_threshold_lock_deployment_checked,
         "authority_threshold_lock_deployment_mode": authority_threshold_lock_deployment_mode,
+        "canonical_ckb_multisig": canonical_multisig_report,
         "carrier_capacity_shannons": args.carrier_capacity_shannons,
         "carrier_min_capacity_shannons": carrier_min_capacity_shannons,
         "change_capacity_shannons": change_capacity,
@@ -10991,6 +11595,7 @@ fn final_l1_da_availability_preflight_ready(submission: &Value) -> bool {
         &manifest.proof_molecule_hex,
         manifest.local_da_published,
         manifest.availability.external_receipt.clone(),
+        manifest.availability.provider_neutral_certificate.clone(),
     ) else {
         return false;
     };
@@ -11057,6 +11662,29 @@ fn final_l1_authority_authentication_preflight_ready(submission: &Value) -> bool
         return false;
     };
     if authority_authentication_attestation_hash(&auth).ok().as_deref() != Some(auth.attestation_hash.as_str()) {
+        return false;
+    }
+    if validate_authority_canonical_multisig(&auth).is_err() {
+        return false;
+    }
+    let Some(multisig) = submission.get("canonical_ckb_multisig") else {
+        return false;
+    };
+    let multisig_ready = multisig.get("scheme").and_then(Value::as_str) == Some("secp256k1_blake160_multisig_all")
+        && multisig.get("locally_verified").and_then(Value::as_bool) == Some(true)
+        && multisig.get("external_signing_required").and_then(Value::as_bool) == Some(false)
+        && multisig.get("signature_count").and_then(Value::as_u64).is_some_and(|count| count >= u64::from(auth.threshold))
+        && multisig
+            .get("lock_args")
+            .and_then(Value::as_str)
+            .is_some_and(|lock_args| lock_args.eq_ignore_ascii_case(&auth.ckb_lock_args))
+        && multisig
+            .get("config_hash")
+            .and_then(Value::as_str)
+            .and_then(normalize_ckb_tx_hash)
+            .is_some_and(|hash| hash.trim_start_matches("0x").eq_ignore_ascii_case(&auth.ckb_multisig_config_hash))
+        && multisig.get("signing_message").and_then(Value::as_str).and_then(normalize_ckb_tx_hash).is_some();
+    if !multisig_ready {
         return false;
     }
     let signature_evidence_ready = match auth.participant_signature_evidence.clone() {
@@ -11779,32 +12407,39 @@ fn verify_session_finality_checks(
 ) -> Result<()> {
     if let Some(tm) = &bundle.weighted_precommit_evidence {
         let weighted_precommit_engine = weighted_precommit_fixture_engine();
-        let signatures = tm
+        let precommits = tm
             .signatures
             .iter()
             .map(|signature| {
                 let bytes = parse_hex_64(&signature.signature)
-                    .ok_or_else(|| CliError::InvalidFixture("weighted_precommit signature must be 64-byte hex".to_owned()))?;
-                Ok(CommitteeSignature { validator_id: signature.validator_id.clone(), signature: bytes })
+                    .ok_or_else(|| CliError::InvalidFixture("Tendermint signature must be 64-byte hex".to_owned()))?;
+                Ok(myelin_consensus::TendermintVote {
+                    height: tm.height,
+                    round: tm.round,
+                    step: TendermintStep::Precommit,
+                    block_hash: Some(block_hash),
+                    validator_id: signature.validator_id.clone(),
+                    signature: bytes.to_vec(),
+                })
             })
             .collect::<Result<Vec<_>>>()?;
-        let certificate =
-            myelin_consensus::WeightedPrecommitCertificate { block_hash, height: tm.height, round: tm.round, signatures };
-        let certificate_ok =
-            weighted_precommit_engine.verify_precommit_certificate(block_hash, tm.height, tm.round, &certificate).is_ok();
+        let decision = TendermintDecision { block_hash, height: tm.height, round: tm.round, precommits };
+        let reconstructed_block =
+            bundle.block.to_myelin_block().map_err(|error| CliError::InvalidFixture(format!("bundle block: {error}")))?;
+        let certificate_ok = weighted_precommit_engine.finalise_block_with_decision(reconstructed_block, decision).is_ok();
         push_check(
             checks,
             "weighted-precommit-certificate",
             certificate_ok,
-            Some(format!("quorum power {} height {} round {}", 2, tm.height, tm.round)),
+            Some(format!("quorum power {} height {} round {}", 3, tm.height, tm.round)),
             Some(format!("quorum power {}, finalised {}", tm.quorum_power, tm.finalised)),
             "WeightedPrecommit precommit certificate verifies against the fixture engine",
         );
         push_check(
             checks,
             "weighted-precommit-quorum-power",
-            tm.quorum_power == 2,
-            Some("2".to_owned()),
+            tm.quorum_power == 3,
+            Some("3".to_owned()),
             Some(tm.quorum_power.to_string()),
             "bundle WeightedPrecommit quorum power matches the fixture engine",
         );
@@ -11849,7 +12484,7 @@ fn verify_session_finality_checks(
 fn parse_session_consensus(consensus: &str) -> Result<ConsensusKind> {
     match consensus {
         "static-closed-committee" => Ok(ConsensusKind::StaticClosedCommittee),
-        "weighted-precommit" => Ok(ConsensusKind::WeightedPrecommit),
+        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::WeightedPrecommit),
         other => Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     }
 }
@@ -12143,20 +12778,25 @@ fn finality_evidence_for_block(
         }
         ConsensusKind::WeightedPrecommit => {
             let weighted_precommit_engine = weighted_precommit_fixture_engine();
-            let round = 0u32;
-            let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
-            let certificate = weighted_precommit_engine.precommit_certificate_from_signers(
-                block_hash,
-                block.number,
-                round,
-                &fixture_signers(&["validator-0", "validator-1"]),
-            )?;
-            weighted_precommit_engine.finalise_block_with_precommit(block.clone(), round, certificate.clone())?;
-            let signatures = certificate.signatures.iter().map(weighted_precommit_signature_report).collect();
+            let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned(), "validator-2".to_owned()];
+            let voting_signers = fixture_signers(&["validator-0", "validator-1", "validator-2"]);
+            let all_signers = fixture_signers(&["validator-0", "validator-1", "validator-2", "validator-3"]);
+            let decision = tendermint_decision_from_signers(&weighted_precommit_engine, block, &voting_signers, &all_signers)?;
+            let round = decision.round;
+            weighted_precommit_engine.finalise_block_with_decision(block.clone(), decision.clone())?;
+            let signatures = decision
+                .precommits
+                .iter()
+                .map(|vote| CommitteeSignatureEvidenceReport {
+                    validator_id: vote.validator_id.clone(),
+                    signature: hex::encode(&vote.signature),
+                    signature_hash: hex::encode(blake3_32(b"myelin:tendermint-signature-hash:v1", &vote.signature)),
+                })
+                .collect();
             let weighted_precommit_evidence = WeightedPrecommitEvidenceReport {
                 consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
                 block_hash: hex::encode(block_hash),
-                quorum_power: 2,
+                quorum_power: 3,
                 height: block.number,
                 round,
                 signer_ids,
@@ -12183,14 +12823,6 @@ fn static_signature_report(signature: &CommitteeSignature) -> CommitteeSignature
         validator_id: signature.validator_id.clone(),
         signature: hex::encode(signature.signature),
         signature_hash: hex::encode(blake3_32(b"myelin:static-committee-signature-hash:v1", &signature.signature)),
-    }
-}
-
-fn weighted_precommit_signature_report(signature: &CommitteeSignature) -> CommitteeSignatureEvidenceReport {
-    CommitteeSignatureEvidenceReport {
-        validator_id: signature.validator_id.clone(),
-        signature: hex::encode(signature.signature),
-        signature_hash: hex::encode(blake3_32(b"myelin:weighted-precommit-signature-hash:v1", &signature.signature)),
     }
 }
 
@@ -12284,7 +12916,7 @@ struct RuntimeSmokeReport {
 fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
     let consensus_kind = match consensus {
         "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
-        "weighted-precommit" => ConsensusKind::WeightedPrecommit,
+        "tendermint" | "weighted-precommit" => ConsensusKind::WeightedPrecommit,
         other => return Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     };
 
@@ -12355,11 +12987,12 @@ fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
         }
         ConsensusKind::WeightedPrecommit => {
             let weighted_precommit_engine = weighted_precommit_fixture_engine();
-            let cert = weighted_precommit_engine
-                .precommit_certificate_from_signers(block.hash(), block.number, 0, &fixture_signers(&["validator-0", "validator-1"]))
-                .expect("weighted_precommit fixture certificate");
+            let all_signers = fixture_signers(&["validator-0", "validator-1", "validator-2", "validator-3"]);
+            let voting_signers = fixture_signers(&["validator-0", "validator-1", "validator-2"]);
+            let decision = tendermint_decision_from_signers(&weighted_precommit_engine, &block, &voting_signers, &all_signers)
+                .expect("Tendermint fixture decision");
             let finalised =
-                weighted_precommit_engine.finalise_block_with_precommit(block, 0, cert).expect("weighted_precommit fixture finality");
+                weighted_precommit_engine.finalise_block_with_decision(block, decision).expect("Tendermint fixture finality");
             hex::encode(finalised.block_hash)
         }
     };
@@ -12455,15 +13088,25 @@ mod tests {
                 schema: "myelin-session-threshold-lock-deployment-v2".to_owned(),
                 network: "ckb-mainnet".to_owned(),
                 code_hash: format!("0x{}", "a1".repeat(32)),
-                hash_type: "data2".to_owned(),
+                hash_type: "type".to_owned(),
                 code_dep_tx_hash: format!("0x{}", "b2".repeat(32)),
                 code_dep_index: "0x0".to_owned(),
+                code_dep_type: "dep_group".to_owned(),
                 audited_source_hash: format!("0x{}", "c3".repeat(32)),
                 audit_report_hash: format!("0x{}", "d4".repeat(32)),
-                deployment_policy: "mainnet-production-threshold-lock-v1".to_owned(),
+                deployment_policy: "ckb-system-multisig-mainnet-v1".to_owned(),
                 ckb_lock_args_hash: auth.ckb_lock_args_hash.clone(),
                 threshold: auth.threshold,
                 signer_pubkey_hashes: auth.signer_pubkey_hashes.clone(),
+                multisig_participant_pubkey_hashes: auth.ckb_multisig_participant_pubkey_hashes.clone(),
+                multisig_require_first_n: auth.ckb_multisig_require_first_n,
+                multisig_config_hash: auth.ckb_multisig_config_hash.clone(),
+                node_chain: "ckb".to_owned(),
+                consensus_multisig_type_hash: format!("0x{}", "a1".repeat(32)),
+                dep_group_live: true,
+                system_script_member_out_point: Some(format!("0x{}:0x4", "b3".repeat(32))),
+                system_script_data_hash: Some(format!("0x{}", "b4".repeat(32))),
+                system_script_identity_checked: true,
                 ckb_enforceable_checked: true,
                 testnet_beta_ready: true,
                 production_ready: true,
@@ -12484,7 +13127,7 @@ mod tests {
         for secret_key_bytes in [[0x11u8; 32], [0x22u8; 32]] {
             let secret_key = SecretKey::from_slice(&secret_key_bytes).expect("static fixture secret key");
             let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-            let pubkey_hash = secp256k1_pubkey_hash20(&public_key);
+            let pubkey_hash = ckb_secp256k1_blake160_pubkey_hash(&public_key.serialize());
             let signature = secp.sign_ecdsa_recoverable(&message, &secret_key);
             let (recovery_id, compact_signature) = signature.serialize_compact();
             let mut signature_bytes = [0u8; 65];
@@ -12503,6 +13146,8 @@ mod tests {
                 message_hash: auth.message_hash.clone(),
                 signer_pubkey_hashes,
                 signatures,
+                participant_pubkey_hashes: auth.ckb_multisig_participant_pubkey_hashes.clone(),
+                require_first_n: auth.ckb_multisig_require_first_n,
                 attestation_hashes: Vec::new(),
                 signature_verified: false,
                 evidence_commitment_algorithm: String::new(),
@@ -12662,6 +13307,81 @@ mod tests {
         serde_json::from_slice(&request[body_start..]).unwrap_or_else(|error| panic!("parse {label} request json: {error}"))
     }
 
+    fn write_mock_rpc_result(stream: &mut std::net::TcpStream, result: Value) {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string();
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        stream.write_all(response.as_bytes()).expect("write mock RPC response");
+    }
+
+    #[test]
+    fn canonical_multisig_system_probe_binds_consensus_dep_group_and_member_type_hash() {
+        let type_script = Script::new(myelin_exec::CKB_TYPE_ID_CODE_HASH, 1, vec![0x42; 32]);
+        let consensus_type_hash = ckb_script_hash_molecule(&type_script).expect("system type hash");
+        let consensus_type_hash_hex = byte32_hex(&consensus_type_hash);
+        let dep_tx_hash = byte32_hex(&[0xA1; 32]);
+        let member = OutPoint::new([0xB2; 32], 4);
+        let member_tx_hash = byte32_hex(&member.tx_hash);
+        let dep_group_data = myelin_exec::encode_ckb_dep_group_data(&[member]).expect("dep-group data");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind canonical multisig probe mock");
+        let addr = listener.local_addr().expect("canonical multisig probe mock address");
+        let type_script_json = serde_json::json!({
+            "code_hash": byte32_hex(&myelin_exec::CKB_TYPE_ID_CODE_HASH),
+            "hash_type": "type",
+            "args": format!("0x{}", "42".repeat(32))
+        });
+        let expected_consensus_type_hash = consensus_type_hash_hex.clone();
+        let handle = std::thread::spawn(move || {
+            for expected_method in ["get_blockchain_info", "get_consensus", "get_live_cell", "get_live_cell"] {
+                let (mut stream, _) = listener.accept().expect("accept canonical multisig probe request");
+                let request = read_mock_rpc_request(&mut stream, expected_method);
+                assert_eq!(request["method"], expected_method);
+                let result = match expected_method {
+                    "get_blockchain_info" => serde_json::json!({ "chain": "ckb_testnet" }),
+                    "get_consensus" => serde_json::json!({
+                        "secp256k1_blake160_multisig_all_type_hash": expected_consensus_type_hash
+                    }),
+                    "get_live_cell" if request["params"][0]["tx_hash"] == dep_tx_hash => serde_json::json!({
+                        "status": "live",
+                        "cell": {
+                            "data": {
+                                "content": format!("0x{}", hex::encode(&dep_group_data)),
+                                "hash": byte32_hex(&[0xC3; 32])
+                            },
+                            "output": { "capacity": "0x3e8", "lock": Value::Null, "type": Value::Null }
+                        }
+                    }),
+                    "get_live_cell" => {
+                        assert_eq!(request["params"][0]["tx_hash"], member_tx_hash);
+                        serde_json::json!({
+                            "status": "live",
+                            "cell": {
+                                "data": { "content": "0x01", "hash": byte32_hex(&[0xD4; 32]) },
+                                "output": { "capacity": "0x3e8", "lock": Value::Null, "type": type_script_json }
+                            }
+                        })
+                    }
+                    _ => unreachable!(),
+                };
+                write_mock_rpc_result(&mut stream, result);
+            }
+        });
+
+        let evidence = probe_canonical_multisig_system_script(
+            &format!("http://{addr}"),
+            &consensus_type_hash_hex,
+            &byte32_hex(&[0xA1; 32]),
+            "0x0",
+        )
+        .expect("canonical multisig system evidence");
+        handle.join().expect("canonical multisig probe mock thread");
+        assert_eq!(evidence.node_chain, "ckb_testnet");
+        assert_eq!(evidence.consensus_type_hash, consensus_type_hash_hex);
+        assert!(evidence.dep_group_live);
+        assert_eq!(evidence.member_out_point, format!("{}:0x4", byte32_hex(&[0xB2; 32])));
+        assert_eq!(evidence.member_data_hash, byte32_hex(&[0xD4; 32]));
+    }
+
     #[derive(Clone, Debug)]
     struct MockCarrierLiveCell {
         capacity: String,
@@ -12681,7 +13401,7 @@ mod tests {
         lock_code_hash: String,
         lock_args: String,
     ) -> MockCarrierLiveCell {
-        MockCarrierLiveCell { capacity, data_hash, lock_code_hash, lock_hash_type: "data".to_owned(), lock_args }
+        MockCarrierLiveCell { capacity, data_hash, lock_code_hash, lock_hash_type: "type".to_owned(), lock_args }
     }
 
     fn spawn_carrier_submission_rpc_mock(
@@ -13202,11 +13922,99 @@ mod tests {
         let in_memory_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("in-memory DA manifest");
         let receipt_path =
             write_production_external_da_receipt(&in_memory_manifest.molecule_transaction_hash, &in_memory_manifest.segment_root);
+        let certificate_path = write_provider_neutral_da_certificate(&in_memory_manifest, label);
         let storage_dir = std::env::temp_dir().join(format!("myelin-{label}-da-store-{}-{nonce}", std::process::id()));
         let _ = std::fs::remove_dir_all(&storage_dir);
-        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), Some(receipt_path.clone()))
-            .expect("production DA manifest");
+        let manifest = session_da_manifest_with_certificate(
+            bundle_path.clone(),
+            Some(storage_dir.clone()),
+            Some(receipt_path.clone()),
+            Some(certificate_path.clone()),
+            Some(100),
+        )
+        .expect("production DA manifest");
+        let _ = std::fs::remove_file(certificate_path);
         (manifest, bundle_path, receipt_path, storage_dir)
+    }
+
+    fn write_provider_neutral_da_certificate(manifest: &SessionDaManifestReport, label: &str) -> PathBuf {
+        use myelin_state::{DaBlobCommitment, DaErasureProfile, DaPolicy, DaProviderReceipt, DaRetrievalProbe};
+        use secp256k1::{Keypair, XOnlyPublicKey};
+
+        let secp = Secp256k1::new();
+        let key_material = |seed: u8| {
+            let secret = SecretKey::from_slice(&[seed; 32]).expect("valid DA fixture key");
+            let keypair = Keypair::from_secret_key(&secp, &secret);
+            let public = XOnlyPublicKey::from_keypair(&keypair).0.serialize();
+            (secret, public)
+        };
+        let sign = |secret: &SecretKey, digest: [u8; 32]| {
+            let keypair = Keypair::from_secret_key(&secp, secret);
+            secp.sign_schnorr_no_aux_rand(&Message::from_digest(digest), &keypair).serialize().to_vec()
+        };
+        let payload_hash = parse_hex_32(&manifest.molecule_transaction_hash).expect("manifest payload hash");
+        let blob = DaBlobCommitment {
+            namespace: blake3_32(b"myelin:test-da-namespace:v1", label.as_bytes()),
+            session_id: parse_hex_32(&manifest.session_id).expect("manifest session id"),
+            chunk_index: manifest.chunk_index,
+            payload_hash,
+            payload_len: u64::from(manifest.chunk_length),
+            segment_root: parse_hex_32(&manifest.segment_root).expect("manifest segment root"),
+            erasure: DaErasureProfile::replicated(u64::from(manifest.chunk_length), payload_hash).expect("replicated profile"),
+        };
+        let blob_id = blob.blob_id();
+        let (auditor_secret, auditor_public_key) = key_material(9);
+        let mut receipts = Vec::new();
+        let mut probes = Vec::new();
+        for (sample_index, (provider_id, fault_domain, seed)) in
+            [("provider-a", "region-a", 1u8), ("provider-b", "region-b", 2u8)].into_iter().enumerate()
+        {
+            let (provider_secret, provider_public_key) = key_material(seed);
+            let mut receipt = DaProviderReceipt {
+                blob_id,
+                provider_id: provider_id.to_owned(),
+                fault_domain: fault_domain.to_owned(),
+                retrieval_endpoint: format!("https://{provider_id}.example.invalid/{}", hex::encode(blob_id)),
+                stored_at_epoch: 90,
+                retained_until_epoch: 200,
+                provider_public_key,
+                signature: vec![0; 64],
+            };
+            receipt.signature = sign(&provider_secret, receipt.signing_digest());
+            let mut probe = DaRetrievalProbe {
+                blob_id,
+                provider_id: provider_id.to_owned(),
+                receipt_hash: receipt.receipt_hash(),
+                sample_index: sample_index as u32,
+                sample_hash: payload_hash,
+                sample_proof_hash: blake3_32(b"myelin:test-da-sample-proof:v1", provider_id.as_bytes()),
+                observed_at_epoch: 99,
+                latency_ms: 100,
+                successful: true,
+                auditor_public_key,
+                signature: vec![0; 64],
+            };
+            probe.signature = sign(&auditor_secret, probe.signing_digest());
+            receipts.push(receipt);
+            probes.push(probe);
+        }
+        let certificate = DaCertificate {
+            blob,
+            policy: DaPolicy {
+                min_distinct_providers: 2,
+                min_distinct_fault_domains: 2,
+                min_retention_epochs: 50,
+                min_successful_probes: 2,
+                min_probed_providers: 2,
+                max_probe_age_epochs: 5,
+                max_probe_latency_ms: 500,
+                trusted_auditors: vec![auditor_public_key],
+            },
+            receipts,
+            probes,
+        };
+        certificate.verify(100).expect("provider-neutral DA fixture certificate");
+        write_temp_json(&format!("{label}-provider-neutral-da-certificate"), &certificate)
     }
 
     fn da_anchor_package_from_carrier_payload(payload: &str) -> Value {
@@ -13534,10 +14342,27 @@ mod tests {
         write_temp_json(&format!("readiness-live-final-script-submission-no-preflight-{label_hash}"), &submission)
     }
 
+    fn canonical_multisig_readiness_fixture(auth: &SessionAuthorityAuthenticationEvidence) -> Value {
+        serde_json::json!({
+            "scheme": "secp256k1_blake160_multisig_all",
+            "require_first_n": auth.ckb_multisig_require_first_n,
+            "threshold": auth.threshold,
+            "participant_pubkey_hashes": auth.ckb_multisig_participant_pubkey_hashes,
+            "witness_config": auth.ckb_multisig_witness_config,
+            "config_hash": format!("0x{}", auth.ckb_multisig_config_hash),
+            "lock_args": auth.ckb_lock_args,
+            "signing_message": format!("0x{}", "ab".repeat(32)),
+            "signature_count": auth.threshold,
+            "locally_verified": true,
+            "external_signing_required": false
+        })
+    }
+
     fn write_readiness_live_final_settlement_submission(expected_hash: &str, authority_lock_matches: bool) -> PathBuf {
         let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
         let label_hash = &label_hash[..label_hash.len().min(8)];
         let authority = settlement_authority_requirement([0x10; 32], [0x44; 32], [0x46; 32], [0x50; 32], [0x53; 32]);
+        let canonical_multisig = canonical_multisig_readiness_fixture(&authority.authority_authentication);
         let court_economics =
             court_economics_evidence(&"46".repeat(32), &"50".repeat(32), &"51".repeat(32), &"60".repeat(32), 60_000, 60_000)
                 .expect("readiness court economics fixture");
@@ -13557,6 +14382,7 @@ mod tests {
             "evidence_cell_dep_present": true,
             "authority_input_present": true,
             "settlement_authority_requirement": authority,
+            "canonical_ckb_multisig": canonical_multisig,
             "court_economics": court_economics,
             "authority_threshold_lock_identity_checked": authority_lock_matches,
             "authority_threshold_lock_deployment_checked": authority_lock_matches,
@@ -13623,6 +14449,7 @@ mod tests {
             Some(threshold_deployment),
         )
         .expect("production authority fixture");
+        let canonical_multisig = canonical_multisig_readiness_fixture(&authority.authority_authentication);
         let base_court_economics =
             court_economics_evidence(&"46".repeat(32), &"50".repeat(32), &"51".repeat(32), &"60".repeat(32), 60_000, 60_000)
                 .expect("readiness court economics fixture");
@@ -13656,6 +14483,7 @@ mod tests {
             "evidence_cell_dep_present": true,
             "authority_input_present": true,
             "settlement_authority_requirement": authority,
+            "canonical_ckb_multisig": canonical_multisig,
             "court_economics": court_economics,
             "authority_threshold_lock_identity_checked": true,
             "authority_threshold_lock_deployment_checked": true,
@@ -13835,7 +14663,7 @@ mod tests {
         });
         std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
 
-        let report = teeworlds_court_bundle(path.clone(), 4, 0, "weighted-precommit").unwrap();
+        let report = teeworlds_court_bundle(path.clone(), 4, 0, "tendermint").unwrap();
         let _ = std::fs::remove_file(path);
 
         assert!(!report.court_verifiable);
@@ -13850,13 +14678,13 @@ mod tests {
         // The static-closed-committee evidence is reported for completeness;
         // the WeightedPrecommit evidence is the active finality path.
         let tm = report.weighted_precommit_evidence.as_ref().expect("weighted_precommit evidence must be present");
-        assert_eq!(tm.consensus_kind, "weighted-precommit");
-        assert_eq!(tm.quorum_power, 2);
+        assert_eq!(tm.consensus_kind, "tendermint");
+        assert_eq!(tm.quorum_power, 3);
         assert_eq!(tm.height, 1);
         assert_eq!(tm.round, 0);
         assert_eq!(tm.certificate_step, "precommit");
         assert!(tm.finalised);
-        assert_eq!(tm.signatures.len(), 2);
+        assert_eq!(tm.signatures.len(), 3);
 
         // The static-committee and WeightedPrecommit block hashes MUST agree: both
         // engines sign the same canonical MyelinBlock (same data fields,
@@ -13958,13 +14786,13 @@ mod tests {
             participants: vec!["alice".to_owned(), "bob".to_owned(), "carol".to_owned()],
             escrow_cells: vec![format!("{alice_tx}:0:1200:{fixture_lock}"), format!("{bob_tx}:2:2400:{fixture_lock}")],
             timeout_ms: 90_000,
-            consensus: "weighted-precommit".to_owned(),
+            consensus: "tendermint".to_owned(),
             out: None,
         })
         .expect("open configurable session");
 
         assert_eq!(open.app_id, "myelin-custom-game-session-v1");
-        assert_eq!(open.consensus_kind, "weighted-precommit");
+        assert_eq!(open.consensus_kind, "tendermint");
         assert_eq!(open.participants.len(), 3);
         assert_eq!(open.escrow_input_cells.len(), 2);
         assert_eq!(open.timeout_ms, 90_000);
@@ -13977,7 +14805,7 @@ mod tests {
         let _ = std::fs::remove_file(open_path);
 
         assert_eq!(commit.chunk_index, 7);
-        assert_eq!(commit.consensus_kind, "weighted-precommit");
+        assert_eq!(commit.consensus_kind, "tendermint");
         assert!(commit.weighted_precommit_evidence.is_some());
         assert_ne!(commit.state_root_before, commit.state_root_after);
 
@@ -14022,7 +14850,7 @@ mod tests {
         assert_eq!(manifest.challenge_payload_hash, bundle.challenge_payload_hash);
         assert!(manifest.proof_valid);
         assert_eq!(manifest.availability.schema, "myelin-da-availability-v1");
-        assert_eq!(manifest.availability.mode, "replicated-da-committee");
+        assert_eq!(manifest.availability.mode, "fixture-replicated-committee");
         assert_eq!(manifest.availability.signature_scheme, "secp256k1-recoverable-blake3-pubkey-hash20");
         assert_eq!(manifest.availability.attester_pubkey_hashes.len(), 3);
         assert_eq!(manifest.availability.attestation_signatures.len(), 3);
@@ -14169,7 +14997,7 @@ mod tests {
     }
 
     #[test]
-    fn session_da_manifest_accepts_signed_production_da_receipt() {
+    fn session_da_manifest_treats_one_signed_sla_receipt_as_testnet_evidence_only() {
         let open = session_open_fixture("static-closed-committee").expect("open session");
         let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-production-{}.json", std::process::id()));
         std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
@@ -14208,7 +15036,7 @@ mod tests {
         assert!(manifest.local_da_published);
         assert!(manifest.availability.external_receipt_checked);
         assert!(manifest.availability.testnet_beta_ready);
-        assert!(manifest.availability.production_ready);
+        assert!(!manifest.availability.production_ready);
         assert!(verification.valid);
         assert!(verification.checks.iter().all(|check| check.ok));
     }
@@ -14239,6 +15067,7 @@ mod tests {
             &segment_root_hex,
             &proof_hex,
             true,
+            None,
             None,
         )
         .expect("commitment-only availability evidence");
@@ -14304,13 +15133,21 @@ mod tests {
         })
         .expect("generate externally signed external DA receipt");
         let receipt_path = write_temp_json("external-da-helper-receipt", &receipt);
+        let certificate_path = write_provider_neutral_da_certificate(&in_memory_manifest, "external-da-helper");
         let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-helper-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&storage_dir);
 
-        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), Some(receipt_path.clone()))
-            .expect("DA manifest accepts helper-generated receipt");
+        let manifest = session_da_manifest_with_certificate(
+            bundle_path.clone(),
+            Some(storage_dir.clone()),
+            Some(receipt_path.clone()),
+            Some(certificate_path.clone()),
+            Some(100),
+        )
+        .expect("DA manifest accepts helper-generated receipt and provider-neutral certificate");
 
         let _ = std::fs::remove_file(receipt_path);
+        let _ = std::fs::remove_file(certificate_path);
         let _ = std::fs::remove_file(bundle_path);
         let _ = std::fs::remove_dir_all(storage_dir);
 
@@ -14900,15 +15737,17 @@ mod tests {
         assert_eq!(package.settlement_authority.session_authority_commitment, expected_authority.session_authority_commitment);
         assert_eq!(package.settlement_authority.authority_authentication, expected_authority.authority_authentication);
         assert_eq!(package.settlement_authority.authority_authentication.schema, "myelin-session-settlement-authority-auth-v2");
-        assert_eq!(package.settlement_authority.authority_authentication.mode, "ckb-threshold-lock");
+        assert_eq!(package.settlement_authority.authority_authentication.mode, "ckb-secp256k1-blake160-multisig-all");
         assert_eq!(
             package.settlement_authority.authority_authentication.signature_scheme,
-            "secp256k1-recoverable-blake3-pubkey-hash20"
+            "secp256k1-recoverable-blake3-message-ckb-blake160-pubkey-hash"
         );
         assert!(package.settlement_authority.authority_authentication.signature_verified);
         assert_eq!(package.settlement_authority.authority_authentication.signer_pubkey_hashes.len(), 2);
         assert_eq!(package.settlement_authority.authority_authentication.signatures.len(), 2);
-        assert!(package.settlement_authority.authority_authentication.ckb_lock_args.starts_with("0x6d79656c696e2d617574682d7631"));
+        assert_eq!(package.settlement_authority.authority_authentication.ckb_lock_args.len(), 42);
+        assert_eq!(package.settlement_authority.authority_authentication.ckb_multisig_participant_pubkey_hashes.len(), 3);
+        assert_eq!(package.settlement_authority.authority_authentication.ckb_multisig_require_first_n, 0);
         assert_eq!(package.settlement_authority.authority_authentication.ckb_lock_args_hash.len(), 64);
         assert!(hex::decode(&package.settlement_authority.authority_authentication.ckb_lock_args[2..]).is_ok());
         assert!(hex::decode(&package.settlement_authority.authority_authentication.ckb_lock_args_hash).is_ok());
@@ -15037,29 +15876,33 @@ mod tests {
 
         let auth = &base_package.settlement_authority.authority_authentication;
         let message_hash = parse_hex_32(&auth.message_hash).expect("authority message hash");
-        let (signer_0, signature_0) =
-            sign_recoverable_pubkey_hash20(&message_hash, &"11".repeat(32), "authority signer 0").expect("signer 0 signs externally");
-        let (signer_1, signature_1) =
-            sign_recoverable_pubkey_hash20(&message_hash, &"22".repeat(32), "authority signer 1").expect("signer 1 signs externally");
+        let (signer_0, signature_0) = sign_recoverable_ckb_pubkey_hash20(&message_hash, &"11".repeat(32), "authority signer 0")
+            .expect("signer 0 signs externally");
+        let (signer_1, signature_1) = sign_recoverable_ckb_pubkey_hash20(&message_hash, &"22".repeat(32), "authority signer 1")
+            .expect("signer 1 signs externally");
         let signature_evidence = session_authority_signature_evidence(
             package_path.clone(),
             Vec::new(),
             vec![signer_0, signer_1],
             vec![signature_0, signature_1],
+            auth.ckb_multisig_participant_pubkey_hashes.clone(),
+            auth.ckb_multisig_require_first_n,
         )
         .expect("authority signature helper evidence");
         let threshold_deployment = session_threshold_lock_deployment_evidence(SessionThresholdLockDeploymentEvidenceArgs {
             package: package_path.clone(),
             network: "ckb-testnet".to_owned(),
             code_hash: format!("0x{}", "a1".repeat(32)),
-            hash_type: "data2".to_owned(),
+            hash_type: "type".to_owned(),
             code_dep_tx_hash: format!("0x{}", "b2".repeat(32)),
             code_dep_index: "0x0".to_owned(),
+            code_dep_type: "dep_group".to_owned(),
+            rpc_url: None,
             audited_source_hash: format!("0x{}", "c3".repeat(32)),
             audit_report_hash: format!("0x{}", "d4".repeat(32)),
             deployment_policy: None,
-            ckb_enforceable_checked: true,
-            testnet_beta_ready: true,
+            ckb_enforceable_checked: false,
+            testnet_beta_ready: false,
             production_ready: false,
             out: None,
         })
@@ -15086,8 +15929,8 @@ mod tests {
         assert_eq!(signature_evidence.message_hash, auth.message_hash);
         assert_eq!(threshold_deployment.ckb_lock_args_hash, auth.ckb_lock_args_hash);
         assert_eq!(threshold_deployment.signer_pubkey_hashes, auth.signer_pubkey_hashes);
-        assert_eq!(threshold_deployment.deployment_policy, "testnet-beta-threshold-lock-v1");
-        assert!(threshold_deployment.testnet_beta_ready);
+        assert_eq!(threshold_deployment.deployment_policy, "ckb-system-multisig-testnet-v1");
+        assert!(!threshold_deployment.testnet_beta_ready);
         assert!(!threshold_deployment.production_ready);
         assert_eq!(court_deployment.economics_commitment, intent.court_economics.economics_commitment);
         assert_eq!(court_deployment.da_availability_commitment, intent.court_economics.da_availability_commitment);
@@ -16263,12 +17106,15 @@ mod tests {
             output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "34".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
+            lock_code_dep_type: "code".to_owned(),
             verifier_code_hash: format!("0x{}", "35".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "36".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
             verifier_source: verifier_source.display().to_string(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
+            multisig_signer_secret_keys: Vec::new(),
+            multisig_signatures: Vec::new(),
             outputs_validator: "passthrough".to_owned(),
             rpc_url: Some("http://127.0.0.1:8114".to_owned()),
             submit: false,
@@ -16352,12 +17198,15 @@ mod tests {
             output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "44".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
+            lock_code_dep_type: "code".to_owned(),
             verifier_code_hash: format!("0x{}", "45".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "46".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
             verifier_source: "da-anchor-carrier.cell".to_owned(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
+            multisig_signer_secret_keys: Vec::new(),
+            multisig_signatures: Vec::new(),
             outputs_validator: "passthrough".to_owned(),
             rpc_url: Some("http://127.0.0.1:8114".to_owned()),
             submit: false,
@@ -16418,12 +17267,15 @@ mod tests {
             output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "b4".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
+            lock_code_dep_type: "code".to_owned(),
             verifier_code_hash: format!("0x{}", "b5".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "b6".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
             verifier_source: "settlement-final.cell".to_owned(),
             verifier_role: "final-l1-script".to_owned(),
             witness: "0x1234".to_owned(),
+            multisig_signer_secret_keys: Vec::new(),
+            multisig_signatures: Vec::new(),
             outputs_validator: "passthrough".to_owned(),
             rpc_url: Some("http://127.0.0.1:8114".to_owned()),
             submit: false,
@@ -16470,12 +17322,15 @@ mod tests {
             output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "bf".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
+            lock_code_dep_type: "code".to_owned(),
             verifier_code_hash: format!("0x{}", "c0".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "c1".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
             verifier_source: "settlement-final.cell".to_owned(),
             verifier_role: "final-l1-script".to_owned(),
             witness: "0x1234".to_owned(),
+            multisig_signer_secret_keys: Vec::new(),
+            multisig_signatures: Vec::new(),
             outputs_validator: "passthrough".to_owned(),
             rpc_url: Some("http://127.0.0.1:8114".to_owned()),
             submit: false,
@@ -16524,17 +17379,20 @@ mod tests {
             carrier_capacity_shannons: carrier_capacity,
             fee_shannons: fee,
             lock_code_hash: format!("0x{}", "d3".repeat(32)),
-            lock_hash_type: "data".to_owned(),
+            lock_hash_type: "type".to_owned(),
             lock_args: authority_lock_args.clone(),
             output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "d4".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
+            lock_code_dep_type: "dep_group".to_owned(),
             verifier_code_hash: format!("0x{}", "d5".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "d6".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
             verifier_source: "settlement-final.cell".to_owned(),
             verifier_role: "final-l1-script".to_owned(),
             witness: "0x1234".to_owned(),
+            multisig_signer_secret_keys: vec!["11".repeat(32), "22".repeat(32)],
+            multisig_signatures: Vec::new(),
             outputs_validator: "passthrough".to_owned(),
             rpc_url: Some("http://127.0.0.1:8114".to_owned()),
             submit: false,
@@ -16619,17 +17477,20 @@ mod tests {
             carrier_capacity_shannons: carrier_capacity,
             fee_shannons: fee,
             lock_code_hash: lock_code_hash.clone(),
-            lock_hash_type: "data".to_owned(),
+            lock_hash_type: "type".to_owned(),
             lock_args: authority_lock_args.clone(),
             output_lock_args: None,
             lock_code_dep_tx_hash: lock_dep_tx_hash.clone(),
             lock_code_dep_index: lock_dep_index.clone(),
+            lock_code_dep_type: "dep_group".to_owned(),
             verifier_code_hash: verifier_code_hash.clone(),
             verifier_code_dep_tx_hash: verifier_dep_tx_hash.clone(),
             verifier_code_dep_index: verifier_dep_index.clone(),
             verifier_source: verifier_source.display().to_string(),
             verifier_role: "final-l1-script".to_owned(),
             witness: "0x1234".to_owned(),
+            multisig_signer_secret_keys: vec!["11".repeat(32), "22".repeat(32)],
+            multisig_signatures: Vec::new(),
             outputs_validator: "passthrough".to_owned(),
             rpc_url,
             submit,
@@ -16775,12 +17636,15 @@ mod tests {
             output_lock_args: None,
             lock_code_dep_tx_hash: lock_dep_tx_hash.clone(),
             lock_code_dep_index: lock_dep_index.clone(),
+            lock_code_dep_type: "code".to_owned(),
             verifier_code_hash: verifier_code_hash.clone(),
             verifier_code_dep_tx_hash: verifier_dep_tx_hash.clone(),
             verifier_code_dep_index: verifier_dep_index.clone(),
             verifier_source: verifier_source.display().to_string(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
+            multisig_signer_secret_keys: Vec::new(),
+            multisig_signatures: Vec::new(),
             outputs_validator: "passthrough".to_owned(),
             rpc_url,
             submit,
@@ -16957,12 +17821,15 @@ mod tests {
             output_lock_args: None,
             lock_code_dep_tx_hash: lock_dep_tx_hash,
             lock_code_dep_index: lock_dep_index,
+            lock_code_dep_type: "code".to_owned(),
             verifier_code_hash,
             verifier_code_dep_tx_hash: verifier_dep_tx_hash,
             verifier_code_dep_index: verifier_dep_index,
             verifier_source: verifier_source.display().to_string(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
+            multisig_signer_secret_keys: Vec::new(),
+            multisig_signatures: Vec::new(),
             outputs_validator: "passthrough".to_owned(),
             rpc_url: Some(url),
             submit: true,
@@ -17006,12 +17873,15 @@ mod tests {
             output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "84".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
+            lock_code_dep_type: "code".to_owned(),
             verifier_code_hash: format!("0x{}", "85".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "86".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
             verifier_source: "/tmp/myelin-missing-carrier-source.cell".to_owned(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
+            multisig_signer_secret_keys: Vec::new(),
+            multisig_signatures: Vec::new(),
             outputs_validator: "passthrough".to_owned(),
             rpc_url: Some("http://127.0.0.1:8114".to_owned()),
             submit: true,
@@ -17053,12 +17923,15 @@ mod tests {
             output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "54".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
+            lock_code_dep_type: "code".to_owned(),
             verifier_code_hash: format!("0x{}", "55".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "56".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
             verifier_source: "da-anchor-carrier.cell".to_owned(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
+            multisig_signer_secret_keys: Vec::new(),
+            multisig_signatures: Vec::new(),
             outputs_validator: "passthrough".to_owned(),
             rpc_url: Some("http://127.0.0.1:8114".to_owned()),
             submit: false,
@@ -18341,19 +19214,19 @@ mod tests {
 
     #[test]
     fn session_fixture_weighted_precommit_commit_court_bundle_verifies() {
-        let open = session_open_fixture("weighted-precommit").expect("open session");
+        let open = session_open_fixture("tendermint").expect("open session");
         let open_path = std::env::temp_dir().join(format!("myelin-session-open-tm-{}.json", std::process::id()));
         std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
         let commit = session_commit_fixture(open_path.clone()).expect("commit session");
         let _ = std::fs::remove_file(open_path);
 
-        assert_eq!(commit.consensus_kind, "weighted-precommit");
+        assert_eq!(commit.consensus_kind, "tendermint");
         assert!(!commit.static_committee_evidence.finalised);
         let tm = commit.weighted_precommit_evidence.as_ref().expect("weighted_precommit evidence");
-        assert_eq!(tm.consensus_kind, "weighted-precommit");
+        assert_eq!(tm.consensus_kind, "tendermint");
         assert_eq!(tm.certificate_step, "precommit");
         assert!(tm.finalised);
-        assert_eq!(tm.signatures.len(), 2);
+        assert_eq!(tm.signatures.len(), 3);
 
         let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-tm-{}.json", std::process::id()));
         std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
@@ -18375,7 +19248,7 @@ mod tests {
     #[test]
     fn session_fixture_state_transition_is_consensus_agnostic() {
         let static_open = session_open_fixture("static-closed-committee").expect("open static");
-        let tm_open = session_open_fixture("weighted-precommit").expect("open weighted_precommit");
+        let tm_open = session_open_fixture("tendermint").expect("open Tendermint");
         assert_eq!(static_open.session_id, tm_open.session_id);
         assert_eq!(static_open.initial_state_root, tm_open.initial_state_root);
 
@@ -18444,9 +19317,9 @@ mod tests {
 
     #[test]
     fn runtime_smoke_weighted_precommit_finalises_a_block() {
-        let report = runtime_smoke("weighted-precommit").expect("smoke weighted_precommit");
+        let report = runtime_smoke("tendermint").expect("smoke Tendermint");
         assert_eq!(report.schema, "myelin-runtime-smoke-v2");
-        assert_eq!(report.consensus_kind, "weighted-precommit");
+        assert_eq!(report.consensus_kind, "tendermint");
         assert_eq!(report.vm_profile, "no-vm-runtime-smoke");
         assert_eq!(report.ckb_spawn_ipc_enabled, CKB_SPAWN_IPC_SYSCALLS_ENABLED);
         assert_eq!(report.cell_tx_id.len(), 64);
@@ -18467,7 +19340,7 @@ mod tests {
         // engines. Only the certificate_hash (the finalisation signature
         // domain) is allowed to differ.
         let static_report = runtime_smoke("static-closed-committee").expect("smoke static");
-        let weighted_precommit_report = runtime_smoke("weighted-precommit").expect("smoke weighted_precommit");
+        let weighted_precommit_report = runtime_smoke("tendermint").expect("smoke Tendermint");
 
         assert_eq!(static_report.cell_tx_id, weighted_precommit_report.cell_tx_id);
         assert_eq!(static_report.cell_wtxid, weighted_precommit_report.cell_wtxid);

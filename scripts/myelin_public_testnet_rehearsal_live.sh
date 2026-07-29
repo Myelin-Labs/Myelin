@@ -168,6 +168,7 @@ run_role() {
       --lock-args "${CKB_TESTNET_LOCK_ARGS:-0x}" \
       --lock-code-dep-tx-hash "$CKB_TESTNET_LOCK_DEP_TX_HASH" \
       --lock-code-dep-index "$CKB_TESTNET_LOCK_DEP_INDEX" \
+      --lock-code-dep-type "${CKB_TESTNET_LOCK_DEP_TYPE:-code}" \
       --verifier-code-hash "$verifier_code_hash" \
       --verifier-code-dep-tx-hash "$verifier_dep_tx_hash" \
       --verifier-code-dep-index "$verifier_dep_index" \

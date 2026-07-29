@@ -13,6 +13,17 @@ use secp256k1::{schnorr::Signature, Keypair, Message, Secp256k1, SecretKey, XOnl
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
+mod tendermint;
+pub use tendermint::{
+    TendermintDecision, TendermintProgress, TendermintProposal, TendermintRoundState, TendermintStep, TendermintVote,
+};
+
+/// Public name for the finite-session Tendermint engine. The legacy Rust type
+/// name remains alias-compatible for v0.10 callers.
+pub type Tendermint = WeightedPrecommit;
+/// Public name for the Tendermint validator-set configuration.
+pub type TendermintConfig = WeightedPrecommitConfig;
+
 /// Fixed-width hash used by consensus artefacts.
 pub type Hash32 = [u8; 32];
 
@@ -28,16 +39,20 @@ const WEIGHTED_PRECOMMIT_DOMAIN: &[u8] = b"myelin:weighted-precommit:v1";
 pub enum ConsensusKind {
     /// Configured validators finalise blocks once the quorum weight is reached.
     StaticClosedCommittee,
-    /// Weighted precommit finality for finite sessions.
-    WeightedPrecommit,
+    /// Tendermint proposal/prevote/precommit finality for finite sessions.
+    Tendermint,
 }
 
 impl ConsensusKind {
+    /// Legacy source-compatibility name. New code should use `Tendermint`.
+    #[allow(non_upper_case_globals)]
+    pub const WeightedPrecommit: Self = Self::Tendermint;
+
     /// Stable config string for this consensus kind.
     pub const fn as_str(self) -> &'static str {
         match self {
             ConsensusKind::StaticClosedCommittee => "static-closed-committee",
-            ConsensusKind::WeightedPrecommit => "weighted-precommit",
+            ConsensusKind::Tendermint => "tendermint",
         }
     }
 }
@@ -49,19 +64,25 @@ pub struct ConsensusConfig {
     pub kind: ConsensusKind,
     /// Static committee configuration when `kind` is `StaticClosedCommittee`.
     pub static_committee: Option<StaticCommitteeConfig>,
-    /// WeightedPrecommit configuration when `kind` is `WeightedPrecommit`.
-    pub weighted_precommit: Option<WeightedPrecommitConfig>,
+    /// Tendermint configuration when `kind` is `Tendermint`.
+    pub tendermint: Option<TendermintConfig>,
 }
 
 impl ConsensusConfig {
     /// Build a static closed-committee config directly.
     pub fn static_closed_committee(static_committee: StaticCommitteeConfig) -> Self {
-        Self { kind: ConsensusKind::StaticClosedCommittee, static_committee: Some(static_committee), weighted_precommit: None }
+        Self { kind: ConsensusKind::StaticClosedCommittee, static_committee: Some(static_committee), tendermint: None }
     }
 
-    /// Build a WeightedPrecommit config directly.
+    /// Build a Tendermint config directly.
+    pub fn tendermint(tendermint: TendermintConfig) -> Self {
+        Self { kind: ConsensusKind::Tendermint, static_committee: None, tendermint: Some(tendermint) }
+    }
+
+    /// Legacy constructor retained for source migration.
+    #[deprecated(note = "use ConsensusConfig::tendermint")]
     pub fn weighted_precommit(weighted_precommit: WeightedPrecommitConfig) -> Self {
-        Self { kind: ConsensusKind::WeightedPrecommit, static_committee: None, weighted_precommit: Some(weighted_precommit) }
+        Self::tendermint(weighted_precommit)
     }
 
     /// Parse a TOML consensus config.
@@ -77,9 +98,10 @@ impl ConsensusConfig {
             }
             ConsensusKind::WeightedPrecommit => {
                 let raw_weighted_precommit = raw
-                    .weighted_precommit
-                    .ok_or_else(|| ConsensusError::InvalidConfig("weighted_precommit requires [weighted_precommit]".to_owned()))?;
-                Ok(Self::weighted_precommit(raw_weighted_precommit.try_into()?))
+                    .tendermint
+                    .or(raw.weighted_precommit)
+                    .ok_or_else(|| ConsensusError::InvalidConfig("tendermint requires [tendermint]".to_owned()))?;
+                Ok(Self::tendermint(raw_weighted_precommit.try_into()?))
             }
         }
     }
@@ -91,6 +113,7 @@ struct RawConsensusConfig {
     kind: String,
     static_committee: Option<RawStaticCommitteeConfig>,
     weighted_precommit: Option<RawWeightedPrecommitConfig>,
+    tendermint: Option<RawWeightedPrecommitConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,7 +171,7 @@ impl TryFrom<RawWeightedPrecommitConfig> for WeightedPrecommitConfig {
 fn parse_consensus_kind(kind: &str) -> Result<ConsensusKind> {
     match kind {
         "static-closed-committee" => Ok(ConsensusKind::StaticClosedCommittee),
-        "weighted-precommit" => Ok(ConsensusKind::WeightedPrecommit),
+        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::WeightedPrecommit),
         other => Err(ConsensusError::UnknownEngine(other.to_owned())),
     }
 }
@@ -388,8 +411,8 @@ pub trait ConsensusEngine {
 pub enum SelectedConsensus {
     /// Static closed committee.
     StaticClosedCommittee(StaticClosedCommittee),
-    /// WeightedPrecommit-style precommit finality.
-    WeightedPrecommit(WeightedPrecommit),
+    /// Tendermint proposal/prevote/precommit finality.
+    Tendermint(Tendermint),
 }
 
 impl SelectedConsensus {
@@ -403,10 +426,9 @@ impl SelectedConsensus {
                 Ok(Self::StaticClosedCommittee(StaticClosedCommittee::new(committee)?))
             }
             ConsensusKind::WeightedPrecommit => {
-                let weighted_precommit = config
-                    .weighted_precommit
-                    .ok_or_else(|| ConsensusError::InvalidConfig("missing weighted_precommit config".to_owned()))?;
-                Ok(Self::WeightedPrecommit(WeightedPrecommit::new(weighted_precommit)?))
+                let tendermint =
+                    config.tendermint.ok_or_else(|| ConsensusError::InvalidConfig("missing tendermint config".to_owned()))?;
+                Ok(Self::Tendermint(Tendermint::new(tendermint)?))
             }
         }
     }
@@ -416,14 +438,14 @@ impl ConsensusEngine for SelectedConsensus {
     fn kind(&self) -> ConsensusKind {
         match self {
             SelectedConsensus::StaticClosedCommittee(engine) => engine.kind(),
-            SelectedConsensus::WeightedPrecommit(engine) => engine.kind(),
+            SelectedConsensus::Tendermint(engine) => engine.kind(),
         }
     }
 
     fn verify_certificate(&self, block_hash: Hash32, certificate: &CommitteeCertificate) -> Result<()> {
         match self {
             SelectedConsensus::StaticClosedCommittee(engine) => engine.verify_certificate(block_hash, certificate),
-            SelectedConsensus::WeightedPrecommit(engine) => engine.verify_certificate(block_hash, certificate),
+            SelectedConsensus::Tendermint(engine) => engine.verify_certificate(block_hash, certificate),
         }
     }
 }
@@ -781,6 +803,27 @@ pub enum ConsensusError {
     /// `WeightedPrecommitCertificate` instead.
     #[error("weighted_precommit does not implement verify_certificate; use verify_precommit_certificate with a typed WeightedPrecommitCertificate")]
     LegacyCertificatePathUnsupported,
+    /// A proposal was not signed by the deterministic proposer for the round.
+    #[error("unexpected Tendermint proposer: expected {expected}, got {actual}")]
+    UnexpectedProposer {
+        /// Expected proposer id.
+        expected: String,
+        /// Actual proposer id.
+        actual: String,
+    },
+    /// A validator signed two different values for one height/round/step.
+    #[error("Tendermint equivocation by {validator_id} at round {round} during {step}")]
+    Equivocation {
+        /// Equivocating validator.
+        validator_id: String,
+        /// Round containing the conflicting messages.
+        round: u32,
+        /// Proposal or vote phase.
+        step: &'static str,
+    },
+    /// The persisted Tendermint round state violates a transition invariant.
+    #[error("invalid Tendermint state: {0}")]
+    InvalidTendermintState(String),
 }
 
 /// Consensus result type.
@@ -927,25 +970,36 @@ weight = 1
     }
 
     #[test]
-    fn selected_weighted_precommit_loads_from_toml() {
+    fn selected_tendermint_loads_from_canonical_toml() {
         let toml = r#"
-kind = "weighted-precommit"
+kind = "tendermint"
 
-[weighted_precommit]
-quorum_power = 2
+[tendermint]
+quorum_power = 3
 
-[[weighted_precommit.validators]]
+[[tendermint.validators]]
 id = "alice"
 public_key = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 weight = 1
 
-[[weighted_precommit.validators]]
+[[tendermint.validators]]
 id = "bob"
 public_key = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+weight = 1
+
+[[tendermint.validators]]
+id = "carol"
+public_key = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+weight = 1
+
+[[tendermint.validators]]
+id = "dave"
+public_key = "e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13"
 weight = 1
 "#;
         let selected = SelectedConsensus::from_config(ConsensusConfig::from_toml_str(toml).unwrap()).unwrap();
         assert_eq!(selected.kind(), ConsensusKind::WeightedPrecommit);
+        assert_eq!(selected.kind().as_str(), "tendermint");
     }
 
     // ─── Additional StaticClosedCommittee tests ──────────────────────────────────

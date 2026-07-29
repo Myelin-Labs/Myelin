@@ -3,7 +3,7 @@
 Generate the local, uncommitted reports/myelin-teeworlds-repro.json from the
 live Teeworlds acceptance output. Run after
 `bash scripts/myelin_teeworlds_acceptance.sh` to merge the static-committee and
-weighted-precommit reports into a single reproducible JSON artefact.
+Tendermint reports into a single reproducible JSON artefact.
 """
 import json
 import os
@@ -42,14 +42,14 @@ def load_or_run_static(mock_tx_path):
     return build, vm, court, verify
 
 def run_weighted_precommit(mock_tx_path):
-    """Run inspect / court-bundle with --consensus weighted-precommit."""
-    out_dir = Path("/tmp/myelin-weighted-precommit-teeworlds")
+    """Run inspect / court-bundle with --consensus tendermint."""
+    out_dir = Path("/tmp/myelin-tendermint-teeworlds")
     out_dir.mkdir(parents=True, exist_ok=True)
-    inspect_path = out_dir / "inspect-weighted-precommit.json"
-    court_path = out_dir / "court-bundle-weighted-precommit.json"
-    verify_path = out_dir / "court-bundle-verify-weighted-precommit.json"
-    run_myelin("teeworlds", "inspect", "--mock-tx", mock_tx_path, "--consensus", "weighted-precommit", "--out", str(inspect_path))
-    run_myelin("teeworlds", "court-bundle", "--mock-tx", mock_tx_path, "--consensus", "weighted-precommit", "--out", str(court_path))
+    inspect_path = out_dir / "inspect-tendermint.json"
+    court_path = out_dir / "court-bundle-tendermint.json"
+    verify_path = out_dir / "court-bundle-verify-tendermint.json"
+    run_myelin("teeworlds", "inspect", "--mock-tx", mock_tx_path, "--consensus", "tendermint", "--out", str(inspect_path))
+    run_myelin("teeworlds", "court-bundle", "--mock-tx", mock_tx_path, "--consensus", "tendermint", "--out", str(court_path))
     run_myelin("teeworlds", "verify-court-bundle", "--bundle", str(court_path), "--out", str(verify_path))
     return json.loads(inspect_path.read_text()), json.loads(court_path.read_text()), json.loads(verify_path.read_text())
 

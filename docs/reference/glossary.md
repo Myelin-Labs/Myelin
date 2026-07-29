@@ -63,8 +63,8 @@ public-key set. Used by the `StaticClosedCommittee` consensus
 engine. See [Consensus engines](../architecture/consensus.md).
 
 **Committee certificate** — The signature set that finalises a
-`MyelinBlock`. Quorum-weighted for the static engine; strict-majority
-precommit for the WeightedPrecommit engine. See
+`MyelinBlock`. Quorum-weighted for the static engine; a
+greater-than-two-thirds precommit decision for Tendermint. See
 [Consensus engines](../architecture/consensus.md).
 
 **Conflict domain** — A typed grouping of Cells over which two
@@ -256,14 +256,16 @@ transaction they're validating. See
 
 ## T
 
-**WeightedPrecommit** — A consensus engine with weighted precommit
-finality. Same trait as the static engine; different certificate
-shape. See [Consensus engines](../architecture/consensus.md).
+**Tendermint** — Myelin's finite-session proposal/prevote/precommit engine.
+It implements locks, valid rounds, nil votes, round changes and equivocation
+rejection for a known validator set. See
+[Consensus engines](../architecture/consensus.md).
 
-**Threshold-lock** — The declared participant-threshold lock-args scheme
-for final settlement authority Cells. The devnet smoke verifies args and
-participant evidence but deliberately reports that canonical lock-code
-enforcement is still missing. See
+**Threshold-lock** — The canonical CKB
+`secp256k1_blake160_multisig_all` lock used by final settlement authority
+Cells. The witness config commits participant Blake160 hashes,
+`require_first_n`, and threshold; the exact settlement transaction is signed
+with standard CKB multisig `sighash_all`. See
 [Local CKB devnet smoke](../operations/devnet-smoke.md).
 
 **Type script** — The script that enforces state rules across a set

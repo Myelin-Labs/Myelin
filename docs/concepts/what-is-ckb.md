@@ -150,7 +150,7 @@ Myelin keeps all three properties off-chain.
 | Witness | `CellTx.witnesses[]` |
 | Cell dep | `CellTx.cell_deps[]` |
 | Block hash | Deterministic canonical hash over header + commitments |
-| Finality | Nakamoto PoW on L1, but Myelin uses static committee / WeightedPrecommit |
+| Finality | Nakamoto PoW on L1, but Myelin uses static committee / finite-session Tendermint |
 
 Myelin does **not** take: the PoW consensus, the RPC API, the node
 software, the address format, or the wallet format. Those are L1

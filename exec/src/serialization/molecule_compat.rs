@@ -13,6 +13,7 @@
 use crate::celltx::{CellDep, CellInput, CellOutput, CellTx, DepType, OutPoint, Script};
 use crate::serialization::{SerializationError, VmAbiError};
 use crate::vm::{ResolvedCell, ResolvedHeader};
+use std::collections::HashSet;
 
 const NUMBER_SIZE: usize = 4;
 const CKB_RAW_HEADER_SIZE: usize = 192;
@@ -34,6 +35,8 @@ const CKB_HASH_PERSONALIZATION: &[u8] = b"ckb-default-hash";
 pub const CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE: usize = 20;
 /// Recoverable secp256k1 signature length used by CKB's default sighash-all lock.
 pub const CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE: usize = 65;
+/// Fixed header size of the CKB multisig configuration carried in `WitnessArgs.lock`.
+pub const CKB_SECP256K1_MULTISIG_CONFIG_HEADER_SIZE: usize = 4;
 /// CKB `ScriptHashType::Type`.
 pub const CKB_SCRIPT_HASH_TYPE_TYPE: u8 = 1;
 /// CKB built-in TYPE_ID system script code hash.
@@ -76,6 +79,140 @@ impl CkbSecp256k1Blake160SighashAllLockConfig {
     /// Build a CKB standard lock script for a 20-byte Blake160 pubkey hash.
     pub fn lock_script(&self, pubkey_hash: &[u8; CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE]) -> Script {
         ckb_secp256k1_blake160_sighash_all_lock_script(self.type_hash, pubkey_hash)
+    }
+}
+
+/// Canonical configuration for CKB's `secp256k1_blake160_multisig_all` lock.
+///
+/// CKB commits this exact byte sequence in the witness lock field:
+///
+/// `reserved(0) || require_first_n || threshold || pubkey_count || blake160(pubkey)[]`
+///
+/// The on-chain lock args are the first 20 bytes of CKB Blake2b-256 over that
+/// sequence. Signatures follow the configuration bytes in participant order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CkbSecp256k1Blake160MultisigAllConfig {
+    require_first_n: u8,
+    threshold: u8,
+    pubkey_hashes: Vec<[u8; CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE]>,
+}
+
+impl CkbSecp256k1Blake160MultisigAllConfig {
+    /// Validate and construct a canonical CKB multisig configuration.
+    pub fn new(
+        require_first_n: u8,
+        threshold: u8,
+        pubkey_hashes: Vec<[u8; CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE]>,
+    ) -> Result<Self, MoleculeError> {
+        if pubkey_hashes.is_empty() {
+            return Err(MoleculeError::ValidationFailed("CKB multisig participant set must not be empty".to_owned()));
+        }
+        if pubkey_hashes.len() > u8::MAX as usize {
+            return Err(MoleculeError::ValidationFailed("CKB multisig participant set exceeds 255 entries".to_owned()));
+        }
+        if threshold == 0 || usize::from(threshold) > pubkey_hashes.len() {
+            return Err(MoleculeError::ValidationFailed(format!(
+                "CKB multisig threshold must be in 1..={}, got {threshold}",
+                pubkey_hashes.len()
+            )));
+        }
+        if require_first_n > threshold {
+            return Err(MoleculeError::ValidationFailed(format!(
+                "CKB multisig require_first_n {require_first_n} exceeds threshold {threshold}"
+            )));
+        }
+        let unique = pubkey_hashes.iter().collect::<HashSet<_>>();
+        if unique.len() != pubkey_hashes.len() {
+            return Err(MoleculeError::ValidationFailed("CKB multisig participant hashes must be unique".to_owned()));
+        }
+        Ok(Self { require_first_n, threshold, pubkey_hashes })
+    }
+
+    /// Number of leading participants whose signatures are mandatory.
+    pub const fn require_first_n(&self) -> u8 {
+        self.require_first_n
+    }
+
+    /// Number of signatures required by the lock.
+    pub const fn threshold(&self) -> u8 {
+        self.threshold
+    }
+
+    /// Ordered CKB Blake160 participant identifiers.
+    pub fn pubkey_hashes(&self) -> &[[u8; CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE]] {
+        &self.pubkey_hashes
+    }
+
+    /// Canonical configuration bytes stored at the start of the witness lock field.
+    pub fn witness_config(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(
+            CKB_SECP256K1_MULTISIG_CONFIG_HEADER_SIZE + self.pubkey_hashes.len() * CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE,
+        );
+        bytes.extend_from_slice(&[0, self.require_first_n, self.threshold, self.pubkey_hashes.len() as u8]);
+        for pubkey_hash in &self.pubkey_hashes {
+            bytes.extend_from_slice(pubkey_hash);
+        }
+        bytes
+    }
+
+    /// Full CKB Blake2b-256 commitment to the canonical witness configuration.
+    pub fn config_hash(&self) -> [u8; 32] {
+        ckb_blake2b_256(&self.witness_config())
+    }
+
+    /// CKB lock args: Blake160 of the canonical witness configuration.
+    pub fn lock_args(&self) -> [u8; CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE] {
+        ckb_blake160(&self.witness_config())
+    }
+
+    /// Placeholder lock bytes used when computing the CKB `sighash_all` message.
+    pub fn placeholder_lock(&self) -> Vec<u8> {
+        let config = self.witness_config();
+        let mut lock = vec![0u8; config.len() + usize::from(self.threshold) * CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE];
+        lock[..config.len()].copy_from_slice(&config);
+        lock
+    }
+
+    /// Placeholder `WitnessArgs` preserving optional type-script witness data.
+    pub fn placeholder_witness(&self, input_type: Option<Vec<u8>>, output_type: Option<Vec<u8>>) -> CkbWitnessArgs {
+        CkbWitnessArgs::new(Some(self.placeholder_lock()), input_type, output_type)
+    }
+
+    /// Build the canonical multisig lock script for a chain-specific system-script type hash.
+    pub fn lock_script(&self, type_hash: [u8; 32]) -> Script {
+        Script::new(type_hash, CKB_SCRIPT_HASH_TYPE_TYPE, self.lock_args().to_vec())
+    }
+}
+
+/// Chain-specific deployment identity plus canonical CKB multisig parameters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CkbSecp256k1Blake160MultisigAllLockConfig {
+    /// Type hash of the deployed `secp256k1_blake160_multisig_all` system script.
+    pub type_hash: [u8; 32],
+    /// Dep-group or code CellDep that exposes the standard lock implementation.
+    pub cell_dep: CellDep,
+    /// Canonical witness/lock-args configuration.
+    pub multisig: CkbSecp256k1Blake160MultisigAllConfig,
+}
+
+impl CkbSecp256k1Blake160MultisigAllLockConfig {
+    /// Build a chain-specific canonical multisig lock configuration.
+    pub fn new(type_hash: [u8; 32], cell_dep: CellDep, multisig: CkbSecp256k1Blake160MultisigAllConfig) -> Self {
+        Self { type_hash, cell_dep, multisig }
+    }
+
+    /// Build a config using the standard CKB multisig dep group.
+    pub fn with_dep_group(
+        type_hash: [u8; 32],
+        dep_group_out_point: OutPoint,
+        multisig: CkbSecp256k1Blake160MultisigAllConfig,
+    ) -> Self {
+        Self::new(type_hash, ckb_dep_group_cell_dep(dep_group_out_point), multisig)
+    }
+
+    /// Return the exact standard multisig lock script.
+    pub fn lock_script(&self) -> Script {
+        self.multisig.lock_script(self.type_hash)
     }
 }
 
@@ -247,33 +384,40 @@ pub fn ckb_verify_secp256k1_blake160_recoverable_signature(
     signature: &[u8; CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE],
     message_hash: &[u8; 32],
 ) -> bool {
+    ckb_recover_secp256k1_blake160(signature, message_hash).as_ref() == Some(expected_pubkey_hash)
+}
+
+fn ckb_recover_secp256k1_blake160(
+    signature: &[u8; CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE],
+    message_hash: &[u8; 32],
+) -> Option<[u8; CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE]> {
     if signature[64] > 3 {
-        return false;
+        return None;
     }
     let recovery_id = match secp256k1::ecdsa::RecoveryId::from_i32(signature[64] as i32) {
         Ok(value) => value,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let recoverable_signature = match secp256k1::ecdsa::RecoverableSignature::from_compact(&signature[..64], recovery_id) {
         Ok(value) => value,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let standard_signature = recoverable_signature.to_standard();
     let mut normalized = standard_signature;
     normalized.normalize_s();
     if normalized != standard_signature {
-        return false;
+        return None;
     }
     let message = match secp256k1::Message::from_digest_slice(message_hash) {
         Ok(value) => value,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let secp = secp256k1::Secp256k1::new();
     let recovered_pubkey = match secp.recover_ecdsa(&message, &recoverable_signature) {
         Ok(value) => value,
-        Err(_) => return false,
+        Err(_) => return None,
     };
-    ckb_secp256k1_blake160_pubkey_hash(&recovered_pubkey.serialize()) == *expected_pubkey_hash
+    Some(ckb_secp256k1_blake160_pubkey_hash(&recovered_pubkey.serialize()))
 }
 
 /// Verify a CKB default secp256k1-blake160-sighash-all witness.
@@ -423,6 +567,143 @@ pub fn ckb_verify_secp256k1_blake160_sighash_all_lock_group_molecule(
     let group_extra_witnesses = ckb_collect_group_extra_witnesses(tx, &group_indices, extra_witnesses);
     let group_extra_slices = group_extra_witnesses.iter().map(Vec::as_slice).collect::<Vec<_>>();
     ckb_verify_secp256k1_blake160_sighash_all_molecule(expected_pubkey_hash, tx, &signing_witness, &group_extra_slices)
+}
+
+/// Compute the standard CKB multisig `sighash_all` message.
+///
+/// The witness lock field is replaced with the canonical multisig config plus
+/// `threshold` zeroed 65-byte signature slots. The optional type witness fields
+/// are preserved, matching the parent CKB SDK and system-script convention.
+pub fn ckb_secp256k1_blake160_multisig_all_signing_message_molecule(
+    tx: &CellTx,
+    config: &CkbSecp256k1Blake160MultisigAllConfig,
+    signing_witness: &CkbWitnessArgs,
+    extra_witnesses: &[&[u8]],
+) -> Result<[u8; 32], MoleculeError> {
+    let placeholder = config.placeholder_witness(signing_witness.input_type.clone(), signing_witness.output_type.clone());
+    ckb_sighash_all_message_from_witness_args_molecule(tx, &placeholder, extra_witnesses)
+}
+
+/// Create one externally composable signature for a canonical CKB multisig transaction.
+///
+/// The signer must belong to `config`. The returned 65-byte signature is over
+/// the exact transaction and witness group supplied by the caller.
+pub fn ckb_sign_secp256k1_blake160_multisig_all_molecule(
+    tx: &CellTx,
+    config: &CkbSecp256k1Blake160MultisigAllConfig,
+    signing_witness: &CkbWitnessArgs,
+    secret_key: &secp256k1::SecretKey,
+    extra_witnesses: &[&[u8]],
+) -> Result<[u8; CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE], MoleculeError> {
+    let secp = secp256k1::Secp256k1::new();
+    let public_key = secp256k1::PublicKey::from_secret_key(&secp, secret_key);
+    let pubkey_hash = ckb_secp256k1_blake160_pubkey_hash(&public_key.serialize());
+    if !config.pubkey_hashes.contains(&pubkey_hash) {
+        return Err(MoleculeError::ValidationFailed(format!(
+            "CKB multisig signer {} is not in the configured participant set",
+            hex::encode(pubkey_hash)
+        )));
+    }
+    let message_hash = ckb_secp256k1_blake160_multisig_all_signing_message_molecule(tx, config, signing_witness, extra_witnesses)?;
+    let message = secp256k1::Message::from_digest_slice(&message_hash)
+        .map_err(|err| MoleculeError::ValidationFailed(format!("invalid CKB multisig sighash message: {err}")))?;
+    let signature = secp.sign_ecdsa_recoverable(&message, secret_key);
+    let (recovery_id, compact) = signature.serialize_compact();
+    let mut bytes = [0u8; CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE];
+    bytes[..64].copy_from_slice(&compact);
+    bytes[64] = recovery_id.to_i32() as u8;
+    Ok(bytes)
+}
+
+/// Assemble threshold signatures into a canonical CKB multisig witness.
+///
+/// Signatures are recovered against the exact CKB signing message, matched to
+/// configured Blake160 participants, deduplicated, and sorted into participant
+/// order. The mandatory `require_first_n` prefix is enforced before a witness
+/// can be returned.
+pub fn ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule(
+    tx: &CellTx,
+    config: &CkbSecp256k1Blake160MultisigAllConfig,
+    signing_witness: &CkbWitnessArgs,
+    signatures: &[[u8; CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE]],
+    extra_witnesses: &[&[u8]],
+) -> Result<CkbWitnessArgs, MoleculeError> {
+    if signatures.len() != usize::from(config.threshold) {
+        return Err(MoleculeError::ValidationFailed(format!(
+            "CKB multisig witness requires exactly {} signatures, got {}",
+            config.threshold,
+            signatures.len()
+        )));
+    }
+    let message_hash = ckb_secp256k1_blake160_multisig_all_signing_message_molecule(tx, config, signing_witness, extra_witnesses)?;
+    let mut ordered = Vec::with_capacity(signatures.len());
+    let mut seen = HashSet::with_capacity(signatures.len());
+    for signature in signatures {
+        let pubkey_hash = ckb_recover_secp256k1_blake160(signature, &message_hash)
+            .ok_or_else(|| MoleculeError::ValidationFailed("CKB multisig signature is malformed or non-canonical".to_owned()))?;
+        let participant_index = config.pubkey_hashes.iter().position(|configured| configured == &pubkey_hash).ok_or_else(|| {
+            MoleculeError::ValidationFailed(format!("CKB multisig signature recovers to non-participant {}", hex::encode(pubkey_hash)))
+        })?;
+        if !seen.insert(participant_index) {
+            return Err(MoleculeError::ValidationFailed(format!(
+                "duplicate CKB multisig signature for participant index {participant_index}"
+            )));
+        }
+        ordered.push((participant_index, *signature));
+    }
+    ordered.sort_by_key(|(participant_index, _)| *participant_index);
+    for required_index in 0..usize::from(config.require_first_n) {
+        if !seen.contains(&required_index) {
+            return Err(MoleculeError::ValidationFailed(format!(
+                "CKB multisig witness is missing required participant index {required_index}"
+            )));
+        }
+    }
+
+    let mut lock = config.witness_config();
+    for (_, signature) in ordered {
+        lock.extend_from_slice(&signature);
+    }
+    Ok(CkbWitnessArgs::new(Some(lock), signing_witness.input_type.clone(), signing_witness.output_type.clone()))
+}
+
+/// Verify a canonical CKB multisig witness locally against the exact transaction.
+pub fn ckb_verify_secp256k1_blake160_multisig_all_molecule(
+    expected_lock_args: &[u8; CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE],
+    tx: &CellTx,
+    config: &CkbSecp256k1Blake160MultisigAllConfig,
+    signing_witness: &CkbWitnessArgs,
+    extra_witnesses: &[&[u8]],
+) -> Result<bool, MoleculeError> {
+    if config.lock_args() != *expected_lock_args {
+        return Ok(false);
+    }
+    let Some(lock) = signing_witness.lock.as_deref() else {
+        return Ok(false);
+    };
+    let config_bytes = config.witness_config();
+    let expected_len = config_bytes.len() + usize::from(config.threshold) * CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE;
+    if lock.len() != expected_len || !lock.starts_with(&config_bytes) {
+        return Ok(false);
+    }
+    let message_hash = ckb_secp256k1_blake160_multisig_all_signing_message_molecule(tx, config, signing_witness, extra_witnesses)?;
+    let mut prior_index = None;
+    let mut seen = HashSet::with_capacity(usize::from(config.threshold));
+    for signature in lock[config_bytes.len()..].chunks_exact(CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE) {
+        let signature: [u8; CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE] =
+            signature.try_into().expect("chunks_exact yields one canonical CKB signature");
+        let Some(pubkey_hash) = ckb_recover_secp256k1_blake160(&signature, &message_hash) else {
+            return Ok(false);
+        };
+        let Some(participant_index) = config.pubkey_hashes.iter().position(|configured| configured == &pubkey_hash) else {
+            return Ok(false);
+        };
+        if prior_index.is_some_and(|prior| participant_index <= prior) || !seen.insert(participant_index) {
+            return Ok(false);
+        }
+        prior_index = Some(participant_index);
+    }
+    Ok((0..usize::from(config.require_first_n)).all(|required_index| seen.contains(&required_index)))
 }
 
 /// CKB `Script::calc_script_hash`: Blake2b-256 over packed Molecule bytes.
@@ -1494,6 +1775,144 @@ mod tests {
         assert_eq!(lock.code_hash, type_hash);
         assert_eq!(lock.hash_type, CKB_SCRIPT_HASH_TYPE_TYPE);
         assert_eq!(lock.args, pubkey_hash.to_vec());
+    }
+
+    #[test]
+    fn ckb_multisig_config_matches_parent_ckb_witness_and_lock_args_shape() {
+        let secp = secp256k1::Secp256k1::new();
+        let keys = [
+            secp256k1::SecretKey::from_slice(&[0x11; 32]).unwrap(),
+            secp256k1::SecretKey::from_slice(&[0x22; 32]).unwrap(),
+            secp256k1::SecretKey::from_slice(&[0x33; 32]).unwrap(),
+        ];
+        let participants = keys
+            .iter()
+            .map(|key| ckb_secp256k1_blake160_pubkey_hash(&secp256k1::PublicKey::from_secret_key(&secp, key).serialize()))
+            .collect::<Vec<_>>();
+        let config = CkbSecp256k1Blake160MultisigAllConfig::new(1, 2, participants.clone()).unwrap();
+
+        let mut expected_witness_config = vec![0, 1, 2, 3];
+        for participant in &participants {
+            expected_witness_config.extend_from_slice(participant);
+        }
+        assert_eq!(config.witness_config(), expected_witness_config);
+        assert_eq!(config.config_hash(), ckb_blake2b_256(&expected_witness_config));
+        assert_eq!(config.lock_args(), ckb_blake160(&expected_witness_config));
+        assert_eq!(config.placeholder_lock().len(), expected_witness_config.len() + 2 * CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE);
+
+        let chain =
+            CkbSecp256k1Blake160MultisigAllLockConfig::with_dep_group([0x42; 32], OutPoint::new([0x99; 32], 1), config.clone());
+        assert_eq!(chain.cell_dep.dep_type, DepType::DepGroup);
+        assert_eq!(chain.lock_script().args, config.lock_args().to_vec());
+        assert_eq!(chain.lock_script().hash_type, CKB_SCRIPT_HASH_TYPE_TYPE);
+    }
+
+    #[test]
+    fn ckb_multisig_assembles_two_of_three_in_participant_order() {
+        let tx = sample_tx();
+        let secp = secp256k1::Secp256k1::new();
+        let keys = [
+            secp256k1::SecretKey::from_slice(&[0x11; 32]).unwrap(),
+            secp256k1::SecretKey::from_slice(&[0x22; 32]).unwrap(),
+            secp256k1::SecretKey::from_slice(&[0x33; 32]).unwrap(),
+        ];
+        let participants = keys
+            .iter()
+            .map(|key| ckb_secp256k1_blake160_pubkey_hash(&secp256k1::PublicKey::from_secret_key(&secp, key).serialize()))
+            .collect::<Vec<_>>();
+        let config = CkbSecp256k1Blake160MultisigAllConfig::new(1, 2, participants).unwrap();
+        let unsigned = CkbWitnessArgs::new(None, Some(vec![0xA1]), Some(vec![0xB2]));
+        let tail = b"tail witness";
+        let signature_0 =
+            ckb_sign_secp256k1_blake160_multisig_all_molecule(&tx, &config, &unsigned, &keys[0], &[tail.as_ref()]).unwrap();
+        let signature_2 =
+            ckb_sign_secp256k1_blake160_multisig_all_molecule(&tx, &config, &unsigned, &keys[2], &[tail.as_ref()]).unwrap();
+
+        let witness = ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule(
+            &tx,
+            &config,
+            &unsigned,
+            &[signature_2, signature_0],
+            &[tail.as_ref()],
+        )
+        .unwrap();
+        assert!(ckb_verify_secp256k1_blake160_multisig_all_molecule(&config.lock_args(), &tx, &config, &witness, &[tail.as_ref()])
+            .unwrap());
+        assert_eq!(witness.input_type, unsigned.input_type);
+        assert_eq!(witness.output_type, unsigned.output_type);
+
+        let lock = witness.lock.as_ref().unwrap();
+        let config_len = config.witness_config().len();
+        assert_eq!(&lock[config_len..config_len + 65], &signature_0);
+        assert_eq!(&lock[config_len + 65..], &signature_2);
+    }
+
+    #[test]
+    fn ckb_multisig_rejects_missing_required_duplicate_nonmember_and_mutation() {
+        let tx = sample_tx();
+        let secp = secp256k1::Secp256k1::new();
+        let keys = [
+            secp256k1::SecretKey::from_slice(&[0x11; 32]).unwrap(),
+            secp256k1::SecretKey::from_slice(&[0x22; 32]).unwrap(),
+            secp256k1::SecretKey::from_slice(&[0x33; 32]).unwrap(),
+        ];
+        let participants = keys
+            .iter()
+            .map(|key| ckb_secp256k1_blake160_pubkey_hash(&secp256k1::PublicKey::from_secret_key(&secp, key).serialize()))
+            .collect::<Vec<_>>();
+        let config = CkbSecp256k1Blake160MultisigAllConfig::new(1, 2, participants).unwrap();
+        let unsigned = CkbWitnessArgs::default();
+        let signatures = keys
+            .iter()
+            .map(|key| ckb_sign_secp256k1_blake160_multisig_all_molecule(&tx, &config, &unsigned, key, &[]).unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule(
+            &tx,
+            &config,
+            &unsigned,
+            &[signatures[1], signatures[2]],
+            &[]
+        )
+        .is_err());
+        assert!(ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule(
+            &tx,
+            &config,
+            &unsigned,
+            &[signatures[0], signatures[0]],
+            &[]
+        )
+        .is_err());
+
+        let outsider = secp256k1::SecretKey::from_slice(&[0x44; 32]).unwrap();
+        assert!(ckb_sign_secp256k1_blake160_multisig_all_molecule(&tx, &config, &unsigned, &outsider, &[]).is_err());
+
+        let witness = ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule(
+            &tx,
+            &config,
+            &unsigned,
+            &[signatures[0], signatures[2]],
+            &[],
+        )
+        .unwrap();
+        let mut mutated = tx.clone();
+        mutated.outputs[0].capacity += 1;
+        assert!(!ckb_verify_secp256k1_blake160_multisig_all_molecule(&config.lock_args(), &mutated, &config, &witness, &[]).unwrap());
+
+        let mut reordered = witness.clone();
+        let lock = reordered.lock.as_mut().unwrap();
+        let config_len = config.witness_config().len();
+        let (first, second) = lock[config_len..].split_at_mut(65);
+        first.swap_with_slice(second);
+        assert!(!ckb_verify_secp256k1_blake160_multisig_all_molecule(&config.lock_args(), &tx, &config, &reordered, &[]).unwrap());
+    }
+
+    #[test]
+    fn ckb_multisig_config_rejects_invalid_thresholds_and_duplicates() {
+        assert!(CkbSecp256k1Blake160MultisigAllConfig::new(0, 0, vec![[1; 20]]).is_err());
+        assert!(CkbSecp256k1Blake160MultisigAllConfig::new(0, 2, vec![[1; 20]]).is_err());
+        assert!(CkbSecp256k1Blake160MultisigAllConfig::new(2, 1, vec![[1; 20], [2; 20]]).is_err());
+        assert!(CkbSecp256k1Blake160MultisigAllConfig::new(0, 1, vec![[1; 20], [1; 20]]).is_err());
     }
 
     #[test]

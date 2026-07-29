@@ -214,16 +214,16 @@ The adapter verifies compiler identity, source revision, target profile, metadat
 | --- | --- |
 | Typed Cell execution, state-resolved conflicts, atomic state roots | Implemented and tested |
 | Strict local CKB-VM verification with a shared transaction cycle budget | Implemented and tested |
-| Static-committee and weighted-precommit closed-validator finality | Implemented and tested |
+| Static-committee and full-round Tendermint closed-validator finality | Implemented and tested |
 | Exact CellScript v0.22.0 reproduction | Implemented and gated |
 | Live CKB admission, commitment, transaction proof, depth, and reorg checks | Exercised on parent CKB 0.207.0 devnet |
-| Canonical on-chain threshold lock | Not implemented |
+| Canonical CKB `secp256k1_blake160_multisig_all` settlement construction and verification | Implemented; public-testnet exercise pending |
 | Full disputed-chunk court and economics | Not implemented |
-| Durable production data availability | Not implemented |
+| Provider-neutral DA certificate core | Implemented; real provider/auditor adapters pending |
 | Public-testnet deployment | Not exercised |
 | Finished trustless or permissionless L2 | **No** |
 
-The main production blockers are the canonical threshold lock, full court adjudication and economics, public-testnet proof artifacts, durable external DA, unified finalized evidence, broader differential/fuzz/soak testing, safe multi-parent overlays, and production operator key procedures. See the complete list in the [v0.10.0 changelog](CHANGELOG.md#known-production-blockers).
+The main production blockers are a deployed and exercised public-testnet multisig/court path, full court adjudication and economics, real independent DA provider/auditor adapters, public-testnet proof artifacts, unified finalized evidence, broader differential/fuzz/soak testing, safe multi-parent overlays, and production operator key procedures. The DA certificate model is documented in [the DA design](docs/MYELIN_DA_DESIGN.md). See the complete list in the [v0.10.0 changelog](CHANGELOG.md#known-production-blockers).
 
 ## Validation
 

@@ -49,7 +49,7 @@ it.
 ### What's the difference between Myelin and a sidechain?
 
 A sidechain has its own consensus on a separate chain. Myelin
-doesn't — its finality is a configured committee or WeightedPrecommit BFT
+doesn't — its finality is a configured committee or finite-session Tendermint
 inside a single process, with the L1 (CKB) as the custody and
 court layer.
 
@@ -149,8 +149,9 @@ projection layer connects the two.
 
 A committee certificate is the signature set that finalises a
 `MyelinBlock`. For the static closed committee, it's a list of
-signatures from quorum-weight validators. For WeightedPrecommit, it's a
-list of precommits with strict-majority power.
+signatures from quorum-weight validators. For Tendermint, it is a decision
+certificate containing more-than-two-thirds signed precommits after a full
+proposal/prevote/precommit round.
 
 The certificate is what makes a `MyelinBlock` a `FinalisedBlock`.
 

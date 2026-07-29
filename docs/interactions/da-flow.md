@@ -14,20 +14,19 @@ nobody can fetch the chunk payload that produced it. The state
 root alone isn't enough to dispute — the disputer needs to *replay*
 the chunk in a CKB-VM-style verifier and compare results.
 
-DA is what makes "I can fetch the payload" a verifiable claim
-instead of a hand-wave. The DA manifest is the receipt; the
-`SegmentProof` is the cryptographic proof; the external DA receipt
-is the operator attestation; the anchor package is the L1-anchored
-proof-of-publication.
+DA is what makes "I can fetch the payload" a verifiable claim instead of a
+hand-wave. `SegmentProof` binds bytes to local sealed storage. Provider
+receipts bind retention, auditor probes prove recent retrieval, and a
+provider-neutral `DaCertificate` enforces quorum. The anchor package is the
+input to L1 publication evidence.
 
 ## The DA ladder
 
 ```text
 local_only           -> chunk sealed in local DA store
-testnet_beta_ready   -> + provider-signed external DA receipt
-production_ready     -> + production SLA: retention >= 30 days,
-                        HTTPS retrieval endpoint, audit-log commitment
-l1_da_published      -> + DA anchor CellTx committed on CKB
+testnet_beta_ready   -> + one checked rehearsal receipt, or a valid certificate
+production_ready     -> + provider/fault-domain quorum and recent signed probes
+l1_da_published      -> + exact DA anchor CellTx committed on CKB
 ```
 
 ```mermaid
@@ -44,8 +43,8 @@ l1_da_published      -> + DA anchor CellTx committed on CKB
 }}%%
 flowchart TB
     L1["local_only<br/>(SegmentWriter seals the payload)"]:::r1
-    L2["testnet_beta_ready<br/>(provider signs receipt)"]:::r2
-    L3["production_ready<br/>(SLA fields bound)"]:::r3
+    L2["testnet_beta_ready<br/>(checked external evidence)"]:::r2
+    L3["production_ready<br/>(provider-neutral quorum + probes)"]:::r3
     L4["l1_da_published<br/>(anchor CellTx committed)"]:::r4
 
     L1 --> L2 --> L3 --> L4
@@ -163,7 +162,7 @@ The receipt must use the schema `myelin-external-da-receipt-v2`,
 bind to the same `payload_hash` and `segment_root`, and carry a
 provider-recoverable secp256k1 signature over the receipt fields.
 
-For `production_ready`, the receipt must additionally carry:
+Legacy receipts may also carry rehearsal SLA fields:
 
 ```text
 service_level       = "production"
@@ -172,9 +171,27 @@ retrieval_endpoint  -> HTTPS URL with documented retrieval procedure
 audit_log_commitment -> 32-byte commitment to the operator's audit log
 ```
 
-These fields are hashed into the DA availability commitment.
+These fields are hashed into the DA availability commitment, but one receipt
+cannot make the manifest production-ready.
 
-## Step 3 — Anchor package
+## Step 3 — Provider-neutral certificate
+
+Production DA requires a `DaCertificate` with independent provider and fault
+domain quorum plus signed, fresh retrieval probes:
+
+```bash
+cargo run -p myelin-cli -- session da-manifest \
+  --bundle reports/session-court-bundle.json \
+  --storage-dir reports/session-da-store \
+  --da-certificate reports/provider-neutral-da-certificate.json \
+  --da-evaluation-epoch 12345 \
+  --out reports/session-da-manifest.json
+```
+
+The evaluation epoch is explicit and deterministic. See the complete
+[provider-neutral DA design](../MYELIN_DA_DESIGN.md).
+
+## Step 4 — Anchor package
 
 ```bash
 cargo run -p myelin-cli -- session da-anchor-package \
@@ -195,7 +212,7 @@ It still keeps `l1_da_publication_implemented = false`. The anchor
 package is the *deterministic* input to the L1 submission step; the
 publication claim only flips when the CellTx is actually committed.
 
-## Step 4 — Submission to CKB
+## Step 5 — Submission to CKB
 
 ```bash
 cargo run -p myelin-cli -- session submit-da-anchor-package \
@@ -264,10 +281,10 @@ separately, and the final readiness report aggregates them.
 Three things keep `production_ready` false until they're *all*
 done:
 
-1. **External DA production SLA receipt** with retention ≥ 30 days,
-   HTTPS endpoint, audit-log commitment.
-2. **Canonical threshold-lock enforcement** — verified authority
-   Cell with the declared threshold-lock args.
+1. **Provider-neutral DA certificate** with provider/fault-domain quorum,
+   sufficient retention, and recent signed retrieval probes.
+2. **Canonical CKB multisig enforcement** — verified authority Cell using
+   `secp256k1_blake160_multisig_all` and the exact transaction witness.
 3. **Deployed CKB court economics** — checked mainnet deployment
    evidence for the court verifier.
 
