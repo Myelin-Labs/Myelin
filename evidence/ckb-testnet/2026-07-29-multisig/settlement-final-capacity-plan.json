@@ -1,0 +1,17 @@
+{
+  "change_min_capacity_shannons": 9700000000,
+  "data2_code_hash": "0x2f7cc1d336b7a5bb7b7e8bfe9a34818cb6b375b82e18a8630b909eba03df3b76",
+  "data_bytes": 38628,
+  "data_hash": "0x2f7cc1d336b7a5bb7b7e8bfe9a34818cb6b375b82e18a8630b909eba03df3b76",
+  "data_source": "evidence/ckb-testnet/2026-07-29-multisig/settlement-final.elf",
+  "fee_shannons": 100000,
+  "funding_shortfall_shannons": 2942200500000,
+  "funding_sufficient": false,
+  "input_capacity_shannons": 939999600000,
+  "output_capacity_shannons": 3872500000000,
+  "output_min_capacity_shannons": 3872500000000,
+  "planning_only": true,
+  "required_capacity_shannons": 3882200100000,
+  "schema": "myelin-ckb-create-cell-plan-v1",
+  "secret_material_in_report": false
+}

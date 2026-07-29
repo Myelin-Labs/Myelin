@@ -34,13 +34,24 @@ trivial CellTx. The pure projection stage is `wire-encoded`.
 
 | Subcommand | What it does |
 | --- | --- |
+| `ckb generate-rehearsal-key` | Creates a disposable testnet secp256k1 key file with `0600` permissions and reports only its public identity. |
+| `ckb multisig-config` | Builds canonical ordered CKB multisig config bytes, the full config hash, and 20-byte lock args without exposing secret material. |
+| `ckb create-cell` | Plans or submits one-input transactions that create a Cell plus explicit change; supports local key files or external standard/multisig signatures. |
 | `ckb prove` | Resolves immutable CKB context, requires node validation, runs strict local VM, and optionally submits/observes the exact transaction. |
 | `ckb observe` | Advances node-accepted evidence through canonical commitment and configured-depth finality. |
 | `ckb verify` | Recomputes and verifies a serialized receipt chain offline, including the transaction Merkle proof. |
 
 Input may be Myelin `CellTx` JSON or exact CKB transaction JSON. The
 pure projector remains wire-only; these commands emit
-`CkbEvidenceProjection` receipts for higher stages.
+`CkbEvidenceProjection` receipts for higher stages. `observe` and `verify` also
+accept a `create-cell` report directly and read its nested exact transaction
+and evidence projection.
+
+`create-cell` never prints a private key. A local signing key must be supplied
+through a permission-restricted file; external signing uses the reported exact
+message and repeated 65-byte recoverable signatures. When capacity is
+insufficient, the command emits a planning-only report with the exact shortfall
+and does not construct a misleading deployable transaction.
 
 ## `committee` — finality engine
 
@@ -97,7 +108,7 @@ This is the largest subcommand surface. It maps 1:1 onto the
 
 | Flag | Used by | What it does |
 | --- | --- | --- |
-| `--consensus <kind>` | `open-fixture`, `commit-fixture` | `static-closed-committee` or `tendermint`. |
+| `--consensus <kind>` | `open-fixture`, `commit-fixture` | `static-closed-committee`, `proof-of-authority`, or `tendermint`. |
 | `--out <path>` | (most) | Where to write the report JSON. |
 | `--rpc-url <url>` | `submit-*`, `verify-submission-*` | CKB JSON-RPC endpoint. |
 | `--dry-run` | `submit-*` | Build the request without sending. |

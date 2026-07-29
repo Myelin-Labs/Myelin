@@ -15,12 +15,14 @@ use myelin_consensus::{
 use myelin_exec::{
     build_cell_tx_execution_report, celltx::compute_wtxid, ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule,
     ckb_cell_data_hash, ckb_script_hash_molecule, ckb_secp256k1_blake160_multisig_all_signing_message_molecule,
-    ckb_secp256k1_blake160_pubkey_hash, ckb_sign_secp256k1_blake160_multisig_all_molecule,
+    ckb_secp256k1_blake160_pubkey_hash, ckb_sighash_all_message_with_zeroed_witness_lock_molecule,
+    ckb_sign_secp256k1_blake160_multisig_all_molecule, ckb_sign_secp256k1_blake160_sighash_all_molecule,
     ckb_verify_secp256k1_blake160_multisig_all_molecule, ckb_verify_secp256k1_blake160_recoverable_signature,
-    deserialize_transaction_molecule, parse_ckb_dep_group_data, project_cell_tx_to_ckb, serialize_ckb_witness_args_molecule,
-    serialize_transaction_molecule, CellDep, CellInput, CellOutput, CellTx, CkbProjectionReport,
-    CkbSecp256k1Blake160MultisigAllConfig, CkbWitnessArgs, DepType, OutPoint, ProjectionStage, ResolvedCell, Script, ScriptVersion,
-    SimpleDataProvider, TransactionScriptVerifier, VmSemantics, CKB_SPAWN_IPC_SYSCALLS_ENABLED,
+    ckb_verify_secp256k1_blake160_sighash_all_molecule, deserialize_transaction_molecule, parse_ckb_dep_group_data,
+    project_cell_tx_to_ckb, serialize_ckb_witness_args_molecule, serialize_transaction_molecule, CellDep, CellInput, CellOutput,
+    CellTx, CkbProjectionReport, CkbSecp256k1Blake160MultisigAllConfig, CkbWitnessArgs, DepType, OutPoint, ProjectionStage,
+    ResolvedCell, Script, ScriptVersion, SimpleDataProvider, TransactionScriptVerifier, VmSemantics,
+    CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE, CKB_SPAWN_IPC_SYSCALLS_ENABLED,
 };
 use myelin_mempool::CellPool;
 use myelin_state::{
@@ -32,8 +34,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     fs,
-    io::{Read, Write},
-    net::TcpStream,
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -68,7 +68,7 @@ enum Commands {
     /// for the off-chain kernel surface.
     Runtime(RuntimeArgs),
     /// Evidence-staged projection through an authoritative CKB node.
-    Ckb(CkbArgs),
+    Ckb(Box<CkbArgs>),
     /// Finite Cell session L2 fixture commands.
     Session(SessionArgs),
 }
@@ -297,12 +297,147 @@ struct CkbArgs {
 
 #[derive(Debug, Subcommand)]
 enum CkbCommand {
+    /// Generate one disposable rehearsal key into a new mode-0600 file; never use for production custody.
+    GenerateRehearsalKey(CkbGenerateRehearsalKeyArgs),
+    /// Derive canonical CKB multisig witness configuration and lock args.
+    MultisigConfig(CkbMultisigConfigArgs),
+    /// Create one live Cell plus explicit change, with offline-capable standard or multisig signing.
+    CreateCell(Box<CkbCreateCellArgs>),
     /// Resolve, validate and strictly verify one exact transaction; optionally submit it.
     Prove(CkbProveArgs),
     /// Advance accepted evidence through committed inclusion and confirmation finality.
     Observe(CkbObserveArgs),
     /// Verify a serialized CKB evidence projection against its exact transaction.
     Verify(CkbVerifyArgs),
+}
+
+#[derive(Debug, Args)]
+struct CkbGenerateRehearsalKeyArgs {
+    /// New private JSON file. Refuses to overwrite an existing path.
+    #[arg(long)]
+    secret_out: PathBuf,
+    /// Human-readable network label recorded with the local secret.
+    #[arg(long, default_value = "ckb-testnet")]
+    network: String,
+    /// Optional public-only report path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct CkbMultisigConfigArgs {
+    /// Ordered CKB Blake160 participant pubkey hash. Repeat for each participant.
+    #[arg(long = "participant-pubkey-hash", conflicts_with = "participant_secret_key_files")]
+    participant_pubkey_hashes: Vec<String>,
+    /// Local secret-key file used only to derive a participant pubkey hash. The file may contain raw hex or a JSON private_key_hex field.
+    #[arg(long = "participant-secret-key-file", conflicts_with = "participant_pubkey_hashes")]
+    participant_secret_key_files: Vec<PathBuf>,
+    /// Required signature count.
+    #[arg(long)]
+    threshold: u8,
+    /// Number of leading participants whose signatures are mandatory.
+    #[arg(long, default_value_t = 0)]
+    require_first_n: u8,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct CkbCreateCellArgs {
+    /// Funding input transaction hash.
+    #[arg(long)]
+    input_tx_hash: String,
+    /// Funding input output index as a CKB hex quantity.
+    #[arg(long)]
+    input_index: String,
+    /// Exact funding input capacity in shannons.
+    #[arg(long)]
+    input_capacity_shannons: u64,
+    /// Funding input lock code hash.
+    #[arg(long)]
+    input_lock_code_hash: String,
+    /// Funding input lock hash type.
+    #[arg(long, default_value = "type")]
+    input_lock_hash_type: String,
+    /// Funding input lock args.
+    #[arg(long)]
+    input_lock_args: String,
+    /// Funding input lock dependency transaction hash.
+    #[arg(long)]
+    input_lock_dep_tx_hash: String,
+    /// Funding input lock dependency output index.
+    #[arg(long)]
+    input_lock_dep_index: String,
+    /// Funding input lock dependency kind.
+    #[arg(long, default_value = "dep_group")]
+    input_lock_dep_type: String,
+    /// Input signer: sighash-all or multisig-all.
+    #[arg(long, default_value = "sighash-all")]
+    input_lock_kind: String,
+    /// Created Cell lock code hash. Defaults to the input lock code hash.
+    #[arg(long)]
+    output_lock_code_hash: Option<String>,
+    /// Created Cell lock hash type. Defaults to the input lock hash type.
+    #[arg(long)]
+    output_lock_hash_type: Option<String>,
+    /// Created Cell lock args. Defaults to the input lock args.
+    #[arg(long)]
+    output_lock_args: Option<String>,
+    /// Created Cell data file.
+    #[arg(long, conflicts_with = "data_hex")]
+    data_file: Option<PathBuf>,
+    /// Created Cell data as hex.
+    #[arg(long, conflicts_with = "data_file", default_value = "0x")]
+    data_hex: String,
+    /// Created Cell capacity. Defaults to its conservative occupied-capacity minimum.
+    #[arg(long)]
+    output_capacity_shannons: Option<u64>,
+    /// Transaction fee in shannons.
+    #[arg(long, default_value_t = 100_000)]
+    fee_shannons: u64,
+    /// Ordered multisig participant Blake160 hash. Required for multisig-all input signing.
+    #[arg(long = "multisig-participant-pubkey-hash")]
+    multisig_participant_pubkey_hashes: Vec<String>,
+    /// Multisig threshold.
+    #[arg(long)]
+    multisig_threshold: Option<u8>,
+    /// Multisig leading mandatory signer count.
+    #[arg(long, default_value_t = 0)]
+    multisig_require_first_n: u8,
+    /// Local signer secret-key file. One for sighash-all; exactly threshold for multisig-all.
+    #[arg(long = "signer-secret-key-file", conflicts_with = "signatures")]
+    signer_secret_key_files: Vec<PathBuf>,
+    /// External 65-byte recoverable signature over the reported signing_message. Repeat for multisig threshold.
+    #[arg(long = "signature", conflicts_with = "signer_secret_key_files")]
+    signatures: Vec<String>,
+    /// CKB outputs validator argument.
+    #[arg(long, default_value = "passthrough")]
+    outputs_validator: String,
+    /// Public CKB JSON-RPC endpoint.
+    #[arg(long)]
+    rpc_url: Option<String>,
+    /// Submit after local signature and live-context verification.
+    #[arg(long)]
+    submit: bool,
+    /// Fail unless live RPC admission succeeds.
+    #[arg(long)]
+    require_accepted: bool,
+    /// Shared strict local CKB-VM cycle limit used by the evidence engine.
+    #[arg(long, default_value_t = 100_000_000)]
+    max_cycles: u64,
+    /// Stable-tip context resolution attempts before broadcast.
+    #[arg(long, default_value_t = 3)]
+    context_attempts: usize,
+    /// Maximum post-broadcast observations for NodeAccepted evidence.
+    #[arg(long, default_value_t = 30)]
+    poll_attempts: usize,
+    /// Delay between post-broadcast observations.
+    #[arg(long, default_value_t = 1_000)]
+    poll_interval_ms: u64,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -1191,6 +1326,21 @@ fn run() -> Result<()> {
             }
         },
         Commands::Ckb(args) => match args.command {
+            CkbCommand::GenerateRehearsalKey(args) => {
+                let out = args.out.clone();
+                let report = ckb_generate_rehearsal_key(args)?;
+                write_json(out, &report)
+            }
+            CkbCommand::MultisigConfig(args) => {
+                let out = args.out.clone();
+                let report = ckb_multisig_config(args)?;
+                write_json(out, &report)
+            }
+            CkbCommand::CreateCell(args) => {
+                let out = args.out.clone();
+                let report = ckb_create_cell(*args)?;
+                write_json(out, &report)
+            }
             CkbCommand::Prove(args) => {
                 let out = args.out.clone();
                 let report = ckb_prove(args)?;
@@ -1203,7 +1353,7 @@ fn run() -> Result<()> {
             }
             CkbCommand::Verify(args) => {
                 let tx = read_ckb_evidence_transaction(&args.transaction)?;
-                let evidence: CkbEvidenceProjection = serde_json::from_slice(&fs::read(&args.evidence)?)?;
+                let evidence = read_ckb_evidence_projection(&args.evidence)?;
                 verify_projection(&tx, &evidence)?;
                 write_json(
                     args.out,
@@ -1408,7 +1558,7 @@ fn ckb_prove(args: CkbProveArgs) -> Result<CkbEvidenceProjection> {
 
 fn ckb_observe(args: CkbObserveArgs) -> Result<CkbEvidenceProjection> {
     let tx = read_ckb_evidence_transaction(&args.transaction)?;
-    let mut evidence: CkbEvidenceProjection = serde_json::from_slice(&fs::read(&args.evidence)?)?;
+    let mut evidence = read_ckb_evidence_projection(&args.evidence)?;
     verify_projection(&tx, &evidence)?;
     let engine = CkbEvidenceEngine::new(HttpCkbRpc::new(args.rpc_url)?);
     let interval = Duration::from_millis(args.poll_interval_ms);
@@ -1427,12 +1577,475 @@ fn ckb_observe(args: CkbObserveArgs) -> Result<CkbEvidenceProjection> {
     Ok(evidence)
 }
 
+fn ckb_generate_rehearsal_key(args: CkbGenerateRehearsalKeyArgs) -> Result<Value> {
+    use std::io::Write as _;
+
+    if args.network.trim().is_empty() {
+        return Err(CliError::InvalidFixture("rehearsal key network label must be non-empty".to_owned()));
+    }
+    let mut rng = rand::rngs::OsRng;
+    let secret_key = SecretKey::new(&mut rng);
+    let secp = Secp256k1::new();
+    let public_key = PublicKey::from_secret_key(&secp, &secret_key).serialize();
+    let pubkey_hash = ckb_secp256k1_blake160_pubkey_hash(&public_key);
+    let secret_document = serde_json::json!({
+        "schema": "myelin-disposable-ckb-rehearsal-key-v1",
+        "network": args.network,
+        "private_key_hex": bytes_hex(&secret_key.secret_bytes()),
+        "public_key_compressed_hex": bytes_hex(&public_key),
+        "public_key_blake160": bytes_hex(&pubkey_hash),
+        "warning": "Disposable public-testnet rehearsal key only. Never use for mainnet or production custody."
+    });
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&args.secret_out)?;
+    file.write_all(&serde_json::to_vec_pretty(&secret_document)?)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(serde_json::json!({
+        "schema": "myelin-ckb-rehearsal-key-public-v1",
+        "network": secret_document["network"],
+        "secret_file": args.secret_out,
+        "public_key_compressed_hex": bytes_hex(&public_key),
+        "public_key_blake160": bytes_hex(&pubkey_hash),
+        "secret_material_in_report": false,
+        "production_custody_approved": false
+    }))
+}
+
+fn read_secret_key_file(path: &Path) -> Result<SecretKey> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            return Err(CliError::InvalidFixture(format!(
+                "secret-key file {} must not be readable or writable by group/other (expected mode 0600 or stricter)",
+                path.display()
+            )));
+        }
+    }
+    let contents = fs::read_to_string(path)?;
+    let value = serde_json::from_str::<Value>(&contents).ok();
+    let secret_hex = value.as_ref().and_then(|value| value.get("private_key_hex")).and_then(Value::as_str).unwrap_or(contents.trim());
+    let bytes: [u8; 32] = decode_hex_bytes(secret_hex)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| CliError::InvalidFixture(format!("secret-key file {} must contain exactly 32-byte hex", path.display())))?;
+    SecretKey::from_slice(&bytes).map_err(|_| CliError::InvalidFixture(format!("secret-key file {} is invalid", path.display())))
+}
+
+fn ckb_blake160_arg(value: &str, field: &str) -> Result<[u8; 20]> {
+    decode_hex_bytes(value)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| CliError::InvalidFixture(format!("{field} must be exactly 20-byte hex")))
+}
+
+fn ckb_multisig_config(args: CkbMultisigConfigArgs) -> Result<Value> {
+    if args.participant_pubkey_hashes.is_empty() == args.participant_secret_key_files.is_empty() {
+        return Err(CliError::InvalidFixture(
+            "provide exactly one of --participant-pubkey-hash or --participant-secret-key-file".to_owned(),
+        ));
+    }
+    let participants = if args.participant_secret_key_files.is_empty() {
+        args.participant_pubkey_hashes
+            .iter()
+            .map(|value| ckb_blake160_arg(value, "participant-pubkey-hash"))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        let secp = Secp256k1::new();
+        args.participant_secret_key_files
+            .iter()
+            .map(|path| {
+                let key = read_secret_key_file(path)?;
+                Ok(ckb_secp256k1_blake160_pubkey_hash(&PublicKey::from_secret_key(&secp, &key).serialize()))
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    let config = CkbSecp256k1Blake160MultisigAllConfig::new(args.require_first_n, args.threshold, participants)
+        .map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    Ok(serde_json::json!({
+        "schema": "myelin-ckb-multisig-config-v1",
+        "scheme": "secp256k1_blake160_multisig_all",
+        "require_first_n": config.require_first_n(),
+        "threshold": config.threshold(),
+        "participant_pubkey_hashes": config.pubkey_hashes().iter().map(|hash| bytes_hex(hash)).collect::<Vec<_>>(),
+        "witness_config": bytes_hex(&config.witness_config()),
+        "config_hash": byte32_hex(&config.config_hash()),
+        "lock_args": bytes_hex(&config.lock_args()),
+        "secret_material_in_report": false
+    }))
+}
+
+fn parse_recoverable_signatures(values: &[String], expected: usize, field: &str) -> Result<Vec<[u8; 65]>> {
+    if values.len() != expected {
+        return Err(CliError::InvalidFixture(format!("{field} requires exactly {expected} signatures, got {}", values.len())));
+    }
+    values
+        .iter()
+        .map(|value| {
+            decode_hex_bytes(value)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| CliError::InvalidFixture(format!("{field} entries must be exactly 65-byte hex")))
+        })
+        .collect()
+}
+
+fn ckb_create_cell(args: CkbCreateCellArgs) -> Result<Value> {
+    if args.outputs_validator.trim().is_empty() {
+        return Err(CliError::InvalidFixture("outputs-validator must be non-empty".to_owned()));
+    }
+    if args.submit && args.outputs_validator != "passthrough" {
+        return Err(CliError::InvalidFixture(
+            "evidence-backed create-cell submission currently requires --outputs-validator passthrough".to_owned(),
+        ));
+    }
+    if args.submit && args.rpc_url.is_none() {
+        return Err(CliError::InvalidFixture("ckb create-cell requires --rpc-url when --submit is set".to_owned()));
+    }
+    let input_tx_hash = normalize_ckb_tx_hash(&args.input_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("input-tx-hash must be 32-byte hex".to_owned()))?;
+    let input_tx_hash_bytes = ckb_byte32_arg(&input_tx_hash, "input-tx-hash")?;
+    let input_index = ckb_quantity_arg(&args.input_index, "input-index")?;
+    let input_index_u32 = ckb_quantity_index_arg(&input_index, "input-index")?;
+    let input_lock_code_hash = normalize_ckb_tx_hash(&args.input_lock_code_hash)
+        .ok_or_else(|| CliError::InvalidFixture("input-lock-code-hash must be 32-byte hex".to_owned()))?;
+    let input_lock_code_hash_bytes = ckb_byte32_arg(&input_lock_code_hash, "input-lock-code-hash")?;
+    let input_lock_hash_type = ckb_script_hash_type_arg(&args.input_lock_hash_type, "input-lock-hash-type")?;
+    let input_lock_args = normalize_hex_arg(&args.input_lock_args, "input-lock-args")?;
+    let input_lock_args_bytes = decode_hex_bytes(&input_lock_args).expect("normalized hex decodes");
+    let input_lock_dep_tx_hash = normalize_ckb_tx_hash(&args.input_lock_dep_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("input-lock-dep-tx-hash must be 32-byte hex".to_owned()))?;
+    let input_lock_dep_tx_hash_bytes = ckb_byte32_arg(&input_lock_dep_tx_hash, "input-lock-dep-tx-hash")?;
+    let input_lock_dep_index = ckb_quantity_arg(&args.input_lock_dep_index, "input-lock-dep-index")?;
+    let input_lock_dep_index_u32 = ckb_quantity_index_arg(&input_lock_dep_index, "input-lock-dep-index")?;
+    let input_lock_dep_type = match args.input_lock_dep_type.as_str() {
+        "code" => DepType::Code,
+        "dep_group" | "dep-group" => DepType::DepGroup,
+        other => {
+            return Err(CliError::InvalidFixture(format!("unsupported input-lock-dep-type: {other}; expected code or dep_group")));
+        }
+    };
+    let output_lock_code_hash = args.output_lock_code_hash.as_deref().unwrap_or(&input_lock_code_hash);
+    let output_lock_code_hash = normalize_ckb_tx_hash(output_lock_code_hash)
+        .ok_or_else(|| CliError::InvalidFixture("output-lock-code-hash must be 32-byte hex".to_owned()))?;
+    let output_lock_code_hash_bytes = ckb_byte32_arg(&output_lock_code_hash, "output-lock-code-hash")?;
+    let output_lock_hash_type_label = args.output_lock_hash_type.as_deref().unwrap_or(&args.input_lock_hash_type);
+    let output_lock_hash_type = ckb_script_hash_type_arg(output_lock_hash_type_label, "output-lock-hash-type")?;
+    let output_lock_args = normalize_hex_arg(args.output_lock_args.as_deref().unwrap_or(&input_lock_args), "output-lock-args")?;
+    let output_lock_args_bytes = decode_hex_bytes(&output_lock_args).expect("normalized hex decodes");
+    let data = match args.data_file.as_deref() {
+        Some(path) => fs::read(path)?,
+        None => decode_hex_bytes(&args.data_hex).ok_or_else(|| CliError::InvalidFixture("data-hex must be valid hex".to_owned()))?,
+    };
+    let data_source = args.data_file.as_ref().map(|path| path.display().to_string()).unwrap_or_else(|| "inline-hex".to_owned());
+    let output_min_capacity_shannons = ckb_output_min_capacity_shannons(output_lock_args_bytes.len(), None, data.len())?;
+    let output_capacity_shannons = args.output_capacity_shannons.unwrap_or(output_min_capacity_shannons);
+    if output_capacity_shannons < output_min_capacity_shannons {
+        return Err(CliError::InvalidFixture(format!(
+            "created Cell capacity {output_capacity_shannons} is below conservative occupied-capacity minimum {output_min_capacity_shannons}"
+        )));
+    }
+    let change_min_capacity_shannons = ckb_output_min_capacity_shannons(input_lock_args_bytes.len(), None, 0)?;
+    let required_capacity_shannons = output_capacity_shannons
+        .checked_add(change_min_capacity_shannons)
+        .and_then(|value| value.checked_add(args.fee_shannons))
+        .ok_or_else(|| CliError::InvalidFixture("create-cell required capacity overflow".to_owned()))?;
+    let funding_sufficient = args.input_capacity_shannons >= required_capacity_shannons;
+    let funding_shortfall_shannons = required_capacity_shannons.saturating_sub(args.input_capacity_shannons);
+    let data_hash = ckb_cell_data_hash(&data);
+    if !funding_sufficient {
+        if args.submit {
+            return Err(CliError::InvalidFixture(format!(
+                "funding input is short by {funding_shortfall_shannons} shannons; refusing live submission"
+            )));
+        }
+        return Ok(serde_json::json!({
+            "schema": "myelin-ckb-create-cell-plan-v1",
+            "planning_only": true,
+            "funding_sufficient": false,
+            "funding_shortfall_shannons": funding_shortfall_shannons,
+            "input_capacity_shannons": args.input_capacity_shannons,
+            "required_capacity_shannons": required_capacity_shannons,
+            "output_capacity_shannons": output_capacity_shannons,
+            "output_min_capacity_shannons": output_min_capacity_shannons,
+            "change_min_capacity_shannons": change_min_capacity_shannons,
+            "fee_shannons": args.fee_shannons,
+            "data_source": data_source,
+            "data_bytes": data.len(),
+            "data_hash": byte32_hex(&data_hash),
+            "data2_code_hash": byte32_hex(&data_hash),
+            "secret_material_in_report": false
+        }));
+    }
+    let change_capacity_shannons = args.input_capacity_shannons - output_capacity_shannons - args.fee_shannons;
+    let input_lock_script = Script::new(input_lock_code_hash_bytes, input_lock_hash_type, input_lock_args_bytes.clone());
+    let output_lock_script = Script::new(output_lock_code_hash_bytes, output_lock_hash_type, output_lock_args_bytes);
+    let input = CellInput::new(OutPoint::new(input_tx_hash_bytes, input_index_u32), 0);
+    let lock_dep =
+        CellDep { out_point: OutPoint::new(input_lock_dep_tx_hash_bytes, input_lock_dep_index_u32), dep_type: input_lock_dep_type };
+    let input_kind = args.input_lock_kind.as_str();
+    let canonical_multisig = match input_kind {
+        "sighash-all" => {
+            if !args.multisig_participant_pubkey_hashes.is_empty()
+                || args.multisig_threshold.is_some()
+                || args.multisig_require_first_n != 0
+            {
+                return Err(CliError::InvalidFixture(
+                    "multisig configuration is only valid with --input-lock-kind multisig-all".to_owned(),
+                ));
+            }
+            None
+        }
+        "multisig-all" => {
+            let threshold = args
+                .multisig_threshold
+                .ok_or_else(|| CliError::InvalidFixture("multisig-all requires --multisig-threshold".to_owned()))?;
+            let participants = args
+                .multisig_participant_pubkey_hashes
+                .iter()
+                .map(|value| ckb_blake160_arg(value, "multisig-participant-pubkey-hash"))
+                .collect::<Result<Vec<_>>>()?;
+            let config = CkbSecp256k1Blake160MultisigAllConfig::new(args.multisig_require_first_n, threshold, participants)
+                .map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+            if config.lock_args().as_slice() != input_lock_args_bytes.as_slice() {
+                return Err(CliError::InvalidFixture(
+                    "canonical multisig config does not match the funding input lock args".to_owned(),
+                ));
+            }
+            Some(config)
+        }
+        other => {
+            return Err(CliError::InvalidFixture(format!(
+                "unsupported input-lock-kind: {other}; expected sighash-all or multisig-all"
+            )));
+        }
+    };
+    let base_witness = CkbWitnessArgs::new(None, None, None);
+    let initial_witness = match canonical_multisig.as_ref() {
+        Some(multisig) => serialize_ckb_witness_args_molecule(&multisig.placeholder_witness(None, None)),
+        None => serialize_ckb_witness_args_molecule(&base_witness.with_zeroed_lock(CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE)),
+    }
+    .map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let mut tx = CellTx::new(
+        vec![input],
+        vec![lock_dep],
+        vec![
+            CellOutput { capacity: output_capacity_shannons, lock: output_lock_script, type_: None },
+            CellOutput { capacity: change_capacity_shannons, lock: input_lock_script, type_: None },
+        ],
+        vec![data, vec![]],
+        vec![initial_witness],
+    )
+    .map_err(|error| CliError::InvalidFixture(format!("create-cell transaction construction failed: {error}")))?;
+    tx.version = 0;
+    let signing_message = match canonical_multisig.as_ref() {
+        Some(multisig) => ckb_secp256k1_blake160_multisig_all_signing_message_molecule(&tx, multisig, &base_witness, &[]),
+        None => ckb_sighash_all_message_with_zeroed_witness_lock_molecule(
+            &tx,
+            &base_witness,
+            CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE,
+            &[],
+        ),
+    }
+    .map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let mut locally_verified = false;
+    let mut signature_count = 0usize;
+    if !args.signer_secret_key_files.is_empty() || !args.signatures.is_empty() {
+        let signed_witness = if let Some(multisig) = canonical_multisig.as_ref() {
+            let signatures = if args.signer_secret_key_files.is_empty() {
+                parse_recoverable_signatures(&args.signatures, usize::from(multisig.threshold()), "multisig-all")?
+            } else {
+                if args.signer_secret_key_files.len() != usize::from(multisig.threshold()) {
+                    return Err(CliError::InvalidFixture(format!(
+                        "multisig-all requires exactly {} signer secret-key files, got {}",
+                        multisig.threshold(),
+                        args.signer_secret_key_files.len()
+                    )));
+                }
+                args.signer_secret_key_files
+                    .iter()
+                    .map(|path| {
+                        let key = read_secret_key_file(path)?;
+                        ckb_sign_secp256k1_blake160_multisig_all_molecule(&tx, multisig, &base_witness, &key, &[])
+                            .map_err(|error| CliError::InvalidFixture(error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            };
+            signature_count = signatures.len();
+            ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule(&tx, multisig, &base_witness, &signatures, &[])
+                .map_err(|error| CliError::InvalidFixture(error.to_string()))?
+        } else {
+            let witness = if args.signer_secret_key_files.is_empty() {
+                let signature = parse_recoverable_signatures(&args.signatures, 1, "sighash-all")?[0];
+                CkbWitnessArgs::new(Some(signature.to_vec()), None, None)
+            } else {
+                if args.signer_secret_key_files.len() != 1 {
+                    return Err(CliError::InvalidFixture(format!(
+                        "sighash-all requires exactly one signer secret-key file, got {}",
+                        args.signer_secret_key_files.len()
+                    )));
+                }
+                let key = read_secret_key_file(&args.signer_secret_key_files[0])?;
+                let secp = Secp256k1::new();
+                let pubkey_hash = ckb_secp256k1_blake160_pubkey_hash(&PublicKey::from_secret_key(&secp, &key).serialize());
+                if pubkey_hash.as_slice() != input_lock_args_bytes.as_slice() {
+                    return Err(CliError::InvalidFixture("sighash-all signer does not match the funding input lock args".to_owned()));
+                }
+                ckb_sign_secp256k1_blake160_sighash_all_molecule(&tx, &base_witness, &key, &[])
+                    .map_err(|error| CliError::InvalidFixture(error.to_string()))?
+            };
+            signature_count = 1;
+            witness
+        };
+        locally_verified = match canonical_multisig.as_ref() {
+            Some(multisig) => {
+                ckb_verify_secp256k1_blake160_multisig_all_molecule(&multisig.lock_args(), &tx, multisig, &signed_witness, &[])
+            }
+            None => {
+                let expected: [u8; 20] = input_lock_args_bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CliError::InvalidFixture("sighash-all input lock args must be exactly 20 bytes".to_owned()))?;
+                ckb_verify_secp256k1_blake160_sighash_all_molecule(&expected, &tx, &signed_witness, &[])
+            }
+        }
+        .map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+        if !locally_verified {
+            return Err(CliError::InvalidFixture("assembled CKB witness failed local verification".to_owned()));
+        }
+        tx.witnesses[0] =
+            serialize_ckb_witness_args_molecule(&signed_witness).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    }
+    if args.submit && !locally_verified {
+        return Err(CliError::InvalidFixture(
+            "live create-cell submission requires a locally verified signature over the exact signing_message".to_owned(),
+        ));
+    }
+    let projection = project_cell_tx_to_ckb(&tx);
+    let expected_tx_hash = projection
+        .ckb_raw_tx_hash
+        .map(|hash| byte32_hex(&hash))
+        .ok_or_else(|| CliError::InvalidFixture("create-cell CKB raw transaction hash failed".to_owned()))?;
+    let tx_json = ckb_json_transaction(&tx)?;
+    let mut ckb_evidence_projection = None;
+    if args.submit {
+        let rpc_url = args.rpc_url.as_deref().expect("submit requires RPC URL");
+        let input_preflight = check_live_cell_preflight(
+            rpc_url,
+            "create-cell input",
+            tx_json.pointer("/inputs/0/previous_output").expect("created transaction input"),
+        )?;
+        let input_matches = input_preflight.live
+            && input_preflight.capacity == Some(args.input_capacity_shannons)
+            && input_preflight.lock_code_hash.as_deref() == Some(input_lock_code_hash.as_str())
+            && input_preflight.lock_hash_type.as_deref() == Some(args.input_lock_hash_type.as_str())
+            && input_preflight.lock_args.as_deref() == Some(input_lock_args.as_str());
+        if !input_matches {
+            return Err(CliError::InvalidFixture("create-cell funding input live state, capacity, or lock does not match".to_owned()));
+        }
+        let dep_preflight = check_live_cell_preflight(
+            rpc_url,
+            "create-cell lock dep",
+            tx_json.pointer("/cell_deps/0/out_point").expect("created transaction dep"),
+        )?;
+        if !dep_preflight.live {
+            return Err(CliError::InvalidFixture("create-cell input lock dependency is not live".to_owned()));
+        }
+        let engine = CkbEvidenceEngine::new(HttpCkbRpc::new(rpc_url)?);
+        let context = engine.resolve_context(&tx, args.context_attempts)?;
+        let verified = engine.validate_and_verify(&tx, context, args.max_cycles)?;
+        let accepted = engine.submit_and_observe(&tx, verified, args.poll_attempts, Duration::from_millis(args.poll_interval_ms))?;
+        if args.require_accepted && accepted.stage != ProjectionStage::NodeAccepted {
+            return Err(CliError::InvalidFixture("CKB evidence engine did not reach NodeAccepted".to_owned()));
+        }
+        ckb_evidence_projection = Some(accepted);
+    }
+    let accepted = ckb_evidence_projection.as_ref().is_some_and(|evidence| evidence.stage >= ProjectionStage::NodeAccepted);
+    let rpc_admission = ckb_evidence_projection.as_ref().map(|evidence| {
+        let node = evidence.node.as_ref().expect("NodeAccepted evidence has node receipt");
+        serde_json::json!({
+            "schema": "myelin-ckb-evidence-backed-admission-v1",
+            "full_node_validated": true,
+            "pool_accept_result": {
+                "cycles": quantity_hex(evidence.consensus.cycles),
+                "fee": quantity_hex(evidence.consensus.fee)
+            },
+            "submitted_hash_matches": node.submitted_tx_hash == evidence.raw_tx_hash,
+            "observed_status": node.observed_status,
+            "transaction_observed": true,
+            "accepted": evidence.stage >= ProjectionStage::NodeAccepted,
+            "node_receipt_commitment": byte32_hex(&node.receipt_commitment)
+        })
+    });
+    let created_out_point = serde_json::json!({ "tx_hash": expected_tx_hash, "index": "0x0" });
+    let change_out_point = serde_json::json!({ "tx_hash": expected_tx_hash, "index": "0x1" });
+    Ok(serde_json::json!({
+        "schema": "myelin-ckb-create-cell-v1",
+        "planning_only": false,
+        "funding_sufficient": true,
+        "funding_shortfall_shannons": 0,
+        "input_capacity_shannons": args.input_capacity_shannons,
+        "required_capacity_shannons": required_capacity_shannons,
+        "fee_shannons": args.fee_shannons,
+        "input_lock_kind": input_kind,
+        "input_lock": {
+            "code_hash": input_lock_code_hash,
+            "hash_type": args.input_lock_hash_type,
+            "args": input_lock_args,
+            "code_dep": { "tx_hash": input_lock_dep_tx_hash, "index": input_lock_dep_index, "dep_type": args.input_lock_dep_type }
+        },
+        "created_cell": {
+            "out_point": created_out_point,
+            "capacity_shannons": output_capacity_shannons,
+            "minimum_capacity_shannons": output_min_capacity_shannons,
+            "lock": { "code_hash": output_lock_code_hash, "hash_type": output_lock_hash_type_label, "args": output_lock_args },
+            "data_source": data_source,
+            "data_bytes": tx.outputs_data[0].len(),
+            "data_hash": byte32_hex(&data_hash),
+            "data2_code_hash": byte32_hex(&data_hash)
+        },
+        "change_cell": {
+            "out_point": change_out_point,
+            "capacity_shannons": change_capacity_shannons,
+            "minimum_capacity_shannons": change_min_capacity_shannons
+        },
+        "signing": {
+            "signing_message": byte32_hex(&signing_message),
+            "signature_count": signature_count,
+            "locally_verified": locally_verified,
+            "external_signing_required": !locally_verified,
+            "secret_key_file_count": args.signer_secret_key_files.len(),
+            "secret_material_in_report": false
+        },
+        "ckb_raw_tx_hash": expected_tx_hash,
+        "ckb_wtx_hash": projection.ckb_wtx_hash.map(|hash| byte32_hex(&hash)),
+        "ckb_transaction_json": tx_json,
+        "rpc_url": args.rpc_url,
+        "submitted_to_rpc": args.submit,
+        "accepted_by_rpc": accepted,
+        "rpc_admission": rpc_admission,
+        "ckb_evidence_projection": ckb_evidence_projection
+    }))
+}
+
 fn read_ckb_evidence_transaction(path: &Path) -> Result<CellTx> {
     let value: Value = serde_json::from_slice(&fs::read(path)?)?;
-    match serde_json::from_value::<CellTx>(value.clone()) {
+    let transaction = value.get("ckb_transaction_json").cloned().unwrap_or(value);
+    match serde_json::from_value::<CellTx>(transaction.clone()) {
         Ok(tx) => Ok(tx),
-        Err(_) => parse_ckb_json_transaction(&value).map_err(Into::into),
+        Err(_) => parse_ckb_json_transaction(&transaction).map_err(Into::into),
     }
+}
+
+fn read_ckb_evidence_projection(path: &Path) -> Result<CkbEvidenceProjection> {
+    let value: Value = serde_json::from_slice(&fs::read(path)?)?;
+    let projection = value.get("ckb_evidence_projection").filter(|projection| !projection.is_null()).cloned().unwrap_or(value);
+    Ok(serde_json::from_value(projection)?)
 }
 
 fn write_json<T: Serialize>(path: Option<PathBuf>, value: &T) -> Result<()> {
@@ -12521,73 +13134,24 @@ fn validate_rpc_admission_evidence(value: &Value, expected_ckb_tx_hash: &str) ->
 }
 
 fn post_json_rpc(url: &str, request: &Value) -> Result<Value> {
-    let endpoint = parse_http_url(url)?;
-    let body = serde_json::to_vec(request)?;
-    let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(15)))?;
-    let http_request = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        endpoint.path,
-        endpoint.host_header(),
-        body.len()
-    );
-    stream.write_all(http_request.as_bytes())?;
-    stream.write_all(&body)?;
-    stream.flush()?;
-
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
-    let response_text =
-        String::from_utf8(response).map_err(|error| CliError::InvalidFixture(format!("CKB RPC response is not UTF-8: {error}")))?;
-    let (head, body) = response_text
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| CliError::InvalidFixture("CKB RPC response missing HTTP header/body separator".to_owned()))?;
-    let status = head.lines().next().unwrap_or_default();
-    if !status.contains(" 200 ") {
-        return Err(CliError::InvalidFixture(format!("CKB RPC HTTP request failed: {status}")));
+    let endpoint = reqwest::Url::parse(url).map_err(|error| CliError::InvalidFixture(format!("invalid CKB RPC URL: {error}")))?;
+    if !matches!(endpoint.scheme(), "http" | "https") {
+        return Err(CliError::InvalidFixture("CKB RPC URL must use http or https".to_owned()));
     }
-    serde_json::from_str(body).map_err(CliError::from)
-}
-
-#[derive(Debug)]
-struct HttpEndpoint {
-    host: String,
-    port: u16,
-    path: String,
-}
-
-impl HttpEndpoint {
-    fn host_header(&self) -> String {
-        if self.port == 80 {
-            self.host.clone()
-        } else {
-            format!("{}:{}", self.host, self.port)
-        }
-    }
-}
-
-fn parse_http_url(url: &str) -> Result<HttpEndpoint> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| CliError::InvalidFixture("only plain http:// CKB RPC URLs are supported".to_owned()))?;
-    let (authority, path) = match rest.split_once('/') {
-        Some((authority, path)) => (authority, format!("/{path}")),
-        None => (rest, "/".to_owned()),
-    };
-    if authority.is_empty() {
-        return Err(CliError::InvalidFixture("CKB RPC URL host is empty".to_owned()));
-    }
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port)) if !host.is_empty() => {
-            let port =
-                port.parse::<u16>().map_err(|error| CliError::InvalidFixture(format!("CKB RPC URL port is invalid: {error}")))?;
-            (host.to_owned(), port)
-        }
-        Some(_) => return Err(CliError::InvalidFixture("CKB RPC URL host is empty".to_owned())),
-        None => (authority.to_owned(), 80),
-    };
-    Ok(HttpEndpoint { host, port, path })
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| CliError::InvalidFixture(format!("cannot build CKB RPC client: {error}")))?;
+    client
+        .post(endpoint)
+        .json(request)
+        .send()
+        .map_err(|error| CliError::InvalidFixture(format!("CKB RPC request failed: {error:?}")))?
+        .error_for_status()
+        .map_err(|error| CliError::InvalidFixture(format!("CKB RPC HTTP request failed: {error:?}")))?
+        .json::<Value>()
+        .map_err(|error| CliError::InvalidFixture(format!("CKB RPC response is not valid JSON: {error:?}")))
 }
 
 fn verify_session_finality_checks(
@@ -19747,5 +20311,181 @@ mod tests {
         let err = runtime_smoke("not-a-real-engine").expect_err("must reject unknown");
         let msg = format!("{err}");
         assert!(msg.contains("unknown consensus engine"), "got: {msg}");
+    }
+
+    fn write_test_secret_key(label: &str, byte: u8) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("myelin-{label}-{}-{byte:02x}.json", std::process::id()));
+        std::fs::write(&path, serde_json::json!({ "private_key_hex": format!("0x{}", hex::encode([byte; 32])) }).to_string())
+            .expect("write test secret key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod test secret key");
+        }
+        path
+    }
+
+    fn create_cell_args(input_lock_args: String) -> CkbCreateCellArgs {
+        CkbCreateCellArgs {
+            input_tx_hash: format!("0x{}", "91".repeat(32)),
+            input_index: "0x0".to_owned(),
+            input_capacity_shannons: 100_000_000_000,
+            input_lock_code_hash: format!("0x{}", "92".repeat(32)),
+            input_lock_hash_type: "type".to_owned(),
+            input_lock_args,
+            input_lock_dep_tx_hash: format!("0x{}", "93".repeat(32)),
+            input_lock_dep_index: "0x0".to_owned(),
+            input_lock_dep_type: "dep_group".to_owned(),
+            input_lock_kind: "sighash-all".to_owned(),
+            output_lock_code_hash: None,
+            output_lock_hash_type: None,
+            output_lock_args: None,
+            data_file: None,
+            data_hex: "0x010203".to_owned(),
+            output_capacity_shannons: None,
+            fee_shannons: 100_000,
+            multisig_participant_pubkey_hashes: Vec::new(),
+            multisig_threshold: None,
+            multisig_require_first_n: 0,
+            signer_secret_key_files: Vec::new(),
+            signatures: Vec::new(),
+            outputs_validator: "passthrough".to_owned(),
+            rpc_url: None,
+            submit: false,
+            require_accepted: false,
+            max_cycles: 100_000_000,
+            context_attempts: 3,
+            poll_attempts: 30,
+            poll_interval_ms: 1_000,
+            out: None,
+        }
+    }
+
+    #[test]
+    fn ckb_generate_rehearsal_key_creates_new_private_file_and_public_only_report() {
+        let path = std::env::temp_dir().join(format!("myelin-generated-rehearsal-key-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let report = ckb_generate_rehearsal_key(CkbGenerateRehearsalKeyArgs {
+            secret_out: path.clone(),
+            network: "ckb-testnet".to_owned(),
+            out: None,
+        })
+        .expect("generate rehearsal key");
+        let secret: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read secret key file")).expect("parse secret key file");
+        assert_eq!(report["schema"], "myelin-ckb-rehearsal-key-public-v1");
+        assert_eq!(report["secret_material_in_report"], false);
+        assert_eq!(report["production_custody_approved"], false);
+        assert_eq!(secret["schema"], "myelin-disposable-ckb-rehearsal-key-v1");
+        assert_eq!(secret["public_key_blake160"], report["public_key_blake160"]);
+        assert!(secret["private_key_hex"].as_str().is_some_and(|value| value.len() == 66));
+        let serialized_report = serde_json::to_string(&report).expect("serialize report");
+        assert!(!serialized_report.contains(secret["private_key_hex"].as_str().expect("secret hex")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).expect("secret metadata").permissions().mode() & 0o777, 0o600);
+        }
+        let overwrite = ckb_generate_rehearsal_key(CkbGenerateRehearsalKeyArgs {
+            secret_out: path.clone(),
+            network: "ckb-testnet".to_owned(),
+            out: None,
+        });
+        assert!(overwrite.is_err(), "existing secret file must never be overwritten");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ckb_multisig_config_from_private_files_never_reports_secrets() {
+        let key_a = write_test_secret_key("multisig-config-a", 0x31);
+        let key_b = write_test_secret_key("multisig-config-b", 0x32);
+        let key_c = write_test_secret_key("multisig-config-c", 0x33);
+        let report = ckb_multisig_config(CkbMultisigConfigArgs {
+            participant_pubkey_hashes: Vec::new(),
+            participant_secret_key_files: vec![key_a.clone(), key_b.clone(), key_c.clone()],
+            threshold: 2,
+            require_first_n: 1,
+            out: None,
+        })
+        .expect("derive multisig config");
+        for path in [key_a, key_b, key_c] {
+            let _ = std::fs::remove_file(path);
+        }
+        assert_eq!(report["schema"], "myelin-ckb-multisig-config-v1");
+        assert_eq!(report["threshold"], 2);
+        assert_eq!(report["require_first_n"], 1);
+        assert_eq!(report["participant_pubkey_hashes"].as_array().expect("participants").len(), 3);
+        assert_eq!(report["lock_args"].as_str().expect("lock args").len(), 42);
+        assert_eq!(report["secret_material_in_report"], false);
+        let serialized = serde_json::to_string(&report).expect("serialize report");
+        assert!(!serialized.contains(&"31".repeat(32)));
+        assert!(!serialized.contains(&"32".repeat(32)));
+        assert!(!serialized.contains(&"33".repeat(32)));
+    }
+
+    #[test]
+    fn ckb_create_cell_signs_standard_sighash_without_reporting_secret() {
+        let key_path = write_test_secret_key("create-cell-sighash", 0x41);
+        let key = read_secret_key_file(&key_path).expect("read key");
+        let secp = Secp256k1::new();
+        let lock_args = bytes_hex(&ckb_secp256k1_blake160_pubkey_hash(&PublicKey::from_secret_key(&secp, &key).serialize()));
+        let mut args = create_cell_args(lock_args);
+        args.signer_secret_key_files = vec![key_path.clone()];
+        let report = ckb_create_cell(args).expect("create standard signed Cell");
+        let _ = std::fs::remove_file(key_path);
+        assert_eq!(report["schema"], "myelin-ckb-create-cell-v1");
+        assert_eq!(report["signing"]["locally_verified"], true);
+        assert_eq!(report["signing"]["signature_count"], 1);
+        assert_eq!(report["signing"]["secret_material_in_report"], false);
+        assert_eq!(report["created_cell"]["data_bytes"], 3);
+        assert_eq!(report["submitted_to_rpc"], false);
+    }
+
+    #[test]
+    fn ckb_create_cell_signs_and_orders_canonical_multisig() {
+        let key_a = write_test_secret_key("create-cell-multisig-a", 0x51);
+        let key_b = write_test_secret_key("create-cell-multisig-b", 0x52);
+        let key_c = write_test_secret_key("create-cell-multisig-c", 0x53);
+        let secp = Secp256k1::new();
+        let keys = [
+            read_secret_key_file(&key_a).expect("key a"),
+            read_secret_key_file(&key_b).expect("key b"),
+            read_secret_key_file(&key_c).expect("key c"),
+        ];
+        let participants = keys
+            .iter()
+            .map(|key| ckb_secp256k1_blake160_pubkey_hash(&PublicKey::from_secret_key(&secp, key).serialize()))
+            .collect::<Vec<_>>();
+        let config = CkbSecp256k1Blake160MultisigAllConfig::new(0, 2, participants.clone()).expect("multisig config");
+        let mut args = create_cell_args(bytes_hex(&config.lock_args()));
+        args.input_lock_kind = "multisig-all".to_owned();
+        args.multisig_participant_pubkey_hashes = participants.iter().map(|hash| bytes_hex(hash)).collect();
+        args.multisig_threshold = Some(2);
+        args.output_lock_args = Some(format!("0x{}", "61".repeat(20)));
+        args.signer_secret_key_files = vec![key_c.clone(), key_a.clone()];
+        let report = ckb_create_cell(args).expect("create multisig signed Cell");
+        for path in [key_a, key_b, key_c] {
+            let _ = std::fs::remove_file(path);
+        }
+        assert_eq!(report["input_lock_kind"], "multisig-all");
+        assert_eq!(report["signing"]["locally_verified"], true);
+        assert_eq!(report["signing"]["signature_count"], 2);
+        assert_eq!(report["created_cell"]["lock"]["args"], format!("0x{}", "61".repeat(20)));
+    }
+
+    #[test]
+    fn ckb_create_cell_reports_cellscript_deployment_capacity_shortfall() {
+        let artifact = std::env::temp_dir().join(format!("myelin-capacity-plan-{}.elf", std::process::id()));
+        std::fs::write(&artifact, vec![0x7f; 38_628]).expect("write representative CellScript artifact");
+        let mut args = create_cell_args(format!("0x{}", "71".repeat(20)));
+        args.input_capacity_shannons = 999_999_900_000;
+        args.data_file = Some(artifact.clone());
+        let report = ckb_create_cell(args).expect("capacity planning report");
+        let _ = std::fs::remove_file(artifact);
+        assert_eq!(report["schema"], "myelin-ckb-create-cell-plan-v1");
+        assert_eq!(report["planning_only"], true);
+        assert_eq!(report["funding_sufficient"], false);
+        assert!(report["funding_shortfall_shannons"].as_u64().expect("shortfall") > 0);
+        assert_eq!(report["data_bytes"], 38_628);
     }
 }

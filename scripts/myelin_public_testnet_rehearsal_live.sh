@@ -87,7 +87,7 @@ myelin() {
   if [[ -n "${MYELIN_BIN:-}" ]]; then
     "${MYELIN_BIN}" "$@"
   else
-    cargo run -q -p myelin-cli -- "$@"
+    cargo run --locked -q -p myelin-cli -- "$@"
   fi
 }
 

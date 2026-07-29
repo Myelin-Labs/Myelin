@@ -1,0 +1,187 @@
+{
+  "accepted_by_rpc": true,
+  "change_cell": {
+    "capacity_shannons": 9999900000,
+    "minimum_capacity_shannons": 9700000000,
+    "out_point": {
+      "index": "0x1",
+      "tx_hash": "0xe0ddab558cda05a8a4cab8ec5dcc5323520a2e6e3c70ee84d2071a61d95e4c38"
+    }
+  },
+  "ckb_raw_tx_hash": "0xe0ddab558cda05a8a4cab8ec5dcc5323520a2e6e3c70ee84d2071a61d95e4c38",
+  "ckb_transaction_json": {
+    "cell_deps": [
+      {
+        "dep_type": "dep_group",
+        "out_point": {
+          "index": "0x1",
+          "tx_hash": "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37"
+        }
+      }
+    ],
+    "header_deps": [],
+    "inputs": [
+      {
+        "previous_output": {
+          "index": "0x0",
+          "tx_hash": "0x2be3685bdb90dc7f79aade0cf239d43037d029f68a77a866e700ad4dc1f30d2e"
+        },
+        "since": "0x0"
+      }
+    ],
+    "outputs": [
+      {
+        "capacity": "0x2540be400",
+        "lock": {
+          "args": "0x47db34c0e8e559a0509124bc8e505facefd3a840",
+          "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+          "hash_type": "type"
+        },
+        "type": null
+      },
+      {
+        "capacity": "0x2540a5d60",
+        "lock": {
+          "args": "0x50e0ad9cebbf06d20fc6b72f3bea26917998b31d",
+          "code_hash": "0x5c5069eb0857efc65e1bca0c07df34c31663b3622fd3876c876320fc9634e2a8",
+          "hash_type": "type"
+        },
+        "type": null
+      }
+    ],
+    "outputs_data": [
+      "0x",
+      "0x"
+    ],
+    "version": "0x0",
+    "witnesses": [
+      "0xd600000010000000d6000000d6000000c2000000000002034483c6d317539d8fe2b9cf7ce9df42f3dab592f7b0b29e5ba7205f3d7891bc10f32165574261dfaba6d56ced92ee5595e85647a8f3dc7f6c6e90dc1043a9d4ff1409ccf45d43d1ecbb95f40e53bda54129e023fa6e6f9530ed042239693dcb62c9fee533c9dfa36d3826f8ccda32e09e782382a9a9c4da001023111001a059bb05804c41d68d8e093710e11497c51bc8fff4cc36e07a39dae38289326f1c9aa082a6ed7411293516b6820d88e1dfeec7f40cddb6572e3e8b18eb55284600"
+    ]
+  },
+  "ckb_wtx_hash": "0x2a1d75d31b29a0eea9986fd93615ce74dde1e4065488f61ecdbe58bf7f43091e",
+  "created_cell": {
+    "capacity_shannons": 10000000000,
+    "data2_code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "data_bytes": 0,
+    "data_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "data_source": "inline-hex",
+    "lock": {
+      "args": "0x47db34c0e8e559a0509124bc8e505facefd3a840",
+      "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+      "hash_type": "type"
+    },
+    "minimum_capacity_shannons": 9700000000,
+    "out_point": {
+      "index": "0x0",
+      "tx_hash": "0xe0ddab558cda05a8a4cab8ec5dcc5323520a2e6e3c70ee84d2071a61d95e4c38"
+    }
+  },
+  "fee_shannons": 100000,
+  "funding_shortfall_shannons": 0,
+  "funding_sufficient": true,
+  "input_capacity_shannons": 20000000000,
+  "input_lock": {
+    "args": "0x50e0ad9cebbf06d20fc6b72f3bea26917998b31d",
+    "code_dep": {
+      "dep_type": "dep_group",
+      "index": "0x1",
+      "tx_hash": "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37"
+    },
+    "code_hash": "0x5c5069eb0857efc65e1bca0c07df34c31663b3622fd3876c876320fc9634e2a8",
+    "hash_type": "type"
+  },
+  "input_lock_kind": "multisig-all",
+  "planning_only": false,
+  "required_capacity_shannons": 19700100000,
+  "rpc_admission": {
+    "accepted": true,
+    "expected_ckb_tx_hash": "0xe0ddab558cda05a8a4cab8ec5dcc5323520a2e6e3c70ee84d2071a61d95e4c38",
+    "full_node_validated": true,
+    "observation_error": null,
+    "observation_result": {
+      "cycles": "0x2dfdf9",
+      "fee": "0x186a0",
+      "min_replace_fee": "0x18a19",
+      "time_added_to_pool": "0x19fae63ba61",
+      "transaction": {
+        "cell_deps": [
+          {
+            "dep_type": "dep_group",
+            "out_point": {
+              "index": "0x1",
+              "tx_hash": "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37"
+            }
+          }
+        ],
+        "hash": "0xe0ddab558cda05a8a4cab8ec5dcc5323520a2e6e3c70ee84d2071a61d95e4c38",
+        "header_deps": [],
+        "inputs": [
+          {
+            "previous_output": {
+              "index": "0x0",
+              "tx_hash": "0x2be3685bdb90dc7f79aade0cf239d43037d029f68a77a866e700ad4dc1f30d2e"
+            },
+            "since": "0x0"
+          }
+        ],
+        "outputs": [
+          {
+            "capacity": "0x2540be400",
+            "lock": {
+              "args": "0x47db34c0e8e559a0509124bc8e505facefd3a840",
+              "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+              "hash_type": "type"
+            },
+            "type": null
+          },
+          {
+            "capacity": "0x2540a5d60",
+            "lock": {
+              "args": "0x50e0ad9cebbf06d20fc6b72f3bea26917998b31d",
+              "code_hash": "0x5c5069eb0857efc65e1bca0c07df34c31663b3622fd3876c876320fc9634e2a8",
+              "hash_type": "type"
+            },
+            "type": null
+          }
+        ],
+        "outputs_data": [
+          "0x",
+          "0x"
+        ],
+        "version": "0x0",
+        "witnesses": [
+          "0xd600000010000000d6000000d6000000c2000000000002034483c6d317539d8fe2b9cf7ce9df42f3dab592f7b0b29e5ba7205f3d7891bc10f32165574261dfaba6d56ced92ee5595e85647a8f3dc7f6c6e90dc1043a9d4ff1409ccf45d43d1ecbb95f40e53bda54129e023fa6e6f9530ed042239693dcb62c9fee533c9dfa36d3826f8ccda32e09e782382a9a9c4da001023111001a059bb05804c41d68d8e093710e11497c51bc8fff4cc36e07a39dae38289326f1c9aa082a6ed7411293516b6820d88e1dfeec7f40cddb6572e3e8b18eb55284600"
+        ]
+      },
+      "tx_status": {
+        "block_hash": null,
+        "block_number": null,
+        "reason": null,
+        "status": "pending",
+        "tx_index": null
+      }
+    },
+    "observed_status": "pending",
+    "pool_accept_error": null,
+    "pool_accept_result": {
+      "cycles": "0x2dfdf9",
+      "fee": "0x186a0"
+    },
+    "schema": "myelin-session-rpc-admission-v1",
+    "send_error": null,
+    "send_result": "0xe0ddab558cda05a8a4cab8ec5dcc5323520a2e6e3c70ee84d2071a61d95e4c38",
+    "submitted_hash_matches": true,
+    "transaction_observed": true
+  },
+  "rpc_url": "https://testnet.ckb.dev/rpc",
+  "schema": "myelin-ckb-create-cell-v1",
+  "signing": {
+    "external_signing_required": false,
+    "locally_verified": true,
+    "secret_key_file_count": 2,
+    "secret_material_in_report": false,
+    "signature_count": 2,
+    "signing_message": "0x85fa985257e87ec59bbadd2649871e411e157b501b422e1dfc7e9602a641bb73"
+  },
+  "submitted_to_rpc": true
+}

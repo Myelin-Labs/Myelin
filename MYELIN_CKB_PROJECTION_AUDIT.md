@@ -16,7 +16,7 @@ There is no caller-controlled boolean override. Deserializing a higher-stage rep
 | `Rejected` | one or more wire/invariant blockers | `myelin-exec` |
 | `WireEncoded` | exact version-0 transaction, CKB Molecule bytes, raw hash, witness-inclusive hash | `myelin-exec` |
 | `ContextResolved` | all inputs, code deps, DepGroup members, and header deps resolved under one stable tip; node/chain/genesis/rule context committed | `myelin-ckb-adapter` |
-| `ConsensusValidated` | exact transaction accepted by CKB `test_tx_pool_accept` at the same tip; fee, cycles, and node result committed | `myelin-ckb-adapter` |
+| `ConsensusValidated` | exact transaction accepted by CKB `test_tx_pool_accept` around a separately sampled stable validation tip; fee, cycles, and node result committed | `myelin-ckb-adapter` |
 | `ScriptsVerified` | strict local CKB-VM verification over that resolved context and one transaction cycle budget; local and node cycles recorded | `myelin-ckb-adapter` |
 | `NodeAccepted` | `send_transaction` returns the exact raw hash and `get_transaction(..., false)` observes that hash as pending, proposed, or committed | `myelin-ckb-adapter` |
 | `Committed` | the exact transaction is committed in the declared canonical block and its CKB transaction proof recomputes the block header's transactions root | `myelin-ckb-adapter` |
@@ -39,7 +39,13 @@ creation block identity where available
 every resolved header dependency
 ```
 
-DepGroups are parsed only as CKB Molecule `OutPointVec` data and every member is resolved independently. The resolver samples the tip before and after resolution and retries or fails if it moved. Receipt verification rejects omitted, duplicated, reordered, mutated, stale, or transaction-unreferenced context.
+DepGroups are parsed only as CKB Molecule `OutPointVec` data and every member is resolved independently. The resolver samples the tip before and after resolution and retries or fails if it moved. Strict VM `SOURCE_CELL_DEP` access uses the ordered expanded member view, while `LOAD_TRANSACTION` remains bound to the original declared DepGroup transaction bytes. Receipt verification rejects omitted, duplicated, reordered, mutated, stale, or transaction-unreferenced context.
+
+Normal descendant blocks do not make a resolved context stale. Before node
+validation and submission, Myelin re-queries the context tip by height and
+requires its exact header hash to remain canonical. A same-height replacement
+is rejected as a reorganization. The node validation call records its own
+stable tip, which may be a descendant of the context anchor.
 
 ## Consensus and VM boundary
 
@@ -80,10 +86,10 @@ The pure wire projection fails closed for a nonzero version, mismatched output/d
 
 ## Exercised evidence
 
-The adapter has been exercised against the parent CKB 0.207.0 integration devnet through `myelin ckb prove`, `observe`, and `verify`. The full devnet gate also compiles four exact upstream CellScript v0.22.0 programs, deploys their ELF artifacts, commits valid DA and settlement transitions, and requires CKB to reject payload tampering and a competing settlement.
+The adapter has been exercised against the parent CKB 0.207.0 integration devnet and against public `ckb_testnet` through `myelin ckb prove`, `observe`, and `verify`. The archived public transaction reached `Finalized` with a locally checked transaction proof and 13 observed confirmations. The full devnet gate also compiles four exact upstream CellScript v0.22.0 programs, deploys their ELF artifacts, commits valid DA and settlement transitions, and requires CKB to reject payload tampering and a competing settlement.
 
 This does not establish a public-testnet court or permissionless L2 security. Session/court package-local `ckb_projection` fields may still honestly remain `wire-encoded`; a package advances only when it carries or references a separately verified `CkbEvidenceProjection` for its exact transaction.
 
 ## Remaining boundary
 
-The next credibility milestone is not another projection enum value. It is a public CKB testnet rehearsal that binds canonical `secp256k1_blake160_multisig_all` system-script identity and exact witnesses, deployed court code OutPoints, provider-neutral DA certificates and live retrieval, production key custody, court economics, operator policy, committed transaction proofs, and reorg/finality monitoring into one reproducible evidence bundle.
+The next credibility milestone is not another projection enum value. Canonical `secp256k1_blake160_multisig_all` identity, exact witnesses, and finalized public-testnet transaction evidence are now exercised. The remaining milestone is to bind deployed verifier/court code OutPoints, provider-neutral DA certificates and live retrieval, production key custody, court economics, and operator policy into the same reproducible evidence bundle.

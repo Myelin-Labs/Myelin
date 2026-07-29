@@ -1,6 +1,6 @@
 # Production gate
 
-`scripts/myelin_production_gate.sh` is the merge-readiness gate. It runs formatting, diff checks, workspace check/clippy/tests, focused protocol tests, exact upstream CellScript v0.22.0 reproduction and fixture compilation, both closed-validator CLI paths, runtime/session/court/DA/settlement workflows, RPC admission/observation checks, the parent CKB devnet deployment smoke, dependency/stale-surface audits, and optionally the external Teeworlds workload.
+`scripts/myelin_production_gate.sh` is the merge-readiness gate. It runs formatting, diff checks, workspace check/clippy/tests, focused protocol tests, exact upstream CellScript v0.22.0 reproduction and fixture compilation, all three closed-validator CLI paths, runtime/session/court/DA/settlement workflows, RPC admission/observation checks, the parent CKB devnet deployment smoke, dependency/stale-surface audits, and optionally the external Teeworlds workload.
 
 ```bash
 scripts/myelin_production_gate.sh

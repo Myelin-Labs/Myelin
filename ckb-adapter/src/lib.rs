@@ -278,7 +278,7 @@ pub struct ConsensusValidatedReceipt {
     pub context_commitment: [u8; 32],
     /// Exact raw transaction hash.
     pub raw_tx_hash: [u8; 32],
-    /// Stable tip used by `test_tx_pool_accept`.
+    /// Stable tip observed around `test_tx_pool_accept`.
     pub validation_tip_hash: [u8; 32],
     /// Fee computed by CKB.
     pub fee: u64,
@@ -490,9 +490,19 @@ impl<R: CkbRpc> CkbEvidenceEngine<R> {
         if max_cycles == 0 {
             return Err(CkbAdapterError::InvalidRequest("max_cycles must be nonzero".to_owned()));
         }
-        self.require_tip(context.tip.hash)?;
-        let node_result = self.rpc.call("test_tx_pool_accept", json!([ckb_json_transaction(tx)?, "passthrough"]))?;
-        self.require_tip(context.tip.hash)?;
+        self.require_canonical_context(&context)?;
+        let transaction_json = ckb_json_transaction(tx)?;
+        let mut stable_validation = None;
+        for _ in 0..3 {
+            let tip = parse_header(&self.rpc.call("get_tip_header", json!([]))?)?;
+            let node_result = self.rpc.call("test_tx_pool_accept", json!([transaction_json.clone(), "passthrough"]))?;
+            let tip_after = parse_header(&self.rpc.call("get_tip_header", json!([]))?)?;
+            if tip_after.hash == tip.hash {
+                stable_validation = Some((tip, node_result));
+                break;
+            }
+        }
+        let (validation_tip, node_result) = stable_validation.ok_or(CkbAdapterError::UnstableValidationTip)?;
         let cycles = parse_quantity_value(
             node_result.get("cycles").ok_or_else(|| CkbAdapterError::InvalidResponse("missing tx-pool cycles".to_owned()))?,
             "cycles",
@@ -508,7 +518,7 @@ impl<R: CkbRpc> CkbEvidenceEngine<R> {
             schema: CONSENSUS_SCHEMA.to_owned(),
             context_commitment: context.context_commitment,
             raw_tx_hash: context.raw_tx_hash,
-            validation_tip_hash: context.tip.hash,
+            validation_tip_hash: validation_tip.hash,
             fee,
             cycles,
             node_result_hash: canonical_json_hash(&node_result),
@@ -563,7 +573,7 @@ impl<R: CkbRpc> CkbEvidenceEngine<R> {
         {
             return Err(CkbAdapterError::InvalidRequest("projection is not ready for node submission".to_owned()));
         }
-        self.require_tip(projection.context.tip.hash)?;
+        self.require_canonical_context(&projection.context)?;
         let result = self.rpc.call("send_transaction", json!([ckb_json_transaction(tx)?, "passthrough"]))?;
         let submitted_tx_hash = parse_hash_value(&result, "send_transaction result")?;
         if submitted_tx_hash != projection.raw_tx_hash {
@@ -843,10 +853,15 @@ impl<R: CkbRpc> CkbEvidenceEngine<R> {
         Ok(ResolvedCellEvidence { role, index, out_point, expanded_from, output, data, data_hash, creation_block_hash })
     }
 
-    fn require_tip(&self, expected: [u8; 32]) -> Result<(), CkbAdapterError> {
-        let actual = parse_header(&self.rpc.call("get_tip_header", json!([]))?)?;
-        if actual.hash != expected {
-            return Err(CkbAdapterError::StaleContext { expected, actual: actual.hash });
+    fn require_canonical_context(&self, context: &ContextResolvedReceipt) -> Result<(), CkbAdapterError> {
+        let actual_value = self.rpc.call("get_header_by_number", json!([quantity_hex(context.tip.number), null]))?;
+        if actual_value.is_null() {
+            return Err(CkbAdapterError::StaleContext { expected: context.tip.hash, actual: [0; 32] });
+        }
+        let actual = parse_header(&actual_value)?;
+        actual.verify_hash()?;
+        if actual.hash != context.tip.hash {
+            return Err(CkbAdapterError::StaleContext { expected: context.tip.hash, actual: actual.hash });
         }
         Ok(())
     }
@@ -862,7 +877,6 @@ pub fn verify_projection(tx: &CellTx, projection: &CkbEvidenceProjection) -> Res
     if consensus.schema != CONSENSUS_SCHEMA
         || consensus.context_commitment != projection.context.context_commitment
         || consensus.raw_tx_hash != projection.raw_tx_hash
-        || consensus.validation_tip_hash != projection.context.tip.hash
         || consensus.receipt_commitment != consensus_commitment(consensus)
     {
         return Err(CkbAdapterError::EvidenceMismatch("consensus receipt chain is invalid".to_owned()));
@@ -1466,6 +1480,9 @@ pub enum CkbAdapterError {
     /// Tip changed repeatedly during context resolution.
     #[error("CKB tip did not remain stable while resolving the transaction context")]
     UnstableTip,
+    /// Tip changed repeatedly around transaction-pool validation.
+    #[error("CKB tip did not remain stable while validating the transaction")]
+    UnstableValidationTip,
     /// Previously resolved context is stale.
     #[error("CKB context is stale: expected tip {expected:02x?}, observed {actual:02x?}")]
     StaleContext {
@@ -1521,7 +1538,11 @@ mod tests {
             self.calls.lock().unwrap().push(method.to_owned());
             match method {
                 "get_tip_header" => Ok(self.tip.clone()),
-                "get_header_by_number" => Ok(self.canonical_block.clone()),
+                "get_header_by_number" => {
+                    let requested = parse_quantity_value(params.get(0).unwrap(), "requested block number")?;
+                    let tip_number = parse_quantity_field(&self.tip, "number")?;
+                    Ok(if requested == tip_number { self.tip.clone() } else { self.canonical_block.clone() })
+                }
                 "get_header" => Ok(self.block.clone()),
                 "local_node_info" => Ok(json!({ "version": "0.207.0" })),
                 "get_blockchain_info" => Ok(json!({ "chain": "ckb_dev" })),
@@ -1663,6 +1684,16 @@ mod tests {
     }
 
     #[test]
+    fn header_evidence_json_preserves_full_ckb_nonce_width() {
+        let (rpc, tx) = fixture();
+        let mut evidence = CkbEvidenceEngine::new(rpc).resolve_context(&tx, 1).unwrap().tip;
+        evidence.nonce = u128::MAX;
+        let value = serde_json::to_value(&evidence).unwrap();
+        assert_eq!(value["nonce"].as_number().and_then(serde_json::Number::as_u128), Some(u128::MAX));
+        assert_eq!(serde_json::from_value::<CkbHeaderEvidence>(value).unwrap().nonce, u128::MAX);
+    }
+
+    #[test]
     fn advances_only_with_concrete_validation_and_node_receipts() {
         let (rpc, tx) = fixture();
         let engine = CkbEvidenceEngine::new(rpc);
@@ -1680,6 +1711,24 @@ mod tests {
         let mut mutated = accepted;
         mutated.scripts.node_vm_cycles += 1;
         assert!(verify_projection(&tx, &mutated).is_err());
+    }
+
+    #[test]
+    fn accepts_descendant_tips_but_rejects_reorganized_context_anchor() {
+        let (rpc, tx) = fixture();
+        let context = CkbEvidenceEngine::new(rpc).resolve_context(&tx, 1).unwrap();
+
+        let (mut advanced_rpc, _) = fixture();
+        advanced_rpc.tip = header_at(1, [11; 32]);
+        let advanced = CkbEvidenceEngine::new(advanced_rpc).validate_and_verify(&tx, context.clone(), 10_000).unwrap();
+        assert_ne!(advanced.consensus.validation_tip_hash, advanced.context.tip.hash);
+        verify_projection(&tx, &advanced).unwrap();
+
+        let (mut reorganized_rpc, _) = fixture();
+        reorganized_rpc.tip = header_at(1, [12; 32]);
+        reorganized_rpc.canonical_block = header_at(0, [13; 32]);
+        let error = CkbEvidenceEngine::new(reorganized_rpc).validate_and_verify(&tx, context, 10_000).unwrap_err();
+        assert!(matches!(error, CkbAdapterError::StaleContext { .. }));
     }
 
     #[test]

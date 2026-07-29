@@ -662,7 +662,18 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
             .collect::<ScriptResult<Vec<_>>>()?;
         let (tx_hash, tx_data) = transaction_hash_and_data_for_semantics(&self.tx, self.semantics)?;
 
-        let tx = Arc::clone(&self.tx);
+        let tx = match self.semantics {
+            VmSemantics::CkbStrict => {
+                let mut resolved_view = (*self.tx).clone();
+                resolved_view.cell_deps = self
+                    .expanded_code_dep_outpoints()?
+                    .into_iter()
+                    .map(|out_point| crate::celltx::CellDep { out_point, dep_type: DepType::Code })
+                    .collect();
+                Arc::new(resolved_view)
+            }
+            VmSemantics::MyelinExtended => Arc::clone(&self.tx),
+        };
         let provider = Arc::clone(&self.data_provider);
         let script = Arc::new(group.script.clone());
         let group_input_indices = group.input_indices.clone();
@@ -985,6 +996,7 @@ mod tests {
     use crate::serialization::molecule_compat::{
         ckb_raw_transaction_hash_molecule, ckb_script_hash_molecule, serialize_transaction_molecule,
     };
+    use crate::vm::syscalls::Source;
     use crate::vm::VmSemantics;
 
     fn always_success_verifier() -> TransactionScriptVerifier<SimpleDataProvider> {
@@ -1423,6 +1435,17 @@ mod tests {
             assert_eq!(runtime.script_version, expected_version);
             assert_eq!(runtime.script_code, ALWAYS_SUCCESS_SCRIPT);
         }
+    }
+
+    #[test]
+    fn ckb_strict_cell_dep_runtime_view_expands_dep_groups() {
+        let verifier = ckb_strict_verifier_for_hash_type(1, true);
+        let groups = verifier.extract_script_groups().unwrap();
+        let runtime = verifier.prepare_group_runtime(&groups[0]).unwrap();
+        let program =
+            (runtime.program_resolver)(&ProgramPiece { source: Source::CellDep, index: 0, place: ProgramPlace::CellData }).unwrap();
+
+        assert_eq!(program, ALWAYS_SUCCESS_SCRIPT);
     }
 
     #[test]

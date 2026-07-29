@@ -1,0 +1,15 @@
+{
+  "config_hash": "0x50e0ad9cebbf06d20fc6b72f3bea26917998b31de2c1c93a9578956abfac1dce",
+  "lock_args": "0x50e0ad9cebbf06d20fc6b72f3bea26917998b31d",
+  "participant_pubkey_hashes": [
+    "0x4483c6d317539d8fe2b9cf7ce9df42f3dab592f7",
+    "0xb0b29e5ba7205f3d7891bc10f32165574261dfab",
+    "0xa6d56ced92ee5595e85647a8f3dc7f6c6e90dc10"
+  ],
+  "require_first_n": 0,
+  "schema": "myelin-ckb-multisig-config-v1",
+  "scheme": "secp256k1_blake160_multisig_all",
+  "secret_material_in_report": false,
+  "threshold": 2,
+  "witness_config": "0x000002034483c6d317539d8fe2b9cf7ce9df42f3dab592f7b0b29e5ba7205f3d7891bc10f32165574261dfaba6d56ced92ee5595e85647a8f3dc7f6c6e90dc10"
+}

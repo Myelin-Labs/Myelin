@@ -11,7 +11,7 @@
 </div>
 
 > [!IMPORTANT]
-> Myelin is a research preview. Its full path has been exercised on a parent CKB 0.207.0 integration devnet, but it is not a CKB full node, a new L1, a public-testnet deployment, or a finished permissionless L2.
+> Myelin is a research preview. Its full path has been exercised on a parent CKB 0.207.0 integration devnet, and its standard plus canonical 2-of-3 multisig locks have been exercised on public CKB testnet. The verifier/court/DA path is not deployed there. Myelin is not a CKB full node, a new L1, or a finished permissionless L2.
 
 ## Why Myelin?
 
@@ -216,15 +216,15 @@ The adapter verifies compiler identity, source revision, target profile, metadat
 | Strict local CKB-VM verification with a shared transaction cycle budget | Implemented and tested |
 | Static committee, rotating PoA, and full-round Tendermint closed-validator finality | Implemented and tested |
 | Exact CellScript v0.22.0 reproduction | Implemented and gated |
-| Live CKB admission, commitment, transaction proof, depth, and reorg checks | Exercised on parent CKB 0.207.0 devnet |
-| Standard-lock transaction admission and commitment on public CKB testnet | Exercised; full Session/court/DA deployment pending |
-| Canonical CKB `secp256k1_blake160_multisig_all` settlement construction and verification | Implemented; public-testnet exercise pending |
+| Live CKB admission, commitment, transaction proof, depth, and reorg checks | Exercised on parent devnet and public testnet |
+| Standard-lock transaction admission and commitment on public CKB testnet | Exercised with finalized evidence |
+| Canonical CKB `secp256k1_blake160_multisig_all` construction and verification | Public-testnet 2-of-3 create/spend exercised |
 | Full disputed-chunk court and economics | Not implemented |
 | Provider-neutral DA certificate core | Implemented; real provider/auditor adapters pending |
-| Public-testnet deployment | Not exercised |
+| Public-testnet deployment | Partial: standard/multisig locks only; verifier/court/DA pending |
 | Finished trustless or permissionless L2 | **No** |
 
-The main production blockers are a deployed and exercised public-testnet multisig/court path, full court adjudication and economics, real independent DA provider/auditor adapters, public-testnet proof artifacts, unified finalized evidence, broader differential/fuzz/soak testing, safe multi-parent overlays, and production operator key procedures. The DA certificate model is documented in [the DA design](docs/MYELIN_DA_DESIGN.md). See the complete list in the [v0.10.0 changelog](CHANGELOG.md#known-production-blockers).
+The main production blockers are public-testnet verifier/court deployment, full court adjudication and economics, real independent DA provider/auditor adapters, broader differential/fuzz/soak testing, safe multi-parent overlays, and production operator key procedures. The [archived public-testnet evidence](evidence/ckb-testnet/2026-07-29-multisig/README.md) proves only standard and canonical multisig lock paths. The DA certificate model is documented in [the DA design](docs/MYELIN_DA_DESIGN.md). See the complete list in the [v0.10.0 changelog](CHANGELOG.md#known-production-blockers).
 
 ## Validation
 
@@ -243,7 +243,7 @@ Run the comprehensive gate:
 RUN_TEEWORLDS=0 scripts/myelin_production_gate.sh
 ```
 
-The comprehensive path rebuilds the locked CellScript compiler, compiles all four Myelin fixtures, runs both closed-validator modes, exercises the Session L2 spine, and deploys valid and adversarial DA/settlement transactions to the parent CKB devnet. Set `RUN_CKB_DEVNET=0` only for an explicitly reduced run. The external Teeworlds acceptance requires its separate repository and prebuilt replayer.
+The comprehensive path rebuilds the locked CellScript compiler, compiles all four Myelin fixtures, runs all three closed-validator modes, exercises the Session L2 spine, and deploys valid and adversarial DA/settlement transactions to the parent CKB devnet. Set `RUN_CKB_DEVNET=0` only for an explicitly reduced run. The external Teeworlds acceptance requires its separate repository and prebuilt replayer.
 
 ## Repository guide
 

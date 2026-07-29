@@ -1277,6 +1277,8 @@ dependencies = [
  "myelin-hashes",
  "myelin-mempool",
  "myelin-state",
+ "rand 0.8.7",
+ "reqwest",
  "secp256k1",
  "serde",
  "serde_json",

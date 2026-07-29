@@ -1,0 +1,187 @@
+{
+  "accepted_by_rpc": true,
+  "change_cell": {
+    "capacity_shannons": 979999800000,
+    "minimum_capacity_shannons": 9700000000,
+    "out_point": {
+      "index": "0x1",
+      "tx_hash": "0x2be3685bdb90dc7f79aade0cf239d43037d029f68a77a866e700ad4dc1f30d2e"
+    }
+  },
+  "ckb_raw_tx_hash": "0x2be3685bdb90dc7f79aade0cf239d43037d029f68a77a866e700ad4dc1f30d2e",
+  "ckb_transaction_json": {
+    "cell_deps": [
+      {
+        "dep_type": "dep_group",
+        "out_point": {
+          "index": "0x0",
+          "tx_hash": "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37"
+        }
+      }
+    ],
+    "header_deps": [],
+    "inputs": [
+      {
+        "previous_output": {
+          "index": "0x0",
+          "tx_hash": "0xbc662a7d0a452a61e50928a0e50b2b6a1c66c942988b4de8ace72c92a46131de"
+        },
+        "since": "0x0"
+      }
+    ],
+    "outputs": [
+      {
+        "capacity": "0x4a817c800",
+        "lock": {
+          "args": "0x50e0ad9cebbf06d20fc6b72f3bea26917998b31d",
+          "code_hash": "0x5c5069eb0857efc65e1bca0c07df34c31663b3622fd3876c876320fc9634e2a8",
+          "hash_type": "type"
+        },
+        "type": null
+      },
+      {
+        "capacity": "0xe42c8a3ac0",
+        "lock": {
+          "args": "0x47db34c0e8e559a0509124bc8e505facefd3a840",
+          "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+          "hash_type": "type"
+        },
+        "type": null
+      }
+    ],
+    "outputs_data": [
+      "0x",
+      "0x"
+    ],
+    "version": "0x0",
+    "witnesses": [
+      "0x550000001000000055000000550000004100000017cf1ad8631b3e72624faf6ab0062d22b375183ce853c9b3e7b5641a1970d1604efa3ffaccac0f91abafdda1ad409dbe959070ff73fde84d58e7fe21862a8b9300"
+    ]
+  },
+  "ckb_wtx_hash": "0x638696fddd5d66427692a162bf22cebc7b7e54077889ca557e6c03ac954426b2",
+  "created_cell": {
+    "capacity_shannons": 20000000000,
+    "data2_code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "data_bytes": 0,
+    "data_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "data_source": "inline-hex",
+    "lock": {
+      "args": "0x50e0ad9cebbf06d20fc6b72f3bea26917998b31d",
+      "code_hash": "0x5c5069eb0857efc65e1bca0c07df34c31663b3622fd3876c876320fc9634e2a8",
+      "hash_type": "type"
+    },
+    "minimum_capacity_shannons": 9700000000,
+    "out_point": {
+      "index": "0x0",
+      "tx_hash": "0x2be3685bdb90dc7f79aade0cf239d43037d029f68a77a866e700ad4dc1f30d2e"
+    }
+  },
+  "fee_shannons": 100000,
+  "funding_shortfall_shannons": 0,
+  "funding_sufficient": true,
+  "input_capacity_shannons": 999999900000,
+  "input_lock": {
+    "args": "0x47db34c0e8e559a0509124bc8e505facefd3a840",
+    "code_dep": {
+      "dep_type": "dep_group",
+      "index": "0x0",
+      "tx_hash": "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37"
+    },
+    "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+    "hash_type": "type"
+  },
+  "input_lock_kind": "sighash-all",
+  "planning_only": false,
+  "required_capacity_shannons": 29700100000,
+  "rpc_admission": {
+    "accepted": true,
+    "expected_ckb_tx_hash": "0x2be3685bdb90dc7f79aade0cf239d43037d029f68a77a866e700ad4dc1f30d2e",
+    "full_node_validated": true,
+    "observation_error": null,
+    "observation_result": {
+      "cycles": "0x193ad1",
+      "fee": "0x186a0",
+      "min_replace_fee": "0x18958",
+      "time_added_to_pool": "0x19fae6123e4",
+      "transaction": {
+        "cell_deps": [
+          {
+            "dep_type": "dep_group",
+            "out_point": {
+              "index": "0x0",
+              "tx_hash": "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37"
+            }
+          }
+        ],
+        "hash": "0x2be3685bdb90dc7f79aade0cf239d43037d029f68a77a866e700ad4dc1f30d2e",
+        "header_deps": [],
+        "inputs": [
+          {
+            "previous_output": {
+              "index": "0x0",
+              "tx_hash": "0xbc662a7d0a452a61e50928a0e50b2b6a1c66c942988b4de8ace72c92a46131de"
+            },
+            "since": "0x0"
+          }
+        ],
+        "outputs": [
+          {
+            "capacity": "0x4a817c800",
+            "lock": {
+              "args": "0x50e0ad9cebbf06d20fc6b72f3bea26917998b31d",
+              "code_hash": "0x5c5069eb0857efc65e1bca0c07df34c31663b3622fd3876c876320fc9634e2a8",
+              "hash_type": "type"
+            },
+            "type": null
+          },
+          {
+            "capacity": "0xe42c8a3ac0",
+            "lock": {
+              "args": "0x47db34c0e8e559a0509124bc8e505facefd3a840",
+              "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+              "hash_type": "type"
+            },
+            "type": null
+          }
+        ],
+        "outputs_data": [
+          "0x",
+          "0x"
+        ],
+        "version": "0x0",
+        "witnesses": [
+          "0x550000001000000055000000550000004100000017cf1ad8631b3e72624faf6ab0062d22b375183ce853c9b3e7b5641a1970d1604efa3ffaccac0f91abafdda1ad409dbe959070ff73fde84d58e7fe21862a8b9300"
+        ]
+      },
+      "tx_status": {
+        "block_hash": null,
+        "block_number": null,
+        "reason": null,
+        "status": "pending",
+        "tx_index": null
+      }
+    },
+    "observed_status": "pending",
+    "pool_accept_error": null,
+    "pool_accept_result": {
+      "cycles": "0x193ad1",
+      "fee": "0x186a0"
+    },
+    "schema": "myelin-session-rpc-admission-v1",
+    "send_error": null,
+    "send_result": "0x2be3685bdb90dc7f79aade0cf239d43037d029f68a77a866e700ad4dc1f30d2e",
+    "submitted_hash_matches": true,
+    "transaction_observed": true
+  },
+  "rpc_url": "https://testnet.ckb.dev/rpc",
+  "schema": "myelin-ckb-create-cell-v1",
+  "signing": {
+    "external_signing_required": false,
+    "locally_verified": true,
+    "secret_key_file_count": 1,
+    "secret_material_in_report": false,
+    "signature_count": 1,
+    "signing_message": "0xe921d24a206c6faa7038ad2e3c50e8e71ff72846c25b6657c8b9a82094bfc16b"
+  },
+  "submitted_to_rpc": true
+}

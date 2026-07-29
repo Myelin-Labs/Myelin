@@ -178,7 +178,7 @@ Rejected -> WireEncoded -> ContextResolved -> ConsensusValidated
          -> ScriptsVerified -> NodeAccepted -> Committed -> Finalized
 ```
 
-The pure `myelin-exec` projector produces only the first two stages. `myelin-ckb-adapter` produces the higher stages from linked receipts: it resolves all referenced Cells/DepGroups/headers under one stable tip, commits node/chain/genesis/consensus context, requires full-node tx-pool validation, runs strict local CKB-VM over the same context, submits and observes the exact hash, locally verifies the CKB transaction Merkle proof against the canonical committed header, and checks confirmation depth plus canonical-chain stability.
+The pure `myelin-exec` projector produces only the first two stages. `myelin-ckb-adapter` produces the higher stages from linked receipts: it resolves all referenced Cells/DepGroups/headers under one stable context anchor, requires that anchor to remain canonical at its height, records a separately sampled stable tx-pool validation tip, runs strict local CKB-VM over the resolved context, submits and observes the exact hash, locally verifies the CKB transaction Merkle proof against the canonical committed header, and checks confirmation depth plus canonical-chain stability. Strict `SOURCE_CELL_DEP` access uses the ordered expanded DepGroup member view while transaction identity remains bound to the original declared DepGroup bytes.
 
 Node and local VM cycle counts are both recorded but need not be numerically equal; both verdicts must succeed within the configured budget. `NodeAccepted` is not renamed to publication. `Committed` requires inclusion proof, while `Finalized` means only that the configured depth was reached without an observed reorg.
 
@@ -205,11 +205,13 @@ The critical model flaws found in the 2026-07 audit were removed: witness-derive
 
 The remaining work is ordered by security dependency:
 
-1. Exercise the exact adapter and four deployed verifier programs on public CKB testnet, pin deployment OutPoints/code hashes, and preserve committed/finalized evidence artifacts.
-2. Replace fixture keys and local DA attestations with signer isolation, threshold-lock enforcement, rotation/recovery policy, and durable externally retrievable DA.
-3. Implement and exercise complete court economics and disputed-chunk adjudication, not only compact-payload/finality verifiers.
-4. Add independent differential tests against the parent CKB for Molecule encoding, script grouping, hash-type resolution, since/capacity edges, DepGroups, and cycle-limit failure behavior.
-5. Expand adversarial/property testing for conflict field codecs, DAG determinism, RBF packages, state atomicity, receipt mutation/replay, Merkle proofs, and reorg sequences.
-6. Benchmark real contention distributions and long-running mempool/state behavior. Logical conflict scheduling improves concurrency only when transactions touch different domains or share READ access; it cannot parallelize genuine writes to one logical session.
+1. Migrate the Session final-settlement authority surface from the legacy genesis multisig `type` script to the recommended multisig-v2 `data1` deployment, then repeat the archived public-testnet create/spend proof for a real Session package.
+2. Fund and deploy the 38,628-byte settlement verifier; the 2026-07-29 capacity plan records a 29,422.005 CKB shortfall for the exercised input.
+3. Exercise the exact adapter and all four deployed verifier programs on public CKB testnet, pin deployment OutPoints/code hashes, and preserve committed/finalized evidence artifacts.
+4. Replace fixture keys and local DA attestations with signer isolation, threshold-lock enforcement, rotation/recovery policy, and durable externally retrievable DA.
+5. Implement and exercise complete court economics and disputed-chunk adjudication, not only compact-payload/finality verifiers.
+6. Add independent differential tests against the parent CKB for Molecule encoding, script grouping, hash-type resolution, since/capacity edges, DepGroups, and cycle-limit failure behavior.
+7. Expand adversarial/property testing for conflict field codecs, DAG determinism, RBF packages, state atomicity, receipt mutation/replay, Merkle proofs, and reorg sequences.
+8. Benchmark real contention distributions and long-running mempool/state behavior. Logical conflict scheduling improves concurrency only when transactions touch different domains or share READ access; it cannot parallelize genuine writes to one logical session.
 
 The generic evidence engine may honestly claim through `Finalized` for an exact exercised transaction. Myelin still must not claim a public-testnet court, production DA, or permissionless L2 security until the corresponding deployment and operational evidence exists.

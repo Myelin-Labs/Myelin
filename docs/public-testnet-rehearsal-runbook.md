@@ -5,6 +5,12 @@ Session L2 readiness. It is not a gate script. Run it manually, preserve the
 artefacts, and update `MYELIN_PRODUCTION_REHEARSAL_REPORT.md` with the observed
 provenance.
 
+The 2026-07-29 checkpoint completed standard and multisig-v2 lock rehearsal,
+including finalized generic evidence. It did not deploy the CellScript
+verifier/court/DA path because the available funding Cell was 29,422.005 CKB
+short of the conservative settlement-verifier deployment requirement. See the
+[archived checkpoint](../evidence/ckb-testnet/2026-07-29-multisig/README.md).
+
 ## Goal
 
 Move from:
@@ -73,8 +79,8 @@ export MYELIN_AUTHORITY_SIGNER_1_SIGNATURE=...
 export MYELIN_AUTHORITY_PARTICIPANT_0_PUBKEY_HASH=...
 export MYELIN_AUTHORITY_PARTICIPANT_1_PUBKEY_HASH=...
 export MYELIN_AUTHORITY_PARTICIPANT_2_PUBKEY_HASH=...
-# These identify CKB's standard secp256k1_blake160_multisig_all type script
-# and its system-script dep-group, not a custom Myelin lock binary.
+# Prefer CKB multisig v2 (`data1`) and its network deployment DepGroup. The
+# genesis `type` script remains usable but is legacy/deprecated.
 export MYELIN_THRESHOLD_LOCK_CODE_HASH=0x...
 export MYELIN_THRESHOLD_LOCK_CODE_DEP_TX_HASH=0x...
 export MYELIN_THRESHOLD_LOCK_CODE_DEP_INDEX=0x0
@@ -93,6 +99,26 @@ The rehearsal operator must also have:
 5. external DA receipt JSON, either real provider evidence or explicitly
    labelled rehearsal-provider evidence.
 ```
+
+Generate disposable rehearsal keys and the ordered 2-of-3 config without
+placing secret material in reports:
+
+```bash
+cargo run --locked -p myelin-cli -- ckb generate-rehearsal-key \
+  --network ckb-testnet \
+  --secret-out "$MYELIN_REHEARSAL_DIR/participant-0.secret.json"
+
+cargo run --locked -p myelin-cli -- ckb multisig-config \
+  --secret-key-file "$MYELIN_REHEARSAL_DIR/participant-0.secret.json" \
+  --secret-key-file "$MYELIN_REHEARSAL_DIR/participant-1.secret.json" \
+  --secret-key-file "$MYELIN_REHEARSAL_DIR/participant-2.secret.json" \
+  --threshold 2 \
+  --out "$MYELIN_REHEARSAL_DIR/multisig-config.json"
+```
+
+Secret files are rehearsal-only, must remain mode `0600`, and must never be
+copied into tracked evidence. Production custody requires an external signing
+ceremony; pass repeated `--signature` values to `ckb create-cell` instead.
 
 Copy the tracked Myelin CellScript verifier sources into the rehearsal
 artefact directory before submission:
@@ -423,9 +449,21 @@ new gate.
 For the settlement carrier or final-script path, use the same command with the
 settlement package and settlement verifier. When rehearsing final-script
 settlement evidence, also provide the evidence cell dep and authority input
-arguments. The authority input lock must be the canonical CKB
-`secp256k1_blake160_multisig_all` script (`hash_type=type`, system-script
-`dep_type=dep_group`, 20-byte config-hash args). First build the transaction
+arguments. Generic lock rehearsal should use the current CKB
+`secp256k1_blake160_multisig_all` v2 script (`hash_type=data1`, deployed
+`dep_type=dep_group`, 20-byte config-hash args). The Session final-script
+surface still accepts only the genesis `hash_type=type` variant, which is
+legacy; migrate and re-test that surface before using it for the next public
+rehearsal. There is also an unresolved witness-composition boundary: canonical
+multisig owns `WitnessArgs.lock`, while the pinned CellScript v0.22.0
+parameterized entry wrapper reads the raw entry payload from witness 0. The
+current attempt to place that payload in `WitnessArgs.input_type` verifies in
+Myelin's builder but is rejected by the real CKB entry wrapper with error 25.
+Before another final-settlement rehearsal, separate the authority lock group
+from the raw CellScript entry witness or upgrade the entry wrapper to read the
+selected `WitnessArgs` field, then make the parent-CKB devnet path mandatory.
+
+After that boundary is fixed, first build the transaction
 without `--submit`, sign the reported `canonical_ckb_multisig.signing_message`
 externally with the threshold participants, then repeat
 `--multisig-signature 0x...` for each 65-byte recoverable signature. Live
