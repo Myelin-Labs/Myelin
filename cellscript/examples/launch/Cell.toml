@@ -1,7 +1,0 @@
-[package]
-name = "launch"
-version = "0.1.0"
-
-[dependencies]
-token = { path = "../token" }
-amm_pool = { path = "../amm_pool" }

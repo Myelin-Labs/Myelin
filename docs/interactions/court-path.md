@@ -40,7 +40,7 @@ projection_report          -> CkbProjectionReport for the chunk
 challenge_payload          -> canonical bytes for challenge signing
 challenge_payload_hash     -> hash(challenge_payload)
 scheduler_report_hash      -> the scheduler's report hash from session commit
-committee_certificate      -> static-closed-committee or Tendermint cert
+committee_certificate      -> static-closed-committee or WeightedPrecommit cert
 l1_court_implemented       -> false (deterministic input ready for one)
 ```
 
@@ -127,8 +127,8 @@ The verifier checks (currently 16 distinct assertions):
 - signer_ids                       -> committee certificates are valid
 - committee certificate            -> quorum weight present
 - court_verifiable                 -> single-chunk verification possible
-- semantic_profile                 -> declared profile matches payload
-- ckb_projection_possible          -> matches projection report
+- projection_stage                 -> declared profile matches payload
+- wire_encoded          -> matches projection report
 - unsupported_features             -> listed correctly
 - semantic_deviation_flags         -> listed correctly
 - l1_court_implemented             -> false (explicit)

@@ -74,10 +74,10 @@ The projection layer protects against a producer who *claims* a
 transition is CKB-aligned when it isn't:
 
 ```text
-if the projection report says projection_possible: true
+if the projection report says wire_encoded: true
    the CellTx is projectable; the court can replay it
 
-if the projection report says projection_possible: false
+if the projection report says wire_encoded: false
    the report lists the explicit deviation flags
 
 if the projection report doesn't exist

@@ -16,6 +16,7 @@ blake3.workspace = true
 clap.workspace = true
 hex.workspace = true
 myelin-consensus.workspace = true
+myelin-ckb-adapter.workspace = true
 myelin-exec.workspace = true
 myelin-hashes.workspace = true
 myelin-mempool.workspace = true

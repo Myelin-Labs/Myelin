@@ -12,18 +12,18 @@
 // `Fn + Send + Sync` closure that `ParallelExecutor::execute` expects.
 
 use crate::celltx::types::CellTx;
-use crate::vm::{CellDataProvider, TransactionScriptVerifier};
+use crate::vm::{CellDataProvider, TransactionScriptVerifier, VmSemantics};
 use std::sync::Arc;
 
-use super::dag::CellDAG;
+use super::dag::{CellDAG, SchedulerPlan};
 use super::executor::{ExecutionError, ExecutionReceipt, ExecutionResult, ParallelExecutor};
 
 /// Verify a batch of Cell transactions through the real CKB-VM verifier,
 /// scheduled in parallel by the CellDAG.
 ///
-/// The DAG is built with `CellDAG::build_from_typed` so that scheduler
-/// witnesses (when present) add typed conflict-hash edges on top of the
-/// OutPoint-level dependencies. Each transaction is then verified via
+/// The DAG is built from physical OutPoint dependencies. Call
+/// [`verify_celltx_via_dag_with_plans`] when authenticated typed scheduler
+/// plans are available. Each transaction is then verified via
 /// `TransactionScriptVerifier::verify_with_cycles`, which itself already
 /// parallelizes across the script groups of a single transaction. This
 /// function adds inter-transaction parallelism on top of that.
@@ -41,7 +41,19 @@ pub fn verify_celltx_via_dag<D: CellDataProvider>(
     max_cycles: u64,
     skip_lock_groups: bool,
 ) -> Result<Vec<ExecutionResult>, ExecutionError> {
-    let dag = CellDAG::build_from_typed(txs).map_err(|err| ExecutionError::DagBuild(err.to_string()))?;
+    let dag = CellDAG::build(txs).map_err(|err| ExecutionError::DagBuild(err.to_string()))?;
+    verify_with_existing_dag(&dag, txs, data_provider, max_cycles, skip_lock_groups)
+}
+
+/// Verify a batch using authenticated typed scheduler plans.
+pub fn verify_celltx_via_dag_with_plans<D: CellDataProvider>(
+    txs: &[CellTx],
+    plans: &[SchedulerPlan],
+    data_provider: Arc<D>,
+    max_cycles: u64,
+    skip_lock_groups: bool,
+) -> Result<Vec<ExecutionResult>, ExecutionError> {
+    let dag = CellDAG::build_with_scheduler_plans(txs, plans).map_err(|err| ExecutionError::DagBuild(err.to_string()))?;
     verify_with_existing_dag(&dag, txs, data_provider, max_cycles, skip_lock_groups)
 }
 
@@ -58,6 +70,7 @@ pub fn verify_with_existing_dag<D: CellDataProvider>(
     executor.execute(dag, txs, |cell_tx, _node_id| {
         let verifier = TransactionScriptVerifier::new(Arc::new(cell_tx.clone()), data_provider.clone())
             .with_skip_lock_groups(skip_lock_groups)
+            .with_semantics(VmSemantics::CkbStrict)
             .with_max_cycles(max_cycles);
         let cycles = verifier.verify_with_cycles().map_err(|err| err.to_string())?;
         Ok(ExecutionReceipt { cycles, exit_code: 0, gas_used: 0, logs: Vec::new() })

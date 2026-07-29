@@ -1,6 +1,5 @@
 {
-  "_template_note": "Replace fields from settlement_authority_requirement.authority_authentication before passing to session settlement-package.",
-  "schema": "myelin-session-threshold-lock-deployment-v1",
+  "schema": "myelin-session-threshold-lock-deployment-v2",
   "network": "ckb-testnet",
   "code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "hash_type": "data2",

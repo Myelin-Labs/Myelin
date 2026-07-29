@@ -37,7 +37,7 @@ mod tests {
         // Use exact target delta
         let since = encode_relative_block_number_since(TARGET_DELTA);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -61,7 +61,7 @@ mod tests {
         // Use a larger delta
         let since = encode_relative_block_number_since(TARGET_DELTA + 50);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -85,7 +85,7 @@ mod tests {
         // Use a smaller delta
         let since = encode_relative_block_number_since(TARGET_DELTA - 50);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -109,7 +109,7 @@ mod tests {
         // Use absolute lock (bit63 = 0)
         let since = TARGET_DELTA;
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -133,7 +133,7 @@ mod tests {
         // Use timestamp lock instead of block number (bit62 = 1)
         let since = (1u64 << 63) | (1u64 << 62) | TARGET_DELTA;
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],

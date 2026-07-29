@@ -263,12 +263,7 @@ impl SegmentWriter {
     /// Compute a Merkle root over a caller-supplied chunk snapshot, without
     /// touching `current_chunks`. This is the seal-binding path: the snapshot
     /// is taken under the file/offset critical section so it cannot drift.
-    fn compute_merkle_root_from_snapshot(
-        &self,
-        segment_id: u32,
-        size: u64,
-        chunk_ranges: &[AppendRecord],
-    ) -> Result<[u8; 32]> {
+    fn compute_merkle_root_from_snapshot(&self, segment_id: u32, size: u64, chunk_ranges: &[AppendRecord]) -> Result<[u8; 32]> {
         let path = self.segment_path(segment_id);
         let mut file = File::open(path)?;
 

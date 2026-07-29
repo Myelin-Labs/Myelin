@@ -108,8 +108,8 @@ The main ones:
 | `current_cycles` | Read remaining cycle budget. |
 | `debug_print` *(disabled in some VM versions)* | Optional logging. |
 
-Myelin runs the same syscall surface for `semantic_profile =
-"ckb-compatible"`. The Teeworlds replayer uses
+Myelin runs the same syscall surface for `projection_stage =
+"wire-encoded"`. The Teeworlds replayer uses
 `LOAD_TRANSACTION` against the Molecule-encoded transaction bytes and
 reads witnesses from the witness slots.
 

@@ -1,14 +1,15 @@
 # CLI reference
 
-`myelin-cli` is the executable surface of the Myelin kernel. It
+`myelin` (the binary built by package `myelin-cli`) is the executable surface of the Myelin kernel. It
 exposes subcommands that produce and verify reports. This page is
 the canonical reference.
 
 ## Top-level shape
 
 ```text
-myelin-cli
+myelin
 ├── celltx
+├── ckb
 ├── committee
 ├── runtime
 ├── session
@@ -16,7 +17,7 @@ myelin-cli
 └── (a few lower-level helpers)
 ```
 
-Run `myelin-cli --help` for the full subcommand list. Each
+Run `myelin --help` for the full subcommand list. Each
 subcommand takes its own flags; `--help` after the subcommand name
 prints them.
 
@@ -27,7 +28,19 @@ prints them.
 | `celltx simple-report` | Builds a trivial CellTx, runs it through Myelin, and emits an execution report + projection report. |
 
 Output: `MyelinExecutionReport` + `CkbProjectionReport` for the
-trivial CellTx. The default semantic profile is `ckb-compatible`.
+trivial CellTx. The pure projection stage is `wire-encoded`.
+
+## `ckb` — context-bound CKB evidence
+
+| Subcommand | What it does |
+| --- | --- |
+| `ckb prove` | Resolves immutable CKB context, requires node validation, runs strict local VM, and optionally submits/observes the exact transaction. |
+| `ckb observe` | Advances node-accepted evidence through canonical commitment and configured-depth finality. |
+| `ckb verify` | Recomputes and verifies a serialized receipt chain offline, including the transaction Merkle proof. |
+
+Input may be Myelin `CellTx` JSON or exact CKB transaction JSON. The
+pure projector remains wire-only; these commands emit
+`CkbEvidenceProjection` receipts for higher stages.
 
 ## `committee` — finality engine
 
@@ -37,7 +50,7 @@ trivial CellTx. The default semantic profile is `ckb-compatible`.
 
 The config file uses the same TOML schema documented in
 [Consensus engines](../architecture/consensus.md#static-closed-committee).
-The subcommand picks `static-closed-committee` or `tendermint`
+The subcommand picks `static-closed-committee` or `weighted-precommit`
 based on the `kind` field.
 
 ## `runtime` — end-to-end smoke
@@ -84,7 +97,7 @@ This is the largest subcommand surface. It maps 1:1 onto the
 
 | Flag | Used by | What it does |
 | --- | --- | --- |
-| `--consensus <kind>` | `open-fixture`, `commit-fixture` | `static-closed-committee` or `tendermint`. |
+| `--consensus <kind>` | `open-fixture`, `commit-fixture` | `static-closed-committee` or `weighted-precommit`. |
 | `--out <path>` | (most) | Where to write the report JSON. |
 | `--rpc-url <url>` | `submit-*`, `verify-submission-*` | CKB JSON-RPC endpoint. |
 | `--dry-run` | `submit-*` | Build the request without sending. |
@@ -133,8 +146,8 @@ The readiness object is the *honest label*:
 ```json
 {
   "readiness": {
-    "semantic_profile": "ckb-compatible",
-    "ckb_projection_possible": true,
+    "projection_stage": "wire-encoded",
+    "wire_encoded": true,
     "l1_da_published": false,
     "l1_court_implemented": false,
     "production_submission_ready": false,

@@ -140,7 +140,7 @@ A passing run prints a summary whose live values (recorded 2026-07) are:
   "vm_profile": "ckb-strict-basic",
   "ckb_spawn_ipc_enabled": false,
   "court_checks": 22,
-  "semantic_profile": "ckb-compatible",
+  "projection_stage": "wire-encoded",
   "static_committee_finalised": true
 }
 ```
@@ -244,11 +244,11 @@ from 14 to 22). If it reports `valid: true` with all checks passing, you've
 reached Tier 2 of the claim ladder: *"executable disputed-chunk input
 shape."*
 
-## Step 6 — (Optional) Tendermint path and merged repro report
+## Step 6 — (Optional) WeightedPrecommit path and merged repro report
 
-The same workload finalises under the Tendermint precommit verifier too.
+The same workload finalises under the WeightedPrecommit precommit verifier too.
 `build-fixture`, `court-bundle`, and `verify-court-bundle` all accept a
-`--consensus tendermint` flag. The merged static + Tendermint repro report
+`--consensus weighted-precommit` flag. The merged static + WeightedPrecommit repro report
 is produced by:
 
 ```bash
@@ -262,7 +262,7 @@ Its `shared_metrics` match the static summary:
 {
   "tape_bytes": 2162,
   "vm_cycles": 15139695,
-  "projection_status": "ckb-compatible",
+  "projection_status": "wire-encoded",
   "court_bundle_status": "valid"
 }
 ```
@@ -270,10 +270,10 @@ Its `shared_metrics` match the static summary:
 ## What this proves
 
 - ✅ A real CKB binary ran through Myelin's CKB-strict VM (15,139,695 cycles).
-- ✅ Per-chunk projection reports all say `ckb-compatible`.
+- ✅ Per-chunk projection reports all say `wire-encoded`.
 - ✅ A court bundle exists, with all 22 assertions passing.
 - ✅ The workload finalises under both the static closed committee and the
-  Tendermint precommit verifier.
+  WeightedPrecommit precommit verifier.
 
 It does **not** exercise (yet):
 

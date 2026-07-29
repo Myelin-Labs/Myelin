@@ -20,6 +20,6 @@ pub mod executor;
 pub mod vm_bridge;
 
 pub use conflict::{ConflictKey, ConflictResolution, ConflictResolver};
-pub use dag::{AccessMode, CellDAG, ConflictEntry, DagEdge, DagNode};
+pub use dag::{AccessMode, CellDAG, ConflictEntry, DagEdge, DagNode, SchedulerPlan};
 pub use executor::{ExecutionError, ExecutionReceipt, ExecutionResult, ExecutionStats, ParallelExecutor};
-pub use vm_bridge::{verify_celltx_via_dag, verify_with_existing_dag};
+pub use vm_bridge::{verify_celltx_via_dag, verify_celltx_via_dag_with_plans, verify_with_existing_dag};

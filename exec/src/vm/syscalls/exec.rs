@@ -302,7 +302,7 @@ mod tests {
 
     fn sample_dep_tx(out_point: OutPoint) -> Arc<CellTx> {
         Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![CellDep { out_point, dep_type: DepType::Code }],
             header_deps: vec![],

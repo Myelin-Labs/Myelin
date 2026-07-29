@@ -6,8 +6,10 @@ submission) needs extra pieces — those are documented at the bottom.
 
 ## 1. Rust
 
-Myelin tracks stable Rust. The workspace is built against the same
-`rust-version` as the parent CellScript project.
+Myelin's development toolchain is pinned by `rust-toolchain.toml`; its
+declared workspace MSRV remains in `Cargo.toml`. Upstream CellScript is
+an independent process boundary and uses the separate Rust toolchain
+recorded in `cellscript-adapter/cellscript-toolchain.lock.json`.
 
 ```bash
 # Install rustup if you don't already have it
@@ -47,30 +49,23 @@ If all four pass, you have a working Myelin workspace.
 cargo build -p myelin-cli --release
 ```
 
-The binary lands at `target/release/myelin-cli`. From here on, the docs
+The binary lands at `target/release/myelin`. From here on, the docs
 will just say `cargo run -p myelin-cli -- …` for brevity, but you can
 swap that for the release binary whenever you want a faster shell.
 
-## 4. (Optional) Local CKB devnet for live smoke tests
+## 4. Parent CKB devnet for the full gate
 
-The `scripts/myelin_ckb_devnet_smoke.sh` script submits carrier
-transactions to a real CKB devnet. To run it locally:
+The production gate starts an isolated integration chain from the parent
+CKB checkout, reproduces the exact CellScript compiler, deploys four
+verifiers, and exercises valid and invalid transactions:
 
 ```bash
-# Either use OffCKB (the recommended path)
-# see https://docs.nervos.org/docs/node/install-ckb for current install
-offckb init --ckb-version latest
-offckb start
-
-# ... or use a parent ckb checkout, if you maintain one
-cd ../ckb
-cargo build --release
-target/release/ckb init --testnet
-target/release/ckb run --testnet --tmp --listen 127.0.0.1:8114
+CKB_ROOT=/home/arthur/a19q3/ckb \
+RUN_TEEWORLDS=0 scripts/myelin_production_gate.sh
 ```
 
-You should see CKB's RPC listener on `127.0.0.1:8114`. The smoke script
-will talk to it over JSON-RPC.
+Set `RUN_CKB_DEVNET=0` only for a deliberately reduced local validation
+when the parent checkout is unavailable.
 
 ## 5. Verify
 
@@ -81,6 +76,6 @@ cargo run -p myelin-cli -- celltx simple-report
 ```
 
 This writes a `MyelinExecutionReport` and a `CkbProjectionReport` for a
-trivial CellTx. If you see `semantic_profile = "ckb-compatible"` and
-`ckb_projection_possible = true`, the toolchain is good. Head to
+trivial CellTx. If you see `projection_stage = "wire-encoded"` and
+`wire_encoded = true`, the toolchain is good. Head to
 [First run](first-run.md) for the longer end-to-end path.

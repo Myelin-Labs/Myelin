@@ -3,7 +3,7 @@
 Generate the local, uncommitted reports/myelin-teeworlds-repro.json from the
 live Teeworlds acceptance output. Run after
 `bash scripts/myelin_teeworlds_acceptance.sh` to merge the static-committee and
-Tendermint reports into a single reproducible JSON artefact.
+weighted-precommit reports into a single reproducible JSON artefact.
 """
 import json
 import os
@@ -41,15 +41,15 @@ def load_or_run_static(mock_tx_path):
     verify = json.loads((build_dir / "court-bundle-verify.json").read_text())
     return build, vm, court, verify
 
-def run_tendermint(mock_tx_path):
-    """Run inspect / court-bundle with --consensus tendermint."""
-    out_dir = Path("/tmp/myelin-tendermint-teeworlds")
+def run_weighted_precommit(mock_tx_path):
+    """Run inspect / court-bundle with --consensus weighted-precommit."""
+    out_dir = Path("/tmp/myelin-weighted-precommit-teeworlds")
     out_dir.mkdir(parents=True, exist_ok=True)
-    inspect_path = out_dir / "inspect-tendermint.json"
-    court_path = out_dir / "court-bundle-tendermint.json"
-    verify_path = out_dir / "court-bundle-verify-tendermint.json"
-    run_myelin("teeworlds", "inspect", "--mock-tx", mock_tx_path, "--consensus", "tendermint", "--out", str(inspect_path))
-    run_myelin("teeworlds", "court-bundle", "--mock-tx", mock_tx_path, "--consensus", "tendermint", "--out", str(court_path))
+    inspect_path = out_dir / "inspect-weighted-precommit.json"
+    court_path = out_dir / "court-bundle-weighted-precommit.json"
+    verify_path = out_dir / "court-bundle-verify-weighted-precommit.json"
+    run_myelin("teeworlds", "inspect", "--mock-tx", mock_tx_path, "--consensus", "weighted-precommit", "--out", str(inspect_path))
+    run_myelin("teeworlds", "court-bundle", "--mock-tx", mock_tx_path, "--consensus", "weighted-precommit", "--out", str(court_path))
     run_myelin("teeworlds", "verify-court-bundle", "--bundle", str(court_path), "--out", str(verify_path))
     return json.loads(inspect_path.read_text()), json.loads(court_path.read_text()), json.loads(verify_path.read_text())
 
@@ -60,21 +60,21 @@ def main():
         sys.exit(1)
 
     build, vm, court, verify = load_or_run_static(str(mock_tx))
-    tm_inspect, tm_court, tm_verify = run_tendermint(str(mock_tx))
+    wp_inspect, wp_court, wp_verify = run_weighted_precommit(str(mock_tx))
 
     fixture = build["benchmark"]["fixture"]
     chunks = fixture["chunks"]
 
     report = {
-        "schema": "myelin-teeworlds-repro-v1",
+        "schema": "myelin-teeworlds-repro-v2",
         "teeworlds_root": TEEWORLDS_ROOT,
-        "static_closed_committee": {
+        "static_committee": {
             "fixture": {
                 "tape_bytes": fixture["tape_bytes"],
                 "chunks": len(chunks),
                 "chunk_bytes": fixture["chunk_bytes"],
-                "ckb_projection_possible": fixture["ckb_projection_possible"],
-                "semantic_profile": chunks[0]["ckb_projection"]["semantic_profile"],
+                "wire_encoded": fixture["wire_encoded"],
+                "projection_stage": chunks[0]["ckb_projection"]["projection_stage"],
                 "average_elapsed_ns": build["benchmark"]["average_elapsed_ns"],
                 "finalised": fixture["finality"]["finalised"],
                 "block_hash": fixture["finality"]["block_hash"],
@@ -103,38 +103,38 @@ def main():
                 "failed_checks": [c["name"] for c in verify["checks"] if not c["ok"]],
             },
         },
-        "tendermint": {
+        "weighted_precommit": {
             "fixture": {
-                "tape_bytes": tm_inspect["tape_bytes"],
-                "chunks": len(tm_inspect["chunks"]),
-                "ckb_projection_possible": tm_inspect["ckb_projection_possible"],
-                "semantic_profile": tm_inspect["chunks"][0]["ckb_projection"]["semantic_profile"],
-                "block_hash": tm_inspect["finality"]["block_hash"],
-                "consensus_kind": tm_inspect["finality"]["consensus_kind"],
-                "certificate_height": tm_inspect["finality"]["certificate_height"],
-                "certificate_round": tm_inspect["finality"]["certificate_round"],
-                "certificate_step": tm_inspect["finality"]["certificate_step"],
-                "signer_ids": tm_inspect["finality"]["signer_ids"],
-                "quorum_weight": tm_inspect["finality"]["quorum_weight"],
-                "finalised": tm_inspect["finality"]["finalised"],
+                "tape_bytes": wp_inspect["tape_bytes"],
+                "chunks": len(wp_inspect["chunks"]),
+                "wire_encoded": wp_inspect["wire_encoded"],
+                "projection_stage": wp_inspect["chunks"][0]["ckb_projection"]["projection_stage"],
+                "block_hash": wp_inspect["finality"]["block_hash"],
+                "consensus_kind": wp_inspect["finality"]["consensus_kind"],
+                "certificate_height": wp_inspect["finality"]["certificate_height"],
+                "certificate_round": wp_inspect["finality"]["certificate_round"],
+                "certificate_step": wp_inspect["finality"]["certificate_step"],
+                "signer_ids": wp_inspect["finality"]["signer_ids"],
+                "quorum_weight": wp_inspect["finality"]["quorum_weight"],
+                "finalised": wp_inspect["finality"]["finalised"],
             },
             "court_bundle": {
-                "court_verifiable": tm_court["court_verifiable"],
-                "l1_court_implemented": tm_court["l1_court_implemented"],
-                "molecule_transaction_bytes": tm_court["molecule_transaction_bytes"],
-                "tendermint_evidence": tm_court["tendermint_evidence"],
+                "court_verifiable": wp_court["court_verifiable"],
+                "l1_court_implemented": wp_court["l1_court_implemented"],
+                "molecule_transaction_bytes": wp_court["molecule_transaction_bytes"],
+                "weighted_precommit_evidence": wp_court["weighted_precommit_evidence"],
             },
             "court_bundle_verification": {
-                "valid": tm_verify["valid"],
-                "checks": len(tm_verify["checks"]),
-                "failed_checks": [c["name"] for c in tm_verify["checks"] if not c["ok"]],
+                "valid": wp_verify["valid"],
+                "checks": len(wp_verify["checks"]),
+                "failed_checks": [c["name"] for c in wp_verify["checks"] if not c["ok"]],
             },
         },
         "shared_metrics": {
             "tape_bytes": vm["tape_bytes"],
             "vm_cycles": vm["cycles"],
-            "projection_status": "ckb-compatible",
-            "court_bundle_status": "valid",
+            "projection_stage": "wire-encoded",
+            "court_bundle_status": "internally-valid-not-ckb-context-verified",
         },
     }
 

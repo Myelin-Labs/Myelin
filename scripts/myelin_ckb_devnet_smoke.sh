@@ -9,12 +9,14 @@ P2P_PORT="${P2P_PORT:-18315}"
 RPC_URL="http://127.0.0.1:${RPC_PORT}"
 WORKDIR="${WORKDIR:-$(mktemp -d /tmp/myelin-ckb-devnet.XXXXXX)}"
 REPORT="${REPORT:-"$WORKDIR/myelin-ckb-devnet-smoke.json"}"
+CELLSCRIPT_BIN="${CELLSCRIPT_BIN:?set CELLSCRIPT_BIN to the attested parent CellScript cellc binary}"
+CELLSCRIPT_ATTESTATION="${CELLSCRIPT_ATTESTATION:?set CELLSCRIPT_ATTESTATION to its Myelin attestation JSON}"
 ALWAYS_SUCCESS_CODE_HASH="0x28e83a1277d48add8e72fadaa9248559e1b632bab2bd60b27955ebc4c03800a5"
 GENESIS_ALWAYS_SUCCESS_DEP_INDEX="${GENESIS_ALWAYS_SUCCESS_DEP_INDEX:-0x5}"
-INITIAL_MINING_BLOCKS="${INITIAL_MINING_BLOCKS:-48}"
+INITIAL_MINING_BLOCKS="${INITIAL_MINING_BLOCKS:-96}"
 COMMIT_MINING_BLOCKS="${COMMIT_MINING_BLOCKS:-8}"
-FEE_SHANNONS="${FEE_SHANNONS:-2000}"
-DEPLOY_FEE_SHANNONS="${DEPLOY_FEE_SHANNONS:-100000}"
+FEE_SHANNONS="${FEE_SHANNONS:-10000}"
+DEPLOY_FEE_SHANNONS="${DEPLOY_FEE_SHANNONS:-500000}"
 MIN_FUNDING_CELL_CAPACITY_SHANNONS="${MIN_FUNDING_CELL_CAPACITY_SHANNONS:-10000000000}"
 CARRIER_CELL_CAPACITY_SHANNONS="${CARRIER_CELL_CAPACITY_SHANNONS:-42000000000}"
 SETTLEMENT_AUTHORITY_CELL_CAPACITY_SHANNONS="${SETTLEMENT_AUTHORITY_CELL_CAPACITY_SHANNONS:-30000000000}"
@@ -60,6 +62,8 @@ require_cmd curl
 require_cmd jq
 require_cmd python3
 
+cargo run -q -p myelin-cellscript-adapter -- verify "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION"
+
 if [[ ! -x "$CKB_BIN" ]]; then
   echo "CKB binary not found or not executable: $CKB_BIN" >&2
   exit 1
@@ -77,7 +81,7 @@ file_hex() {
 
 ckb_hash_hex() {
   local hex_value="${1#0x}"
-  echo "0x$(cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- ckb-hash --hex "$hex_value" --json | jq -r '.hash')"
+  echo "0x$("$CELLSCRIPT_BIN" ckb-hash --hex "$hex_value" --json | jq -r '.hash')"
 }
 
 carrier_identity_hex() {
@@ -97,7 +101,7 @@ entry_witness_hex() {
   shift 2
   local witness_hex
   local cmd=(
-    cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc --
+    "$CELLSCRIPT_BIN"
     entry-witness "$source_path"
     --action "$action"
   )
@@ -111,90 +115,38 @@ entry_witness_hex() {
 }
 
 compile_carrier_verifiers() {
-  cp "$ROOT/cellscript/examples/myelin/da-anchor-carrier.cell" "$WORKDIR/myelin/da-anchor-carrier.cell"
-  cp "$ROOT/cellscript/examples/myelin/settlement-carrier.cell" "$WORKDIR/myelin/settlement-carrier.cell"
-  cp "$ROOT/cellscript/examples/myelin/da-anchor-final.cell" "$WORKDIR/myelin/da-anchor-final.cell"
-  cp "$ROOT/cellscript/examples/myelin/settlement-final.cell" "$WORKDIR/myelin/settlement-final.cell"
-  cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    "$WORKDIR/myelin/da-anchor-carrier.cell" \
-    -t riscv64-elf \
-    --target-profile typed-cell \
-    --primitive-compat 0.18 \
-    --entry-action verify_da_anchor_carrier \
-    -o "$WORKDIR/myelin/da-anchor-carrier.typed-cell.elf"
-  cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    "$WORKDIR/myelin/settlement-carrier.cell" \
-    -t riscv64-elf \
-    --target-profile typed-cell \
-    --primitive-compat 0.18 \
-    --entry-action verify_settlement_carrier \
-    -o "$WORKDIR/myelin/settlement-carrier.typed-cell.elf"
-  cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    "$WORKDIR/myelin/da-anchor-final.cell" \
-    -t riscv64-elf \
-    --target-profile typed-cell \
-    --primitive-compat 0.18 \
-    --entry-action verify_final_da_publication \
-    -o "$WORKDIR/myelin/da-anchor-final.typed-cell.elf"
-  cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    "$WORKDIR/myelin/settlement-final.cell" \
-    -t riscv64-elf \
-    --target-profile typed-cell \
-    --primitive-compat 0.18 \
-    --entry-action verify_final_settlement \
-    -o "$WORKDIR/myelin/settlement-final.typed-cell.elf"
-  cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    "$WORKDIR/myelin/da-anchor-carrier.cell" \
-    -t riscv64-elf \
-    --target-profile ckb \
-    --primitive-compat 0.18 \
-    --entry-action verify_da_anchor_carrier \
-    -o "$WORKDIR/myelin/da-anchor-carrier.elf"
-  cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    "$WORKDIR/myelin/settlement-carrier.cell" \
-    -t riscv64-elf \
-    --target-profile ckb \
-    --primitive-compat 0.18 \
-    --entry-action verify_settlement_carrier \
-    -o "$WORKDIR/myelin/settlement-carrier.elf"
-  cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    "$WORKDIR/myelin/da-anchor-final.cell" \
-    -t riscv64-elf \
-    --target-profile ckb \
-    --primitive-compat 0.18 \
-    --entry-action verify_final_da_publication \
-    -o "$WORKDIR/myelin/da-anchor-final.elf"
-  cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    "$WORKDIR/myelin/settlement-final.cell" \
-    -t riscv64-elf \
-    --target-profile ckb \
-    --primitive-compat 0.18 \
-    --entry-action verify_final_settlement \
-    -o "$WORKDIR/myelin/settlement-final.elf"
+  cp "$ROOT/fixtures/cellscript/da-anchor-carrier.cell" "$WORKDIR/myelin/da-anchor-carrier.cell"
+  cp "$ROOT/fixtures/cellscript/settlement-carrier.cell" "$WORKDIR/myelin/settlement-carrier.cell"
+  cp "$ROOT/fixtures/cellscript/da-anchor-final.cell" "$WORKDIR/myelin/da-anchor-final.cell"
+  cp "$ROOT/fixtures/cellscript/settlement-final.cell" "$WORKDIR/myelin/settlement-final.cell"
+  cargo run -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
+    "$WORKDIR/myelin/da-anchor-carrier.cell" "$WORKDIR/myelin/da-anchor-carrier.elf" verify_da_anchor_carrier
+  cargo run -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
+    "$WORKDIR/myelin/settlement-carrier.cell" "$WORKDIR/myelin/settlement-carrier.elf" verify_settlement_carrier
+  cargo run -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
+    "$WORKDIR/myelin/da-anchor-final.cell" "$WORKDIR/myelin/da-anchor-final.elf" verify_final_da_publication
+  cargo run -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
+    "$WORKDIR/myelin/settlement-final.cell" "$WORKDIR/myelin/settlement-final.elf" verify_final_settlement
 
-  da_verifier_code_hash="0x$(cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    ckb-hash --file "$WORKDIR/myelin/da-anchor-carrier.elf" --json | jq -r '.hash')"
+  da_verifier_code_hash="0x$("$CELLSCRIPT_BIN" ckb-hash --file "$WORKDIR/myelin/da-anchor-carrier.elf" --json | jq -r '.hash')"
   da_verifier_elf_hex="0x$(file_hex "$WORKDIR/myelin/da-anchor-carrier.elf")"
   da_verifier_elf_size="$(wc -c <"$WORKDIR/myelin/da-anchor-carrier.elf" | tr -d ' ')"
   da_verifier_code_capacity="$(((da_verifier_elf_size + 1000) * CKB_SHANNONS_PER_BYTE))"
   da_verifier_code_capacity_hex="$(printf '0x%x' "$da_verifier_code_capacity")"
 
-  settlement_verifier_code_hash="0x$(cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    ckb-hash --file "$WORKDIR/myelin/settlement-carrier.elf" --json | jq -r '.hash')"
+  settlement_verifier_code_hash="0x$("$CELLSCRIPT_BIN" ckb-hash --file "$WORKDIR/myelin/settlement-carrier.elf" --json | jq -r '.hash')"
   settlement_verifier_elf_hex="0x$(file_hex "$WORKDIR/myelin/settlement-carrier.elf")"
   settlement_verifier_elf_size="$(wc -c <"$WORKDIR/myelin/settlement-carrier.elf" | tr -d ' ')"
   settlement_verifier_code_capacity="$(((settlement_verifier_elf_size + 1000) * CKB_SHANNONS_PER_BYTE))"
   settlement_verifier_code_capacity_hex="$(printf '0x%x' "$settlement_verifier_code_capacity")"
 
-  da_final_verifier_code_hash="0x$(cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    ckb-hash --file "$WORKDIR/myelin/da-anchor-final.elf" --json | jq -r '.hash')"
+  da_final_verifier_code_hash="0x$("$CELLSCRIPT_BIN" ckb-hash --file "$WORKDIR/myelin/da-anchor-final.elf" --json | jq -r '.hash')"
   da_final_verifier_elf_hex="0x$(file_hex "$WORKDIR/myelin/da-anchor-final.elf")"
   da_final_verifier_elf_size="$(wc -c <"$WORKDIR/myelin/da-anchor-final.elf" | tr -d ' ')"
   da_final_verifier_code_capacity="$(((da_final_verifier_elf_size + 1000) * CKB_SHANNONS_PER_BYTE))"
   da_final_verifier_code_capacity_hex="$(printf '0x%x' "$da_final_verifier_code_capacity")"
 
-  settlement_final_verifier_code_hash="0x$(cargo run -q --manifest-path "$ROOT/cellscript/Cargo.toml" --bin cellc -- \
-    ckb-hash --file "$WORKDIR/myelin/settlement-final.elf" --json | jq -r '.hash')"
+  settlement_final_verifier_code_hash="0x$("$CELLSCRIPT_BIN" ckb-hash --file "$WORKDIR/myelin/settlement-final.elf" --json | jq -r '.hash')"
   settlement_final_verifier_elf_hex="0x$(file_hex "$WORKDIR/myelin/settlement-final.elf")"
   settlement_final_verifier_elf_size="$(wc -c <"$WORKDIR/myelin/settlement-final.elf" | tr -d ' ')"
   settlement_final_verifier_code_capacity="$(((settlement_final_verifier_elf_size + 1000) * CKB_SHANNONS_PER_BYTE))"
@@ -416,7 +368,7 @@ if [[ "$settlement_authority_lock_binding" != "final-da-publication-lock-hash" ]
   echo "settlement package authority lock binding must target the final DA publication lock" >&2
   exit 1
 fi
-if [[ "$settlement_authority_authentication_schema" != "myelin-session-settlement-authority-auth-v1" || "$settlement_authority_authentication_mode" != "ckb-threshold-lock" ]]; then
+if [[ "$settlement_authority_authentication_schema" != "myelin-session-settlement-authority-auth-v2" || "$settlement_authority_authentication_mode" != "ckb-threshold-lock" ]]; then
   echo "settlement authority must expose CKB threshold-lock authentication evidence" >&2
   exit 1
 fi
@@ -473,6 +425,10 @@ sed \
     cat "$WORKDIR/ckb-init.log" >&2
     exit 1
   }
+
+# The integration chain uses Dummy PoW. A short deterministic delay keeps the
+# acceptance gate fast while still exercising the real parent miner/node path.
+sed -i.bak -e '/worker_type = "Dummy"/,$ s/^value = 5000$/value = 10/' "$WORKDIR/ckb-miner.toml"
 
 cp "$CKB_ROOT/test/template/specs/cells/always_success" "$WORKDIR/specs/cells/always_success"
 cp "$CKB_ROOT/test/template/specs/cells/always_failure" "$WORKDIR/specs/cells/always_failure"
@@ -693,28 +649,29 @@ submit_and_verify_carrier() {
   local authority_input_index="${12:-}"
   local authority_input_capacity_hex="${13:-}"
   local carrier_lock_args="${14:-0x}"
+  local output_lock_args="${15:-$carrier_lock_args}"
 
   local verifier_source verifier_action verifier_code_hash_for_carrier verifier_code_dep_index_for_carrier
   case "$verifier_role:$package_kind" in
-    carrier:myelin-session-da-anchor-package-v1)
+    carrier:myelin-session-da-anchor-package-v2)
       verifier_source="da-anchor-carrier.cell"
       verifier_action="verify_da_anchor_carrier"
       verifier_code_hash_for_carrier="$da_verifier_code_hash"
       verifier_code_dep_index_for_carrier="$da_verifier_code_dep_index"
       ;;
-    carrier:myelin-session-settlement-package-v1)
+    carrier:myelin-session-settlement-package-v2)
       verifier_source="settlement-carrier.cell"
       verifier_action="verify_settlement_carrier"
       verifier_code_hash_for_carrier="$settlement_verifier_code_hash"
       verifier_code_dep_index_for_carrier="$settlement_verifier_code_dep_index"
       ;;
-    final-l1-script:myelin-session-da-anchor-package-v1)
+    final-l1-script:myelin-session-da-anchor-package-v2)
       verifier_source="da-anchor-final.cell"
       verifier_action="verify_final_da_publication"
       verifier_code_hash_for_carrier="$da_final_verifier_code_hash"
       verifier_code_dep_index_for_carrier="$da_final_verifier_code_dep_index"
       ;;
-    final-l1-script:myelin-session-settlement-package-v1)
+    final-l1-script:myelin-session-settlement-package-v2)
       verifier_source="settlement-final.cell"
       verifier_action="verify_final_settlement"
       verifier_code_hash_for_carrier="$settlement_final_verifier_code_hash"
@@ -802,6 +759,7 @@ submit_and_verify_carrier() {
     --lock-code-hash "$ALWAYS_SUCCESS_CODE_HASH" \
     --lock-hash-type data \
     --lock-args "$carrier_lock_args" \
+    --output-lock-args "$output_lock_args" \
     --lock-code-dep-tx-hash "$genesis_tx_hash" \
     --lock-code-dep-index "$GENESIS_ALWAYS_SUCCESS_DEP_INDEX" \
     --verifier-code-hash "$verifier_code_hash_for_carrier" \
@@ -822,7 +780,7 @@ submit_and_verify_carrier() {
   carrier_type_args="$(jq -r '.carrier_type_args' "$dry_run_submission_path")"
 
   local witness_args=("$carrier_type_args")
-  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v1" ]]; then
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v2" ]]; then
     if [[ -z "${da_anchor_final_type_args:-}" ]]; then
       echo "$label final settlement witness requires da_anchor_final_type_args" >&2
       exit 1
@@ -832,7 +790,7 @@ submit_and_verify_carrier() {
   local witness_hex
   witness_hex="$(entry_witness_hex "$verifier_source_path" "$verifier_action" "${witness_args[@]}")"
 
-  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v1" ]]; then
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v2" ]]; then
     local session_id_hash settlement_identity_hash competing_payload competing_identity_hash competing_type_args
     local competing_output_capacity competing_change_capacity competing_change_capacity_hex
     session_id_hash="$(jq -r '.session_id_hash' "$dry_run_submission_path")"
@@ -958,6 +916,7 @@ PY
     --lock-code-hash "$ALWAYS_SUCCESS_CODE_HASH" \
     --lock-hash-type data \
     --lock-args "$carrier_lock_args" \
+    --output-lock-args "$output_lock_args" \
     --lock-code-dep-tx-hash "$genesis_tx_hash" \
     --lock-code-dep-index "$GENESIS_ALWAYS_SUCCESS_DEP_INDEX" \
     --verifier-code-hash "$verifier_code_hash_for_carrier" \
@@ -991,7 +950,7 @@ PY
   session_id_hash="$(jq -r '.session_id_hash // empty' "$submission_path")"
   duplicate_settlement_detected="$(jq -r '.duplicate_settlement_detected' "$submission_path")"
   replay_protection_mode="$(jq -r '.replay_protection_mode // empty' "$submission_path")"
-  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v1" ]]; then
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v2" ]]; then
     if [[ "$pre_submit_evidence_cell_dep_lock_matches" != "true" ]] \
       || [[ "$pre_submit_authority_input_data_hash_matches" != "true" ]] \
       || [[ "$pre_submit_authority_input_lock_matches" != "true" ]] \
@@ -1138,12 +1097,12 @@ PY
       echo "final L1 readiness must not carry the final-l1-script-not-ready blocker" >&2
       exit 1
     fi
-    if [[ "$package_kind" == "myelin-session-da-anchor-package-v1" ]] \
+    if [[ "$package_kind" == "myelin-session-da-anchor-package-v2" ]] \
       && ! jq -e 'index("real-da-availability-guarantee-missing")' <<<"$end_to_end_production_blockers" >/dev/null; then
       echo "final DA readiness must expose the real DA availability production blocker" >&2
       exit 1
     fi
-    if [[ "$package_kind" == "myelin-session-settlement-package-v1" ]] \
+    if [[ "$package_kind" == "myelin-session-settlement-package-v2" ]] \
       && ! jq -e 'index("real-da-availability-guarantee-missing") and index("canonical-threshold-lock-enforcement-missing") and index("ckb-court-dispute-economics-missing")' <<<"$end_to_end_production_blockers" >/dev/null; then
       echo "final settlement readiness must expose DA, threshold-lock, and court-economics production blockers" >&2
       exit 1
@@ -1303,13 +1262,13 @@ assert_tampered_carrier_rejected() {
 
   local verifier_source verifier_action verifier_code_hash_for_carrier verifier_code_dep_index_for_carrier
   case "$package_kind" in
-    myelin-session-da-anchor-package-v1)
+    myelin-session-da-anchor-package-v2)
       verifier_source="da-anchor-carrier.cell"
       verifier_action="verify_da_anchor_carrier"
       verifier_code_hash_for_carrier="$da_verifier_code_hash"
       verifier_code_dep_index_for_carrier="$da_verifier_code_dep_index"
       ;;
-    myelin-session-settlement-package-v1)
+    myelin-session-settlement-package-v2)
       verifier_source="settlement-carrier.cell"
       verifier_action="verify_settlement_carrier"
       verifier_code_hash_for_carrier="$settlement_verifier_code_hash"
@@ -1478,7 +1437,7 @@ PY
 
 submit_and_verify_carrier \
   "da-anchor" \
-  "myelin-session-da-anchor-package-v1" \
+  "myelin-session-da-anchor-package-v2" \
   "$WORKDIR/myelin/session-da-anchor.json" \
   "$funding_tx_hash" \
   "0x0" \
@@ -1494,7 +1453,7 @@ da_anchor_carrier_payload="$(jq -r '.carrier_payload' "$WORKDIR/da-anchor-carrie
 
 assert_tampered_carrier_rejected \
   "da-anchor" \
-  "myelin-session-da-anchor-package-v1" \
+  "myelin-session-da-anchor-package-v2" \
   "$da_anchor_tx_hash" \
   "$da_anchor_output_index" \
   "$da_anchor_output_capacity" \
@@ -1502,7 +1461,7 @@ assert_tampered_carrier_rejected \
 
 submit_and_verify_carrier \
   "settlement" \
-  "myelin-session-settlement-package-v1" \
+  "myelin-session-settlement-package-v2" \
   "$WORKDIR/myelin/session-settlement-package.json" \
   "$da_anchor_change_tx_hash" \
   "$da_anchor_change_index" \
@@ -1518,7 +1477,7 @@ settlement_carrier_payload="$(jq -r '.carrier_payload' "$WORKDIR/settlement-carr
 
 assert_tampered_carrier_rejected \
   "settlement" \
-  "myelin-session-settlement-package-v1" \
+  "myelin-session-settlement-package-v2" \
   "$settlement_tx_hash" \
   "$settlement_output_index" \
   "$settlement_output_capacity" \
@@ -1526,7 +1485,7 @@ assert_tampered_carrier_rejected \
 
 submit_and_verify_carrier \
   "da-anchor-final" \
-  "myelin-session-da-anchor-package-v1" \
+  "myelin-session-da-anchor-package-v2" \
   "$WORKDIR/myelin/session-da-anchor.json" \
   "$settlement_change_tx_hash" \
   "$settlement_change_index" \
@@ -1538,6 +1497,7 @@ submit_and_verify_carrier \
   "" \
   "" \
   "" \
+  "0x" \
   "$settlement_authority_lock_args"
 
 da_anchor_final_change_tx_hash="$(jq -r '.change_output.tx_hash' "$WORKDIR/da-anchor-final-final-script-summary.json")"
@@ -1550,7 +1510,7 @@ da_anchor_final_type_args="$(jq -r '.carrier_verifier.output_type_script_args' "
 
 submit_and_verify_carrier \
   "settlement-final" \
-  "myelin-session-settlement-package-v1" \
+  "myelin-session-settlement-package-v2" \
   "$WORKDIR/myelin/session-settlement-package.json" \
   "$da_anchor_final_change_tx_hash" \
   "$da_anchor_final_change_index" \
@@ -1562,10 +1522,11 @@ submit_and_verify_carrier \
   "$settlement_authority_tx_hash" \
   "$settlement_authority_output_index" \
   "$settlement_authority_output_capacity_hex" \
+  "$settlement_authority_lock_args" \
   "$settlement_authority_lock_args"
 
 jq -n \
-  --arg schema "myelin-ckb-devnet-smoke-v1" \
+  --arg schema "myelin-ckb-devnet-smoke-v2" \
   --arg ckb_root "$CKB_ROOT" \
   --arg ckb_version "$("$CKB_BIN" --version)" \
   --arg rpc_url "$RPC_URL" \
@@ -1574,29 +1535,21 @@ jq -n \
   --arg settlement_package "$WORKDIR/myelin/session-settlement-package.json" \
   --arg da_verifier_source "$WORKDIR/myelin/da-anchor-carrier.cell" \
   --arg da_verifier_elf "$WORKDIR/myelin/da-anchor-carrier.elf" \
-  --arg da_verifier_typed_cell_elf "$WORKDIR/myelin/da-anchor-carrier.typed-cell.elf" \
-  --arg da_verifier_typed_cell_metadata "$WORKDIR/myelin/da-anchor-carrier.typed-cell.elf.meta.json" \
   --arg da_verifier_code_hash "$da_verifier_code_hash" \
   --arg da_verifier_dep_index "$da_verifier_code_dep_index" \
   --arg da_verifier_code_capacity "$da_verifier_code_capacity_hex" \
   --arg settlement_verifier_source "$WORKDIR/myelin/settlement-carrier.cell" \
   --arg settlement_verifier_elf "$WORKDIR/myelin/settlement-carrier.elf" \
-  --arg settlement_verifier_typed_cell_elf "$WORKDIR/myelin/settlement-carrier.typed-cell.elf" \
-  --arg settlement_verifier_typed_cell_metadata "$WORKDIR/myelin/settlement-carrier.typed-cell.elf.meta.json" \
   --arg settlement_verifier_code_hash "$settlement_verifier_code_hash" \
   --arg settlement_verifier_dep_index "$settlement_verifier_code_dep_index" \
   --arg settlement_verifier_code_capacity "$settlement_verifier_code_capacity_hex" \
   --arg da_final_verifier_source "$WORKDIR/myelin/da-anchor-final.cell" \
   --arg da_final_verifier_elf "$WORKDIR/myelin/da-anchor-final.elf" \
-  --arg da_final_verifier_typed_cell_elf "$WORKDIR/myelin/da-anchor-final.typed-cell.elf" \
-  --arg da_final_verifier_typed_cell_metadata "$WORKDIR/myelin/da-anchor-final.typed-cell.elf.meta.json" \
   --arg da_final_verifier_code_hash "$da_final_verifier_code_hash" \
   --arg da_final_verifier_dep_index "$da_final_verifier_code_dep_index" \
   --arg da_final_verifier_code_capacity "$da_final_verifier_code_capacity_hex" \
   --arg settlement_final_verifier_source "$WORKDIR/myelin/settlement-final.cell" \
   --arg settlement_final_verifier_elf "$WORKDIR/myelin/settlement-final.elf" \
-  --arg settlement_final_verifier_typed_cell_elf "$WORKDIR/myelin/settlement-final.typed-cell.elf" \
-  --arg settlement_final_verifier_typed_cell_metadata "$WORKDIR/myelin/settlement-final.typed-cell.elf.meta.json" \
   --arg settlement_final_verifier_code_hash "$settlement_final_verifier_code_hash" \
   --arg settlement_final_verifier_dep_index "$settlement_final_verifier_code_dep_index" \
   --arg settlement_final_verifier_code_capacity "$settlement_final_verifier_code_capacity_hex" \
@@ -1632,9 +1585,7 @@ jq -n \
     carrier_verifiers: {
       da_anchor: {
         cellscript_source: $da_verifier_source,
-        typed_cell_profile_checked: true,
-        typed_cell_elf: $da_verifier_typed_cell_elf,
-        typed_cell_metadata: $da_verifier_typed_cell_metadata,
+        compiler_boundary: "attested-parent-cellscript",
         elf: $da_verifier_elf,
         code_hash: $da_verifier_code_hash,
         deployment_tx_hash: $verifier_deploy_tx,
@@ -1646,9 +1597,7 @@ jq -n \
       },
       settlement: {
         cellscript_source: $settlement_verifier_source,
-        typed_cell_profile_checked: true,
-        typed_cell_elf: $settlement_verifier_typed_cell_elf,
-        typed_cell_metadata: $settlement_verifier_typed_cell_metadata,
+        compiler_boundary: "attested-parent-cellscript",
         elf: $settlement_verifier_elf,
         code_hash: $settlement_verifier_code_hash,
         deployment_tx_hash: $verifier_deploy_tx,
@@ -1663,9 +1612,7 @@ jq -n \
     final_script_verifiers: {
       da_anchor: {
         cellscript_source: $da_final_verifier_source,
-        typed_cell_profile_checked: true,
-        typed_cell_elf: $da_final_verifier_typed_cell_elf,
-        typed_cell_metadata: $da_final_verifier_typed_cell_metadata,
+        compiler_boundary: "attested-parent-cellscript",
         elf: $da_final_verifier_elf,
         code_hash: $da_final_verifier_code_hash,
         deployment_tx_hash: $verifier_deploy_tx,
@@ -1677,9 +1624,7 @@ jq -n \
       },
       settlement: {
         cellscript_source: $settlement_final_verifier_source,
-        typed_cell_profile_checked: true,
-        typed_cell_elf: $settlement_final_verifier_typed_cell_elf,
-        typed_cell_metadata: $settlement_final_verifier_typed_cell_metadata,
+        compiler_boundary: "attested-parent-cellscript",
         elf: $settlement_final_verifier_elf,
         code_hash: $settlement_final_verifier_code_hash,
         deployment_tx_hash: $verifier_deploy_tx,
@@ -1777,7 +1722,7 @@ jq -n \
       "This smoke deploys separate CellScript DA-anchor and settlement compact carrier verifiers plus final-script verifier artefacts, then submits live CKB devnet transactions through both roles.",
       "The smoke also submits tampered compact-payload carriers under both deployed verifiers and requires CKB script verification to reject them.",
       "The smoke submits a competing final settlement output probe before the valid final settlement and requires CKB script verification to reject it.",
-      "The carrier submissions prove backwards-compatible live carrier evidence; the final-script submissions prove strict readiness under deployed final verifier artefacts."
+      "The carrier submissions prove live carrier evidence; the final-script submissions prove strict readiness under deployed final verifier artefacts."
     ]
   }' >"$REPORT"
 

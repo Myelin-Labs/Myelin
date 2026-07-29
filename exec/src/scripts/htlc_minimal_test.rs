@@ -30,7 +30,7 @@ mod tests {
         let input_out_point = OutPoint::new([0x61; 32], 0);
         let provider = build_provider(code_hash, input_out_point);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -51,7 +51,7 @@ mod tests {
         let input_out_point = OutPoint::new([0x62; 32], 0);
         let provider = build_provider(code_hash, input_out_point);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],

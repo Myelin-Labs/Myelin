@@ -1,13 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Myelin developers
-//
-// CKB-style projection reports for Myelin Cell transactions.
 
-//! CKB-style projection reports.
-//!
-//! A projection report answers a narrow question: can this Myelin CellTx be
-//! represented as a CKB Molecule transaction/context shape? It does not execute
-//! a CKB node and does not claim L1 acceptance by itself.
+//! Evidence-staged CKB projection reports.
 
 use crate::{
     celltx::{compute_txid, CellTx},
@@ -18,73 +12,79 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Semantic compatibility profile for a Myelin transition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Highest CKB-alignment stage supported by concrete evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum SemanticProfile {
-    /// Uses Myelin-only helper semantics or metadata.
-    MyelinNative,
-    /// Can be represented as a CKB-style transaction/context.
-    CkbCompatible,
-    /// Follows Cell-style ideas but is not projectable to CKB transaction shape.
-    CkbInspiredOnly,
+pub enum ProjectionStage {
+    /// Wire or invariant validation failed.
+    Rejected,
+    /// Canonical CKB Molecule bytes and hashes were produced.
+    WireEncoded,
+    /// Every input, cell dep and header dep was resolved.
+    ContextResolved,
+    /// Contextual CKB consensus checks passed.
+    ConsensusValidated,
+    /// All CKB script groups passed under a shared cycle budget.
+    ScriptsVerified,
+    /// A CKB node accepted the exact transaction through RPC.
+    NodeAccepted,
+    /// The exact transaction has a node-verified inclusion proof in a canonical block.
+    Committed,
+    /// The committed block remained canonical through the configured confirmation depth.
+    Finalized,
 }
 
-/// A condition that prevents CKB-style projection.
+/// A condition that invalidates the claimed stage.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProjectionBlocker {
-    /// The number of outputs and output data items differs.
+    /// Transaction version is not CKB version zero.
+    NonCkbTransactionVersion {
+        /// Actual transaction version.
+        actual: u32,
+    },
+    /// Output and output-data lengths differ.
     OutputsDataLengthMismatch {
-        /// Number of Cell outputs.
+        /// Number of outputs.
         outputs: usize,
         /// Number of output data entries.
         outputs_data: usize,
     },
-    /// The CellTx could not be serialised with the CKB Molecule transaction layout.
+    /// Molecule transaction encoding failed.
     MoleculeEncodingFailed {
-        /// Error returned by the Molecule compatibility layer.
+        /// Encoding error.
         error: String,
     },
-    /// The CKB-style raw transaction hash could not be derived.
+    /// Raw transaction hashing failed.
     RawTransactionHashFailed {
-        /// Error returned by the Molecule compatibility layer.
+        /// Hashing error.
         error: String,
     },
-    /// The CKB-style full transaction witness hash could not be derived.
+    /// Witness-inclusive hashing failed.
     WitnessTransactionHashFailed {
-        /// Error returned by the Molecule compatibility layer.
+        /// Hashing error.
         error: String,
     },
 }
 
-/// A non-fatal projection warning.
+/// Non-fatal context note.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProjectionWarning {
-    /// Myelin CellTx version is not the usual CKB transaction version.
-    NonCkbTransactionVersion {
-        /// Version carried by the Myelin CellTx.
-        actual: u32,
-        /// Version normally used for CKB transaction projection fixtures.
-        ckb_fixture_version: u32,
-    },
-    /// The transaction carries no witness bytes.
+    /// No witnesses are present; scripts may still be valid depending on locks.
     EmptyWitnessSet,
-    /// The transaction carries no inputs and is therefore a cellbase-style context.
+    /// No inputs are present, so a cellbase/genesis context is required.
     CellbaseStyleContext,
 }
 
-/// CKB-style projection report for a Myelin CellTx.
+/// Evidence-staged projection report for one exact transaction.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CkbProjectionReport {
-    /// Myelin transaction id.
+    /// Raw Myelin/CKB transaction id.
     pub source_txid: [u8; 32],
-    /// Semantic profile assigned by the projection pass.
-    pub semantic_profile: SemanticProfile,
-    /// Whether CKB-style projection is possible.
-    pub ckb_projection_possible: bool,
-    /// Blockers that prevented projection.
+    /// Highest stage actually supported by evidence.
+    pub stage: ProjectionStage,
+    /// Conditions invalidating the claimed stage.
     pub blockers: Vec<ProjectionBlocker>,
-    /// Non-fatal warnings.
+    /// Non-fatal notes.
     pub warnings: Vec<ProjectionWarning>,
     /// Number of inputs.
     pub input_count: usize,
@@ -96,37 +96,43 @@ pub struct CkbProjectionReport {
     pub output_count: usize,
     /// Number of witnesses.
     pub witness_count: usize,
-    /// Size of the CKB Molecule transaction bytes when encoding succeeds.
+    /// Size of canonical Molecule transaction bytes.
     pub molecule_transaction_bytes: Option<usize>,
-    /// CKB-style raw transaction hash when derivation succeeds.
+    /// CKB raw transaction hash.
     pub ckb_raw_tx_hash: Option<[u8; 32]>,
-    /// CKB-style transaction-with-witness hash when derivation succeeds.
+    /// Witness-inclusive CKB transaction hash.
     pub ckb_wtx_hash: Option<[u8; 32]>,
 }
 
-/// Build a CKB-style projection report for a CellTx.
+impl CkbProjectionReport {
+    /// True only after strict script verification, not merely wire encoding.
+    pub fn scripts_verified(&self) -> bool {
+        self.stage >= ProjectionStage::ScriptsVerified
+    }
+
+    /// True only when a node accepted the exact transaction.
+    pub fn node_accepted(&self) -> bool {
+        self.stage >= ProjectionStage::NodeAccepted
+    }
+}
+
+/// Produce a wire-stage report. This function never claims contextual or
+/// executable CKB compatibility.
 pub fn project_cell_tx_to_ckb(tx: &CellTx) -> CkbProjectionReport {
     let mut blockers = Vec::new();
     let mut warnings = Vec::new();
-
+    if tx.version != CELL_TX_VERSION {
+        blockers.push(ProjectionBlocker::NonCkbTransactionVersion { actual: tx.version });
+    }
     if tx.outputs.len() != tx.outputs_data.len() {
         blockers.push(ProjectionBlocker::OutputsDataLengthMismatch { outputs: tx.outputs.len(), outputs_data: tx.outputs_data.len() });
     }
-
-    if tx.version != 0 && tx.version != CELL_TX_VERSION {
-        warnings.push(ProjectionWarning::NonCkbTransactionVersion { actual: tx.version, ckb_fixture_version: 0 });
-    } else if tx.version == CELL_TX_VERSION {
-        warnings.push(ProjectionWarning::NonCkbTransactionVersion { actual: CELL_TX_VERSION, ckb_fixture_version: 0 });
-    }
-
     if tx.witnesses.is_empty() {
         warnings.push(ProjectionWarning::EmptyWitnessSet);
     }
-
     if tx.inputs.is_empty() {
         warnings.push(ProjectionWarning::CellbaseStyleContext);
     }
-
     let molecule_transaction_bytes = match serialize_transaction_molecule(tx) {
         Ok(bytes) => Some(bytes.len()),
         Err(error) => {
@@ -134,7 +140,6 @@ pub fn project_cell_tx_to_ckb(tx: &CellTx) -> CkbProjectionReport {
             None
         }
     };
-
     let ckb_raw_tx_hash = match ckb_raw_transaction_hash_molecule(tx) {
         Ok(hash) => Some(hash),
         Err(error) => {
@@ -142,7 +147,6 @@ pub fn project_cell_tx_to_ckb(tx: &CellTx) -> CkbProjectionReport {
             None
         }
     };
-
     let ckb_wtx_hash = match ckb_transaction_witness_hash_molecule(tx) {
         Ok(hash) => Some(hash),
         Err(error) => {
@@ -151,13 +155,14 @@ pub fn project_cell_tx_to_ckb(tx: &CellTx) -> CkbProjectionReport {
         }
     };
 
-    let ckb_projection_possible = blockers.is_empty();
-    let semantic_profile = if ckb_projection_possible { SemanticProfile::CkbCompatible } else { SemanticProfile::CkbInspiredOnly };
+    // This module currently owns only canonical wire encoding. Higher stages
+    // deliberately have no boolean escape hatch: they will require opaque
+    // receipts from contextual validation, strict VM verification, and a node.
+    let stage = if blockers.is_empty() { ProjectionStage::WireEncoded } else { ProjectionStage::Rejected };
 
     CkbProjectionReport {
         source_txid: compute_txid(tx),
-        semantic_profile,
-        ckb_projection_possible,
+        stage,
         blockers,
         warnings,
         input_count: tx.inputs.len(),
@@ -176,129 +181,42 @@ mod tests {
     use super::*;
     use crate::celltx::{CellInput, CellOutput, OutPoint, Script};
 
-    fn script(byte: u8) -> Script {
-        Script::new([byte; 32], 1, vec![byte, byte + 1])
+    fn tx() -> CellTx {
+        CellTx::new(
+            vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
+            vec![],
+            vec![CellOutput { lock: Script::new([2; 32], 1, vec![]), type_: None, capacity: 100 }],
+            vec![vec![]],
+            vec![vec![0xCC]],
+        )
+        .unwrap()
     }
 
     #[test]
-    fn simple_cell_tx_projects_to_ckb_shape() {
-        let tx = CellTx::new(
-            vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
-            vec![],
-            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
-            vec![vec![0xAA, 0xBB]],
-            vec![vec![0xCC]],
-        )
-        .unwrap();
-
-        let report = project_cell_tx_to_ckb(&tx);
-        assert!(report.ckb_projection_possible);
-        assert_eq!(report.semantic_profile, SemanticProfile::CkbCompatible);
+    fn encoding_alone_claims_only_wire_stage() {
+        let report = project_cell_tx_to_ckb(&tx());
+        assert_eq!(report.stage, ProjectionStage::WireEncoded);
+        assert!(!report.scripts_verified());
         assert!(report.blockers.is_empty());
-        assert!(report.molecule_transaction_bytes.unwrap() > 0);
-        assert!(report.ckb_raw_tx_hash.is_some());
-        assert!(report.ckb_wtx_hash.is_some());
     }
 
     #[test]
-    fn malformed_output_data_is_a_projection_blocker() {
-        let mut tx = CellTx::new(
-            vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
-            vec![],
-            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
-            vec![vec![0xAA]],
-            vec![vec![0xCC]],
-        )
-        .unwrap();
-        tx.outputs_data.clear();
-
-        let report = project_cell_tx_to_ckb(&tx);
-        assert!(!report.ckb_projection_possible);
-        assert_eq!(report.semantic_profile, SemanticProfile::CkbInspiredOnly);
-        assert!(matches!(report.blockers.first(), Some(ProjectionBlocker::OutputsDataLengthMismatch { outputs: 1, outputs_data: 0 })));
+    fn nonzero_version_is_a_blocker() {
+        let mut transaction = tx();
+        transaction.version = 1;
+        let report = project_cell_tx_to_ckb(&transaction);
+        assert_eq!(report.stage, ProjectionStage::Rejected);
+        assert!(matches!(report.blockers.first(), Some(ProjectionBlocker::NonCkbTransactionVersion { actual: 1 })));
     }
 
     #[test]
-    fn empty_witness_set_is_a_warning_not_a_blocker() {
-        // A CellTx with no witnesses is still projectable. It carries a
-        // non-fatal warning so the consumer can see the deviation.
-        let tx = CellTx::new(
-            vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
-            vec![],
-            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
-            vec![vec![0xAA, 0xBB]],
-            vec![],
-        )
-        .unwrap();
-
-        let report = project_cell_tx_to_ckb(&tx);
-        assert!(report.ckb_projection_possible);
-        assert_eq!(report.semantic_profile, SemanticProfile::CkbCompatible);
-        assert!(report.blockers.is_empty());
-        assert!(report.warnings.iter().any(|w| matches!(w, ProjectionWarning::EmptyWitnessSet)));
-    }
-
-    #[test]
-    fn cellbase_style_context_is_a_warning_not_a_blocker() {
-        // A CellTx with no inputs is cellbase-shaped. It still projects
-        // to a CKB-shaped transaction; the warning is informational.
-        let tx = CellTx::new(
-            vec![],
-            vec![],
-            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
-            vec![vec![0xAA, 0xBB]],
-            vec![vec![0xCC]],
-        )
-        .unwrap();
-
-        let report = project_cell_tx_to_ckb(&tx);
-        assert!(report.ckb_projection_possible);
-        assert_eq!(report.semantic_profile, SemanticProfile::CkbCompatible);
-        assert!(report.warnings.iter().any(|w| matches!(w, ProjectionWarning::CellbaseStyleContext)));
-    }
-
-    #[test]
-    fn ckb_style_tx_hash_is_deterministic() {
-        let tx = CellTx::new(
-            vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
-            vec![],
-            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
-            vec![vec![0xAA, 0xBB]],
-            vec![vec![0xCC]],
-        )
-        .unwrap();
-        let r1 = project_cell_tx_to_ckb(&tx);
-        let r2 = project_cell_tx_to_ckb(&tx);
-        assert_eq!(r1.ckb_raw_tx_hash, r2.ckb_raw_tx_hash);
-        assert_eq!(r1.ckb_wtx_hash, r2.ckb_wtx_hash);
-        assert_eq!(r1.source_txid, r2.source_txid);
-        assert_eq!(r1.molecule_transaction_bytes, r2.molecule_transaction_bytes);
-    }
-
-    #[test]
-    fn witness_change_does_not_affect_raw_tx_hash_but_affects_wtx_hash() {
-        // CKB raw transaction hash is the hash of the raw transaction
-        // (without witnesses). CKB wtxid hashes the full transaction
-        // including witnesses. The projection must report both.
-        let tx_a = CellTx::new(
-            vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
-            vec![],
-            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
-            vec![vec![0xAA]],
-            vec![vec![0xCC]],
-        )
-        .unwrap();
-        let tx_b = CellTx::new(
-            vec![CellInput::new(OutPoint::new([1; 32], 0), 0)],
-            vec![],
-            vec![CellOutput { lock: script(2), type_: None, capacity: 100 }],
-            vec![vec![0xAA]],
-            vec![vec![0xDD]],
-        )
-        .unwrap();
-        let r_a = project_cell_tx_to_ckb(&tx_a);
-        let r_b = project_cell_tx_to_ckb(&tx_b);
-        assert_eq!(r_a.ckb_raw_tx_hash, r_b.ckb_raw_tx_hash, "raw tx hash is witness-independent");
-        assert_ne!(r_a.ckb_wtx_hash, r_b.ckb_wtx_hash, "wtxid is witness-dependent");
+    fn witness_changes_only_witness_hash() {
+        let tx_a = tx();
+        let mut tx_b = tx_a.clone();
+        tx_b.witnesses[0] = vec![0xDD];
+        let a = project_cell_tx_to_ckb(&tx_a);
+        let b = project_cell_tx_to_ckb(&tx_b);
+        assert_eq!(a.ckb_raw_tx_hash, b.ckb_raw_tx_hash);
+        assert_ne!(a.ckb_wtx_hash, b.ckb_wtx_hash);
     }
 }

@@ -145,7 +145,7 @@ serialization/
 - CKB `Script` / `OutPoint` / `CellInput` / `CellOutput` / `CellDep` / `RawTransaction` / `Transaction` / `WitnessArgs` / `RawHeader` / `Header` / packed `EpochNumberWithFraction` helpers are available for CKB-profile byte and hash material, including zeroed-lock `SIGHASH_ALL`, header hash, Blake160 pubkey hashes, local CKB Blake160 recoverable-signature verification, and local zeroed-lock CKB sighash-all witness verification
 - `VmSemantics::CkbStrict` uses provider-supplied CKB `Header` bytes for `LOAD_HEADER` and CKB epoch fields for `LOAD_HEADER_BY_FIELD`; it does not fall back to Myelin `ResolvedHeader`
 - CellScript metadata 通过 `runtime.vm_abi.version = 0x8001` 声明所需 VM object ABI
-- CellScript scheduler witness 的 public admission 只接受 Molecule bytes；legacy witness decode path 已移除
+- Scheduler plans are off-chain, raw-tx-bound sidecars and are not decoded from transaction witnesses
 - RISC-V ELF artifact 可以内嵌固定 ABI trailer；verifier/loader 在交给 CKB-VM 前 strip trailer，并据此选择 Molecule syscall 输出格式
 - verifier caller 仍可以用 `with_abi_version(0x8001)` 将 artifact metadata 映射到 Molecule syscall 输出格式
 - TransactionScriptVerifier 使用 Molecule；Non-Molecule VM object ABI versions are rejected

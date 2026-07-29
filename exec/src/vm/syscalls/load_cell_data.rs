@@ -217,7 +217,7 @@ mod tests {
         let input_out_point = OutPoint::new([7u8; 32], 0);
         let dep_out_point = OutPoint::new([8u8; 32], 1);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![CellDep { out_point: dep_out_point, dep_type: DepType::Code }],
             header_deps: vec![],
@@ -266,7 +266,7 @@ mod tests {
     fn test_load_cell_data_supports_partial_reads() {
         let dep_out_point = OutPoint::new([8u8; 32], 1);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![CellDep { out_point: dep_out_point, dep_type: DepType::Code }],
             header_deps: vec![],
@@ -306,7 +306,7 @@ mod tests {
     fn test_load_cell_data_treats_missing_resolved_payload_as_empty() {
         let input_out_point = OutPoint::new([7u8; 32], 0);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn test_load_cell_data_rejects_invalid_source() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![],
@@ -372,7 +372,7 @@ mod tests {
     fn test_load_cell_data_returns_item_missing_when_resolved_input_cell_not_found() {
         let input_out_point = OutPoint::new([7u8; 32], 0);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn test_load_cell_data_output_source_returns_item_missing_when_output_data_absent() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![],
@@ -429,7 +429,7 @@ mod tests {
     fn test_load_cell_data_as_code_maps_bytes_into_executable_pages() {
         let dep_out_point = OutPoint::new([8u8; 32], 1);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![CellDep { out_point: dep_out_point, dep_type: DepType::Code }],
             header_deps: vec![],
@@ -470,7 +470,7 @@ mod tests {
     fn test_load_cell_data_as_code_reports_slice_out_of_bound() {
         let dep_out_point = OutPoint::new([8u8; 32], 1);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![CellDep { out_point: dep_out_point, dep_type: DepType::Code }],
             header_deps: vec![],
@@ -509,7 +509,7 @@ mod tests {
     fn test_load_cell_data_ckb_strict_rejects_header_dep_source() {
         let header_hash = [0xDD; 32];
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![header_hash],

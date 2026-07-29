@@ -119,13 +119,13 @@ verify = load(verify_path)
 
 fixture = build["benchmark"]["fixture"]
 chunks = fixture["chunks"]
-require(fixture["ckb_projection_possible"] is True, "fixture projection must be possible")
+require(fixture["wire_encoded"] is True, "fixture transactions must be CKB-wire encoded")
 require(fixture["finality"]["finalised"] is True, "fixture block must be finalised")
 require(len(chunks) > 0, "fixture must contain at least one chunk")
 for index, chunk in enumerate(chunks):
     projection = chunk["ckb_projection"]
-    require(projection["semantic_profile"] == "ckb-compatible", f"chunk {index} must use ckb-compatible profile")
-    require(projection["ckb_projection_possible"] is True, f"chunk {index} projection must be possible")
+    require(projection["projection_stage"] == "wire-encoded", f"chunk {index} must claim only the wire-encoded stage")
+    require(projection["wire_encoded"] is True, f"chunk {index} must be CKB-wire encoded")
     require(projection["ckb_raw_tx_hash"], f"chunk {index} must expose CKB raw tx hash")
     require(projection["ckb_wtx_hash"], f"chunk {index} must expose CKB witness tx hash")
 
@@ -135,12 +135,12 @@ require(vm["ckb_strict"] is True, "VM probe must use CKB-strict semantics")
 require(isinstance(vm["ckb_spawn_ipc_enabled"], bool), "VM probe must report the spawn/IPC build flag")
 require(isinstance(vm["cycles"], int) and vm["cycles"] > 0, "VM probe must report positive cycles")
 
-require(bundle["court_verifiable"] is True, "court bundle must be verifiable")
+require(bundle["court_verifiable"] is False, "court bundle must not claim contextual CKB verification")
 require(bundle["l1_court_implemented"] is False, "bundle must keep unfinished L1 court status explicit")
 require(bundle["vm_profile"] == "ckb-strict-basic", "court bundle must use the minimal CKB-strict profile")
 require(bundle["ckb_spawn_ipc_required"] is False, "court bundle must not require spawn/IPC")
-require(bundle["ckb_projection"]["semantic_profile"] == "ckb-compatible", "court bundle must use ckb-compatible profile")
-require(bundle["ckb_projection"]["ckb_projection_possible"] is True, "court bundle projection must be possible")
+require(bundle["ckb_projection"]["projection_stage"] == "wire-encoded", "court bundle must claim only the wire-encoded stage")
+require(bundle["ckb_projection"]["wire_encoded"] is True, "court bundle transaction must be CKB-wire encoded")
 require(bundle["static_committee_evidence"]["finalised"] is True, "court bundle must include finalised committee evidence")
 
 require(verify["valid"] is True, "court bundle verifier must pass")
@@ -157,7 +157,7 @@ summary = {
 	"vm_profile": vm["vm_profile"],
 	"ckb_spawn_ipc_enabled": vm["ckb_spawn_ipc_enabled"],
 	"court_checks": len(checks),
-    "semantic_profile": chunks[0]["ckb_projection"]["semantic_profile"],
+    "projection_stage": chunks[0]["ckb_projection"]["projection_stage"],
     "static_committee_finalised": fixture["finality"]["finalised"],
 }
 print(json.dumps(summary, indent=2, sort_keys=True))

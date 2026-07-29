@@ -6,18 +6,22 @@
 #![recursion_limit = "256"]
 
 use clap::{Args, Parser, Subcommand};
+use myelin_ckb_adapter::{parse_ckb_json_transaction, verify_projection, CkbEvidenceEngine, CkbEvidenceProjection, HttpCkbRpc};
 use myelin_consensus::{
-    CommitteeCertificate, CommitteeSignature, CommitteeValidator, ConsensusConfig, ConsensusEngine, ConsensusKind, MyelinBlock,
-    SelectedConsensus, StaticClosedCommittee, StaticCommitteeConfig, Tendermint, TendermintConfig,
+    CommitteeCertificate, CommitteeSignature, CommitteeSigner, ConsensusConfig, ConsensusEngine, ConsensusKind, MyelinBlock,
+    SelectedConsensus, StaticClosedCommittee, StaticCommitteeConfig, WeightedPrecommit, WeightedPrecommitConfig,
 };
 use myelin_exec::{
     build_cell_tx_execution_report, celltx::compute_wtxid, ckb_cell_data_hash, deserialize_transaction_molecule,
     project_cell_tx_to_ckb, serialize_transaction_molecule, CellDep, CellInput, CellOutput, CellTx, CkbProjectionReport, DepType,
-    OutPoint, ResolvedCell, Script, ScriptVersion, SemanticProfile, SimpleDataProvider, TransactionScriptVerifier, VmSemantics,
+    OutPoint, ProjectionStage, ResolvedCell, Script, ScriptVersion, SimpleDataProvider, TransactionScriptVerifier, VmSemantics,
     CKB_SPAWN_IPC_SYSCALLS_ENABLED,
 };
 use myelin_mempool::CellPool;
-use myelin_state::{CellStateTree, MerkleTreeBuilder, SegmentProof, SegmentReader, SegmentWriter};
+use myelin_state::{
+    CellEntry, CellStateTree, MerkleTreeBuilder, SegmentProof, SegmentReader, SegmentWriter, StateTransitionContext,
+    StateTransitionEngine,
+};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -58,6 +62,8 @@ enum Commands {
     /// L2 simulation; they are a single-shot integration smoke
     /// for the off-chain kernel surface.
     Runtime(RuntimeArgs),
+    /// Evidence-staged projection through an authoritative CKB node.
+    Ckb(CkbArgs),
     /// Finite Cell session L2 fixture commands.
     Session(SessionArgs),
 }
@@ -129,7 +135,7 @@ struct TeeworldsInspectArgs {
     #[arg(long, default_value_t = 262_144)]
     chunk_bytes: usize,
     /// Consensus engine for the finality evidence: "static-closed-committee"
-    /// (default) or "tendermint".
+    /// (default) or "weighted-precommit".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path.
@@ -149,7 +155,7 @@ struct TeeworldsBenchArgs {
     #[arg(long, default_value_t = 3)]
     runs: usize,
     /// Consensus engine for the finality evidence: "static-closed-committee"
-    /// (default) or "tendermint".
+    /// (default) or "weighted-precommit".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path.
@@ -184,7 +190,7 @@ struct TeeworldsBuildFixtureArgs {
     #[arg(long, default_value_t = 3)]
     runs: usize,
     /// Consensus engine for the finality evidence: "static-closed-committee"
-    /// (default) or "tendermint".
+    /// (default) or "weighted-precommit".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path for the combined report.
@@ -226,7 +232,7 @@ struct TeeworldsCourtBundleArgs {
     #[arg(long, default_value_t = 0)]
     chunk_index: usize,
     /// Consensus engine for the bundle evidence: "static-closed-committee"
-    /// (default) or "tendermint".
+    /// (default) or "weighted-precommit".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path.
@@ -270,9 +276,91 @@ enum RuntimeCommand {
 
 #[derive(Debug, Args)]
 struct RuntimeSmokeArgs {
-    /// Consensus engine: "static-closed-committee" (default) or "tendermint".
+    /// Consensus engine: "static-closed-committee" (default) or "weighted-precommit".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct CkbArgs {
+    #[command(subcommand)]
+    command: CkbCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CkbCommand {
+    /// Resolve, validate and strictly verify one exact transaction; optionally submit it.
+    Prove(CkbProveArgs),
+    /// Advance accepted evidence through committed inclusion and confirmation finality.
+    Observe(CkbObserveArgs),
+    /// Verify a serialized CKB evidence projection against its exact transaction.
+    Verify(CkbVerifyArgs),
+}
+
+#[derive(Debug, Args)]
+struct CkbProveArgs {
+    /// JSON file containing either a Myelin CellTx or a CKB JSON-RPC transaction object.
+    #[arg(long)]
+    transaction: PathBuf,
+    /// Authoritative CKB JSON-RPC endpoint.
+    #[arg(long)]
+    rpc_url: String,
+    /// Shared transaction-level strict VM cycle limit.
+    #[arg(long, default_value_t = 100_000_000)]
+    max_cycles: u64,
+    /// Maximum stable-tip context-resolution attempts.
+    #[arg(long, default_value_t = 3)]
+    context_attempts: usize,
+    /// Submit after context, consensus and scripts receipts all verify.
+    #[arg(long)]
+    submit: bool,
+    /// Maximum get_transaction observations after submission.
+    #[arg(long, default_value_t = 30)]
+    poll_attempts: usize,
+    /// Delay between transaction observations.
+    #[arg(long, default_value_t = 1_000)]
+    poll_interval_ms: u64,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct CkbVerifyArgs {
+    /// Exact transaction JSON used to produce the evidence.
+    #[arg(long)]
+    transaction: PathBuf,
+    /// Evidence JSON emitted by `myelin ckb prove`.
+    #[arg(long)]
+    evidence: PathBuf,
+    /// Optional output JSON path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct CkbObserveArgs {
+    /// Exact transaction JSON used to produce the evidence.
+    #[arg(long)]
+    transaction: PathBuf,
+    /// Node-accepted or committed evidence JSON to advance.
+    #[arg(long)]
+    evidence: PathBuf,
+    /// Authoritative CKB JSON-RPC endpoint.
+    #[arg(long)]
+    rpc_url: String,
+    /// Required confirmation depth (`tip.number - committed_block.number`).
+    #[arg(long, default_value_t = 6)]
+    min_confirmations: u64,
+    /// Maximum observations for each of commitment and finality.
+    #[arg(long, default_value_t = 120)]
+    poll_attempts: usize,
+    /// Delay between observations.
+    #[arg(long, default_value_t = 1_000)]
+    poll_interval_ms: u64,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -358,7 +446,7 @@ struct SessionOpenArgs {
     /// Session timeout in milliseconds.
     #[arg(long, default_value_t = 60_000)]
     timeout_ms: u64,
-    /// Consensus engine: "static-closed-committee" (default) or "tendermint".
+    /// Consensus engine: "static-closed-committee" (default) or "weighted-precommit".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path.
@@ -368,7 +456,7 @@ struct SessionOpenArgs {
 
 #[derive(Debug, Args)]
 struct SessionOpenFixtureArgs {
-    /// Consensus engine: "static-closed-committee" (default) or "tendermint".
+    /// Consensus engine: "static-closed-committee" (default) or "weighted-precommit".
     #[arg(long, default_value = "static-closed-committee")]
     consensus: String,
     /// Optional output JSON path.
@@ -680,9 +768,12 @@ struct SessionCarrierSubmissionArgs {
     /// Funding and change lock script hash type.
     #[arg(long, default_value = "data")]
     lock_hash_type: String,
-    /// Funding and change lock script args.
+    /// Funding input lock script args.
     #[arg(long, default_value = "0x")]
     lock_args: String,
+    /// Carrier and change output lock script args. Defaults to `--lock-args`.
+    #[arg(long)]
+    output_lock_args: Option<String>,
     /// Funding lock script code dep tx hash.
     #[arg(long)]
     lock_code_dep_tx_hash: String,
@@ -1000,6 +1091,8 @@ enum CliError {
     Json(#[from] serde_json::Error),
     #[error("consensus error: {0}")]
     Consensus(#[from] myelin_consensus::ConsensusError),
+    #[error("CKB evidence error: {0}")]
+    Ckb(#[from] myelin_ckb_adapter::CkbAdapterError),
     #[error("invalid fixture: {0}")]
     InvalidFixture(String),
 }
@@ -1061,6 +1154,34 @@ fn run() -> Result<()> {
             RuntimeCommand::Smoke(args) => {
                 let report = runtime_smoke(&args.consensus)?;
                 write_json(args.out, &report)
+            }
+        },
+        Commands::Ckb(args) => match args.command {
+            CkbCommand::Prove(args) => {
+                let out = args.out.clone();
+                let report = ckb_prove(args)?;
+                write_json(out, &report)
+            }
+            CkbCommand::Observe(args) => {
+                let out = args.out.clone();
+                let report = ckb_observe(args)?;
+                write_json(out, &report)
+            }
+            CkbCommand::Verify(args) => {
+                let tx = read_ckb_evidence_transaction(&args.transaction)?;
+                let evidence: CkbEvidenceProjection = serde_json::from_slice(&fs::read(&args.evidence)?)?;
+                verify_projection(&tx, &evidence)?;
+                write_json(
+                    args.out,
+                    &serde_json::json!({
+                        "schema": "myelin-ckb-evidence-verification-v1",
+                        "transaction": args.transaction,
+                        "evidence": args.evidence,
+                        "stage": evidence.stage,
+                        "raw_tx_hash": hex::encode(evidence.raw_tx_hash),
+                        "valid": true
+                    }),
+                )
             }
         },
         Commands::Session(args) => match args.command {
@@ -1231,6 +1352,47 @@ fn run() -> Result<()> {
     }
 }
 
+fn ckb_prove(args: CkbProveArgs) -> Result<CkbEvidenceProjection> {
+    let tx = read_ckb_evidence_transaction(&args.transaction)?;
+    let engine = CkbEvidenceEngine::new(HttpCkbRpc::new(args.rpc_url)?);
+    let context = engine.resolve_context(&tx, args.context_attempts)?;
+    let verified = engine.validate_and_verify(&tx, context, args.max_cycles)?;
+    if args.submit {
+        engine.submit_and_observe(&tx, verified, args.poll_attempts, Duration::from_millis(args.poll_interval_ms)).map_err(Into::into)
+    } else {
+        Ok(verified)
+    }
+}
+
+fn ckb_observe(args: CkbObserveArgs) -> Result<CkbEvidenceProjection> {
+    let tx = read_ckb_evidence_transaction(&args.transaction)?;
+    let mut evidence: CkbEvidenceProjection = serde_json::from_slice(&fs::read(&args.evidence)?)?;
+    verify_projection(&tx, &evidence)?;
+    let engine = CkbEvidenceEngine::new(HttpCkbRpc::new(args.rpc_url)?);
+    let interval = Duration::from_millis(args.poll_interval_ms);
+    if evidence.stage == ProjectionStage::NodeAccepted {
+        evidence = engine.observe_committed(&tx, evidence, args.poll_attempts, interval)?;
+    }
+    if evidence.stage == ProjectionStage::Committed {
+        evidence = engine.wait_for_finality(&tx, evidence, args.min_confirmations, args.poll_attempts, interval)?;
+    }
+    if evidence.stage != ProjectionStage::Finalized {
+        return Err(CliError::InvalidFixture(format!(
+            "CKB evidence must be node-accepted, committed, or finalized; got {}",
+            projection_stage_label(evidence.stage)
+        )));
+    }
+    Ok(evidence)
+}
+
+fn read_ckb_evidence_transaction(path: &Path) -> Result<CellTx> {
+    let value: Value = serde_json::from_slice(&fs::read(path)?)?;
+    match serde_json::from_value::<CellTx>(value.clone()) {
+        Ok(tx) => Ok(tx),
+        Err(_) => parse_ckb_json_transaction(&value).map_err(Into::into),
+    }
+}
+
 fn write_json<T: Serialize>(path: Option<PathBuf>, value: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
     if let Some(path) = path {
@@ -1250,7 +1412,8 @@ fn simple_celltx_report() -> Result<serde_json::Value> {
         vec![b"myelin-simple-witness".to_vec()],
     )
     .map_err(|error| CliError::InvalidFixture(error.to_owned()))?;
-    let report = build_cell_tx_execution_report(&tx, [0; 32]);
+    let scheduler_plan = myelin_exec::scheduler::SchedulerPlan::empty(&tx);
+    let report = build_cell_tx_execution_report(&tx, &scheduler_plan);
     Ok(serde_json::to_value(report)?)
 }
 
@@ -1272,7 +1435,7 @@ fn finalise_demo_from_config(path: PathBuf) -> Result<CommitteeDemoReport> {
     let selected = SelectedConsensus::from_config(config.clone())?;
     match config.kind {
         ConsensusKind::StaticClosedCommittee => finalise_static_demo(config, selected),
-        ConsensusKind::Tendermint => finalise_tendermint_demo(config, selected),
+        ConsensusKind::WeightedPrecommit => finalise_weighted_precommit_demo(config, selected),
     }
 }
 
@@ -1285,8 +1448,8 @@ fn finalise_static_demo(config: ConsensusConfig, selected: SelectedConsensus) ->
     let block_hash = block.hash();
     let height = block.number;
     let signer_ids = quorum_signers(&static_config)?;
-    let signer_refs = signer_ids.iter().map(String::as_str).collect::<Vec<_>>();
-    let certificate = committee.certificate_for_fixture(block_hash, &signer_refs)?;
+    let signers = fixture_signers_for_ids(&signer_ids)?;
+    let certificate = committee.certificate_from_signers(block_hash, &signers)?;
     selected.finalise_block(block, certificate)?;
     Ok(CommitteeDemoReport {
         consensus_kind: ConsensusKind::StaticClosedCommittee.as_str(),
@@ -1300,33 +1463,34 @@ fn finalise_static_demo(config: ConsensusConfig, selected: SelectedConsensus) ->
     })
 }
 
-fn finalise_tendermint_demo(config: ConsensusConfig, selected: SelectedConsensus) -> Result<CommitteeDemoReport> {
-    let tendermint_config =
-        config.tendermint.ok_or_else(|| CliError::InvalidFixture("demo finality requires a tendermint config".to_owned()))?;
-    let tendermint = Tendermint::new(tendermint_config.clone())?;
-    let block = demo_block(vec![[0xB1; 32]], ConsensusKind::Tendermint);
+fn finalise_weighted_precommit_demo(config: ConsensusConfig, selected: SelectedConsensus) -> Result<CommitteeDemoReport> {
+    let weighted_precommit_config = config
+        .weighted_precommit
+        .ok_or_else(|| CliError::InvalidFixture("demo finality requires a weighted_precommit config".to_owned()))?;
+    let weighted_precommit = WeightedPrecommit::new(weighted_precommit_config.clone())?;
+    let block = demo_block(vec![[0xB1; 32]], ConsensusKind::WeightedPrecommit);
     let block_hash = block.hash();
     let height = block.number;
     let round = 0;
-    let signer_ids = tendermint_quorum_signers(&tendermint_config)?;
-    let signer_refs = signer_ids.iter().map(String::as_str).collect::<Vec<_>>();
-    let certificate = tendermint.precommit_certificate_for_fixture(block_hash, height, round, &signer_refs)?;
+    let signer_ids = weighted_precommit_quorum_signers(&weighted_precommit_config)?;
+    let signers = fixture_signers_for_ids(&signer_ids)?;
+    let certificate = weighted_precommit.precommit_certificate_from_signers(block_hash, height, round, &signers)?;
     match selected {
-        SelectedConsensus::Tendermint(engine) => {
+        SelectedConsensus::WeightedPrecommit(engine) => {
             engine.finalise_block_with_precommit(block, round, certificate)?;
         }
         other => {
             return Err(myelin_consensus::ConsensusError::WrongEngine {
-                expected: ConsensusKind::Tendermint.as_str(),
+                expected: ConsensusKind::WeightedPrecommit.as_str(),
                 actual: other.kind().as_str(),
             }
             .into());
         }
     }
     Ok(CommitteeDemoReport {
-        consensus_kind: ConsensusKind::Tendermint.as_str(),
+        consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
         block_hash: hex::encode(block_hash),
-        quorum_weight: tendermint_config.quorum_power,
+        quorum_weight: weighted_precommit_config.quorum_power,
         signer_ids,
         certificate_height: height,
         certificate_round: Some(round),
@@ -1349,7 +1513,7 @@ fn quorum_signers(config: &StaticCommitteeConfig) -> Result<Vec<String>> {
     Err(CliError::InvalidFixture("static committee config cannot satisfy quorum".to_owned()))
 }
 
-fn tendermint_quorum_signers(config: &TendermintConfig) -> Result<Vec<String>> {
+fn weighted_precommit_quorum_signers(config: &WeightedPrecommitConfig) -> Result<Vec<String>> {
     let mut signers = Vec::new();
     let mut power = 0u64;
     for validator in &config.validators {
@@ -1359,7 +1523,7 @@ fn tendermint_quorum_signers(config: &TendermintConfig) -> Result<Vec<String>> {
             return Ok(signers);
         }
     }
-    Err(CliError::InvalidFixture("tendermint config cannot satisfy quorum".to_owned()))
+    Err(CliError::InvalidFixture("weighted_precommit config cannot satisfy quorum".to_owned()))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1372,7 +1536,7 @@ struct TeeworldsFixtureReport {
     map_bytes: usize,
     config_bytes: usize,
     chunk_bytes: usize,
-    ckb_projection_possible: bool,
+    wire_encoded: bool,
     chunks: Vec<TeeworldsChunkReport>,
     finality: CommitteeDemoReport,
 }
@@ -1388,8 +1552,8 @@ struct TeeworldsChunkReport {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TeeworldsChunkProjectionReport {
-    semantic_profile: String,
-    ckb_projection_possible: bool,
+    projection_stage: String,
+    wire_encoded: bool,
     blockers: Value,
     warnings: Value,
     source_txid: String,
@@ -1451,7 +1615,7 @@ struct TeeworldsBundleBlock {
     number: u64,
     /// Block timestamp in milliseconds.
     timestamp_ms: u64,
-    /// Consensus engine kind: "static-closed-committee" or "tendermint".
+    /// Consensus engine kind: "static-closed-committee" or "weighted-precommit".
     consensus_kind: String,
     /// State root before the block's transitions.
     state_root_before: String,
@@ -1474,7 +1638,7 @@ impl TeeworldsBundleBlock {
         };
         let consensus_kind = match self.consensus_kind.as_str() {
             "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
-            "tendermint" => ConsensusKind::Tendermint,
+            "weighted-precommit" => ConsensusKind::WeightedPrecommit,
             other => return Err(format!("unknown consensus_kind in bundle block: {other}")),
         };
         let ordered_cell_tx_commitments = self
@@ -1517,7 +1681,7 @@ struct TeeworldsCourtBundleReport {
     scheduler_report_hash: String,
     /// Canonical MyelinBlock whose data fields match the bundle's runtime
     /// evidence. The block's `block_hash()` MUST equal the hash that the
-    /// static-closed-committee certificate or Tendermint precommit
+    /// static-closed-committee certificate or WeightedPrecommit precommit
     /// certificate is bound to. This is the data-binding guarantee the
     /// verifier relies on.
     block: TeeworldsBundleBlock,
@@ -1528,13 +1692,13 @@ struct TeeworldsCourtBundleReport {
     vm_profile: &'static str,
     ckb_spawn_ipc_required: bool,
     ckb_projection: TeeworldsChunkProjectionReport,
-    /// Selectable finality evidence: static closed committee OR Tendermint
+    /// Selectable finality evidence: static closed committee OR WeightedPrecommit
     /// weighted precommit certificate. The same `signatures` field carries
     /// both modes; the `consensus_kind` field disambiguates.
     static_committee_evidence: StaticCommitteeEvidenceReport,
-    /// Tendermint-only fields: precommit round, certificate step, height.
+    /// WeightedPrecommit-only fields: precommit round, certificate step, height.
     /// `None` for static-closed-committee bundles.
-    tendermint_evidence: Option<TendermintEvidenceReport>,
+    weighted_precommit_evidence: Option<WeightedPrecommitEvidenceReport>,
     court_verifiable: bool,
     l1_court_implemented: bool,
     notes: Vec<String>,
@@ -1576,16 +1740,17 @@ struct TeeworldsCourtBundleInput {
     /// is bound to. This is the data-binding guarantee.
     block: TeeworldsBundleBlock,
     static_committee_evidence: StaticCommitteeEvidenceInput,
-    /// Optional Tendermint precommit evidence. When present, the challenge
-    /// payload hash binds to the Tendermint block hash and the static
+    /// Optional WeightedPrecommit precommit evidence. When present, the challenge
+    /// payload hash binds to the WeightedPrecommit block hash and the static
     /// committee evidence block hash is reported for completeness only.
-    tendermint_evidence: Option<TendermintEvidenceInput>,
+    weighted_precommit_evidence: Option<WeightedPrecommitEvidenceInput>,
+    court_verifiable: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct TeeworldsChunkProjectionInput {
-    semantic_profile: String,
-    ckb_projection_possible: bool,
+    projection_stage: String,
+    wire_encoded: bool,
     source_txid: String,
     ckb_raw_tx_hash: Option<String>,
     ckb_wtx_hash: Option<String>,
@@ -1602,7 +1767,7 @@ struct StaticCommitteeEvidenceInput {
 }
 
 #[derive(Debug, Deserialize)]
-struct TendermintEvidenceInput {
+struct WeightedPrecommitEvidenceInput {
     block_hash: String,
     quorum_power: u64,
     height: u64,
@@ -1630,7 +1795,7 @@ struct StaticCommitteeEvidenceReport {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct TendermintEvidenceReport {
+struct WeightedPrecommitEvidenceReport {
     consensus_kind: &'static str,
     block_hash: String,
     quorum_power: u64,
@@ -1707,7 +1872,7 @@ fn inspect_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize, consensus: &str)
             TeeworldsChunkReport { index, offset, byte_len: chunk.len(), commitment: hex::encode(commitment), ckb_projection }
         })
         .collect::<Vec<_>>();
-    let ckb_projection_possible = chunks.iter().all(|chunk| chunk.ckb_projection.ckb_projection_possible);
+    let wire_encoded = chunks.iter().all(|chunk| chunk.ckb_projection.wire_encoded);
     let finality = finalise_teeworlds_fixture_block(&chunks, consensus_kind);
 
     Ok(TeeworldsFixtureReport {
@@ -1719,7 +1884,7 @@ fn inspect_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize, consensus: &str)
         map_bytes: map.len(),
         config_bytes: config.len(),
         chunk_bytes,
-        ckb_projection_possible,
+        wire_encoded,
         chunks,
         finality,
     })
@@ -1727,8 +1892,8 @@ fn inspect_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize, consensus: &str)
 
 fn parse_teeworlds_consensus(consensus: &str) -> Result<ConsensusKind> {
     match consensus {
-        "static-closed-committee" | "static_closed_committee" => Ok(ConsensusKind::StaticClosedCommittee),
-        "tendermint" => Ok(ConsensusKind::Tendermint),
+        "static-closed-committee" => Ok(ConsensusKind::StaticClosedCommittee),
+        "weighted-precommit" => Ok(ConsensusKind::WeightedPrecommit),
         other => Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     }
 }
@@ -1926,8 +2091,8 @@ fn teeworlds_court_bundle(
         return Err(CliError::InvalidFixture("chunk-bytes must be non-zero".to_owned()));
     }
     let consensus_kind = match consensus {
-        "static-closed-committee" | "static_closed_committee" => ConsensusKind::StaticClosedCommittee,
-        "tendermint" => ConsensusKind::Tendermint,
+        "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
+        "weighted-precommit" => ConsensusKind::WeightedPrecommit,
         other => return Err(CliError::InvalidFixture(format!("unknown consensus engine for court-bundle: {other}"))),
     };
 
@@ -1984,13 +2149,13 @@ fn teeworlds_court_bundle(
         consensus_kind,
         state_root_before: old_state_root,
         state_root_after: new_state_root,
-        ordered_cell_tx_commitments: vec![commitment],
+        ordered_cell_tx_commitments: vec![tx.id()],
         data_commitments: vec![commitment],
         scheduler_commitment: scheduler_report_hash,
     };
     let canonical_block_hash = canonical_block.hash();
 
-    let (static_evidence, tendermint_evidence, evidence_notes) = match consensus_kind {
+    let (static_evidence, weighted_precommit_evidence, evidence_notes) = match consensus_kind {
         ConsensusKind::StaticClosedCommittee => {
             // Build a static-closed-committee cert over the same canonical
             // block. The cert's `block_hash` MUST equal `canonical_block_hash`.
@@ -1998,7 +2163,7 @@ fn teeworlds_court_bundle(
             let committee = StaticClosedCommittee::new(committee_config.clone()).expect("static fixture committee");
             let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
             let cert = committee
-                .certificate_for_fixture(canonical_block_hash, &["validator-0", "validator-1"])
+                .certificate_from_signers(canonical_block_hash, &fixture_signers(&["validator-0", "validator-1"]))
                 .expect("static fixture certificate");
             committee.finalise_block(canonical_block.clone(), cert.clone()).expect("static fixture finality");
             let signatures = cert
@@ -2020,33 +2185,38 @@ fn teeworlds_court_bundle(
             };
             (evidence, None, vec!["This bundle carries static-closed-committee evidence over the canonical MyelinBlock.".to_owned()])
         }
-        ConsensusKind::Tendermint => {
-            // Build a Tendermint precommit cert over the same canonical
+        ConsensusKind::WeightedPrecommit => {
+            // Build a WeightedPrecommit precommit cert over the same canonical
             // block. The cert's `block_hash` and `height` MUST equal
             // `canonical_block_hash` and `canonical_block.number`. The
-            // Tendermint signature domain is independent of the static
+            // WeightedPrecommit signature domain is independent of the static
             // committee's, so the two paths are not interchangeable.
-            let tendermint_engine = tendermint_fixture_engine();
+            let weighted_precommit_engine = weighted_precommit_fixture_engine();
             let height = canonical_block.number;
             let round = 0u32;
             let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
-            let cert = tendermint_engine
-                .precommit_certificate_for_fixture(canonical_block_hash, height, round, &["validator-0", "validator-1"])
-                .expect("tendermint fixture certificate");
-            tendermint_engine
+            let cert = weighted_precommit_engine
+                .precommit_certificate_from_signers(
+                    canonical_block_hash,
+                    height,
+                    round,
+                    &fixture_signers(&["validator-0", "validator-1"]),
+                )
+                .expect("weighted_precommit fixture certificate");
+            weighted_precommit_engine
                 .finalise_block_with_precommit(canonical_block.clone(), round, cert.clone())
-                .expect("tendermint fixture finality");
+                .expect("weighted_precommit fixture finality");
             let signatures = cert
                 .signatures
                 .iter()
                 .map(|signature| CommitteeSignatureEvidenceReport {
                     validator_id: signature.validator_id.clone(),
                     signature: hex::encode(signature.signature),
-                    signature_hash: hex::encode(blake3_32(b"myelin:tendermint-precommit-signature-hash:v1", &signature.signature)),
+                    signature_hash: hex::encode(blake3_32(b"myelin:weighted-precommit-signature-hash:v1", &signature.signature)),
                 })
                 .collect::<Vec<_>>();
-            let tendermint_evidence = TendermintEvidenceReport {
-                consensus_kind: ConsensusKind::Tendermint.as_str(),
+            let weighted_precommit_evidence = WeightedPrecommitEvidenceReport {
+                consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
                 block_hash: hex::encode(canonical_block_hash),
                 quorum_power: 2,
                 height,
@@ -2058,7 +2228,7 @@ fn teeworlds_court_bundle(
             };
             // Static evidence is still emitted so the bundle surface stays
             // uniform, but it is informational only — the active finality
-            // path is the Tendermint precommit.
+            // path is the WeightedPrecommit precommit.
             let committee_config = static_fixture_committee_config();
             let quorum_weight = committee_config.quorum_weight;
             let static_evidence = StaticCommitteeEvidenceReport {
@@ -2069,9 +2239,10 @@ fn teeworlds_court_bundle(
                 signatures: vec![],
                 finalised: false,
             };
-            let mut notes = vec!["This bundle carries Tendermint precommit evidence over the canonical MyelinBlock.".to_owned()];
+            let mut notes =
+                vec!["This bundle carries WeightedPrecommit precommit evidence over the canonical MyelinBlock.".to_owned()];
             notes.push("The static-closed-committee evidence slot is informational; the challenge-payload-hash binds to the canonical block hash.".to_owned());
-            (static_evidence, Some(tendermint_evidence), notes)
+            (static_evidence, Some(weighted_precommit_evidence), notes)
         }
     };
     let block_hash = canonical_block_hash;
@@ -2080,7 +2251,7 @@ fn teeworlds_court_bundle(
         b"myelin:single-chunk-challenge-payload:v1",
         &[&old_state_root, &chunk_payload_hash, &new_state_root, &scheduler_report_hash, &molecule_transaction_hash, &block_hash],
     );
-    let court_verifiable = ckb_projection.ckb_projection_possible && ckb_projection.semantic_profile == "ckb-compatible";
+    let court_verifiable = projection_stage_is_scripts_verified(&ckb_projection.projection_stage);
 
     let mut notes = evidence_notes;
     notes.push("This is a single-chunk court input bundle for CKB-style adjudication design.".to_owned());
@@ -2126,7 +2297,7 @@ fn teeworlds_court_bundle(
         ckb_spawn_ipc_required: false,
         ckb_projection,
         static_committee_evidence: static_evidence,
-        tendermint_evidence,
+        weighted_precommit_evidence,
         court_verifiable,
         l1_court_implemented: false,
         notes,
@@ -2186,17 +2357,17 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
     push_check(
         &mut checks,
         "projection-possible",
-        bundle.ckb_projection.ckb_projection_possible == recomputed_projection.ckb_projection_possible,
-        Some(recomputed_projection.ckb_projection_possible.to_string()),
-        Some(bundle.ckb_projection.ckb_projection_possible.to_string()),
+        bundle.ckb_projection.wire_encoded == recomputed_projection.wire_encoded,
+        Some(recomputed_projection.wire_encoded.to_string()),
+        Some(bundle.ckb_projection.wire_encoded.to_string()),
         "projection possibility recomputes from embedded Molecule transaction",
     );
     push_check(
         &mut checks,
         "projection-profile",
-        bundle.ckb_projection.semantic_profile == recomputed_projection.semantic_profile,
-        Some(recomputed_projection.semantic_profile.clone()),
-        Some(bundle.ckb_projection.semantic_profile.clone()),
+        bundle.ckb_projection.projection_stage == recomputed_projection.projection_stage,
+        Some(recomputed_projection.projection_stage.clone()),
+        Some(bundle.ckb_projection.projection_stage.clone()),
         "semantic profile recomputes from embedded Molecule transaction",
     );
     push_check(
@@ -2294,11 +2465,11 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
         "bundle.block.data_commitments[0] == bundle.chunk_commitment",
     );
     // The active block hash is the reconstructed hash. The supplied
-    // static-committee / Tendermint `block_hash` fields must equal it.
+    // static-committee / WeightedPrecommit `block_hash` fields must equal it.
     let active_block_hash = reconstructed_block_hash;
-    let supplied_evidence_block_hash = match &bundle.tendermint_evidence {
+    let supplied_evidence_block_hash = match &bundle.weighted_precommit_evidence {
         Some(tm) => parse_hex_32(&tm.block_hash)
-            .ok_or_else(|| CliError::InvalidFixture("tendermint block_hash must be 32-byte hex".to_owned()))?,
+            .ok_or_else(|| CliError::InvalidFixture("weighted_precommit block_hash must be 32-byte hex".to_owned()))?,
         None => parse_hex_32(&bundle.static_committee_evidence.block_hash)
             .ok_or_else(|| CliError::InvalidFixture("static committee block_hash must be 32-byte hex".to_owned()))?,
     };
@@ -2330,11 +2501,11 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
         "challenge payload hash recomputes from bundle fields",
     );
 
-    let signature_hashes_ok = match &bundle.tendermint_evidence {
+    let signature_hashes_ok = match &bundle.weighted_precommit_evidence {
         Some(tm) => tm.signatures.iter().all(|signature| {
             decode_hex_field(&signature.signature, "signature")
                 .map(|bytes| {
-                    hex::encode(blake3_32(b"myelin:tendermint-precommit-signature-hash:v1", &bytes)) == signature.signature_hash
+                    hex::encode(blake3_32(b"myelin:weighted-precommit-signature-hash:v1", &bytes)) == signature.signature_hash
                 })
                 .unwrap_or(false)
         }),
@@ -2344,7 +2515,7 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
                 .unwrap_or(false)
         }),
     };
-    let signature_count = match &bundle.tendermint_evidence {
+    let signature_count = match &bundle.weighted_precommit_evidence {
         Some(tm) => tm.signatures.len(),
         None => bundle.static_committee_evidence.signatures.len(),
     };
@@ -2357,11 +2528,11 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
         "each signature hash matches its embedded signature bytes",
     );
 
-    let signer_ids = match &bundle.tendermint_evidence {
+    let signer_ids = match &bundle.weighted_precommit_evidence {
         Some(tm) => tm.signatures.iter().map(|signature| signature.validator_id.clone()).collect::<Vec<_>>(),
         None => bundle.static_committee_evidence.signatures.iter().map(|signature| signature.validator_id.clone()).collect::<Vec<_>>(),
     };
-    let expected_signer_ids = match &bundle.tendermint_evidence {
+    let expected_signer_ids = match &bundle.weighted_precommit_evidence {
         Some(tm) => &tm.signer_ids,
         None => &bundle.static_committee_evidence.signer_ids,
     };
@@ -2374,41 +2545,41 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
         "signer id list matches embedded certificate signatures",
     );
 
-    if let Some(tm) = &bundle.tendermint_evidence {
-        // Tendermint precommit certificate verification
-        let tendermint_engine = tendermint_fixture_engine();
+    if let Some(tm) = &bundle.weighted_precommit_evidence {
+        // WeightedPrecommit precommit certificate verification
+        let weighted_precommit_engine = weighted_precommit_fixture_engine();
         let signatures = tm
             .signatures
             .iter()
             .map(|signature| {
                 let bytes = parse_hex_64(&signature.signature)
-                    .ok_or_else(|| CliError::InvalidFixture("tendermint signature must be 64-byte hex".to_owned()))?;
+                    .ok_or_else(|| CliError::InvalidFixture("weighted_precommit signature must be 64-byte hex".to_owned()))?;
                 Ok(CommitteeSignature { validator_id: signature.validator_id.clone(), signature: bytes })
             })
             .collect::<Result<Vec<_>>>()?;
-        let certificate = myelin_consensus::TendermintPrecommitCertificate {
+        let certificate = myelin_consensus::WeightedPrecommitCertificate {
             block_hash: active_block_hash,
             height: tm.height,
             round: tm.round,
             signatures,
         };
         let certificate_ok =
-            tendermint_engine.verify_precommit_certificate(active_block_hash, tm.height, tm.round, &certificate).is_ok();
+            weighted_precommit_engine.verify_precommit_certificate(active_block_hash, tm.height, tm.round, &certificate).is_ok();
         push_check(
             &mut checks,
-            "tendermint-certificate",
+            "weighted-precommit-certificate",
             certificate_ok,
             Some(format!("quorum power {} height {} round {}", 2, tm.height, tm.round)),
             Some(format!("quorum power {}, finalised {}", tm.quorum_power, tm.finalised)),
-            "Tendermint precommit certificate verifies against the phase-one fixture engine",
+            "WeightedPrecommit precommit certificate verifies against the phase-one fixture engine",
         );
         push_check(
             &mut checks,
-            "tendermint-quorum-power",
+            "weighted-precommit-quorum-power",
             tm.quorum_power == 2,
             Some("2".to_owned()),
             Some(tm.quorum_power.to_string()),
-            "bundle Tendermint quorum power matches the phase-one fixture engine",
+            "bundle WeightedPrecommit quorum power matches the phase-one fixture engine",
         );
     } else {
         // Static-closed-committee certificate verification
@@ -2449,11 +2620,14 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
     }
     push_check(
         &mut checks,
-        "court-verifiable-profile",
-        bundle.ckb_projection.ckb_projection_possible && bundle.ckb_projection.semantic_profile == "ckb-compatible",
-        Some("ckb-compatible + projection possible".to_owned()),
-        Some(format!("{} + {}", bundle.ckb_projection.semantic_profile, bundle.ckb_projection.ckb_projection_possible)),
-        "bundle is projectable into the CKB-compatible profile",
+        "projection-claim-is-honest",
+        !bundle.court_verifiable && bundle.ckb_projection.projection_stage == "wire-encoded" && bundle.ckb_projection.wire_encoded,
+        Some("court_verifiable=false + wire-encoded=true".to_owned()),
+        Some(format!(
+            "{} + {} + {}",
+            bundle.court_verifiable, bundle.ckb_projection.projection_stage, bundle.ckb_projection.wire_encoded
+        )),
+        "bundle claims wire encoding only until contextual consensus and script-verification receipts exist",
     );
     push_check(
         &mut checks,
@@ -2609,30 +2783,32 @@ fn finalise_teeworlds_fixture_block(chunks: &[TeeworldsChunkReport], consensus_k
                 finalised: evidence.finalised,
             }
         }
-        ConsensusKind::Tendermint => {
-            let tendermint_block = MyelinBlock {
+        ConsensusKind::WeightedPrecommit => {
+            let weighted_precommit_block = MyelinBlock {
                 version: 1,
                 parent_hash: [0; 32],
                 number: 1,
                 timestamp_ms: 0,
-                consensus_kind: ConsensusKind::Tendermint,
+                consensus_kind: ConsensusKind::WeightedPrecommit,
                 state_root_before: [0; 32],
                 state_root_after: [9; 32],
                 ordered_cell_tx_commitments: vec![[7; 32]],
                 data_commitments,
                 scheduler_commitment: [8; 32],
             };
-            let tendermint_engine = tendermint_fixture_engine();
-            let block_hash = tendermint_block.hash();
-            let height = tendermint_block.number;
+            let weighted_precommit_engine = weighted_precommit_fixture_engine();
+            let block_hash = weighted_precommit_block.hash();
+            let height = weighted_precommit_block.number;
             let round = 0u32;
             let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
-            let cert = tendermint_engine
-                .precommit_certificate_for_fixture(block_hash, height, round, &["validator-0", "validator-1"])
-                .expect("tendermint fixture certificate");
-            tendermint_engine.finalise_block_with_precommit(tendermint_block, round, cert).expect("tendermint fixture finality");
+            let cert = weighted_precommit_engine
+                .precommit_certificate_from_signers(block_hash, height, round, &fixture_signers(&["validator-0", "validator-1"]))
+                .expect("weighted_precommit fixture certificate");
+            weighted_precommit_engine
+                .finalise_block_with_precommit(weighted_precommit_block, round, cert)
+                .expect("weighted_precommit fixture finality");
             CommitteeDemoReport {
-                consensus_kind: ConsensusKind::Tendermint.as_str(),
+                consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
                 block_hash: hex::encode(block_hash),
                 quorum_weight: 2,
                 signer_ids,
@@ -2648,27 +2824,44 @@ fn finalise_teeworlds_fixture_block(chunks: &[TeeworldsChunkReport], consensus_k
 fn static_fixture_committee_config() -> StaticCommitteeConfig {
     StaticCommitteeConfig {
         quorum_weight: 2,
-        validators: vec![
-            CommitteeValidator { id: "validator-0".to_owned(), public_key: [1; 32], weight: 1 },
-            CommitteeValidator { id: "validator-1".to_owned(), public_key: [2; 32], weight: 1 },
-            CommitteeValidator { id: "validator-2".to_owned(), public_key: [3; 32], weight: 1 },
-        ],
+        validators: fixture_signers(&["validator-0", "validator-1", "validator-2"]).iter().map(|signer| signer.validator(1)).collect(),
     }
 }
 
-fn tendermint_fixture_config() -> TendermintConfig {
-    TendermintConfig {
+fn weighted_precommit_fixture_config() -> WeightedPrecommitConfig {
+    WeightedPrecommitConfig {
         quorum_power: 2,
-        validators: vec![
-            CommitteeValidator { id: "validator-0".to_owned(), public_key: [1; 32], weight: 1 },
-            CommitteeValidator { id: "validator-1".to_owned(), public_key: [2; 32], weight: 1 },
-            CommitteeValidator { id: "validator-2".to_owned(), public_key: [3; 32], weight: 1 },
-        ],
+        validators: fixture_signers(&["validator-0", "validator-1", "validator-2"]).iter().map(|signer| signer.validator(1)).collect(),
     }
 }
 
-fn tendermint_fixture_engine() -> Tendermint {
-    Tendermint::new(tendermint_fixture_config()).expect("tendermint fixture engine")
+fn fixture_signers(ids: &[&str]) -> Vec<CommitteeSigner> {
+    ids.iter()
+        .map(|id| {
+            let seed = match *id {
+                "validator-0" => 1,
+                "validator-1" => 2,
+                "validator-2" => 3,
+                other => panic!("unknown local fixture signer {other}"),
+            };
+            let mut secret_key = [0; 32];
+            secret_key[31] = seed;
+            CommitteeSigner::new(*id, secret_key).expect("valid local fixture signing key")
+        })
+        .collect()
+}
+
+fn fixture_signers_for_ids(ids: &[String]) -> Result<Vec<CommitteeSigner>> {
+    ids.iter()
+        .map(|id| match id.as_str() {
+            "validator-0" | "validator-1" | "validator-2" => Ok(fixture_signers(&[id.as_str()]).remove(0)),
+            other => Err(CliError::InvalidFixture(format!("no local signing key configured for validator {other}"))),
+        })
+        .collect()
+}
+
+fn weighted_precommit_fixture_engine() -> WeightedPrecommit {
+    WeightedPrecommit::new(weighted_precommit_fixture_config()).expect("weighted_precommit fixture engine")
 }
 
 fn static_committee_evidence_for_commitments(data_commitments: Vec<[u8; 32]>) -> StaticCommitteeEvidenceReport {
@@ -2677,7 +2870,9 @@ fn static_committee_evidence_for_commitments(data_commitments: Vec<[u8; 32]>) ->
     let block = demo_block(data_commitments, ConsensusKind::StaticClosedCommittee);
     let block_hash = block.hash();
     let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
-    let certificate = committee.certificate_for_fixture(block_hash, &["validator-0", "validator-1"]).expect("fixture certificate");
+    let certificate = committee
+        .certificate_from_signers(block_hash, &fixture_signers(&["validator-0", "validator-1"]))
+        .expect("fixture certificate");
     committee.finalise_block(block, certificate.clone()).expect("fixture finality");
     let signatures = certificate
         .signatures
@@ -3290,7 +3485,7 @@ fn session_authority_signature_evidence(
     };
     normalize_authority_signature_evidence(
         SessionAuthoritySignatureEvidence {
-            schema: "myelin-session-authority-signature-evidence-v1".to_owned(),
+            schema: "myelin-session-authority-signature-evidence-v2".to_owned(),
             signature_scheme: auth.signature_scheme.clone(),
             participant_set_hash: auth.participant_set_hash.clone(),
             threshold: auth.threshold,
@@ -3318,7 +3513,7 @@ fn session_threshold_lock_deployment_evidence(
     });
     normalize_threshold_lock_deployment_evidence(
         SessionThresholdLockDeploymentEvidence {
-            schema: "myelin-session-threshold-lock-deployment-v1".to_owned(),
+            schema: "myelin-session-threshold-lock-deployment-v2".to_owned(),
             network: args.network,
             code_hash: args.code_hash,
             hash_type: args.hash_type,
@@ -3351,7 +3546,7 @@ fn session_court_economics_deployment_evidence(
     });
     normalize_court_economics_deployment_evidence(
         SessionCourtEconomicsDeploymentEvidence {
-            schema: "myelin-session-court-economics-deployment-v1".to_owned(),
+            schema: "myelin-session-court-economics-deployment-v2".to_owned(),
             network: args.network,
             verifier_code_hash: args.verifier_code_hash,
             verifier_hash_type: args.verifier_hash_type,
@@ -3672,7 +3867,7 @@ fn settlement_authority_requirement_base(
         session_authority_commitment,
     );
     SessionSettlementAuthorityRequirement {
-        schema: "myelin-session-settlement-authority-v1".to_owned(),
+        schema: "myelin-session-settlement-authority-v2".to_owned(),
         data: format!("0x{}", hex::encode(&authority_data)),
         data_hash: format!("0x{}", hex::encode(ckb_cell_data_hash(&authority_data))),
         data_semantics: "settlement-authority-lineage-v1".to_owned(),
@@ -3740,7 +3935,7 @@ fn settlement_authority_authentication(
     let signer_count = u32::try_from(signatures.len()).expect("static signer fixture fits into u32");
     let signature_verified = signature_verified && signer_count >= threshold;
     let mut evidence = SessionAuthorityAuthenticationEvidence {
-        schema: "myelin-session-settlement-authority-auth-v1".to_owned(),
+        schema: "myelin-session-settlement-authority-auth-v2".to_owned(),
         mode: "ckb-threshold-lock".to_owned(),
         signature_domain: signature_domain.to_owned(),
         signature_scheme: signature_scheme.to_owned(),
@@ -3823,7 +4018,7 @@ fn normalize_threshold_lock_deployment_evidence(
     mut deployment: SessionThresholdLockDeploymentEvidence,
     authority: &SessionAuthorityAuthenticationEvidence,
 ) -> Result<SessionThresholdLockDeploymentEvidence> {
-    if deployment.schema != "myelin-session-threshold-lock-deployment-v1" {
+    if deployment.schema != "myelin-session-threshold-lock-deployment-v2" {
         return Err(CliError::InvalidFixture("threshold-lock deployment evidence schema is not recognised".to_owned()));
     }
     deployment.network = deployment.network.trim().to_ascii_lowercase();
@@ -3913,7 +4108,7 @@ fn normalize_authority_signature_evidence(
     mut evidence: SessionAuthoritySignatureEvidence,
     authority: &SessionAuthorityAuthenticationEvidence,
 ) -> Result<SessionAuthoritySignatureEvidence> {
-    if evidence.schema != "myelin-session-authority-signature-evidence-v1" {
+    if evidence.schema != "myelin-session-authority-signature-evidence-v2" {
         return Err(CliError::InvalidFixture("authority signature evidence schema is not recognised".to_owned()));
     }
     if evidence.signature_scheme != authority.signature_scheme {
@@ -4156,7 +4351,7 @@ fn court_economics_evidence_with_deployment(
         da_evidence_required,
     );
     let mut economics = SessionCourtEconomicsEvidence {
-        schema: "myelin-session-court-economics-v1".to_owned(),
+        schema: "myelin-session-court-economics-v2".to_owned(),
         mode: "disputed-close-explicit-policy-v1".to_owned(),
         escrow_binding_mode: "session-escrow-input-cells-hash".to_owned(),
         bond_policy: "minimum-dispute-bond-plus-session-escrow-digest-binding".to_owned(),
@@ -4279,7 +4474,7 @@ fn normalize_court_economics_deployment_evidence(
     mut deployment: SessionCourtEconomicsDeploymentEvidence,
     economics: &SessionCourtEconomicsEvidence,
 ) -> Result<SessionCourtEconomicsDeploymentEvidence> {
-    if deployment.schema != "myelin-session-court-economics-deployment-v1" {
+    if deployment.schema != "myelin-session-court-economics-deployment-v2" {
         return Err(CliError::InvalidFixture("court economics deployment evidence schema is not recognised".to_owned()));
     }
     deployment.network = deployment.network.trim().to_ascii_lowercase();
@@ -4454,7 +4649,7 @@ fn validate_settlement_authority_requirement(package_json: &Value) -> Result<Ses
         .get("schema")
         .and_then(Value::as_str)
         .ok_or_else(|| CliError::InvalidFixture("settlement_authority is missing schema".to_owned()))?;
-    if schema != "myelin-session-settlement-authority-v1" {
+    if schema != "myelin-session-settlement-authority-v2" {
         return Err(CliError::InvalidFixture(format!("unsupported settlement_authority schema: {schema}")));
     }
     let intent_hash = package_json
@@ -4619,7 +4814,7 @@ fn validate_settlement_authority_requirement(package_json: &Value) -> Result<Ses
 fn carrier_payload_type_args_hex(payload_kind: Option<&str>, payload: &[u8]) -> String {
     let data_hash_hex = hex::encode(ckb_cell_data_hash(payload));
     match payload_kind {
-        Some("myelin-session-da-anchor-carrier-v1" | "myelin-session-settlement-carrier-v1") if payload.len() >= 32 => {
+        Some("myelin-session-da-anchor-carrier-v2" | "myelin-session-settlement-carrier-v2") if payload.len() >= 32 => {
             format!("0x{}{}", data_hash_hex, hex::encode(&payload[..32]))
         }
         _ => format!("0x{data_hash_hex}"),
@@ -4661,10 +4856,10 @@ fn validate_carrier_package_payload_binding(
     payload: &[u8],
 ) -> Result<()> {
     match package_kind {
-        "myelin-session-da-anchor-package-v1" => {
-            if carrier_payload_kind != "myelin-session-da-anchor-carrier-v1" {
+        "myelin-session-da-anchor-package-v2" => {
+            if carrier_payload_kind != "myelin-session-da-anchor-carrier-v2" {
                 return Err(CliError::InvalidFixture(
-                    "DA-anchor package must use myelin-session-da-anchor-carrier-v1 carrier payload kind".to_owned(),
+                    "DA-anchor package must use myelin-session-da-anchor-carrier-v2 carrier payload kind".to_owned(),
                 ));
             }
             validate_carrier_payload_field(package, payload, 0, "da_manifest_hash")?;
@@ -4673,10 +4868,10 @@ fn validate_carrier_package_payload_binding(
             validate_carrier_payload_field(package, payload, 96, "segment_root")?;
             validate_carrier_payload_field(package, payload, 128, "molecule_transaction_hash")?;
         }
-        "myelin-session-settlement-package-v1" => {
-            if carrier_payload_kind != "myelin-session-settlement-carrier-v1" {
+        "myelin-session-settlement-package-v2" => {
+            if carrier_payload_kind != "myelin-session-settlement-carrier-v2" {
                 return Err(CliError::InvalidFixture(
-                    "settlement package must use myelin-session-settlement-carrier-v1 carrier payload kind".to_owned(),
+                    "settlement package must use myelin-session-settlement-carrier-v2 carrier payload kind".to_owned(),
                 ));
             }
             validate_carrier_payload_field(package, payload, 0, "intent_hash")?;
@@ -4734,8 +4929,8 @@ fn parse_hex_64(value: &str) -> Option<[u8; 64]> {
 impl From<CkbProjectionReport> for TeeworldsChunkProjectionReport {
     fn from(report: CkbProjectionReport) -> Self {
         Self {
-            semantic_profile: semantic_profile_label(report.semantic_profile).to_string(),
-            ckb_projection_possible: report.ckb_projection_possible,
+            projection_stage: projection_stage_label(report.stage).to_string(),
+            wire_encoded: report.stage >= ProjectionStage::WireEncoded,
             blockers: serde_json::to_value(report.blockers).expect("projection blockers serialize"),
             warnings: serde_json::to_value(report.warnings).expect("projection warnings serialize"),
             source_txid: hex::encode(report.source_txid),
@@ -4749,12 +4944,21 @@ impl From<CkbProjectionReport> for TeeworldsChunkProjectionReport {
     }
 }
 
-fn semantic_profile_label(profile: SemanticProfile) -> &'static str {
-    match profile {
-        SemanticProfile::MyelinNative => "myelin-native",
-        SemanticProfile::CkbCompatible => "ckb-compatible",
-        SemanticProfile::CkbInspiredOnly => "ckb-inspired-only",
+fn projection_stage_label(stage: ProjectionStage) -> &'static str {
+    match stage {
+        ProjectionStage::Rejected => "rejected",
+        ProjectionStage::WireEncoded => "wire-encoded",
+        ProjectionStage::ContextResolved => "context-resolved",
+        ProjectionStage::ConsensusValidated => "consensus-validated",
+        ProjectionStage::ScriptsVerified => "scripts-verified",
+        ProjectionStage::NodeAccepted => "node-accepted",
+        ProjectionStage::Committed => "committed",
+        ProjectionStage::Finalized => "finalized",
     }
+}
+
+fn projection_stage_is_scripts_verified(stage: &str) -> bool {
+    matches!(stage, "scripts-verified" | "node-accepted" | "committed" | "finalized")
 }
 
 fn ckb_vm_profile_label(spawn_ipc_enabled: bool) -> &'static str {
@@ -4792,6 +4996,7 @@ struct SessionOpenReport {
 
 #[derive(Debug, Deserialize)]
 struct SessionOpenInput {
+    schema: String,
     session_id: String,
     app_id: String,
     vm_profile: String,
@@ -4838,7 +5043,7 @@ struct SessionCommitReport {
     molecule_transaction_hex: String,
     molecule_transaction_hash: String,
     static_committee_evidence: StaticCommitteeEvidenceReport,
-    tendermint_evidence: Option<TendermintEvidenceReport>,
+    weighted_precommit_evidence: Option<WeightedPrecommitEvidenceReport>,
     finalised: bool,
 }
 
@@ -4866,14 +5071,17 @@ struct SessionCommitMultiReport {
     /// Successful / failed counts from the ParallelExecutor stats.
     successful_txs: usize,
     failed_txs: usize,
+    dependency_failed_txs: usize,
     /// Per-tx CKB-VM cycles, indexed by NodeId.
     per_tx_cycles: Vec<u64>,
     ordered_cell_tx_commitments: Vec<String>,
     data_commitments: Vec<String>,
     scheduler_commitment: String,
+    state_root_before: String,
+    state_root_after: String,
     block: TeeworldsBundleBlock,
     static_committee_evidence: StaticCommitteeEvidenceReport,
-    tendermint_evidence: Option<TendermintEvidenceReport>,
+    weighted_precommit_evidence: Option<WeightedPrecommitEvidenceReport>,
     finalised: bool,
 }
 
@@ -4897,7 +5105,7 @@ struct SessionCommitInput {
     molecule_transaction_hex: String,
     molecule_transaction_hash: String,
     static_committee_evidence: StaticCommitteeEvidenceInput,
-    tendermint_evidence: Option<TendermintEvidenceInput>,
+    weighted_precommit_evidence: Option<WeightedPrecommitEvidenceInput>,
     finalised: bool,
 }
 
@@ -4923,7 +5131,7 @@ struct SessionCourtBundleReport {
     challenge_payload_hash: String,
     ckb_projection: TeeworldsChunkProjectionReport,
     static_committee_evidence: StaticCommitteeEvidenceReport,
-    tendermint_evidence: Option<TendermintEvidenceReport>,
+    weighted_precommit_evidence: Option<WeightedPrecommitEvidenceReport>,
     court_verifiable: bool,
     l1_court_implemented: bool,
     notes: Vec<String>,
@@ -4951,7 +5159,7 @@ struct SessionCourtBundleInput {
     challenge_payload_hash: String,
     ckb_projection: TeeworldsChunkProjectionInput,
     static_committee_evidence: StaticCommitteeEvidenceInput,
-    tendermint_evidence: Option<TendermintEvidenceInput>,
+    weighted_precommit_evidence: Option<WeightedPrecommitEvidenceInput>,
     court_verifiable: bool,
 }
 
@@ -5072,7 +5280,7 @@ struct SessionDaAnchorPackageReport {
     molecule_transaction_hex: String,
     molecule_transaction_hash: String,
     ckb_projection: TeeworldsChunkProjectionReport,
-    da_anchor_projectable: bool,
+    da_anchor_wire_encoded: bool,
     l1_da_publication_implemented: bool,
     notes: Vec<String>,
 }
@@ -5105,6 +5313,7 @@ struct SessionDaAnchorSubmissionReport {
     pre_submit: SessionLiveSubmissionPreflight,
     submitted_to_rpc: bool,
     accepted_by_rpc: bool,
+    rpc_admission: Option<SessionRpcAdmissionEvidence>,
     l1_da_published: bool,
     rpc_result: Option<Value>,
     rpc_error: Option<Value>,
@@ -5235,7 +5444,7 @@ struct SessionSettlementPackageReport {
     molecule_transaction_hex: String,
     molecule_transaction_hash: String,
     ckb_projection: TeeworldsChunkProjectionReport,
-    settlement_projectable: bool,
+    settlement_wire_encoded: bool,
     l1_court_script_implemented: bool,
     notes: Vec<String>,
 }
@@ -5360,10 +5569,28 @@ struct SessionSettlementSubmissionReport {
     pre_submit: SessionLiveSubmissionPreflight,
     submitted_to_rpc: bool,
     accepted_by_rpc: bool,
+    rpc_admission: Option<SessionRpcAdmissionEvidence>,
     l1_court_submitted: bool,
     rpc_result: Option<Value>,
     rpc_error: Option<Value>,
     notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionRpcAdmissionEvidence {
+    schema: String,
+    expected_ckb_tx_hash: String,
+    pool_accept_result: Option<Value>,
+    pool_accept_error: Option<Value>,
+    full_node_validated: bool,
+    send_result: Option<Value>,
+    send_error: Option<Value>,
+    submitted_hash_matches: bool,
+    observation_result: Option<Value>,
+    observation_error: Option<Value>,
+    observed_status: Option<String>,
+    transaction_observed: bool,
+    accepted: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -5644,21 +5871,25 @@ struct SessionSubmissionReadinessCheck {
 
 fn session_open_fixture(consensus: &str) -> Result<SessionOpenReport> {
     let participants = vec!["alice".to_owned(), "bob".to_owned()];
+    let fixture_lock_hash = hex::encode(
+        myelin_exec::ckb_script_hash_molecule(&session_fixture_lock_script())
+            .expect("the fixed always-success script has a valid Molecule encoding"),
+    );
     let escrow_input_cells = vec![
         SessionEscrowCellReport {
             outpoint_tx_hash: hex::encode(blake3_32(b"myelin:session-fixture-escrow:v1", b"alice")),
             outpoint_index: 0,
             capacity: 1_000,
-            lock_hash: hex::encode(blake3_32(b"myelin:session-fixture-lock:v1", b"alice")),
+            lock_hash: fixture_lock_hash.clone(),
         },
         SessionEscrowCellReport {
             outpoint_tx_hash: hex::encode(blake3_32(b"myelin:session-fixture-escrow:v1", b"bob")),
             outpoint_index: 0,
             capacity: 1_000,
-            lock_hash: hex::encode(blake3_32(b"myelin:session-fixture-lock:v1", b"bob")),
+            lock_hash: fixture_lock_hash,
         },
     ];
-    session_open_report(consensus, "myelin-session-fixture-v1", participants, escrow_input_cells, 60_000)
+    session_open_report(consensus, "myelin-session-fixture-v2", participants, escrow_input_cells, 60_000)
 }
 
 fn session_open(args: SessionOpenArgs) -> Result<SessionOpenReport> {
@@ -5690,14 +5921,14 @@ fn session_open_report(
         return Err(CliError::InvalidFixture("session timeout-ms must be non-zero".to_owned()));
     }
 
-    let mut tree = CellStateTree::new();
+    let mut tree = session_state_from_escrow_reports(&escrow_input_cells)?;
     let initial_state_root = *tree.root().as_ref();
     let vm_profile = "ckb-strict-basic";
     let session_id = session_id_from_parts(app_id, vm_profile, &participants, &escrow_input_cells, initial_state_root);
     let lineage = session_lineage_commitments(app_id, vm_profile, &participants, &escrow_input_cells, initial_state_root);
 
     Ok(SessionOpenReport {
-        schema: "myelin-session-open-v1",
+        schema: "myelin-session-open-v2",
         session_id: hex::encode(session_id),
         app_id: app_id.to_owned(),
         vm_profile,
@@ -5720,14 +5951,20 @@ fn session_commit_fixture(path: PathBuf) -> Result<SessionCommitReport> {
 /// Load and validate a `SessionOpenInput`, returning the parsed fields the
 /// commit paths need. Shared by `session_commit_from_open` and the multi-tx
 /// commit path so both enforce the same session-open invariants.
-fn load_and_validate_session_open(path: PathBuf) -> Result<(
-    SessionOpenInput,
-    [u8; 32],
-    ConsensusKind,
-    [u8; 32],
-)> {
+struct ValidatedSessionOpen {
+    session: SessionOpenInput,
+    session_id: [u8; 32],
+    consensus_kind: ConsensusKind,
+    initial_state_root: [u8; 32],
+    state: CellStateTree,
+}
+
+fn load_and_validate_session_open(path: PathBuf) -> Result<ValidatedSessionOpen> {
     let bytes = fs::read(path)?;
     let session = serde_json::from_slice::<SessionOpenInput>(&bytes)?;
+    if session.schema != "myelin-session-open-v2" {
+        return Err(CliError::InvalidFixture(format!("unsupported session-open schema: {}", session.schema)));
+    }
     if session.timeout_ms == 0 {
         return Err(CliError::InvalidFixture("session timeout_ms must be non-zero".to_owned()));
     }
@@ -5750,6 +5987,10 @@ fn load_and_validate_session_open(path: PathBuf) -> Result<(
             lock_hash: cell.lock_hash.clone(),
         })
         .collect::<Vec<_>>();
+    let mut state = session_state_from_escrow_reports(&escrow_reports)?;
+    if state.root().as_bytes() != initial_state_root {
+        return Err(CliError::InvalidFixture("initial_state_root does not commit the declared escrow live cells".to_owned()));
+    }
     let expected_session_id =
         session_id_from_parts(&session.app_id, &session.vm_profile, &session.participants, &escrow_reports, initial_state_root);
     let expected_lineage =
@@ -5768,28 +6009,29 @@ fn load_and_validate_session_open(path: PathBuf) -> Result<(
     if parse_hex_32(&session.session_lineage_commitment) != Some(expected_lineage.session_lineage_commitment) {
         return Err(CliError::InvalidFixture("session_lineage_commitment does not match session open fields".to_owned()));
     }
-    Ok((session, session_id, consensus_kind, initial_state_root))
+    Ok(ValidatedSessionOpen { session, session_id, consensus_kind, initial_state_root, state })
 }
 
 /// Commit a multi-CellTx chunk that exercises the CellDAG + ParallelExecutor
 /// inter-transaction parallel verification path.
 ///
 /// Builds a deterministic chain of `tx_count` CellTx (tx[i+1] consumes
-/// tx[i]'s output), schedules them through `CellDAG::build_from_typed`, and
+/// tx[i]'s output), schedules them through `CellDAG::build`, and
 /// verifies each through `verify_celltx_via_dag` (rayon across DAG layers,
 /// real `TransactionScriptVerifier` per tx). The `scheduler_commitment` is
 /// derived from the execution results under a distinct domain tag so it
 /// cannot collide with the single-tx fixture commitment.
 fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u64) -> Result<SessionCommitMultiReport> {
-    let (_session, session_id, consensus_kind, initial_state_root) = load_and_validate_session_open(path)?;
-    let _ = initial_state_root; // validated above; multi path does not mutate a state tree
+    let ValidatedSessionOpen { session, session_id, consensus_kind, initial_state_root, state } =
+        load_and_validate_session_open(path)?;
+    let (first_input, first_input_capacity) = session_primary_escrow(&session)?;
 
-    let txs = session_fixture_cell_tx_chain(session_id, chunk_index, tx_count)
+    let txs = session_fixture_cell_tx_chain(session_id, chunk_index, tx_count, first_input, first_input_capacity)
         .map_err(|error| CliError::InvalidFixture(error.to_owned()))?;
 
     // Build the DAG over the chain and run real parallel VM verification.
-    let dag = myelin_exec::scheduler::CellDAG::build_from_typed(&txs)
-        .map_err(|error| CliError::InvalidFixture(format!("CellDAG build: {error}")))?;
+    let dag =
+        myelin_exec::scheduler::CellDAG::build(&txs).map_err(|error| CliError::InvalidFixture(format!("CellDAG build: {error}")))?;
     let dag_layers = dag.layers.clone();
     let dag_layer_count = dag_layers.len();
 
@@ -5800,52 +6042,53 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
     let mut provider = myelin_exec::SimpleDataProvider::default();
     // Register the always_success RISC-V ELF so the verifier can load the lock
     // script code by code_hash for every tx in the chain.
-    provider.add_script(
-        myelin_exec::scripts::always_success_code_hash(),
-        myelin_exec::scripts::ALWAYS_SUCCESS_SCRIPT.to_vec(),
+    let code_dep = session_fixture_code_dep_outpoint();
+    provider.add_cell(
+        code_dep.tx_hash,
+        code_dep.index,
+        myelin_exec::ResolvedCell {
+            cell_output: CellOutput { lock: session_fixture_lock_script(), type_: None, capacity: 1_000_000 },
+            data: Some(myelin_exec::scripts::ALWAYS_SUCCESS_SCRIPT.to_vec()),
+        },
     );
     for tx in &txs {
-        // Producers are indexed in the DAG by wtxid (see CellDAG::build), and
-        // tx[i+1]'s input references the producer by wtxid, so the data
-        // provider must register each produced cell under the producer's
-        // wtxid — not its txid.
-        let wtxid = compute_wtxid(tx);
+        // Produced Cells are indexed by the raw transaction hash. Witness
+        // changes do not alter OutPoint identity.
+        let txid = tx.id();
         for (idx, output) in tx.outputs.iter().enumerate() {
             let data = tx.outputs_data.get(idx).cloned();
-            provider.add_cell(
-                wtxid,
-                idx as u32,
-                myelin_exec::ResolvedCell { cell_output: output.clone(), data },
-            );
+            provider.add_cell(txid, idx as u32, myelin_exec::ResolvedCell { cell_output: output.clone(), data });
         }
     }
-    // tx[0] spends a synthetic external input (the same one
-    // `session_fixture_cell_tx` mints). Register a matching cell under that
-    // outpoint so the verifier can resolve tx[0]'s input.
-    let index_bytes = chunk_index.to_le_bytes();
-    let external_input_hash = blake3_chunks(b"myelin:session-fixture-input:v1", &[&session_id, &index_bytes]);
+    // Resolve the exact primary escrow committed by the session-open state.
     provider.add_cell(
-        external_input_hash,
-        0,
+        first_input.tx_hash,
+        first_input.index,
         myelin_exec::ResolvedCell {
-            cell_output: CellOutput { lock: Script::new(myelin_exec::scripts::always_success_code_hash(), 0, Vec::new()), type_: None, capacity: 1_500 },
+            cell_output: CellOutput { lock: session_fixture_lock_script(), type_: None, capacity: first_input_capacity },
             data: Some(Vec::new()),
         },
     );
     let results = myelin_exec::scheduler::verify_with_existing_dag(&dag, &txs, std::sync::Arc::new(provider), 10_000_000, false)
         .map_err(|error| CliError::InvalidFixture(format!("parallel verify: {error}")))?;
     let stats = myelin_exec::scheduler::ParallelExecutor::get_stats(&results);
+    if stats.failed_txs != 0 || stats.dependency_failed_txs != 0 {
+        return Err(CliError::InvalidFixture(
+            "parallel VM verification did not succeed for the complete transaction chain".to_owned(),
+        ));
+    }
 
     let per_tx_cycles: Vec<u64> = results
         .iter()
         .map(|r| match r {
             myelin_exec::scheduler::ExecutionResult::Success { receipt, .. } => receipt.cycles,
-            myelin_exec::scheduler::ExecutionResult::Failed { .. } => 0,
+            myelin_exec::scheduler::ExecutionResult::Failed { .. }
+            | myelin_exec::scheduler::ExecutionResult::DependencyFailed { .. } => 0,
         })
         .collect();
 
-    let wtxids: Vec<[u8; 32]> = txs.iter().map(compute_wtxid).collect();
-    let ordered_cell_tx_commitments: Vec<String> = wtxids.iter().map(hex::encode).collect();
+    let txids: Vec<[u8; 32]> = txs.iter().map(CellTx::id).collect();
+    let ordered_cell_tx_commitments: Vec<String> = txids.iter().map(hex::encode).collect();
 
     // Aggregate scheduler commitment over the DAG execution results, under a
     // distinct domain tag from the single-tx path.
@@ -5853,9 +6096,9 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
     sched_hasher.update(b"myelin:session-multi-scheduler:v1");
     sched_hasher.update(&session_id);
     sched_hasher.update(&chunk_index.to_le_bytes());
-    sched_hasher.update(&(wtxids.len() as u32).to_le_bytes());
-    for wtxid in &wtxids {
-        sched_hasher.update(wtxid);
+    sched_hasher.update(&(txids.len() as u32).to_le_bytes());
+    for txid in &txids {
+        sched_hasher.update(txid);
     }
     sched_hasher.update(&(dag_layer_count as u32).to_le_bytes());
     for (node_id, result) in results.iter().enumerate() {
@@ -5865,7 +6108,8 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
                 sched_hasher.update(&[*layer as u32 as u8; 1]);
                 sched_hasher.update(&receipt.cycles.to_le_bytes());
             }
-            myelin_exec::scheduler::ExecutionResult::Failed { layer, .. } => {
+            myelin_exec::scheduler::ExecutionResult::Failed { layer, .. }
+            | myelin_exec::scheduler::ExecutionResult::DependencyFailed { layer, .. } => {
                 sched_hasher.update(&[*layer as u32 as u8; 1]);
                 sched_hasher.update(&0u64.to_le_bytes());
             }
@@ -5881,10 +6125,17 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
         })
         .collect();
 
-    // Multi-tx block uses a neutral state root pair (the multi path does not
-    // walk a CellStateTree; it demonstrates DAG + parallel VM verification).
-    let state_root_before = initial_state_root;
-    let state_root_after = initial_state_root;
+    let mut state_engine = StateTransitionEngine::new(state);
+    let state_root_before = *state_engine.state_root().as_ref();
+    if state_root_before != initial_state_root {
+        return Err(CliError::InvalidFixture("session state reconstruction changed before multi-transaction apply".to_owned()));
+    }
+    for (tx, cycles) in txs.iter().zip(&per_tx_cycles) {
+        state_engine
+            .apply_transaction(tx, StateTransitionContext::ordinary(1), |_, _| Ok::<_, String>(*cycles))
+            .map_err(|error| CliError::InvalidFixture(format!("atomic multi-transaction apply: {error}")))?;
+    }
+    let state_root_after = *state_engine.state_root().as_ref();
     let block = MyelinBlock {
         version: 1,
         parent_hash: [0; 32],
@@ -5893,16 +6144,16 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
         consensus_kind,
         state_root_before,
         state_root_after,
-        ordered_cell_tx_commitments: wtxids.clone(),
+        ordered_cell_tx_commitments: txids,
         data_commitments: data_commitments.clone(),
         scheduler_commitment,
     };
     let block_hash = block.hash();
-    let (static_committee_evidence, tendermint_evidence) = finality_evidence_for_block(&block)?;
+    let (static_committee_evidence, weighted_precommit_evidence) = finality_evidence_for_block(&block)?;
     let bundle_block = block_report_from_myelin_block(&block, block_hash);
 
     Ok(SessionCommitMultiReport {
-        schema: "myelin-session-commit-multi-v1",
+        schema: "myelin-session-commit-multi-v2",
         session_id: hex::encode(session_id),
         chunk_index,
         consensus_kind: consensus_kind.as_str(),
@@ -5914,97 +6165,76 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
         max_layer_depth: stats.max_layer_depth,
         successful_txs: stats.successful_txs,
         failed_txs: stats.failed_txs,
+        dependency_failed_txs: stats.dependency_failed_txs,
         per_tx_cycles,
         ordered_cell_tx_commitments,
         data_commitments: data_commitments.iter().map(hex::encode).collect(),
         scheduler_commitment: hex::encode(scheduler_commitment),
+        state_root_before: hex::encode(state_root_before),
+        state_root_after: hex::encode(state_root_after),
         block: bundle_block,
         static_committee_evidence,
-        tendermint_evidence,
+        weighted_precommit_evidence,
         finalised: true,
     })
 }
 
 fn session_commit_from_open(path: PathBuf, chunk_index: u64) -> Result<SessionCommitReport> {
-    let bytes = fs::read(path)?;
-    let session = serde_json::from_slice::<SessionOpenInput>(&bytes)?;
-    if session.timeout_ms == 0 {
-        return Err(CliError::InvalidFixture("session timeout_ms must be non-zero".to_owned()));
-    }
-    if session.vm_profile != "ckb-strict-basic" {
-        return Err(CliError::InvalidFixture(format!("session vm_profile must be ckb-strict-basic, got {}", session.vm_profile)));
-    }
-    if session.ckb_spawn_ipc_required {
-        return Err(CliError::InvalidFixture("session fixture must not require spawn/IPC".to_owned()));
-    }
-    let consensus_kind = parse_session_consensus(&session.consensus_kind)?;
-    let initial_state_root = parse_hex_32(&session.initial_state_root)
-        .ok_or_else(|| CliError::InvalidFixture("initial_state_root must be 32-byte hex".to_owned()))?;
-    let escrow_reports = session
-        .escrow_input_cells
-        .iter()
-        .map(|cell| SessionEscrowCellReport {
-            outpoint_tx_hash: cell.outpoint_tx_hash.clone(),
-            outpoint_index: cell.outpoint_index,
-            capacity: cell.capacity,
-            lock_hash: cell.lock_hash.clone(),
-        })
-        .collect::<Vec<_>>();
-    let expected_session_id =
-        session_id_from_parts(&session.app_id, &session.vm_profile, &session.participants, &escrow_reports, initial_state_root);
-    let expected_lineage =
-        session_lineage_commitments(&session.app_id, &session.vm_profile, &session.participants, &escrow_reports, initial_state_root);
-    let session_id =
-        parse_hex_32(&session.session_id).ok_or_else(|| CliError::InvalidFixture("session_id must be 32-byte hex".to_owned()))?;
-    if expected_session_id != session_id {
-        return Err(CliError::InvalidFixture("session_id does not match session open fields".to_owned()));
-    }
-    if parse_hex_32(&session.participant_set_hash) != Some(expected_lineage.participant_set_hash) {
-        return Err(CliError::InvalidFixture("session participant_set_hash does not match session open fields".to_owned()));
-    }
-    if parse_hex_32(&session.escrow_input_cells_hash) != Some(expected_lineage.escrow_input_cells_hash) {
-        return Err(CliError::InvalidFixture("session escrow_input_cells_hash does not match session open fields".to_owned()));
-    }
-    if parse_hex_32(&session.session_lineage_commitment) != Some(expected_lineage.session_lineage_commitment) {
-        return Err(CliError::InvalidFixture("session_lineage_commitment does not match session open fields".to_owned()));
-    }
-
-    let tx = session_fixture_cell_tx(session_id, chunk_index).map_err(|error| CliError::InvalidFixture(error.to_owned()))?;
+    let ValidatedSessionOpen { session, session_id, consensus_kind, initial_state_root, state } =
+        load_and_validate_session_open(path)?;
+    let (input_outpoint, input_capacity) = session_primary_escrow(&session)?;
+    let tx = session_fixture_cell_tx(session_id, chunk_index, input_outpoint, input_capacity)
+        .map_err(|error| CliError::InvalidFixture(error.to_owned()))?;
     let txid = tx.id();
     let wtxid = compute_wtxid(&tx);
     let molecule_transaction = serialize_transaction_molecule(&tx).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
     let molecule_transaction_hash = blake3_32(b"myelin:session-molecule-transaction:v1", &molecule_transaction);
 
-    let pool = CellPool::new(64);
+    let pool = CellPool::new(64, initial_state_root);
     let pool_size_before = pool.stats().total_txs;
-    let returned_wtxid =
-        pool.add(tx.clone(), 1_000, 50_000).map_err(|error| CliError::InvalidFixture(format!("mempool add: {error}")))?;
-    if returned_wtxid != wtxid {
-        return Err(CliError::InvalidFixture("mempool returned unexpected wtxid".to_owned()));
+    let mut provider = SimpleDataProvider::default();
+    provider.add_cell(
+        input_outpoint.tx_hash,
+        input_outpoint.index,
+        ResolvedCell {
+            cell_output: CellOutput { lock: session_fixture_lock_script(), type_: None, capacity: input_capacity },
+            data: Some(Vec::new()),
+        },
+    );
+    let code_dep = session_fixture_code_dep_outpoint();
+    provider.add_cell(
+        code_dep.tx_hash,
+        code_dep.index,
+        ResolvedCell {
+            cell_output: CellOutput { lock: session_fixture_lock_script(), type_: None, capacity: 1_000_000 },
+            data: Some(myelin_exec::scripts::ALWAYS_SUCCESS_SCRIPT.to_vec()),
+        },
+    );
+    let provider = Arc::new(provider);
+    let verify = |candidate: &CellTx| {
+        TransactionScriptVerifier::new(Arc::new(candidate.clone()), provider.clone())
+            .with_semantics(VmSemantics::CkbStrict)
+            .with_max_cycles(10_000_000)
+            .verify_with_cycles()
+            .map_err(|error| error.to_string())
+    };
+    let mut state_engine = StateTransitionEngine::new(state);
+    let admitted = state_engine
+        .verify_transaction(&tx, StateTransitionContext::ordinary(1), |candidate, _| verify(candidate))
+        .map_err(|error| CliError::InvalidFixture(format!("mempool admission: {error}")))?;
+    let returned_txid = pool.add(admitted).map_err(|error| CliError::InvalidFixture(format!("mempool add: {error}")))?;
+    if returned_txid != txid {
+        return Err(CliError::InvalidFixture("mempool returned unexpected raw transaction id".to_owned()));
     }
     let pool_size_after = pool.stats().total_txs;
-
-    let mut tree = CellStateTree::new();
-    let state_root_before = *tree.root().as_ref();
+    let receipt = state_engine
+        .apply_transaction(&tx, StateTransitionContext::ordinary(1), |candidate, _| verify(candidate))
+        .map_err(|error| CliError::InvalidFixture(format!("atomic session transition: {error}")))?;
+    let state_root_before = *receipt.state_root_before.as_ref();
     if state_root_before != initial_state_root {
-        return Err(CliError::InvalidFixture("session initial state root does not match empty fixture state".to_owned()));
+        return Err(CliError::InvalidFixture("session transition did not start from the escrow-committed state root".to_owned()));
     }
-    let outpoint_hash = blake3_chunks(b"myelin:session-fixture-outpoint-hash:v1", &[&session_id, &wtxid]);
-    let output_data = tx.outputs_data.first().cloned().unwrap_or_default();
-    let entry = myelin_state::CellEntry {
-        capacity: tx.outputs.first().map(|output| output.capacity).unwrap_or_default(),
-        data_bytes: output_data.len() as u64,
-        lock_hash: myelin_hashes::Hash::from(blake3_32(b"myelin:session-fixture-lock-hash:v1", &session_id)),
-        type_hash: Some(myelin_hashes::Hash::from(blake3_32(b"myelin:session-fixture-type-hash:v1", &session_id))),
-        data_hash: myelin_hashes::Hash::from(blake3_32(b"myelin:session-fixture-output-data:v1", &output_data)),
-        created_block_number: 1,
-        is_cellbase: false,
-        lock_script: tx.outputs.first().map(|output| output.lock.clone()),
-        type_script: tx.outputs.first().and_then(|output| output.type_.clone()),
-        data: Some(output_data),
-    };
-    tree.insert_with_outpoint(myelin_hashes::Hash::from(outpoint_hash), OutPoint::new(wtxid, 0), entry);
-    let state_root_after = *tree.root().as_ref();
+    let state_root_after = *receipt.state_root_after.as_ref();
 
     let index_bytes = chunk_index.to_le_bytes();
     let data_commitment = blake3_chunks(b"myelin:session-fixture-data-commitment:v1", &[&session_id, &index_bytes, &wtxid]);
@@ -6017,16 +6247,16 @@ fn session_commit_from_open(path: PathBuf, chunk_index: u64) -> Result<SessionCo
         consensus_kind,
         state_root_before,
         state_root_after,
-        ordered_cell_tx_commitments: vec![wtxid],
+        ordered_cell_tx_commitments: vec![txid],
         data_commitments: vec![data_commitment],
         scheduler_commitment,
     };
     let block_hash = block.hash();
-    let (static_committee_evidence, tendermint_evidence) = finality_evidence_for_block(&block)?;
+    let (static_committee_evidence, weighted_precommit_evidence) = finality_evidence_for_block(&block)?;
     let bundle_block = block_report_from_myelin_block(&block, block_hash);
 
     Ok(SessionCommitReport {
-        schema: "myelin-session-commit-v1",
+        schema: "myelin-session-commit-v2",
         session_id: hex::encode(session_id),
         chunk_index,
         consensus_kind: consensus_kind.as_str(),
@@ -6041,14 +6271,14 @@ fn session_commit_from_open(path: PathBuf, chunk_index: u64) -> Result<SessionCo
         pool_size_after,
         state_root_before: hex::encode(state_root_before),
         state_root_after: hex::encode(state_root_after),
-        ordered_cell_tx_commitments: vec![hex::encode(wtxid)],
+        ordered_cell_tx_commitments: vec![hex::encode(txid)],
         data_commitments: vec![hex::encode(data_commitment)],
         scheduler_commitment: hex::encode(scheduler_commitment),
         block: bundle_block,
         molecule_transaction_hex: hex::encode(molecule_transaction),
         molecule_transaction_hash: hex::encode(molecule_transaction_hash),
         static_committee_evidence,
-        tendermint_evidence,
+        weighted_precommit_evidence,
         finalised: true,
     })
 }
@@ -6075,9 +6305,15 @@ fn session_court_bundle(path: PathBuf, chunk_index: u64) -> Result<SessionCourtB
         return Err(CliError::InvalidFixture("session commit molecule_transaction_hash mismatch".to_owned()));
     }
     let tx = deserialize_transaction_molecule(&molecule_transaction).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let txid = tx.id();
     let tx_wtxid = compute_wtxid(&tx);
     if hex::encode(tx_wtxid) != commit.cell_wtxid {
         return Err(CliError::InvalidFixture("session commit cell_wtxid does not match embedded transaction".to_owned()));
+    }
+    if commit.ordered_cell_tx_commitments.first().map(String::as_str) != Some(hex::encode(txid).as_str()) {
+        return Err(CliError::InvalidFixture(
+            "session commit ordered CellTx commitment does not match the embedded raw transaction id".to_owned(),
+        ));
     }
     let ckb_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
     let block = commit.block.to_myelin_block().map_err(|error| CliError::InvalidFixture(format!("session commit block: {error}")))?;
@@ -6121,10 +6357,10 @@ fn session_court_bundle(path: PathBuf, chunk_index: u64) -> Result<SessionCourtB
             &session_lineage_commitment,
         ],
     );
-    let court_verifiable = ckb_projection.ckb_projection_possible && ckb_projection.semantic_profile == "ckb-compatible";
+    let court_verifiable = projection_stage_is_scripts_verified(&ckb_projection.projection_stage);
 
     Ok(SessionCourtBundleReport {
-        schema: "myelin-session-court-bundle-v1",
+        schema: "myelin-session-court-bundle-v2",
         session_id: commit.session_id,
         chunk_index,
         consensus_kind: consensus_kind.as_str(),
@@ -6144,7 +6380,7 @@ fn session_court_bundle(path: PathBuf, chunk_index: u64) -> Result<SessionCourtB
         challenge_payload_hash: hex::encode(challenge_payload_hash),
         ckb_projection,
         static_committee_evidence: static_evidence_report_from_input(commit.static_committee_evidence),
-        tendermint_evidence: commit.tendermint_evidence.map(tendermint_evidence_report_from_input),
+        weighted_precommit_evidence: commit.weighted_precommit_evidence.map(weighted_precommit_evidence_report_from_input),
         court_verifiable,
         l1_court_implemented: false,
         notes: vec![
@@ -6162,8 +6398,8 @@ fn verify_session_court_bundle(path: PathBuf) -> Result<SessionCourtBundleVerifi
     push_check(
         &mut checks,
         "schema",
-        bundle.schema == "myelin-session-court-bundle-v1",
-        Some("myelin-session-court-bundle-v1".to_owned()),
+        bundle.schema == "myelin-session-court-bundle-v2",
+        Some("myelin-session-court-bundle-v2".to_owned()),
         Some(bundle.schema.clone()),
         "session court bundle schema is recognised",
     );
@@ -6196,30 +6432,30 @@ fn verify_session_court_bundle(path: PathBuf) -> Result<SessionCourtBundleVerifi
         "Molecule transaction hash matches embedded transaction bytes",
     );
     let tx = deserialize_transaction_molecule(&molecule_transaction).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
-    let tx_wtxid = compute_wtxid(&tx);
+    let txid = tx.id();
     push_check(
         &mut checks,
         "ordered-celltx-commitment",
-        bundle.ordered_cell_tx_commitments.first().map(String::as_str) == Some(hex::encode(tx_wtxid).as_str()),
-        Some(hex::encode(tx_wtxid)),
+        bundle.ordered_cell_tx_commitments.first().map(String::as_str) == Some(hex::encode(txid).as_str()),
+        Some(hex::encode(txid)),
         bundle.ordered_cell_tx_commitments.first().cloned(),
-        "block ordered CellTx commitment matches embedded transaction wtxid",
+        "block ordered CellTx commitment matches the embedded raw transaction id",
     );
     let recomputed_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
     push_check(
         &mut checks,
         "projection-possible",
-        bundle.ckb_projection.ckb_projection_possible == recomputed_projection.ckb_projection_possible,
-        Some(recomputed_projection.ckb_projection_possible.to_string()),
-        Some(bundle.ckb_projection.ckb_projection_possible.to_string()),
+        bundle.ckb_projection.wire_encoded == recomputed_projection.wire_encoded,
+        Some(recomputed_projection.wire_encoded.to_string()),
+        Some(bundle.ckb_projection.wire_encoded.to_string()),
         "projection possibility recomputes from embedded Molecule transaction",
     );
     push_check(
         &mut checks,
         "projection-profile",
-        bundle.ckb_projection.semantic_profile == recomputed_projection.semantic_profile,
-        Some(recomputed_projection.semantic_profile),
-        Some(bundle.ckb_projection.semantic_profile.clone()),
+        bundle.ckb_projection.projection_stage == recomputed_projection.projection_stage,
+        Some(recomputed_projection.projection_stage),
+        Some(bundle.ckb_projection.projection_stage.clone()),
         "semantic profile recomputes from embedded Molecule transaction",
     );
 
@@ -6342,9 +6578,9 @@ fn verify_session_court_bundle(path: PathBuf) -> Result<SessionCourtBundleVerifi
         "challenge payload hash recomputes from bundle fields",
     );
 
-    let evidence_block_hash = match &bundle.tendermint_evidence {
+    let evidence_block_hash = match &bundle.weighted_precommit_evidence {
         Some(tm) => parse_hex_32(&tm.block_hash)
-            .ok_or_else(|| CliError::InvalidFixture("tendermint block_hash must be 32-byte hex".to_owned()))?,
+            .ok_or_else(|| CliError::InvalidFixture("weighted_precommit block_hash must be 32-byte hex".to_owned()))?,
         None => parse_hex_32(&bundle.static_committee_evidence.block_hash)
             .ok_or_else(|| CliError::InvalidFixture("static committee block_hash must be 32-byte hex".to_owned()))?,
     };
@@ -6359,16 +6595,14 @@ fn verify_session_court_bundle(path: PathBuf) -> Result<SessionCourtBundleVerifi
     verify_session_finality_checks(&mut checks, block_hash, &bundle)?;
     push_check(
         &mut checks,
-        "court-verifiable-profile",
-        bundle.court_verifiable
-            && bundle.ckb_projection.ckb_projection_possible
-            && bundle.ckb_projection.semantic_profile == "ckb-compatible",
-        Some("court_verifiable + ckb-compatible + projection possible".to_owned()),
+        "projection-claim-is-honest",
+        !bundle.court_verifiable && bundle.ckb_projection.projection_stage == "wire-encoded" && bundle.ckb_projection.wire_encoded,
+        Some("court_verifiable=false + wire-encoded=true".to_owned()),
         Some(format!(
             "{} + {} + {}",
-            bundle.court_verifiable, bundle.ckb_projection.semantic_profile, bundle.ckb_projection.ckb_projection_possible
+            bundle.court_verifiable, bundle.ckb_projection.projection_stage, bundle.ckb_projection.wire_encoded
         )),
-        "bundle is projectable into the CKB-compatible profile",
+        "bundle claims wire encoding only until contextual consensus and script-verification receipts exist",
     );
 
     let valid = checks.iter().all(|check| check.ok);
@@ -6386,10 +6620,6 @@ fn session_da_manifest(
     if !verification.valid {
         return Err(CliError::InvalidFixture("cannot emit DA manifest for an invalid session court bundle".to_owned()));
     }
-    if !bundle.court_verifiable {
-        return Err(CliError::InvalidFixture("cannot emit DA manifest for a non-court-verifiable bundle".to_owned()));
-    }
-
     let molecule_transaction = decode_hex_field(&bundle.molecule_transaction_hex, "molecule_transaction_hex")?;
     let (proof, segment_sealed, local_da_published, da_storage_path) = if let Some(storage_dir) = storage_dir {
         let writer =
@@ -6456,7 +6686,7 @@ fn session_da_manifest(
     )?;
 
     Ok(SessionDaManifestReport {
-        schema: "myelin-session-da-manifest-v1".to_owned(),
+        schema: "myelin-session-da-manifest-v2".to_owned(),
         session_id: bundle.session_id,
         chunk_index: bundle.chunk_index,
         consensus_kind: bundle.consensus_kind,
@@ -6511,8 +6741,8 @@ fn verify_session_da_manifest(
     push_check(
         &mut checks,
         "schema",
-        manifest.schema == "myelin-session-da-manifest-v1",
-        Some("myelin-session-da-manifest-v1".to_owned()),
+        manifest.schema == "myelin-session-da-manifest-v2",
+        Some("myelin-session-da-manifest-v2".to_owned()),
         Some(manifest.schema.clone()),
         "DA manifest schema is recognised",
     );
@@ -6856,7 +7086,7 @@ fn session_da_anchor_package(manifest_path: PathBuf, bundle_path: PathBuf) -> Re
     let molecule_transaction = serialize_transaction_molecule(&tx).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
     let molecule_transaction_hash = blake3_32(b"myelin:session-da-anchor-molecule-transaction:v1", &molecule_transaction);
     let ckb_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
-    let da_anchor_projectable = ckb_projection.ckb_projection_possible && ckb_projection.semantic_profile == "ckb-compatible";
+    let da_anchor_wire_encoded = ckb_projection.wire_encoded && ckb_projection.projection_stage == "wire-encoded";
     let carrier_payload = carrier_payload_hex(&[
         manifest_hash,
         parse_package_hash_field(&manifest.court_bundle_hash, "manifest court_bundle_hash")?,
@@ -6867,7 +7097,7 @@ fn session_da_anchor_package(manifest_path: PathBuf, bundle_path: PathBuf) -> Re
     let carrier_payload_data_hash = carrier_payload_data_hash_hex(&carrier_payload)?;
 
     Ok(SessionDaAnchorPackageReport {
-        schema: "myelin-session-da-anchor-package-v1".to_owned(),
+        schema: "myelin-session-da-anchor-package-v2".to_owned(),
         session_id: manifest.session_id,
         chunk_index: manifest.chunk_index,
         consensus_kind: manifest.consensus_kind,
@@ -6878,7 +7108,7 @@ fn session_da_anchor_package(manifest_path: PathBuf, bundle_path: PathBuf) -> Re
         challenge_payload_hash: manifest.challenge_payload_hash,
         segment_root: manifest.segment_root,
         da_availability: manifest.availability,
-        carrier_payload_kind: "myelin-session-da-anchor-carrier-v1".to_owned(),
+        carrier_payload_kind: "myelin-session-da-anchor-carrier-v2".to_owned(),
         carrier_payload,
         carrier_payload_data_hash,
         da_anchor_cell_tx_id: hex::encode(txid),
@@ -6886,10 +7116,11 @@ fn session_da_anchor_package(manifest_path: PathBuf, bundle_path: PathBuf) -> Re
         molecule_transaction_hex: hex::encode(molecule_transaction),
         molecule_transaction_hash: hex::encode(molecule_transaction_hash),
         ckb_projection,
-        da_anchor_projectable,
+        da_anchor_wire_encoded,
         l1_da_publication_implemented: false,
         notes: vec![
-            "This package is a deterministic CKB-compatible DA anchor CellTx projection.".to_owned(),
+            "This package contains deterministic CKB Molecule bytes for a DA anchor CellTx; contextual acceptance is not claimed."
+                .to_owned(),
             "It binds the verified DA manifest, court bundle hash, DA segment root, and proof commitment; it is not yet a submitted L1 DA transaction."
                 .to_owned(),
         ],
@@ -6919,8 +7150,8 @@ fn verify_session_da_anchor_package(
     push_check(
         &mut checks,
         "schema",
-        package.schema == "myelin-session-da-anchor-package-v1",
-        Some("myelin-session-da-anchor-package-v1".to_owned()),
+        package.schema == "myelin-session-da-anchor-package-v2",
+        Some("myelin-session-da-anchor-package-v2".to_owned()),
         Some(package.schema.clone()),
         "DA anchor package schema is recognised",
     );
@@ -7027,8 +7258,8 @@ fn verify_session_da_anchor_package(
     push_check(
         &mut checks,
         "carrier-payload-kind",
-        package.carrier_payload_kind == "myelin-session-da-anchor-carrier-v1",
-        Some("myelin-session-da-anchor-carrier-v1".to_owned()),
+        package.carrier_payload_kind == "myelin-session-da-anchor-carrier-v2",
+        Some("myelin-session-da-anchor-carrier-v2".to_owned()),
         Some(package.carrier_payload_kind.clone()),
         "DA anchor package declares the DA-anchor carrier payload type",
     );
@@ -7082,21 +7313,20 @@ fn verify_session_da_anchor_package(
     let recomputed_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
     push_check(
         &mut checks,
-        "projection-possible",
-        package.ckb_projection.ckb_projection_possible == recomputed_projection.ckb_projection_possible
-            && package.da_anchor_projectable,
-        Some(recomputed_projection.ckb_projection_possible.to_string()),
-        Some(package.ckb_projection.ckb_projection_possible.to_string()),
-        "DA anchor package projection possibility recomputes from embedded transaction",
+        "wire-encoding-recomputes",
+        package.ckb_projection.wire_encoded == recomputed_projection.wire_encoded && package.da_anchor_wire_encoded,
+        Some(recomputed_projection.wire_encoded.to_string()),
+        Some(package.ckb_projection.wire_encoded.to_string()),
+        "DA anchor package wire-encoding evidence recomputes from the embedded transaction",
     );
     push_check(
         &mut checks,
         "projection-profile",
-        package.ckb_projection.semantic_profile == recomputed_projection.semantic_profile
-            && package.ckb_projection.semantic_profile == "ckb-compatible",
-        Some(recomputed_projection.semantic_profile),
-        Some(package.ckb_projection.semantic_profile.clone()),
-        "DA anchor package remains in the CKB-compatible profile",
+        package.ckb_projection.projection_stage == recomputed_projection.projection_stage
+            && package.ckb_projection.projection_stage == "wire-encoded",
+        Some(recomputed_projection.projection_stage),
+        Some(package.ckb_projection.projection_stage.clone()),
+        "DA anchor package remains at the wire-encoded projection stage",
     );
     push_check(
         &mut checks,
@@ -7133,12 +7363,12 @@ fn session_submit_da_anchor_package(
 
     let package_bytes = fs::read(&package_path)?;
     let package = serde_json::from_slice::<SessionDaAnchorPackageReport>(&package_bytes)?;
-    if package.schema != "myelin-session-da-anchor-package-v1" {
+    if package.schema != "myelin-session-da-anchor-package-v2" {
         return Err(CliError::InvalidFixture("DA anchor package schema is not recognised".to_owned()));
     }
-    if !package.da_anchor_projectable
-        || !package.ckb_projection.ckb_projection_possible
-        || package.ckb_projection.semantic_profile != "ckb-compatible"
+    if !package.da_anchor_wire_encoded
+        || !package.ckb_projection.wire_encoded
+        || package.ckb_projection.projection_stage != "wire-encoded"
     {
         return Err(CliError::InvalidFixture("DA anchor package is not CKB-projectable".to_owned()));
     }
@@ -7161,7 +7391,7 @@ fn session_submit_da_anchor_package(
         return Err(CliError::InvalidFixture("DA anchor package CellTx witness id mismatch".to_owned()));
     }
     let projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
-    if !projection.ckb_projection_possible || projection.semantic_profile != "ckb-compatible" {
+    if !projection.wire_encoded || projection.projection_stage != "wire-encoded" {
         return Err(CliError::InvalidFixture("embedded DA anchor transaction no longer projects to CKB".to_owned()));
     }
     if projection.ckb_raw_tx_hash != package.ckb_projection.ckb_raw_tx_hash
@@ -7183,6 +7413,7 @@ fn session_submit_da_anchor_package(
     let mut pre_submit = disabled_live_submission_preflight(&ckb_transaction_json)?;
     let mut submitted_to_rpc = false;
     let mut accepted_by_rpc = false;
+    let mut rpc_admission = None;
     let mut rpc_result = None;
     let mut rpc_error = None;
     if !dry_run {
@@ -7191,12 +7422,17 @@ fn session_submit_da_anchor_package(
             CliError::InvalidFixture("submit-da-anchor-package requires --rpc-url unless --dry-run is set".to_owned())
         })?;
         pre_submit = preflight_live_ckb_submission(url, &ckb_transaction_json, "DA anchor submission")?;
-        let response = post_json_rpc(url, &request)?;
-        rpc_result = response.get("result").cloned();
-        rpc_error = response.get("error").cloned();
-        let expected_tx_hash = projection.ckb_raw_tx_hash.as_deref().and_then(normalize_ckb_tx_hash);
-        accepted_by_rpc = rpc_error.is_none()
-            && rpc_result.as_ref().and_then(Value::as_str).and_then(normalize_ckb_tx_hash).as_deref() == expected_tx_hash.as_deref();
+        let expected_tx_hash = projection
+            .ckb_raw_tx_hash
+            .as_deref()
+            .and_then(normalize_ckb_tx_hash)
+            .ok_or_else(|| CliError::InvalidFixture("DA anchor projection is missing a CKB raw transaction hash".to_owned()))?;
+        let evidence = submit_and_observe_ckb_transaction(url, &ckb_transaction_json, outputs_validator, &expected_tx_hash)?;
+        accepted_by_rpc = evidence.accepted;
+        rpc_result = evidence.send_result.clone();
+        rpc_error =
+            evidence.pool_accept_error.clone().or_else(|| evidence.send_error.clone()).or_else(|| evidence.observation_error.clone());
+        rpc_admission = Some(evidence);
     }
 
     if require_accepted && !accepted_by_rpc {
@@ -7220,7 +7456,7 @@ fn session_submit_da_anchor_package(
     };
 
     Ok(SessionDaAnchorSubmissionReport {
-        schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+        schema: "myelin-session-da-anchor-submission-v2".to_owned(),
         package: package_path.display().to_string(),
         dry_run,
         rpc_url,
@@ -7237,6 +7473,7 @@ fn session_submit_da_anchor_package(
         pre_submit,
         submitted_to_rpc,
         accepted_by_rpc,
+        rpc_admission,
         l1_da_published: false,
         rpc_result,
         rpc_error,
@@ -7276,9 +7513,6 @@ fn session_settlement_intent_with_court_deployment(
     if !court_verification.valid {
         return Err(CliError::InvalidFixture("cannot settle from an invalid session court bundle".to_owned()));
     }
-    if !bundle.court_verifiable {
-        return Err(CliError::InvalidFixture("cannot settle from a non-court-verifiable bundle".to_owned()));
-    }
     let da_bytes = fs::read(&da_manifest_path)?;
     let da_manifest = serde_json::from_slice::<SessionDaManifestReport>(&da_bytes)?;
     let da_verification = verify_session_da_manifest(da_manifest_path.clone(), bundle_path.clone(), None)?;
@@ -7317,7 +7551,7 @@ fn session_settlement_intent_with_court_deployment(
     )?;
 
     Ok(SessionSettlementIntentReport {
-        schema: "myelin-session-settlement-intent-v1".to_owned(),
+        schema: "myelin-session-settlement-intent-v2".to_owned(),
         kind: kind.to_owned(),
         session_id: bundle.session_id,
         chunk_index: bundle.chunk_index,
@@ -7379,8 +7613,8 @@ fn verify_session_settlement_intent(
     push_check(
         &mut checks,
         "schema",
-        intent.schema == "myelin-session-settlement-intent-v1",
-        Some("myelin-session-settlement-intent-v1".to_owned()),
+        intent.schema == "myelin-session-settlement-intent-v2",
+        Some("myelin-session-settlement-intent-v2".to_owned()),
         Some(intent.schema.clone()),
         "settlement intent schema is recognised",
     );
@@ -7667,7 +7901,7 @@ fn session_settlement_package_with_deployment(
     let molecule_transaction = serialize_transaction_molecule(&tx).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
     let molecule_transaction_hash = blake3_32(b"myelin:session-settlement-molecule-transaction:v1", &molecule_transaction);
     let ckb_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
-    let settlement_projectable = ckb_projection.ckb_projection_possible && ckb_projection.semantic_profile == "ckb-compatible";
+    let settlement_wire_encoded = ckb_projection.wire_encoded && ckb_projection.projection_stage == "wire-encoded";
     let carrier_payload = carrier_payload_hex(&[
         intent_hash,
         parse_package_hash_field(&intent.court_bundle_hash, "intent court_bundle_hash")?,
@@ -7699,7 +7933,7 @@ fn session_settlement_package_with_deployment(
     };
 
     Ok(SessionSettlementPackageReport {
-        schema: "myelin-session-settlement-package-v1".to_owned(),
+        schema: "myelin-session-settlement-package-v2".to_owned(),
         session_id: intent.session_id,
         chunk_index: intent.chunk_index,
         consensus_kind: intent.consensus_kind,
@@ -7723,7 +7957,7 @@ fn session_settlement_package_with_deployment(
             authority_signature_evidence,
             threshold_lock_deployment,
         )?,
-        carrier_payload_kind: "myelin-session-settlement-carrier-v1".to_owned(),
+        carrier_payload_kind: "myelin-session-settlement-carrier-v2".to_owned(),
         carrier_payload,
         carrier_payload_data_hash,
         settlement_cell_tx_id: hex::encode(txid),
@@ -7731,10 +7965,11 @@ fn session_settlement_package_with_deployment(
         molecule_transaction_hex: hex::encode(molecule_transaction),
         molecule_transaction_hash: hex::encode(molecule_transaction_hash),
         ckb_projection,
-        settlement_projectable,
+        settlement_wire_encoded,
         l1_court_script_implemented: false,
         notes: vec![
-            "This package is a deterministic CKB-compatible settlement CellTx projection.".to_owned(),
+            "This package contains deterministic CKB Molecule bytes for a settlement CellTx; contextual acceptance is not claimed."
+                .to_owned(),
             "It binds the verified court bundle, sealed DA manifest, and settlement intent; it is not yet the deployed CKB court script."
                 .to_owned(),
         ],
@@ -7765,8 +8000,8 @@ fn verify_session_settlement_package(
     push_check(
         &mut checks,
         "schema",
-        package.schema == "myelin-session-settlement-package-v1",
-        Some("myelin-session-settlement-package-v1".to_owned()),
+        package.schema == "myelin-session-settlement-package-v2",
+        Some("myelin-session-settlement-package-v2".to_owned()),
         Some(package.schema.clone()),
         "settlement package schema is recognised",
     );
@@ -8153,8 +8388,8 @@ fn verify_session_settlement_package(
     push_check(
         &mut checks,
         "carrier-payload-kind",
-        package.carrier_payload_kind == "myelin-session-settlement-carrier-v1",
-        Some("myelin-session-settlement-carrier-v1".to_owned()),
+        package.carrier_payload_kind == "myelin-session-settlement-carrier-v2",
+        Some("myelin-session-settlement-carrier-v2".to_owned()),
         Some(package.carrier_payload_kind.clone()),
         "settlement package declares the settlement carrier payload type",
     );
@@ -8206,21 +8441,20 @@ fn verify_session_settlement_package(
     let recomputed_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
     push_check(
         &mut checks,
-        "projection-possible",
-        package.ckb_projection.ckb_projection_possible == recomputed_projection.ckb_projection_possible
-            && package.settlement_projectable,
-        Some(recomputed_projection.ckb_projection_possible.to_string()),
-        Some(package.ckb_projection.ckb_projection_possible.to_string()),
-        "settlement package projection possibility recomputes from embedded transaction",
+        "wire-encoding-recomputes",
+        package.ckb_projection.wire_encoded == recomputed_projection.wire_encoded && package.settlement_wire_encoded,
+        Some(recomputed_projection.wire_encoded.to_string()),
+        Some(package.ckb_projection.wire_encoded.to_string()),
+        "settlement package wire-encoding evidence recomputes from the embedded transaction",
     );
     push_check(
         &mut checks,
         "projection-profile",
-        package.ckb_projection.semantic_profile == recomputed_projection.semantic_profile
-            && package.ckb_projection.semantic_profile == "ckb-compatible",
-        Some(recomputed_projection.semantic_profile),
-        Some(package.ckb_projection.semantic_profile.clone()),
-        "settlement package remains in the CKB-compatible profile",
+        package.ckb_projection.projection_stage == recomputed_projection.projection_stage
+            && package.ckb_projection.projection_stage == "wire-encoded",
+        Some(recomputed_projection.projection_stage),
+        Some(package.ckb_projection.projection_stage.clone()),
+        "settlement package remains at the wire-encoded projection stage",
     );
     push_check(
         &mut checks,
@@ -8258,12 +8492,12 @@ fn session_submit_settlement_package(
 
     let package_bytes = fs::read(&package_path)?;
     let package = serde_json::from_slice::<SessionSettlementPackageReport>(&package_bytes)?;
-    if package.schema != "myelin-session-settlement-package-v1" {
+    if package.schema != "myelin-session-settlement-package-v2" {
         return Err(CliError::InvalidFixture("settlement package schema is not recognised".to_owned()));
     }
-    if !package.settlement_projectable
-        || !package.ckb_projection.ckb_projection_possible
-        || package.ckb_projection.semantic_profile != "ckb-compatible"
+    if !package.settlement_wire_encoded
+        || !package.ckb_projection.wire_encoded
+        || package.ckb_projection.projection_stage != "wire-encoded"
     {
         return Err(CliError::InvalidFixture("settlement package is not CKB-projectable".to_owned()));
     }
@@ -8287,7 +8521,7 @@ fn session_submit_settlement_package(
         return Err(CliError::InvalidFixture("settlement package CellTx witness id mismatch".to_owned()));
     }
     let projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
-    if !projection.ckb_projection_possible || projection.semantic_profile != "ckb-compatible" {
+    if !projection.wire_encoded || projection.projection_stage != "wire-encoded" {
         return Err(CliError::InvalidFixture("embedded settlement transaction no longer projects to CKB".to_owned()));
     }
     if projection.ckb_raw_tx_hash != package.ckb_projection.ckb_raw_tx_hash
@@ -8309,6 +8543,7 @@ fn session_submit_settlement_package(
     let mut pre_submit = disabled_live_submission_preflight(&ckb_transaction_json)?;
     let mut submitted_to_rpc = false;
     let mut accepted_by_rpc = false;
+    let mut rpc_admission = None;
     let mut rpc_result = None;
     let mut rpc_error = None;
     if !dry_run {
@@ -8317,12 +8552,17 @@ fn session_submit_settlement_package(
             CliError::InvalidFixture("submit-settlement-package requires --rpc-url unless --dry-run is set".to_owned())
         })?;
         pre_submit = preflight_live_ckb_submission(url, &ckb_transaction_json, "settlement submission")?;
-        let response = post_json_rpc(url, &request)?;
-        rpc_result = response.get("result").cloned();
-        rpc_error = response.get("error").cloned();
-        let expected_tx_hash = projection.ckb_raw_tx_hash.as_deref().and_then(normalize_ckb_tx_hash);
-        accepted_by_rpc = rpc_error.is_none()
-            && rpc_result.as_ref().and_then(Value::as_str).and_then(normalize_ckb_tx_hash).as_deref() == expected_tx_hash.as_deref();
+        let expected_tx_hash = projection
+            .ckb_raw_tx_hash
+            .as_deref()
+            .and_then(normalize_ckb_tx_hash)
+            .ok_or_else(|| CliError::InvalidFixture("settlement projection is missing a CKB raw transaction hash".to_owned()))?;
+        let evidence = submit_and_observe_ckb_transaction(url, &ckb_transaction_json, outputs_validator, &expected_tx_hash)?;
+        accepted_by_rpc = evidence.accepted;
+        rpc_result = evidence.send_result.clone();
+        rpc_error =
+            evidence.pool_accept_error.clone().or_else(|| evidence.send_error.clone()).or_else(|| evidence.observation_error.clone());
+        rpc_admission = Some(evidence);
     }
 
     if require_accepted && !accepted_by_rpc {
@@ -8346,7 +8586,7 @@ fn session_submit_settlement_package(
     };
 
     Ok(SessionSettlementSubmissionReport {
-        schema: "myelin-session-settlement-submission-v1".to_owned(),
+        schema: "myelin-session-settlement-submission-v2".to_owned(),
         package: package_path.display().to_string(),
         dry_run,
         rpc_url,
@@ -8364,6 +8604,7 @@ fn session_submit_settlement_package(
         pre_submit,
         submitted_to_rpc,
         accepted_by_rpc,
+        rpc_admission,
         l1_court_submitted: false,
         rpc_result,
         rpc_error,
@@ -8380,9 +8621,9 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     };
     let final_l1_script_role = verifier_role == "final-l1-script";
     let submission_schema = if final_l1_script_role {
-        "myelin-session-ckb-final-script-submission-v1"
+        "myelin-session-ckb-final-script-submission-v2"
     } else {
-        "myelin-session-ckb-carrier-submission-v1"
+        "myelin-session-ckb-carrier-submission-v2"
     };
     if args.outputs_validator.trim().is_empty() {
         return Err(CliError::InvalidFixture("outputs-validator must be non-empty".to_owned()));
@@ -8475,6 +8716,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     let verifier_dep_tx_hash_bytes = ckb_byte32_arg(&verifier_dep_tx_hash, "verifier-code-dep-tx-hash")?;
     let lock_hash_type = ckb_script_hash_type_arg(&args.lock_hash_type, "lock-hash-type")?;
     let lock_args = normalize_hex_arg(&args.lock_args, "lock-args")?;
+    let output_lock_args = normalize_hex_arg(args.output_lock_args.as_deref().unwrap_or(&lock_args), "output-lock-args")?;
     let witness = normalize_hex_arg(&args.witness, "witness")?;
     let authority_input_capacity = authority_input.as_ref().map(|(_, _, _, _, capacity)| *capacity).unwrap_or(0);
     let total_input_capacity = args
@@ -8503,11 +8745,11 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     let package_da_availability = package_json.get("da_availability").cloned();
     let package_court_economics = package_json.get("court_economics").cloned();
     let identity_field = match package_kind {
-        "myelin-session-da-anchor-package-v1" => "da_manifest_hash",
-        "myelin-session-settlement-package-v1" => "intent_hash",
+        "myelin-session-da-anchor-package-v2" => "da_manifest_hash",
+        "myelin-session-settlement-package-v2" => "intent_hash",
         other => return Err(CliError::InvalidFixture(format!("unsupported carrier package schema: {other}"))),
     };
-    if authority_input.is_some() && !(final_l1_script_role && package_kind == "myelin-session-settlement-package-v1") {
+    if authority_input.is_some() && !(final_l1_script_role && package_kind == "myelin-session-settlement-package-v2") {
         return Err(CliError::InvalidFixture(
             "authority input is only supported for final-l1-script settlement submissions".to_owned(),
         ));
@@ -8542,7 +8784,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         return Err(CliError::InvalidFixture(format!("carrier payload identity does not match package {identity_field}")));
     }
     validate_carrier_package_payload_binding(&package_json, package_kind, carrier_payload_kind, &carrier_payload_bytes)?;
-    let expected_settlement_authority = if final_l1_script_role && package_kind == "myelin-session-settlement-package-v1" {
+    let expected_settlement_authority = if final_l1_script_role && package_kind == "myelin-session-settlement-package-v2" {
         Some(validate_settlement_authority_requirement(&package_json)?)
     } else {
         None
@@ -8574,14 +8816,17 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     } else {
         carrier_payload_type_args_hex(Some(carrier_payload_kind), &carrier_payload_bytes)
     };
-    let lock_args_bytes =
-        decode_hex_bytes(&lock_args).ok_or_else(|| CliError::InvalidFixture("lock args are not valid hex".to_owned()))?;
+    let output_lock_args_bytes = decode_hex_bytes(&output_lock_args)
+        .ok_or_else(|| CliError::InvalidFixture("output lock args are not valid hex".to_owned()))?;
     let carrier_type_args_bytes = decode_hex_bytes(&carrier_type_args)
         .ok_or_else(|| CliError::InvalidFixture("carrier type args are not valid hex".to_owned()))?;
     let witness_bytes = decode_hex_bytes(&witness).ok_or_else(|| CliError::InvalidFixture("witness is not valid hex".to_owned()))?;
-    let carrier_min_capacity_shannons =
-        ckb_output_min_capacity_shannons(lock_args_bytes.len(), Some(carrier_type_args_bytes.len()), carrier_payload_bytes.len())?;
-    let change_min_capacity_shannons = ckb_output_min_capacity_shannons(lock_args_bytes.len(), None, 0)?;
+    let carrier_min_capacity_shannons = ckb_output_min_capacity_shannons(
+        output_lock_args_bytes.len(),
+        Some(carrier_type_args_bytes.len()),
+        carrier_payload_bytes.len(),
+    )?;
+    let change_min_capacity_shannons = ckb_output_min_capacity_shannons(output_lock_args_bytes.len(), None, 0)?;
     if args.carrier_capacity_shannons < carrier_min_capacity_shannons {
         return Err(CliError::InvalidFixture(format!(
             "carrier output capacity {} is below CKB occupied-capacity minimum {}",
@@ -8601,7 +8846,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
             "live {verifier_role} submission requires --verifier-source to point to a readable CellScript source file"
         )));
     }
-    let lock_script = Script::new(lock_code_hash_bytes, lock_hash_type, lock_args_bytes.clone());
+    let lock_script = Script::new(lock_code_hash_bytes, lock_hash_type, output_lock_args_bytes);
     let carrier_type_script = Script::new(verifier_code_hash_bytes, 4, carrier_type_args_bytes);
     let mut inputs = vec![CellInput::new(OutPoint::new(input_tx_hash_bytes, input_index_u32), 0)];
     if let Some((_, _, authority_tx_hash_bytes, authority_index_u32, _)) = &authority_input {
@@ -8653,7 +8898,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     let mut submitted_to_rpc = false;
     let mut rpc_result = None;
     let mut rpc_error = None;
-    let mut rpc_accepted_tx_hash = None;
+    let mut rpc_admission = None;
     let mut pre_submit_context_checked = false;
     let mut pre_submit_input_live = None;
     let mut pre_submit_input_capacity_matches = None;
@@ -8829,16 +9074,13 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         }
         pre_submit_context_checked = true;
 
-        let response = post_json_rpc(url, &request)?;
-        rpc_result = response.get("result").cloned();
-        rpc_error = response.get("error").cloned();
-        rpc_accepted_tx_hash = rpc_error
-            .as_ref()
-            .map(|_| None)
-            .unwrap_or_else(|| rpc_result.as_ref().and_then(Value::as_str).and_then(normalize_ckb_tx_hash));
+        let evidence = submit_and_observe_ckb_transaction(url, &tx_json, &args.outputs_validator, &expected_ckb_raw_tx_hash)?;
+        rpc_result = evidence.send_result.clone();
+        rpc_error =
+            evidence.pool_accept_error.clone().or_else(|| evidence.send_error.clone()).or_else(|| evidence.observation_error.clone());
+        rpc_admission = Some(evidence);
     }
-    let accepted_by_rpc =
-        args.submit && rpc_accepted_tx_hash.as_deref() == Some(expected_ckb_raw_tx_hash.as_str()) && rpc_error.is_none();
+    let accepted_by_rpc = args.submit && rpc_admission.as_ref().is_some_and(|evidence| evidence.accepted);
     if args.require_accepted && !accepted_by_rpc {
         return Err(CliError::InvalidFixture(
             "carrier transaction was not accepted by live CKB RPC with the projected raw transaction hash".to_owned(),
@@ -8846,18 +9088,20 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     }
     let notes = if args.submit && accepted_by_rpc && final_l1_script_role {
         vec![
-            "Live CKB final L1 script transaction accepted by send_transaction.".to_owned(),
+            "Live CKB final L1 script transaction passed test_tx_pool_accept, returned the exact hash from send_transaction, and was observed by get_transaction."
+                .to_owned(),
             "The transaction output data carries a compact Myelin package payload enforced by the deployed final verifier artefact."
                 .to_owned(),
         ]
     } else if args.submit && accepted_by_rpc {
         vec![
-            "Live CKB carrier transaction accepted by send_transaction.".to_owned(),
+            "Live CKB carrier transaction passed test_tx_pool_accept, returned the exact hash from send_transaction, and was observed by get_transaction."
+                .to_owned(),
             "The transaction output data carries a compact Myelin package payload enforced by the deployed CellScript carrier type script."
                 .to_owned(),
             "This is a deployed carrier verifier, not the final DA or court script.".to_owned(),
         ]
-    } else if args.submit && rpc_error.is_none() && rpc_accepted_tx_hash.is_some() {
+    } else if args.submit && rpc_error.is_none() && rpc_result.is_some() {
         vec!["CKB RPC returned a tx hash that did not match the projected carrier raw transaction hash.".to_owned()]
     } else if args.submit {
         vec!["CKB RPC returned an error or invalid result; the carrier transaction is not accepted.".to_owned()]
@@ -8890,10 +9134,11 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
             "args": carrier_type_args
         }
     });
-    let l1_da_published = final_l1_script_role && accepted_by_rpc && package_kind == "myelin-session-da-anchor-package-v1";
-    let l1_court_submitted = final_l1_script_role && accepted_by_rpc && package_kind == "myelin-session-settlement-package-v1";
+    let l1_da_submission_accepted = final_l1_script_role && accepted_by_rpc && package_kind == "myelin-session-da-anchor-package-v2";
+    let l1_court_submission_accepted =
+        final_l1_script_role && accepted_by_rpc && package_kind == "myelin-session-settlement-package-v2";
     let authority_threshold_lock_deployment_checked = final_l1_script_role
-        && package_kind == "myelin-session-settlement-package-v1"
+        && package_kind == "myelin-session-settlement-package-v2"
         && expected_settlement_authority.is_some()
         && authority_threshold_lock_identity_checked
         && pre_submit_lock_code_dep_live == Some(true)
@@ -8923,7 +9168,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         let settlement_identity_hash = carrier_payload_data_hash.clone();
         let expected_type_args = format!("{}{}", session_id_hash, settlement_identity_hash.trim_start_matches("0x"));
         let checked = final_l1_script_role
-            && package_kind == "myelin-session-settlement-package-v1"
+            && package_kind == "myelin-session-settlement-package-v2"
             && carrier_type_args.eq_ignore_ascii_case(&expected_type_args)
             && authority_input.is_some();
         serde_json::json!({
@@ -8967,6 +9212,8 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         "change_capacity_shannons": change_capacity,
         "change_min_capacity_shannons": change_min_capacity_shannons,
         "fee_shannons": args.fee_shannons,
+        "input_lock_args": lock_args,
+        "output_lock_args": output_lock_args,
         "dry_run": !args.submit && recorded_accepted_tx_hash.is_none(),
         "rpc_url": args.rpc_url,
         "submit_mode": args.submit,
@@ -8993,15 +9240,18 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         "ckb_transaction_json": tx_json,
         "submitted_to_rpc": submitted_to_rpc,
         "accepted_by_rpc": accepted_by_rpc,
+        "rpc_admission": rpc_admission,
         "rpc_result": rpc_result,
         "rpc_error": rpc_error,
         "carrier_verifier": carrier_verifier,
         "notes": notes
     });
     report["verifier_role"] = serde_json::json!(verifier_role);
-    report["live_carrier_committed"] = serde_json::json!(accepted_by_rpc && !final_l1_script_role);
-    report["l1_da_published"] = serde_json::json!(l1_da_published);
-    report["l1_court_submitted"] = serde_json::json!(l1_court_submitted);
+    report["live_carrier_submission_accepted"] = serde_json::json!(accepted_by_rpc && !final_l1_script_role);
+    report["l1_da_submission_accepted"] = serde_json::json!(l1_da_submission_accepted);
+    report["l1_court_submission_accepted"] = serde_json::json!(l1_court_submission_accepted);
+    report["l1_da_published"] = serde_json::json!(false);
+    report["l1_court_submitted"] = serde_json::json!(l1_court_submission_accepted);
     if final_l1_script_role {
         report["final_script_verifier"] = report["carrier_verifier"].clone();
     }
@@ -9036,8 +9286,8 @@ fn verify_session_submission_inclusion(
     let carrier_payload =
         carrier_payload_from_submission(&submission_json, &submission_schema, carrier_package_commitment.as_deref())?;
     let carrier_expected_type_script = carrier_expected_type_script_from_submission(&submission_json, &submission_schema)?;
-    let final_settlement_authority_for_type_args = if submission_schema == "myelin-session-ckb-final-script-submission-v1"
-        && submission_json.get("package_kind").and_then(Value::as_str) == Some("myelin-session-settlement-package-v1")
+    let final_settlement_authority_for_type_args = if submission_schema == "myelin-session-ckb-final-script-submission-v2"
+        && submission_json.get("package_kind").and_then(Value::as_str) == Some("myelin-session-settlement-package-v2")
         && submission_json.get("verifier_role").and_then(Value::as_str) == Some("final-l1-script")
     {
         let authority = submission_json
@@ -9170,7 +9420,7 @@ fn verify_session_submission_inclusion(
     }
 
     Ok(SessionSubmissionInclusionReport {
-        schema: "myelin-session-submission-inclusion-v1".to_owned(),
+        schema: "myelin-session-submission-inclusion-v2".to_owned(),
         submission: submission_path.display().to_string(),
         submission_schema,
         rpc_url: rpc_url.to_owned(),
@@ -9213,7 +9463,7 @@ fn verify_session_submission_finality(
 ) -> Result<SessionSubmissionFinalityReport> {
     let inclusion_bytes = fs::read(&inclusion_path)?;
     let inclusion = serde_json::from_slice::<SessionSubmissionInclusionReport>(&inclusion_bytes)?;
-    if inclusion.schema != "myelin-session-submission-inclusion-v1" {
+    if inclusion.schema != "myelin-session-submission-inclusion-v2" {
         return Err(CliError::InvalidFixture(format!("unsupported inclusion schema for finality verification: {}", inclusion.schema)));
     }
     let expected_ckb_tx_hash = normalize_ckb_tx_hash(&inclusion.expected_ckb_tx_hash)
@@ -9277,7 +9527,7 @@ fn verify_session_submission_finality(
     }
 
     Ok(SessionSubmissionFinalityReport {
-        schema: "myelin-session-submission-finality-v1".to_owned(),
+        schema: "myelin-session-submission-finality-v2".to_owned(),
         inclusion: inclusion_path.display().to_string(),
         rpc_url: rpc_url.to_owned(),
         expected_ckb_tx_hash,
@@ -9299,7 +9549,7 @@ fn verify_session_submission_finality(
 fn verify_session_submission_stability(inclusion_path: PathBuf, rpc_url: &str) -> Result<SessionSubmissionStabilityReport> {
     let inclusion_bytes = fs::read(&inclusion_path)?;
     let inclusion = serde_json::from_slice::<SessionSubmissionInclusionReport>(&inclusion_bytes)?;
-    if inclusion.schema != "myelin-session-submission-inclusion-v1" {
+    if inclusion.schema != "myelin-session-submission-inclusion-v2" {
         return Err(CliError::InvalidFixture(format!(
             "unsupported inclusion schema for stability verification: {}",
             inclusion.schema
@@ -9353,7 +9603,7 @@ fn verify_session_submission_stability(inclusion_path: PathBuf, rpc_url: &str) -
     }
 
     Ok(SessionSubmissionStabilityReport {
-        schema: "myelin-session-submission-stability-v1".to_owned(),
+        schema: "myelin-session-submission-stability-v2".to_owned(),
         inclusion: inclusion_path.display().to_string(),
         rpc_url: rpc_url.to_owned(),
         expected_ckb_tx_hash,
@@ -9442,7 +9692,7 @@ fn verify_session_submission_context(submission_path: PathBuf, rpc_url: &str) ->
     }
 
     Ok(SessionSubmissionContextReport {
-        schema: "myelin-session-submission-context-v1".to_owned(),
+        schema: "myelin-session-submission-context-v2".to_owned(),
         submission: submission_path.display().to_string(),
         submission_schema,
         rpc_url: rpc_url.to_owned(),
@@ -9806,7 +10056,7 @@ fn verify_session_submission_economics(
     }
 
     Ok(SessionSubmissionEconomicsReport {
-        schema: "myelin-session-submission-economics-v1".to_owned(),
+        schema: "myelin-session-submission-economics-v2".to_owned(),
         submission: submission_path.display().to_string(),
         submission_schema,
         rpc_url: rpc_url.to_owned(),
@@ -9858,11 +10108,11 @@ fn verify_session_submission_readiness(
     let stability = read_json_report::<SessionSubmissionStabilityReport>(&stability_path)?;
     let finality = read_json_report::<SessionSubmissionFinalityReport>(&finality_path)?;
 
-    require_report_schema(&context.schema, "myelin-session-submission-context-v1", "context")?;
-    require_report_schema(&economics.schema, "myelin-session-submission-economics-v1", "economics")?;
-    require_report_schema(&inclusion.schema, "myelin-session-submission-inclusion-v1", "inclusion")?;
-    require_report_schema(&stability.schema, "myelin-session-submission-stability-v1", "stability")?;
-    require_report_schema(&finality.schema, "myelin-session-submission-finality-v1", "finality")?;
+    require_report_schema(&context.schema, "myelin-session-submission-context-v2", "context")?;
+    require_report_schema(&economics.schema, "myelin-session-submission-economics-v2", "economics")?;
+    require_report_schema(&inclusion.schema, "myelin-session-submission-inclusion-v2", "inclusion")?;
+    require_report_schema(&stability.schema, "myelin-session-submission-stability-v2", "stability")?;
+    require_report_schema(&finality.schema, "myelin-session-submission-finality-v2", "finality")?;
 
     let context_hash = normalize_ckb_tx_hash(&context.expected_ckb_tx_hash)
         .ok_or_else(|| CliError::InvalidFixture("context report has an invalid expected CKB tx hash".to_owned()))?;
@@ -10095,7 +10345,7 @@ fn verify_session_submission_readiness(
     };
 
     Ok(SessionSubmissionReadinessReport {
-        schema: "myelin-session-submission-readiness-v1".to_owned(),
+        schema: "myelin-session-submission-readiness-v2".to_owned(),
         context: context_path.display().to_string(),
         economics: economics_path.display().to_string(),
         inclusion: inclusion_path.display().to_string(),
@@ -10631,11 +10881,11 @@ fn readiness_submission_report_summary(
     if validate_submission_rpc_result(&submission, expected_ckb_tx_hash).is_err() {
         return ReadinessSubmissionReportSummary::default();
     }
-    let final_l1_script = schema == "myelin-session-ckb-final-script-submission-v1";
+    let final_l1_script = schema == "myelin-session-ckb-final-script-submission-v2";
     let final_l1_da_anchor =
-        final_l1_script && submission.get("package_kind").and_then(Value::as_str) == Some("myelin-session-da-anchor-package-v1");
+        final_l1_script && submission.get("package_kind").and_then(Value::as_str) == Some("myelin-session-da-anchor-package-v2");
     let final_l1_settlement =
-        final_l1_script && submission.get("package_kind").and_then(Value::as_str) == Some("myelin-session-settlement-package-v1");
+        final_l1_script && submission.get("package_kind").and_then(Value::as_str) == Some("myelin-session-settlement-package-v2");
     let raw_court_economics_production_ready = first_json_bool(
         &submission,
         &[
@@ -10702,7 +10952,7 @@ fn final_l1_da_availability_preflight_ready(submission: &Value) -> bool {
     let Ok(manifest) = serde_json::from_value::<SessionDaManifestReport>(manifest_value.clone()) else {
         return false;
     };
-    if manifest.schema != "myelin-session-da-manifest-v1"
+    if manifest.schema != "myelin-session-da-manifest-v2"
         || manifest.da_profile != "single-segment-merkle-v1"
         || manifest.payload_kind != "session-court-molecule-transaction"
     {
@@ -10767,18 +11017,18 @@ fn submission_report_live_accepted(submission: &Value, schema: &str, expected_ck
         return false;
     }
     match schema {
-        "myelin-session-da-anchor-submission-v1" => submission.get("l1_da_published").and_then(Value::as_bool) == Some(true),
-        "myelin-session-settlement-submission-v1" => submission.get("l1_court_submitted").and_then(Value::as_bool) == Some(true),
-        "myelin-session-ckb-carrier-submission-v1" => submission.get("submit_mode").and_then(Value::as_bool) == Some(true),
-        "myelin-session-ckb-final-script-submission-v1" => {
+        "myelin-session-da-anchor-submission-v2" => submission.get("l1_da_published").and_then(Value::as_bool) == Some(true),
+        "myelin-session-settlement-submission-v2" => submission.get("l1_court_submitted").and_then(Value::as_bool) == Some(true),
+        "myelin-session-ckb-carrier-submission-v2" => submission.get("submit_mode").and_then(Value::as_bool) == Some(true),
+        "myelin-session-ckb-final-script-submission-v2" => {
             submission.get("submit_mode").and_then(Value::as_bool) == Some(true)
                 && final_l1_script_preflight_ready(submission)
                 && match submission.get("package_kind").and_then(Value::as_str) {
-                    Some("myelin-session-da-anchor-package-v1") => {
-                        submission.get("l1_da_published").and_then(Value::as_bool) == Some(true)
+                    Some("myelin-session-da-anchor-package-v2") => {
+                        submission.get("l1_da_submission_accepted").and_then(Value::as_bool) == Some(true)
                     }
-                    Some("myelin-session-settlement-package-v1") => {
-                        submission.get("l1_court_submitted").and_then(Value::as_bool) == Some(true)
+                    Some("myelin-session-settlement-package-v2") => {
+                        submission.get("l1_court_submission_accepted").and_then(Value::as_bool) == Some(true)
                     }
                     _ => false,
                 }
@@ -10867,13 +11117,15 @@ fn final_l1_script_preflight_ready(submission: &Value) -> bool {
         return false;
     }
     match submission.get("package_kind").and_then(Value::as_str) {
-        Some("myelin-session-da-anchor-package-v1") => {
-            submission.get("l1_da_published").and_then(Value::as_bool) == Some(true)
+        Some("myelin-session-da-anchor-package-v2") => {
+            submission.get("l1_da_submission_accepted").and_then(Value::as_bool) == Some(true)
+                && submission.get("l1_da_published").and_then(Value::as_bool) == Some(false)
                 && submission.get("l1_court_submitted").and_then(Value::as_bool) == Some(false)
                 && submission.get("authority_input_present").and_then(Value::as_bool) != Some(true)
         }
-        Some("myelin-session-settlement-package-v1") => {
+        Some("myelin-session-settlement-package-v2") => {
             submission.get("l1_da_published").and_then(Value::as_bool) == Some(false)
+                && submission.get("l1_court_submission_accepted").and_then(Value::as_bool) == Some(true)
                 && submission.get("l1_court_submitted").and_then(Value::as_bool) == Some(true)
                 && submission.get("evidence_cell_dep_present").and_then(Value::as_bool) == Some(true)
                 && submission.get("authority_input_present").and_then(Value::as_bool) == Some(true)
@@ -10930,11 +11182,11 @@ fn final_l1_script_preflight_ready(submission: &Value) -> bool {
 }
 
 fn submission_report_carrier_live_accepted(submission: &Value, schema: &str, expected_ckb_tx_hash: &str) -> bool {
-    schema == "myelin-session-ckb-carrier-submission-v1" && submission_report_live_accepted(submission, schema, expected_ckb_tx_hash)
+    schema == "myelin-session-ckb-carrier-submission-v2" && submission_report_live_accepted(submission, schema, expected_ckb_tx_hash)
 }
 
 fn submission_report_final_l1_script_live_accepted(submission: &Value, schema: &str, expected_ckb_tx_hash: &str) -> bool {
-    schema == "myelin-session-ckb-final-script-submission-v1"
+    schema == "myelin-session-ckb-final-script-submission-v2"
         && submission_report_live_accepted(submission, schema, expected_ckb_tx_hash)
 }
 
@@ -10996,10 +11248,10 @@ fn check_economic_input_cell(rpc_url: &str, index: usize, out_point: &Value) -> 
 
 fn expected_ckb_tx_hash_from_submission(submission: &Value, schema: &str) -> Result<String> {
     match schema {
-        "myelin-session-da-anchor-submission-v1"
-        | "myelin-session-settlement-submission-v1"
-        | "myelin-session-ckb-final-script-submission-v1"
-        | "myelin-session-ckb-carrier-submission-v1" => submission
+        "myelin-session-da-anchor-submission-v2"
+        | "myelin-session-settlement-submission-v2"
+        | "myelin-session-ckb-final-script-submission-v2"
+        | "myelin-session-ckb-carrier-submission-v2" => submission
             .get("ckb_raw_tx_hash")
             .and_then(Value::as_str)
             .and_then(normalize_ckb_tx_hash)
@@ -11009,7 +11261,7 @@ fn expected_ckb_tx_hash_from_submission(submission: &Value, schema: &str) -> Res
 }
 
 fn compact_payload_submission_schema(schema: &str) -> bool {
-    matches!(schema, "myelin-session-ckb-carrier-submission-v1" | "myelin-session-ckb-final-script-submission-v1")
+    matches!(schema, "myelin-session-ckb-carrier-submission-v2" | "myelin-session-ckb-final-script-submission-v2")
 }
 
 fn carrier_package_commitment_from_submission(submission: &Value, schema: &str) -> Result<Option<String>> {
@@ -11112,6 +11364,12 @@ fn validate_submission_rpc_result(submission: &Value, expected_ckb_tx_hash: &str
                 "submission rpc_result {result} does not match expected CKB tx hash {expected_ckb_tx_hash}"
             )));
         }
+    }
+    if submission.get("accepted_by_rpc").and_then(Value::as_bool) == Some(true) {
+        let admission = submission
+            .get("rpc_admission")
+            .ok_or_else(|| CliError::InvalidFixture("accepted submission is missing full-node rpc_admission evidence".to_owned()))?;
+        validate_rpc_admission_evidence(admission, expected_ckb_tx_hash)?;
     }
     Ok(())
 }
@@ -11302,6 +11560,148 @@ fn byte32_hex(bytes: &[u8; 32]) -> String {
     bytes_hex(bytes)
 }
 
+fn submit_and_observe_ckb_transaction(
+    rpc_url: &str,
+    tx_json: &Value,
+    outputs_validator: &str,
+    expected_ckb_tx_hash: &str,
+) -> Result<SessionRpcAdmissionEvidence> {
+    let expected_ckb_tx_hash = normalize_ckb_tx_hash(expected_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("expected CKB transaction hash must be 32 bytes".to_owned()))?;
+    let pool_request = serde_json::json!({
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "test_tx_pool_accept",
+        "params": [tx_json, outputs_validator],
+    });
+    let pool_response = post_json_rpc(rpc_url, &pool_request)?;
+    let pool_accept_result = pool_response.get("result").filter(|value| !value.is_null()).cloned();
+    let pool_accept_error = pool_response.get("error").filter(|value| !value.is_null()).cloned();
+    let full_node_validated = pool_accept_error.is_none()
+        && pool_accept_result.as_ref().is_some_and(|result| {
+            result
+                .get("cycles")
+                .and_then(Value::as_str)
+                .is_some_and(|value| parse_ckb_quantity(value, "test_tx_pool_accept cycles").is_ok())
+                && result
+                    .get("fee")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| parse_ckb_quantity(value, "test_tx_pool_accept fee").is_ok())
+        });
+
+    let mut evidence = SessionRpcAdmissionEvidence {
+        schema: "myelin-session-rpc-admission-v1".to_owned(),
+        expected_ckb_tx_hash: expected_ckb_tx_hash.clone(),
+        pool_accept_result,
+        pool_accept_error,
+        full_node_validated,
+        send_result: None,
+        send_error: None,
+        submitted_hash_matches: false,
+        observation_result: None,
+        observation_error: None,
+        observed_status: None,
+        transaction_observed: false,
+        accepted: false,
+    };
+    if !full_node_validated {
+        return Ok(evidence);
+    }
+
+    let send_request = serde_json::json!({
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "send_transaction",
+        "params": [tx_json, outputs_validator],
+    });
+    let send_response = post_json_rpc(rpc_url, &send_request)?;
+    evidence.send_result = send_response.get("result").filter(|value| !value.is_null()).cloned();
+    evidence.send_error = send_response.get("error").filter(|value| !value.is_null()).cloned();
+    evidence.submitted_hash_matches = evidence.send_error.is_none()
+        && evidence.send_result.as_ref().and_then(Value::as_str).and_then(normalize_ckb_tx_hash).as_deref()
+            == Some(expected_ckb_tx_hash.as_str());
+
+    let observation_request = serde_json::json!({
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "get_transaction",
+        "params": [expected_ckb_tx_hash, "0x2", false],
+    });
+    let observation_response = post_json_rpc(rpc_url, &observation_request)?;
+    evidence.observation_result = observation_response.get("result").filter(|value| !value.is_null()).cloned();
+    evidence.observation_error = observation_response.get("error").filter(|value| !value.is_null()).cloned();
+    evidence.observed_status = evidence
+        .observation_result
+        .as_ref()
+        .and_then(|result| result.pointer("/tx_status/status"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let observed_hash = evidence.observation_result.as_ref().and_then(|result| {
+        result
+            .pointer("/transaction/hash")
+            .or_else(|| result.pointer("/transaction/inner/hash"))
+            .and_then(Value::as_str)
+            .and_then(normalize_ckb_tx_hash)
+    });
+    evidence.transaction_observed = evidence.observation_error.is_none()
+        && observed_hash.as_deref() == Some(expected_ckb_tx_hash.as_str())
+        && matches!(evidence.observed_status.as_deref(), Some("pending" | "proposed" | "committed"));
+    evidence.accepted = evidence.full_node_validated && evidence.submitted_hash_matches && evidence.transaction_observed;
+    Ok(evidence)
+}
+
+fn validate_rpc_admission_evidence(value: &Value, expected_ckb_tx_hash: &str) -> Result<()> {
+    let evidence = serde_json::from_value::<SessionRpcAdmissionEvidence>(value.clone())
+        .map_err(|error| CliError::InvalidFixture(format!("invalid rpc_admission evidence: {error}")))?;
+    if evidence.schema != "myelin-session-rpc-admission-v1" {
+        return Err(CliError::InvalidFixture("rpc_admission schema is not recognised".to_owned()));
+    }
+    let expected_ckb_tx_hash = normalize_ckb_tx_hash(expected_ckb_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("expected CKB transaction hash must be 32 bytes".to_owned()))?;
+    let pool_valid = evidence.pool_accept_error.is_none()
+        && evidence.pool_accept_result.as_ref().is_some_and(|result| {
+            result
+                .get("cycles")
+                .and_then(Value::as_str)
+                .is_some_and(|value| parse_ckb_quantity(value, "test_tx_pool_accept cycles").is_ok())
+                && result
+                    .get("fee")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| parse_ckb_quantity(value, "test_tx_pool_accept fee").is_ok())
+        });
+    let send_valid = evidence.send_error.is_none()
+        && evidence.send_result.as_ref().and_then(Value::as_str).and_then(normalize_ckb_tx_hash).as_deref()
+            == Some(expected_ckb_tx_hash.as_str());
+    let observed_hash = evidence.observation_result.as_ref().and_then(|result| {
+        result
+            .pointer("/transaction/hash")
+            .or_else(|| result.pointer("/transaction/inner/hash"))
+            .and_then(Value::as_str)
+            .and_then(normalize_ckb_tx_hash)
+    });
+    let observed_status =
+        evidence.observation_result.as_ref().and_then(|result| result.pointer("/tx_status/status")).and_then(Value::as_str);
+    let observation_valid = evidence.observation_error.is_none()
+        && observed_hash.as_deref() == Some(expected_ckb_tx_hash.as_str())
+        && matches!(observed_status, Some("pending" | "proposed" | "committed"));
+    if evidence.expected_ckb_tx_hash != expected_ckb_tx_hash
+        || !evidence.full_node_validated
+        || evidence.full_node_validated != pool_valid
+        || !evidence.submitted_hash_matches
+        || evidence.submitted_hash_matches != send_valid
+        || evidence.observed_status.as_deref() != observed_status
+        || !evidence.transaction_observed
+        || evidence.transaction_observed != observation_valid
+        || !evidence.accepted
+        || evidence.accepted != (pool_valid && send_valid && observation_valid)
+    {
+        return Err(CliError::InvalidFixture(
+            "rpc_admission does not prove full-node validation, exact-hash submission, and transaction observation".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn post_json_rpc(url: &str, request: &Value) -> Result<Value> {
     let endpoint = parse_http_url(url)?;
     let body = serde_json::to_vec(request)?;
@@ -11377,35 +11777,36 @@ fn verify_session_finality_checks(
     block_hash: [u8; 32],
     bundle: &SessionCourtBundleInput,
 ) -> Result<()> {
-    if let Some(tm) = &bundle.tendermint_evidence {
-        let tendermint_engine = tendermint_fixture_engine();
+    if let Some(tm) = &bundle.weighted_precommit_evidence {
+        let weighted_precommit_engine = weighted_precommit_fixture_engine();
         let signatures = tm
             .signatures
             .iter()
             .map(|signature| {
                 let bytes = parse_hex_64(&signature.signature)
-                    .ok_or_else(|| CliError::InvalidFixture("tendermint signature must be 64-byte hex".to_owned()))?;
+                    .ok_or_else(|| CliError::InvalidFixture("weighted_precommit signature must be 64-byte hex".to_owned()))?;
                 Ok(CommitteeSignature { validator_id: signature.validator_id.clone(), signature: bytes })
             })
             .collect::<Result<Vec<_>>>()?;
         let certificate =
-            myelin_consensus::TendermintPrecommitCertificate { block_hash, height: tm.height, round: tm.round, signatures };
-        let certificate_ok = tendermint_engine.verify_precommit_certificate(block_hash, tm.height, tm.round, &certificate).is_ok();
+            myelin_consensus::WeightedPrecommitCertificate { block_hash, height: tm.height, round: tm.round, signatures };
+        let certificate_ok =
+            weighted_precommit_engine.verify_precommit_certificate(block_hash, tm.height, tm.round, &certificate).is_ok();
         push_check(
             checks,
-            "tendermint-certificate",
+            "weighted-precommit-certificate",
             certificate_ok,
             Some(format!("quorum power {} height {} round {}", 2, tm.height, tm.round)),
             Some(format!("quorum power {}, finalised {}", tm.quorum_power, tm.finalised)),
-            "Tendermint precommit certificate verifies against the fixture engine",
+            "WeightedPrecommit precommit certificate verifies against the fixture engine",
         );
         push_check(
             checks,
-            "tendermint-quorum-power",
+            "weighted-precommit-quorum-power",
             tm.quorum_power == 2,
             Some("2".to_owned()),
             Some(tm.quorum_power.to_string()),
-            "bundle Tendermint quorum power matches the fixture engine",
+            "bundle WeightedPrecommit quorum power matches the fixture engine",
         );
     } else {
         let committee_config = static_fixture_committee_config();
@@ -11447,8 +11848,8 @@ fn verify_session_finality_checks(
 
 fn parse_session_consensus(consensus: &str) -> Result<ConsensusKind> {
     match consensus {
-        "static-closed-committee" | "static_closed_committee" => Ok(ConsensusKind::StaticClosedCommittee),
-        "tendermint" => Ok(ConsensusKind::Tendermint),
+        "static-closed-committee" => Ok(ConsensusKind::StaticClosedCommittee),
+        "weighted-precommit" => Ok(ConsensusKind::WeightedPrecommit),
         other => Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     }
 }
@@ -11471,6 +11872,60 @@ fn parse_session_escrow_cell(value: &str) -> Result<SessionEscrowCellReport> {
         parse_hex_32(parts[3]).ok_or_else(|| CliError::InvalidFixture("escrow-cell lock_hash must be 32-byte hex".to_owned()))?;
 
     Ok(SessionEscrowCellReport { outpoint_tx_hash: hex::encode(tx_hash), outpoint_index, capacity, lock_hash: hex::encode(lock_hash) })
+}
+
+fn session_fixture_lock_script() -> Script {
+    Script::new(ckb_cell_data_hash(myelin_exec::scripts::ALWAYS_SUCCESS_SCRIPT), 2, Vec::new())
+}
+
+fn session_fixture_code_dep_outpoint() -> OutPoint {
+    OutPoint::new(blake3_32(b"myelin:session-fixture-always-success-code-dep:v1", b"cellscript-independent"), 0)
+}
+
+fn session_state_from_escrow_reports(escrows: &[SessionEscrowCellReport]) -> Result<CellStateTree> {
+    let fixture_lock = session_fixture_lock_script();
+    let fixture_lock_hash = myelin_exec::ckb_script_hash_molecule(&fixture_lock)
+        .map_err(|error| CliError::InvalidFixture(format!("fixture lock script encoding: {error}")))?;
+    let empty_data_hash = ckb_cell_data_hash(&[]);
+    let mut state = CellStateTree::new();
+    for escrow in escrows {
+        let tx_hash = parse_hex_32(&escrow.outpoint_tx_hash)
+            .ok_or_else(|| CliError::InvalidFixture("escrow outpoint tx hash must be 32-byte hex".to_owned()))?;
+        let lock_hash = parse_hex_32(&escrow.lock_hash)
+            .ok_or_else(|| CliError::InvalidFixture("escrow lock hash must be 32-byte hex".to_owned()))?;
+        let outpoint = OutPoint::new(tx_hash, escrow.outpoint_index);
+        if state.get(&outpoint).is_some() {
+            return Err(CliError::InvalidFixture(format!("duplicate escrow outpoint {outpoint}")));
+        }
+        let resolved_lock = (lock_hash == fixture_lock_hash).then(|| fixture_lock.clone());
+        let entry = CellEntry::new(
+            escrow.capacity,
+            0,
+            myelin_hashes::Hash::from_bytes(lock_hash),
+            None,
+            myelin_hashes::Hash::from_bytes(empty_data_hash),
+            0,
+            false,
+        )
+        .with_resolved_metadata(resolved_lock, None, Some(Vec::new()));
+        state.insert(outpoint, entry);
+    }
+    Ok(state)
+}
+
+fn session_primary_escrow(session: &SessionOpenInput) -> Result<(OutPoint, u64)> {
+    let escrow =
+        session.escrow_input_cells.first().ok_or_else(|| CliError::InvalidFixture("session has no escrow input cell".to_owned()))?;
+    let tx_hash = parse_hex_32(&escrow.outpoint_tx_hash)
+        .ok_or_else(|| CliError::InvalidFixture("escrow outpoint tx hash must be 32-byte hex".to_owned()))?;
+    let expected_lock_hash = myelin_exec::ckb_script_hash_molecule(&session_fixture_lock_script())
+        .map_err(|error| CliError::InvalidFixture(format!("fixture lock script encoding: {error}")))?;
+    if parse_hex_32(&escrow.lock_hash) != Some(expected_lock_hash) {
+        return Err(CliError::InvalidFixture(
+            "commit-fixture requires the primary escrow to use the declared always-success fixture lock".to_owned(),
+        ));
+    }
+    Ok((OutPoint::new(tx_hash, escrow.outpoint_index), escrow.capacity))
 }
 
 fn session_id_from_parts(
@@ -11525,26 +11980,26 @@ fn session_lineage_commitments(
     SessionLineageCommitments { participant_set_hash, escrow_input_cells_hash, session_lineage_commitment }
 }
 
-fn session_fixture_cell_tx(session_id: [u8; 32], chunk_index: u64) -> std::result::Result<CellTx, &'static str> {
+fn session_fixture_cell_tx(
+    session_id: [u8; 32],
+    chunk_index: u64,
+    input_outpoint: OutPoint,
+    input_capacity: u64,
+) -> std::result::Result<CellTx, &'static str> {
     let index_bytes = chunk_index.to_le_bytes();
-    let input_tx_hash = blake3_chunks(b"myelin:session-fixture-input:v1", &[&session_id, &index_bytes]);
-    let type_code_hash = blake3_32(b"myelin:session-fixture-type:v1", &session_id);
-    let lock_script = Script::new([0x61; 32], 1, session_id.to_vec());
-    let mut type_args = Vec::with_capacity(40);
-    type_args.extend_from_slice(&session_id);
-    type_args.extend_from_slice(&index_bytes);
-    let type_script = Script::new(type_code_hash, 1, type_args);
-    let input = CellInput::new(OutPoint::new(input_tx_hash, 0), 0);
-    let output = CellOutput { lock: lock_script, type_: Some(type_script), capacity: 1_500 };
+    let output_capacity = input_capacity.checked_sub(1).ok_or("primary escrow capacity must leave room for a fee")?;
+    let input = CellInput::new(input_outpoint, 0);
+    let output = CellOutput { lock: session_fixture_lock_script(), type_: None, capacity: output_capacity };
     let output_data = session_fixture_output_data(session_id, chunk_index);
     let witness = blake3_chunks(b"myelin:session-fixture-witness:v1", &[&session_id, &index_bytes]).to_vec();
-    CellTx::new(vec![input], vec![], vec![output], vec![output_data], vec![witness])
+    let code_dep = CellDep { out_point: session_fixture_code_dep_outpoint(), dep_type: DepType::Code };
+    CellTx::new(vec![input], vec![code_dep], vec![output], vec![output_data], vec![witness])
 }
 
 /// Build a chain of `count` deterministic CellTx for the multi-tx commit path.
 ///
 /// Topology: tx[i+1] consumes the single output of tx[i] (the OutPoint is
-/// keyed by the producer's wtxid, which is what `CellDAG::build` indexes on).
+/// keyed by the producer's raw transaction hash, matching CKB OutPoint identity.
 /// tx[0] spends the same synthetic input as `session_fixture_cell_tx` so the
 /// chain root stays deterministic. This produces a real multi-layer DAG:
 /// tx[0] in layer 0, tx[1] in layer 1, … — exercising the
@@ -11554,33 +12009,33 @@ fn session_fixture_cell_tx(session_id: [u8; 32], chunk_index: u64) -> std::resul
 /// verified through the real CKB-VM (the verifier loads the script code by
 /// `code_hash` from the data provider). Type scripts are omitted so no
 /// second, undeployed script group is required.
-fn session_fixture_cell_tx_chain(session_id: [u8; 32], chunk_index: u64, count: usize) -> std::result::Result<Vec<CellTx>, &'static str> {
+fn session_fixture_cell_tx_chain(
+    session_id: [u8; 32],
+    chunk_index: u64,
+    count: usize,
+    first_input: OutPoint,
+    first_input_capacity: u64,
+) -> std::result::Result<Vec<CellTx>, &'static str> {
     if count == 0 {
         return Err("tx_count must be >= 1");
     }
-    let lock_code_hash = myelin_exec::scripts::always_success_code_hash();
+    let output_capacity = first_input_capacity.checked_sub(1).ok_or("primary escrow capacity must leave room for a fee")?;
     let index_bytes = chunk_index.to_le_bytes();
-    let mut txs = Vec::with_capacity(count);
+    let mut txs: Vec<CellTx> = Vec::with_capacity(count);
     for i in 0..count {
         let i_bytes = (i as u64).to_le_bytes();
         // tx[0] spends the same synthetic input as `session_fixture_cell_tx`;
-        // tx[i>0] consumes tx[i-1]'s output (keyed by the producer's wtxid,
-        // which is what CellDAG::build indexes on).
-        let input_tx_hash = if i == 0 {
-            blake3_chunks(b"myelin:session-fixture-input:v1", &[&session_id, &index_bytes])
-        } else {
-            compute_wtxid(&txs[i - 1])
-        };
-        let producer_outpoint = OutPoint::new(input_tx_hash, 0);
-        let lock_script = Script::new(lock_code_hash, 0, Vec::new());
+        // tx[i>0] consumes tx[i-1]'s output by raw transaction hash.
+        let producer_outpoint = if i == 0 { first_input } else { OutPoint::new(txs[i - 1].id(), 0) };
         let input = CellInput::new(producer_outpoint, 0);
-        let output = CellOutput { lock: lock_script, type_: None, capacity: 1_500 };
+        let output = CellOutput { lock: session_fixture_lock_script(), type_: None, capacity: output_capacity };
         let mut data_seed = Vec::with_capacity(40);
         data_seed.extend_from_slice(&session_id);
         data_seed.extend_from_slice(&i_bytes);
         let output_data = blake3_32(b"myelin:session-fixture-chain-output:v1", &data_seed).to_vec();
         let witness = blake3_chunks(b"myelin:session-fixture-chain-witness:v1", &[&session_id, &index_bytes, &i_bytes]).to_vec();
-        let tx = CellTx::new(vec![input], vec![], vec![output], vec![output_data], vec![witness])?;
+        let code_dep = CellDep { out_point: session_fixture_code_dep_outpoint(), dep_type: DepType::Code };
+        let tx = CellTx::new(vec![input], vec![code_dep], vec![output], vec![output_data], vec![witness])?;
         txs.push(tx);
     }
     Ok(txs)
@@ -11664,14 +12119,16 @@ fn session_fixture_output_data(session_id: [u8; 32], chunk_index: u64) -> Vec<u8
     out
 }
 
-fn finality_evidence_for_block(block: &MyelinBlock) -> Result<(StaticCommitteeEvidenceReport, Option<TendermintEvidenceReport>)> {
+fn finality_evidence_for_block(
+    block: &MyelinBlock,
+) -> Result<(StaticCommitteeEvidenceReport, Option<WeightedPrecommitEvidenceReport>)> {
     let block_hash = block.hash();
     match block.consensus_kind {
         ConsensusKind::StaticClosedCommittee => {
             let committee_config = static_fixture_committee_config();
             let committee = StaticClosedCommittee::new(committee_config.clone())?;
             let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
-            let certificate = committee.certificate_for_fixture(block_hash, &["validator-0", "validator-1"])?;
+            let certificate = committee.certificate_from_signers(block_hash, &fixture_signers(&["validator-0", "validator-1"]))?;
             committee.finalise_block(block.clone(), certificate.clone())?;
             let signatures = certificate.signatures.iter().map(static_signature_report).collect();
             let evidence = StaticCommitteeEvidenceReport {
@@ -11684,20 +12141,20 @@ fn finality_evidence_for_block(block: &MyelinBlock) -> Result<(StaticCommitteeEv
             };
             Ok((evidence, None))
         }
-        ConsensusKind::Tendermint => {
-            let tendermint_engine = tendermint_fixture_engine();
+        ConsensusKind::WeightedPrecommit => {
+            let weighted_precommit_engine = weighted_precommit_fixture_engine();
             let round = 0u32;
             let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned()];
-            let certificate = tendermint_engine.precommit_certificate_for_fixture(
+            let certificate = weighted_precommit_engine.precommit_certificate_from_signers(
                 block_hash,
                 block.number,
                 round,
-                &["validator-0", "validator-1"],
+                &fixture_signers(&["validator-0", "validator-1"]),
             )?;
-            tendermint_engine.finalise_block_with_precommit(block.clone(), round, certificate.clone())?;
-            let signatures = certificate.signatures.iter().map(tendermint_signature_report).collect();
-            let tendermint_evidence = TendermintEvidenceReport {
-                consensus_kind: ConsensusKind::Tendermint.as_str(),
+            weighted_precommit_engine.finalise_block_with_precommit(block.clone(), round, certificate.clone())?;
+            let signatures = certificate.signatures.iter().map(weighted_precommit_signature_report).collect();
+            let weighted_precommit_evidence = WeightedPrecommitEvidenceReport {
+                consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
                 block_hash: hex::encode(block_hash),
                 quorum_power: 2,
                 height: block.number,
@@ -11716,7 +12173,7 @@ fn finality_evidence_for_block(block: &MyelinBlock) -> Result<(StaticCommitteeEv
                 signatures: vec![],
                 finalised: false,
             };
-            Ok((static_evidence, Some(tendermint_evidence)))
+            Ok((static_evidence, Some(weighted_precommit_evidence)))
         }
     }
 }
@@ -11729,11 +12186,11 @@ fn static_signature_report(signature: &CommitteeSignature) -> CommitteeSignature
     }
 }
 
-fn tendermint_signature_report(signature: &CommitteeSignature) -> CommitteeSignatureEvidenceReport {
+fn weighted_precommit_signature_report(signature: &CommitteeSignature) -> CommitteeSignatureEvidenceReport {
     CommitteeSignatureEvidenceReport {
         validator_id: signature.validator_id.clone(),
         signature: hex::encode(signature.signature),
-        signature_hash: hex::encode(blake3_32(b"myelin:tendermint-precommit-signature-hash:v1", &signature.signature)),
+        signature_hash: hex::encode(blake3_32(b"myelin:weighted-precommit-signature-hash:v1", &signature.signature)),
     }
 }
 
@@ -11772,9 +12229,9 @@ fn static_evidence_report_from_input(input: StaticCommitteeEvidenceInput) -> Sta
     }
 }
 
-fn tendermint_evidence_report_from_input(input: TendermintEvidenceInput) -> TendermintEvidenceReport {
-    TendermintEvidenceReport {
-        consensus_kind: ConsensusKind::Tendermint.as_str(),
+fn weighted_precommit_evidence_report_from_input(input: WeightedPrecommitEvidenceInput) -> WeightedPrecommitEvidenceReport {
+    WeightedPrecommitEvidenceReport {
+        consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
         block_hash: input.block_hash,
         quorum_power: input.quorum_power,
         height: input.height,
@@ -11807,7 +12264,7 @@ struct RuntimeSmokeReport {
     ckb_spawn_ipc_enabled: bool,
     /// CellTx id (Myelin txid, blake3 domain-separated).
     cell_tx_id: String,
-    /// CellTx witness txid (the key the mempool indexes by).
+    /// CellTx witness-inclusive hash retained as evidence.
     cell_wtxid: String,
     /// Pool size before admitting the CellTx.
     pool_size_before: usize,
@@ -11826,8 +12283,8 @@ struct RuntimeSmokeReport {
 
 fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
     let consensus_kind = match consensus {
-        "static-closed-committee" | "static_closed_committee" => ConsensusKind::StaticClosedCommittee,
-        "tendermint" => ConsensusKind::Tendermint,
+        "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
+        "weighted-precommit" => ConsensusKind::WeightedPrecommit,
         other => return Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     };
 
@@ -11844,45 +12301,33 @@ fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
     let txid = tx.id();
     let wtxid = compute_wtxid(&tx);
 
-    // 1. Create a CellPool (myelin-mempool) and admit the CellTx.
-    let pool = CellPool::new(64);
+    // 1. Seed the resolved input state and derive contextual admission.
+    let mut tree = CellStateTree::new();
+    let input_outpoint = tx.inputs[0].previous_output;
+    let input_output = CellOutput { lock: Script::new([2; 32], 1, vec![0x42]), type_: None, capacity: 1_000 };
+    let input_entry = CellEntry::from_output(&input_output, &[], 0, false)
+        .map_err(|error| CliError::InvalidFixture(format!("runtime input metadata: {error}")))?;
+    tree.insert(input_outpoint, input_entry);
+    let mut transition_engine = StateTransitionEngine::new(tree);
+    let admitted = transition_engine
+        .verify_transaction(&tx, StateTransitionContext::ordinary(1), |_, _| Ok::<_, String>(50_000))
+        .map_err(|error| CliError::InvalidFixture(format!("mempool admission: {error}")))?;
+
+    // 2. Admit only the verified object; fee/cycles are not caller-supplied.
+    let pool = CellPool::new(64, admitted.state_root().as_bytes());
     let pool_size_before = pool.stats().total_txs;
-    let wtxid_returned =
-        pool.add(tx.clone(), 1_000, 50_000).map_err(|error| CliError::InvalidFixture(format!("mempool add: {error}")))?;
-    if wtxid_returned != wtxid {
-        return Err(CliError::InvalidFixture(format!(
-            "mempool returned wtxid mismatch: expected {}, got {}",
-            hex::encode(wtxid),
-            hex::encode(wtxid_returned)
-        )));
+    let returned_txid = pool.add(admitted).map_err(|error| CliError::InvalidFixture(format!("mempool add: {error}")))?;
+    if returned_txid != txid {
+        return Err(CliError::InvalidFixture("mempool returned unexpected raw transaction id".to_owned()));
     }
     let pool_size_after = pool.stats().total_txs;
 
-    // 2. Create a CellStateTree (myelin-state) and apply the CellTx.
-    let mut tree = CellStateTree::new();
-    let state_root_before = tree.root();
-    // Insert a small entry that anchors the smoke CellTx in the
-    // state tree. The outpoint hash is the wtxid, the entry is
-    // derived from the CellTx's first output.
-    let mut entry_hasher = blake3::Hasher::new();
-    entry_hasher.update(b"myelin:runtime-smoke-entry:v1");
-    entry_hasher.update(&wtxid);
-    let outpoint_hash = myelin_hashes::Hash::from(*entry_hasher.finalize().as_bytes());
-    let outpoint = OutPoint::new(wtxid, 0);
-    let entry = myelin_state::CellEntry {
-        capacity: 100,
-        data_bytes: 30,
-        lock_hash: myelin_hashes::Hash::from([2; 32]),
-        type_hash: None,
-        data_hash: myelin_hashes::Hash::from(blake3_32(b"myelin:runtime-smoke-data:v1", b"myelin-runtime-smoke-output")),
-        created_block_number: 1,
-        is_cellbase: false,
-        lock_script: Some(Script::new([2; 32], 1, vec![0x42])),
-        type_script: None,
-        data: Some(b"myelin-runtime-smoke-output".to_vec()),
-    };
-    tree.insert_with_outpoint(outpoint_hash, outpoint, entry);
-    let state_root_after = tree.root();
+    // 3. Re-verify and atomically commit against the unchanged state root.
+    let receipt = transition_engine
+        .apply_transaction(&tx, StateTransitionContext::ordinary(1), |_, _| Ok::<_, String>(50_000))
+        .map_err(|error| CliError::InvalidFixture(format!("state transition: {error}")))?;
+    let state_root_before = receipt.state_root_before;
+    let state_root_after = receipt.state_root_after;
 
     // 3. Build a MyelinBlock anchored on the new state root, then
     //    run the selected consensus engine to finalise it.
@@ -11894,7 +12339,7 @@ fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
         consensus_kind,
         state_root_before: *state_root_before.as_ref(),
         state_root_after: *state_root_after.as_ref(),
-        ordered_cell_tx_commitments: vec![wtxid],
+        ordered_cell_tx_commitments: vec![txid],
         data_commitments: vec![wtxid],
         scheduler_commitment: [0; 32],
     };
@@ -11902,23 +12347,25 @@ fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
         ConsensusKind::StaticClosedCommittee => {
             let committee_config = static_fixture_committee_config();
             let committee = StaticClosedCommittee::new(committee_config).expect("static fixture committee");
-            let cert =
-                committee.certificate_for_fixture(block.hash(), &["validator-0", "validator-1"]).expect("static fixture certificate");
+            let cert = committee
+                .certificate_from_signers(block.hash(), &fixture_signers(&["validator-0", "validator-1"]))
+                .expect("static fixture certificate");
             let finalised = committee.finalise_block(block.clone(), cert).expect("static fixture finality");
             hex::encode(finalised.block_hash)
         }
-        ConsensusKind::Tendermint => {
-            let tendermint_engine = tendermint_fixture_engine();
-            let cert = tendermint_engine
-                .precommit_certificate_for_fixture(block.hash(), block.number, 0, &["validator-0", "validator-1"])
-                .expect("tendermint fixture certificate");
-            let finalised = tendermint_engine.finalise_block_with_precommit(block, 0, cert).expect("tendermint fixture finality");
+        ConsensusKind::WeightedPrecommit => {
+            let weighted_precommit_engine = weighted_precommit_fixture_engine();
+            let cert = weighted_precommit_engine
+                .precommit_certificate_from_signers(block.hash(), block.number, 0, &fixture_signers(&["validator-0", "validator-1"]))
+                .expect("weighted_precommit fixture certificate");
+            let finalised =
+                weighted_precommit_engine.finalise_block_with_precommit(block, 0, cert).expect("weighted_precommit fixture finality");
             hex::encode(finalised.block_hash)
         }
     };
 
     Ok(RuntimeSmokeReport {
-        schema: "myelin-runtime-smoke-v1",
+        schema: "myelin-runtime-smoke-v2",
         consensus_kind: consensus_kind.as_str(),
         vm_profile: "no-vm-runtime-smoke",
         ckb_spawn_ipc_enabled: CKB_SPAWN_IPC_SYSCALLS_ENABLED,
@@ -11974,7 +12421,7 @@ mod tests {
         let report = session_commit_multi_from_open(open_path.clone(), 4, 0).expect("commit-multi succeeds");
         let _ = std::fs::remove_file(open_path);
 
-        assert_eq!(report.schema, "myelin-session-commit-multi-v1");
+        assert_eq!(report.schema, "myelin-session-commit-multi-v2");
         assert_eq!(report.tx_count, 4, "all four txs are committed");
         assert_eq!(report.ordered_cell_tx_commitments.len(), 4);
         assert!(report.dag_layer_count >= 2, "a 4-tx chain must produce >= 2 DAG layers, got {}", report.dag_layer_count);
@@ -11984,8 +12431,8 @@ mod tests {
         assert_eq!(report.per_tx_cycles.len(), 4);
         assert!(report.per_tx_cycles.iter().all(|c| *c > 0), "each tx consumed positive cycles");
         assert_eq!(report.scheduler_commitment.len(), 64, "scheduler commitment is 32-byte hex");
-        // The block is finalised by the static committee. (Tendermint
-        // evidence is only produced for tendermint sessions; the
+        // The block is finalised by the static committee. (WeightedPrecommit
+        // evidence is only produced for weighted_precommit sessions; the
         // static-closed-committee fixture here finalises via the static path.)
         assert!(report.finalised);
         assert!(report.static_committee_evidence.finalised);
@@ -12005,7 +12452,7 @@ mod tests {
     ) -> SessionThresholdLockDeploymentEvidence {
         normalize_threshold_lock_deployment_evidence(
             SessionThresholdLockDeploymentEvidence {
-                schema: "myelin-session-threshold-lock-deployment-v1".to_owned(),
+                schema: "myelin-session-threshold-lock-deployment-v2".to_owned(),
                 network: "ckb-mainnet".to_owned(),
                 code_hash: format!("0x{}", "a1".repeat(32)),
                 hash_type: "data2".to_owned(),
@@ -12048,7 +12495,7 @@ mod tests {
         }
         normalize_authority_signature_evidence(
             SessionAuthoritySignatureEvidence {
-                schema: "myelin-session-authority-signature-evidence-v1".to_owned(),
+                schema: "myelin-session-authority-signature-evidence-v2".to_owned(),
                 signature_scheme: auth.signature_scheme.clone(),
                 participant_set_hash: auth.participant_set_hash.clone(),
                 threshold: auth.threshold,
@@ -12071,7 +12518,7 @@ mod tests {
     ) -> SessionCourtEconomicsDeploymentEvidence {
         normalize_court_economics_deployment_evidence(
             SessionCourtEconomicsDeploymentEvidence {
-                schema: "myelin-session-court-economics-deployment-v1".to_owned(),
+                schema: "myelin-session-court-economics-deployment-v2".to_owned(),
                 network: "ckb-mainnet".to_owned(),
                 verifier_code_hash: format!("0x{}", "e1".repeat(32)),
                 verifier_hash_type: "data2".to_owned(),
@@ -12241,7 +12688,7 @@ mod tests {
         cells: std::collections::BTreeMap<String, MockCarrierLiveCell>,
         accepted_hash: Option<String>,
     ) -> (String, std::thread::JoinHandle<()>) {
-        let request_count = if accepted_hash.is_some() { 4 } else { 3 };
+        let request_count = if accepted_hash.is_some() { 6 } else { 3 };
         spawn_carrier_submission_rpc_mock_with_request_count(cells, accepted_hash, request_count)
     }
 
@@ -12305,6 +12752,22 @@ mod tests {
                             "result": accepted_hash
                         })
                     }
+                    "test_tx_pool_accept" => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request_json["id"].clone(),
+                        "result": { "cycles": "0x219", "fee": "0x64" }
+                    }),
+                    "get_transaction" => {
+                        let requested_hash = request_json["params"][0].clone();
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_json["id"].clone(),
+                            "result": {
+                                "transaction": { "hash": requested_hash },
+                                "tx_status": { "status": "pending", "block_hash": null, "block_number": null }
+                            }
+                        })
+                    }
                     other => panic!("unexpected carrier-submission rpc method: {other}"),
                 }
                 .to_string();
@@ -12326,7 +12789,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind direct-submission rpc");
         let addr = listener.local_addr().expect("direct-submission rpc addr");
         let handle = std::thread::spawn(move || {
-            let request_count = if accepted_hash.is_some() { 2 } else { 1 };
+            let request_count = if accepted_hash.is_some() { 4 } else { 1 };
             let mut send_seen = false;
             for _ in 0..request_count {
                 let (mut stream, _) = listener.accept().expect("accept direct-submission rpc");
@@ -12375,6 +12838,22 @@ mod tests {
                             "jsonrpc": "2.0",
                             "id": request_json["id"].clone(),
                             "result": accepted_hash
+                        })
+                    }
+                    "test_tx_pool_accept" => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request_json["id"].clone(),
+                        "result": { "cycles": "0x219", "fee": "0x64" }
+                    }),
+                    "get_transaction" => {
+                        let requested_hash = request_json["params"][0].clone();
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request_json["id"].clone(),
+                            "result": {
+                                "transaction": { "hash": requested_hash },
+                                "tx_status": { "status": "pending", "block_hash": null, "block_number": null }
+                            }
                         })
                     }
                     other => panic!("unexpected direct-submission rpc method: {other}"),
@@ -12734,13 +13213,13 @@ mod tests {
         let payload_bytes = decode_hex_bytes(payload).expect("carrier payload bytes");
         assert_eq!(payload_bytes.len(), 160);
         serde_json::json!({
-            "schema": "myelin-session-da-anchor-package-v1",
+            "schema": "myelin-session-da-anchor-package-v2",
             "da_manifest_hash": format!("0x{}", hex::encode(&payload_bytes[0..32])),
             "court_bundle_hash": format!("0x{}", hex::encode(&payload_bytes[32..64])),
             "challenge_payload_hash": format!("0x{}", hex::encode(&payload_bytes[64..96])),
             "segment_root": format!("0x{}", hex::encode(&payload_bytes[96..128])),
             "molecule_transaction_hash": format!("0x{}", hex::encode(&payload_bytes[128..160])),
-            "carrier_payload_kind": "myelin-session-da-anchor-carrier-v1",
+            "carrier_payload_kind": "myelin-session-da-anchor-carrier-v2",
             "carrier_payload": payload,
             "carrier_payload_data_hash": carrier_payload_data_hash_hex(payload).expect("carrier payload data hash")
         })
@@ -12762,7 +13241,7 @@ mod tests {
             session_lineage_commitment,
         );
         serde_json::json!({
-            "schema": "myelin-session-settlement-package-v1",
+            "schema": "myelin-session-settlement-package-v2",
             "session_id": hex::encode(session_id),
             "participant_set_hash": hex::encode(participant_set_hash),
             "escrow_input_cells_hash": hex::encode(escrow_input_cells_hash),
@@ -12773,7 +13252,7 @@ mod tests {
             "challenge_payload_hash": format!("0x{}", hex::encode(&payload_bytes[96..128])),
             "final_state_root": format!("0x{}", hex::encode(&payload_bytes[128..160])),
             "settlement_authority": authority,
-            "carrier_payload_kind": "myelin-session-settlement-carrier-v1",
+            "carrier_payload_kind": "myelin-session-settlement-carrier-v2",
             "carrier_payload": payload,
             "carrier_payload_data_hash": carrier_payload_data_hash_hex(payload).expect("carrier payload data hash")
         })
@@ -12790,9 +13269,9 @@ mod tests {
         SessionSubmissionFinalityReport,
     ) {
         let context = SessionSubmissionContextReport {
-            schema: "myelin-session-submission-context-v1".to_owned(),
+            schema: "myelin-session-submission-context-v2".to_owned(),
             submission: "session-submit.json".to_owned(),
-            submission_schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+            submission_schema: "myelin-session-da-anchor-submission-v2".to_owned(),
             rpc_url: "http://127.0.0.1:8114".to_owned(),
             expected_ckb_tx_hash: expected_hash.clone(),
             request_method: "get_live_cell".to_owned(),
@@ -12811,9 +13290,9 @@ mod tests {
             notes: Vec::new(),
         };
         let economics = SessionSubmissionEconomicsReport {
-            schema: "myelin-session-submission-economics-v1".to_owned(),
+            schema: "myelin-session-submission-economics-v2".to_owned(),
             submission: "session-submit.json".to_owned(),
-            submission_schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+            submission_schema: "myelin-session-da-anchor-submission-v2".to_owned(),
             rpc_url: "http://127.0.0.1:8114".to_owned(),
             expected_ckb_tx_hash: expected_hash.clone(),
             request_method: "get_live_cell".to_owned(),
@@ -12846,9 +13325,9 @@ mod tests {
             notes: Vec::new(),
         };
         let inclusion = SessionSubmissionInclusionReport {
-            schema: "myelin-session-submission-inclusion-v1".to_owned(),
+            schema: "myelin-session-submission-inclusion-v2".to_owned(),
             submission: "session-submit.json".to_owned(),
-            submission_schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+            submission_schema: "myelin-session-da-anchor-submission-v2".to_owned(),
             rpc_url: "http://127.0.0.1:8114".to_owned(),
             expected_ckb_tx_hash: expected_hash.clone(),
             min_status: "committed".to_owned(),
@@ -12881,7 +13360,7 @@ mod tests {
             notes: Vec::new(),
         };
         let stability = SessionSubmissionStabilityReport {
-            schema: "myelin-session-submission-stability-v1".to_owned(),
+            schema: "myelin-session-submission-stability-v2".to_owned(),
             inclusion: "session-inclusion.json".to_owned(),
             rpc_url: "http://127.0.0.1:8114".to_owned(),
             expected_ckb_tx_hash: expected_hash.clone(),
@@ -12901,7 +13380,7 @@ mod tests {
             notes: Vec::new(),
         };
         let finality = SessionSubmissionFinalityReport {
-            schema: "myelin-session-submission-finality-v1".to_owned(),
+            schema: "myelin-session-submission-finality-v2".to_owned(),
             inclusion: "session-inclusion.json".to_owned(),
             rpc_url: "http://127.0.0.1:8114".to_owned(),
             expected_ckb_tx_hash: expected_hash,
@@ -12927,18 +13406,39 @@ mod tests {
         write_temp_json(
             &format!("readiness-submission-{label_hash}"),
             &serde_json::json!({
-                "schema": "myelin-session-da-anchor-submission-v1",
+                "schema": "myelin-session-da-anchor-submission-v2",
                 "ckb_raw_tx_hash": expected_hash,
                 "rpc_result": expected_hash
             }),
         )
     }
 
+    fn rpc_admission_fixture(expected_hash: &str) -> Value {
+        serde_json::json!({
+            "schema": "myelin-session-rpc-admission-v1",
+            "expected_ckb_tx_hash": expected_hash,
+            "pool_accept_result": { "cycles": "0x219", "fee": "0x64" },
+            "pool_accept_error": null,
+            "full_node_validated": true,
+            "send_result": expected_hash,
+            "send_error": null,
+            "submitted_hash_matches": true,
+            "observation_result": {
+                "transaction": { "hash": expected_hash },
+                "tx_status": { "status": "pending", "block_hash": null, "block_number": null }
+            },
+            "observation_error": null,
+            "observed_status": "pending",
+            "transaction_observed": true,
+            "accepted": true
+        })
+    }
+
     fn write_readiness_live_da_submission(expected_hash: &str, include_rpc_result: bool) -> PathBuf {
         let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
         let label_hash = &label_hash[..label_hash.len().min(8)];
         let mut submission = serde_json::json!({
-            "schema": "myelin-session-da-anchor-submission-v1",
+            "schema": "myelin-session-da-anchor-submission-v2",
             "ckb_raw_tx_hash": expected_hash,
             "rpc_url": "http://127.0.0.1:8114",
             "dry_run": false,
@@ -12949,6 +13449,7 @@ mod tests {
         });
         if include_rpc_result {
             submission["rpc_result"] = Value::String(expected_hash.to_owned());
+            submission["rpc_admission"] = rpc_admission_fixture(expected_hash);
         }
         write_temp_json(&format!("readiness-live-da-submission-{label_hash}-{include_rpc_result}"), &submission)
     }
@@ -12957,7 +13458,7 @@ mod tests {
         let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
         let label_hash = &label_hash[..label_hash.len().min(8)];
         let mut submission = serde_json::json!({
-            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "schema": "myelin-session-ckb-carrier-submission-v2",
             "ckb_raw_tx_hash": expected_hash,
             "rpc_url": "http://127.0.0.1:8114",
             "dry_run": false,
@@ -12968,6 +13469,7 @@ mod tests {
         });
         if include_rpc_result {
             submission["rpc_result"] = Value::String(expected_hash.to_owned());
+            submission["rpc_admission"] = rpc_admission_fixture(expected_hash);
         }
         write_temp_json(&format!("readiness-live-carrier-submission-{label_hash}-{include_rpc_result}"), &submission)
     }
@@ -12976,8 +13478,8 @@ mod tests {
         let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
         let label_hash = &label_hash[..label_hash.len().min(8)];
         let mut submission = serde_json::json!({
-            "schema": "myelin-session-ckb-final-script-submission-v1",
-            "package_kind": "myelin-session-da-anchor-package-v1",
+            "schema": "myelin-session-ckb-final-script-submission-v2",
+            "package_kind": "myelin-session-da-anchor-package-v2",
             "verifier_role": "final-l1-script",
             "ckb_raw_tx_hash": expected_hash,
             "rpc_url": "http://127.0.0.1:8114",
@@ -12985,7 +13487,8 @@ mod tests {
             "submitted_to_rpc": true,
             "accepted_by_rpc": true,
             "submit_mode": true,
-            "l1_da_published": true,
+            "l1_da_submission_accepted": true,
+            "l1_da_published": false,
             "l1_court_submitted": false,
             "authority_input_present": false,
             "pre_submit_context_checked": true,
@@ -13003,6 +13506,7 @@ mod tests {
         });
         if include_rpc_result {
             submission["rpc_result"] = Value::String(expected_hash.to_owned());
+            submission["rpc_admission"] = rpc_admission_fixture(expected_hash);
         }
         write_temp_json(&format!("readiness-live-final-script-submission-{label_hash}-{include_rpc_result}"), &submission)
     }
@@ -13011,8 +13515,8 @@ mod tests {
         let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
         let label_hash = &label_hash[..label_hash.len().min(8)];
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-final-script-submission-v1",
-            "package_kind": "myelin-session-da-anchor-package-v1",
+            "schema": "myelin-session-ckb-final-script-submission-v2",
+            "package_kind": "myelin-session-da-anchor-package-v2",
             "verifier_role": "final-l1-script",
             "ckb_raw_tx_hash": expected_hash,
             "rpc_url": "http://127.0.0.1:8114",
@@ -13020,9 +13524,11 @@ mod tests {
             "submitted_to_rpc": true,
             "accepted_by_rpc": true,
             "submit_mode": true,
-            "l1_da_published": true,
+            "l1_da_submission_accepted": true,
+            "l1_da_published": false,
             "l1_court_submitted": false,
             "rpc_result": expected_hash,
+            "rpc_admission": rpc_admission_fixture(expected_hash),
             "rpc_error": null
         });
         write_temp_json(&format!("readiness-live-final-script-submission-no-preflight-{label_hash}"), &submission)
@@ -13036,8 +13542,8 @@ mod tests {
             court_economics_evidence(&"46".repeat(32), &"50".repeat(32), &"51".repeat(32), &"60".repeat(32), 60_000, 60_000)
                 .expect("readiness court economics fixture");
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-final-script-submission-v1",
-            "package_kind": "myelin-session-settlement-package-v1",
+            "schema": "myelin-session-ckb-final-script-submission-v2",
+            "package_kind": "myelin-session-settlement-package-v2",
             "verifier_role": "final-l1-script",
             "ckb_raw_tx_hash": expected_hash,
             "rpc_url": "http://127.0.0.1:8114",
@@ -13046,6 +13552,7 @@ mod tests {
             "accepted_by_rpc": true,
             "submit_mode": true,
             "l1_da_published": false,
+            "l1_court_submission_accepted": true,
             "l1_court_submitted": true,
             "evidence_cell_dep_present": true,
             "authority_input_present": true,
@@ -13083,6 +13590,7 @@ mod tests {
                 "cellscript_source_hash": format!("0x{}", "43".repeat(32))
             },
             "rpc_result": expected_hash,
+            "rpc_admission": rpc_admission_fixture(expected_hash),
             "rpc_error": null
         });
         write_temp_json(&format!("readiness-live-final-settlement-submission-{label_hash}-{authority_lock_matches}"), &submission)
@@ -13132,8 +13640,8 @@ mod tests {
         let (da_manifest, bundle_path, receipt_path, storage_dir) =
             production_da_manifest_fixture("readiness-final-settlement-production-da");
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-final-script-submission-v1",
-            "package_kind": "myelin-session-settlement-package-v1",
+            "schema": "myelin-session-ckb-final-script-submission-v2",
+            "package_kind": "myelin-session-settlement-package-v2",
             "verifier_role": "final-l1-script",
             "ckb_raw_tx_hash": expected_hash,
             "rpc_url": "http://127.0.0.1:8114",
@@ -13142,6 +13650,7 @@ mod tests {
             "accepted_by_rpc": true,
             "submit_mode": true,
             "l1_da_published": false,
+            "l1_court_submission_accepted": true,
             "l1_court_submitted": true,
             "da_manifest": da_manifest,
             "evidence_cell_dep_present": true,
@@ -13176,6 +13685,7 @@ mod tests {
                 "cellscript_source_hash": format!("0x{}", "43".repeat(32))
             },
             "rpc_result": expected_hash,
+            "rpc_admission": rpc_admission_fixture(expected_hash),
             "rpc_error": null
         });
         let _ = std::fs::remove_file(bundle_path);
@@ -13188,7 +13698,7 @@ mod tests {
         let label_hash = expected_hash.strip_prefix("0x").unwrap_or(expected_hash);
         let label_hash = &label_hash[..label_hash.len().min(8)];
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "schema": "myelin-session-ckb-carrier-submission-v2",
             "ckb_raw_tx_hash": expected_hash,
             "rpc_url": "http://127.0.0.1:8114",
             "dry_run": false,
@@ -13239,8 +13749,8 @@ mod tests {
         let chunk = b"tick";
         let commitment = chunk_commitment(0, 0, chunk);
         let projection = teeworlds_chunk_projection(0, 0, chunk, commitment, [0xAA; 32], [0xBB; 32], [0xCC; 32]);
-        assert!(projection.ckb_projection_possible);
-        assert_eq!(projection.semantic_profile, "ckb-compatible");
+        assert!(projection.wire_encoded);
+        assert_eq!(projection.projection_stage, "wire-encoded");
         assert_eq!(projection.input_count, 1);
         assert_eq!(projection.output_count, 1);
         assert_eq!(projection.witness_count, 1);
@@ -13266,14 +13776,14 @@ mod tests {
         let report = teeworlds_court_bundle(path.clone(), 4, 0, "static-closed-committee").unwrap();
         let _ = std::fs::remove_file(path);
 
-        assert!(report.court_verifiable);
+        assert!(!report.court_verifiable);
         assert!(!report.l1_court_implemented);
         assert_eq!(report.vm_profile, "ckb-strict-basic");
         assert!(!report.ckb_spawn_ipc_required);
         assert_eq!(report.chunk_index, 0);
         assert_eq!(report.chunk_bytes, 4);
-        assert_eq!(report.ckb_projection.semantic_profile, "ckb-compatible");
-        assert!(report.ckb_projection.ckb_projection_possible);
+        assert_eq!(report.ckb_projection.projection_stage, "wire-encoded");
+        assert!(report.ckb_projection.wire_encoded);
         assert!(report.static_committee_evidence.finalised);
         assert_eq!(report.static_committee_evidence.signatures.len(), 2);
         assert_eq!(report.challenge_payload_hash.len(), 64);
@@ -13311,8 +13821,8 @@ mod tests {
     }
 
     #[test]
-    fn teeworlds_court_bundle_tendermint_precommit_path_verifies() {
-        let path = std::env::temp_dir().join(format!("myelin-tendermint-court-bundle-test-{}.json", std::process::id()));
+    fn teeworlds_court_bundle_weighted_precommit_path_verifies() {
+        let path = std::env::temp_dir().join(format!("myelin-weighted_precommit-court-bundle-test-{}.json", std::process::id()));
         let json = serde_json::json!({
             "tx": {
                 "witnesses": [
@@ -13325,22 +13835,22 @@ mod tests {
         });
         std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
 
-        let report = teeworlds_court_bundle(path.clone(), 4, 0, "tendermint").unwrap();
+        let report = teeworlds_court_bundle(path.clone(), 4, 0, "weighted-precommit").unwrap();
         let _ = std::fs::remove_file(path);
 
-        assert!(report.court_verifiable);
+        assert!(!report.court_verifiable);
         assert!(!report.l1_court_implemented);
         assert_eq!(report.vm_profile, "ckb-strict-basic");
         assert!(!report.ckb_spawn_ipc_required);
         assert_eq!(report.chunk_index, 0);
         assert_eq!(report.chunk_bytes, 4);
-        assert_eq!(report.ckb_projection.semantic_profile, "ckb-compatible");
-        assert!(report.ckb_projection.ckb_projection_possible);
+        assert_eq!(report.ckb_projection.projection_stage, "wire-encoded");
+        assert!(report.ckb_projection.wire_encoded);
 
         // The static-closed-committee evidence is reported for completeness;
-        // the Tendermint evidence is the active finality path.
-        let tm = report.tendermint_evidence.as_ref().expect("tendermint evidence must be present");
-        assert_eq!(tm.consensus_kind, "tendermint");
+        // the WeightedPrecommit evidence is the active finality path.
+        let tm = report.weighted_precommit_evidence.as_ref().expect("weighted_precommit evidence must be present");
+        assert_eq!(tm.consensus_kind, "weighted-precommit");
         assert_eq!(tm.quorum_power, 2);
         assert_eq!(tm.height, 1);
         assert_eq!(tm.round, 0);
@@ -13348,36 +13858,40 @@ mod tests {
         assert!(tm.finalised);
         assert_eq!(tm.signatures.len(), 2);
 
-        // The static-committee and Tendermint block hashes MUST agree: both
+        // The static-committee and WeightedPrecommit block hashes MUST agree: both
         // engines sign the same canonical MyelinBlock (same data fields,
         // same data-binding block hash), but with different signature
         // domains. The two engines cannot drift on what was finalised.
         let static_block_hash = hex::decode(&report.static_committee_evidence.block_hash).unwrap();
-        let tendermint_block_hash = hex::decode(&tm.block_hash).unwrap();
-        assert_eq!(static_block_hash, tendermint_block_hash, "static and tendermint must sign the same canonical block hash");
+        let weighted_precommit_block_hash = hex::decode(&tm.block_hash).unwrap();
+        assert_eq!(
+            static_block_hash, weighted_precommit_block_hash,
+            "static and weighted_precommit must sign the same canonical block hash"
+        );
 
-        // The Tendermint signatures must be domain-separated from the static
+        // The WeightedPrecommit signatures must be domain-separated from the static
         // committee signatures. The two sets of signatures should differ
         // even though the underlying block hash is the same.
         let static_signatures: Vec<&str> = report.static_committee_evidence.signatures.iter().map(|s| s.signature.as_str()).collect();
-        let tendermint_signatures: Vec<&str> = tm.signatures.iter().map(|s| s.signature.as_str()).collect();
+        let weighted_precommit_signatures: Vec<&str> = tm.signatures.iter().map(|s| s.signature.as_str()).collect();
         assert_ne!(
-            static_signatures, tendermint_signatures,
-            "Tendermint precommit signatures must be domain-separated from static-committee signatures"
+            static_signatures, weighted_precommit_signatures,
+            "WeightedPrecommit precommit signatures must be domain-separated from static-committee signatures"
         );
 
-        let bundle_path = std::env::temp_dir().join(format!("myelin-tendermint-court-bundle-report-test-{}.json", std::process::id()));
+        let bundle_path =
+            std::env::temp_dir().join(format!("myelin-weighted_precommit-court-bundle-report-test-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&report).unwrap()).unwrap();
         let verification = verify_teeworlds_court_bundle(bundle_path.clone()).unwrap();
         let _ = std::fs::remove_file(bundle_path);
 
         assert!(verification.valid);
         assert!(verification.checks.iter().all(|check| check.ok));
-        assert!(verification.checks.iter().any(|check| check.name == "tendermint-certificate"));
+        assert!(verification.checks.iter().any(|check| check.name == "weighted-precommit-certificate"));
         assert!(verification.checks.iter().any(|check| check.name == "block-hash-recomputes"));
         assert!(verification.checks.iter().any(|check| check.name == "evidence-block-hash-matches-canonical-block"));
         // The static-committee-certificate check must NOT be present when
-        // Tendermint evidence is in the bundle; otherwise the bundle would
+        // WeightedPrecommit evidence is in the bundle; otherwise the bundle would
         // be claiming both engines.
         assert!(!verification.checks.iter().any(|check| check.name == "committee-certificate"));
     }
@@ -13385,7 +13899,7 @@ mod tests {
     #[test]
     fn session_fixture_static_commit_court_bundle_verifies() {
         let open = session_open_fixture("static-closed-committee").expect("open session");
-        assert_eq!(open.schema, "myelin-session-open-v1");
+        assert_eq!(open.schema, "myelin-session-open-v2");
         assert_eq!(open.vm_profile, "ckb-strict-basic");
         assert!(!open.ckb_spawn_ipc_required);
         assert_eq!(open.participants, vec!["alice".to_owned(), "bob".to_owned()]);
@@ -13395,7 +13909,7 @@ mod tests {
         let commit = session_commit_fixture(open_path.clone()).expect("commit session");
         let _ = std::fs::remove_file(open_path);
 
-        assert_eq!(commit.schema, "myelin-session-commit-v1");
+        assert_eq!(commit.schema, "myelin-session-commit-v2");
         assert_eq!(commit.consensus_kind, "static-closed-committee");
         assert_eq!(commit.vm_profile, "ckb-strict-basic");
         assert!(!commit.ckb_spawn_ipc_required);
@@ -13403,7 +13917,7 @@ mod tests {
         assert_eq!(commit.pool_size_after, 1);
         assert_ne!(commit.state_root_before, commit.state_root_after);
         assert!(commit.static_committee_evidence.finalised);
-        assert!(commit.tendermint_evidence.is_none());
+        assert!(commit.weighted_precommit_evidence.is_none());
         assert!(commit.finalised);
 
         let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-static-{}.json", std::process::id()));
@@ -13411,11 +13925,11 @@ mod tests {
         let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
         let _ = std::fs::remove_file(commit_path);
 
-        assert_eq!(bundle.schema, "myelin-session-court-bundle-v1");
+        assert_eq!(bundle.schema, "myelin-session-court-bundle-v2");
         assert_eq!(bundle.vm_profile, "ckb-strict-basic");
-        assert!(bundle.court_verifiable);
+        assert!(!bundle.court_verifiable);
         assert!(!bundle.l1_court_implemented);
-        assert_eq!(bundle.ckb_projection.semantic_profile, "ckb-compatible");
+        assert_eq!(bundle.ckb_projection.projection_stage, "wire-encoded");
 
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-static-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
@@ -13435,20 +13949,22 @@ mod tests {
     fn session_open_accepts_user_supplied_descriptor_and_commits_nonzero_chunk() {
         let alice_tx = hex::encode([0xA1; 32]);
         let bob_tx = hex::encode([0xB2; 32]);
-        let alice_lock = hex::encode([0x11; 32]);
-        let bob_lock = hex::encode([0x22; 32]);
+        let fixture_lock = hex::encode(
+            myelin_exec::ckb_script_hash_molecule(&session_fixture_lock_script())
+                .expect("the fixture lock has valid Molecule encoding"),
+        );
         let open = session_open(SessionOpenArgs {
             app_id: "myelin-custom-game-session-v1".to_owned(),
             participants: vec!["alice".to_owned(), "bob".to_owned(), "carol".to_owned()],
-            escrow_cells: vec![format!("{alice_tx}:0:1200:{alice_lock}"), format!("{bob_tx}:2:2400:{bob_lock}")],
+            escrow_cells: vec![format!("{alice_tx}:0:1200:{fixture_lock}"), format!("{bob_tx}:2:2400:{fixture_lock}")],
             timeout_ms: 90_000,
-            consensus: "tendermint".to_owned(),
+            consensus: "weighted-precommit".to_owned(),
             out: None,
         })
         .expect("open configurable session");
 
         assert_eq!(open.app_id, "myelin-custom-game-session-v1");
-        assert_eq!(open.consensus_kind, "tendermint");
+        assert_eq!(open.consensus_kind, "weighted-precommit");
         assert_eq!(open.participants.len(), 3);
         assert_eq!(open.escrow_input_cells.len(), 2);
         assert_eq!(open.timeout_ms, 90_000);
@@ -13461,8 +13977,8 @@ mod tests {
         let _ = std::fs::remove_file(open_path);
 
         assert_eq!(commit.chunk_index, 7);
-        assert_eq!(commit.consensus_kind, "tendermint");
-        assert!(commit.tendermint_evidence.is_some());
+        assert_eq!(commit.consensus_kind, "weighted-precommit");
+        assert!(commit.weighted_precommit_evidence.is_some());
         assert_ne!(commit.state_root_before, commit.state_root_after);
 
         let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-custom-{}.json", std::process::id()));
@@ -13471,7 +13987,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
 
         assert_eq!(bundle.chunk_index, 7);
-        assert!(bundle.court_verifiable);
+        assert!(!bundle.court_verifiable);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-custom-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
         let verification = verify_session_court_bundle(bundle_path.clone()).expect("verify custom court bundle");
@@ -13479,7 +13995,7 @@ mod tests {
 
         assert!(verification.valid);
         assert!(verification.checks.iter().all(|check| check.ok));
-        assert!(verification.checks.iter().any(|check| check.name == "tendermint-certificate"));
+        assert!(verification.checks.iter().any(|check| check.name == "weighted-precommit-certificate"));
     }
 
     #[test]
@@ -13497,7 +14013,7 @@ mod tests {
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
 
         let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
-        assert_eq!(manifest.schema, "myelin-session-da-manifest-v1");
+        assert_eq!(manifest.schema, "myelin-session-da-manifest-v2");
         assert_eq!(manifest.da_profile, "single-segment-merkle-v1");
         assert_eq!(manifest.payload_kind, "session-court-molecule-transaction");
         assert_eq!(manifest.session_id, bundle.session_id);
@@ -13716,9 +14232,16 @@ mod tests {
         let segment_root_hex = hex::encode([0xdd; 32]);
         let proof_hex = hex::encode([0xee; 32]);
 
-        let availability =
-            da_availability_evidence(&session_id_hex, &court_bundle_hash_hex, &molecule_hash_hex, &segment_root_hex, &proof_hex, true, None)
-                .expect("commitment-only availability evidence");
+        let availability = da_availability_evidence(
+            &session_id_hex,
+            &court_bundle_hash_hex,
+            &molecule_hash_hex,
+            &segment_root_hex,
+            &proof_hex,
+            true,
+            None,
+        )
+        .expect("commitment-only availability evidence");
 
         assert_eq!(availability.external_receipt_count, 0, "no receipt -> count 0");
         assert!(availability.external_receipt.is_none(), "no receipt -> None");
@@ -13889,7 +14412,7 @@ mod tests {
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
         let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
-        assert_eq!(package.schema, "myelin-session-da-anchor-package-v1");
+        assert_eq!(package.schema, "myelin-session-da-anchor-package-v2");
         assert_eq!(package.session_id, manifest.session_id);
         assert_eq!(package.chunk_index, manifest.chunk_index);
         assert_eq!(package.court_bundle_hash, manifest.court_bundle_hash);
@@ -13897,7 +14420,7 @@ mod tests {
         assert_eq!(package.challenge_payload_hash, manifest.challenge_payload_hash);
         assert_eq!(package.segment_root, manifest.segment_root);
         assert_eq!(package.da_manifest_hash.len(), 64);
-        assert_eq!(package.carrier_payload_kind, "myelin-session-da-anchor-carrier-v1");
+        assert_eq!(package.carrier_payload_kind, "myelin-session-da-anchor-carrier-v2");
         assert_eq!(decode_hex_bytes(&package.carrier_payload).expect("carrier payload").len(), 160);
         assert_eq!(
             package.carrier_payload_data_hash,
@@ -13906,8 +14429,8 @@ mod tests {
         assert_eq!(package.da_anchor_cell_tx_id.len(), 64);
         assert_eq!(package.da_anchor_cell_wtxid.len(), 64);
         assert_eq!(package.molecule_transaction_hash.len(), 64);
-        assert!(package.da_anchor_projectable);
-        assert_eq!(package.ckb_projection.semantic_profile, "ckb-compatible");
+        assert!(package.da_anchor_wire_encoded);
+        assert_eq!(package.ckb_projection.projection_stage, "wire-encoded");
         assert!(!package.l1_da_publication_implemented);
 
         let package_path = std::env::temp_dir().join(format!("myelin-session-da-anchor-package-{}.json", std::process::id()));
@@ -13955,7 +14478,7 @@ mod tests {
         let _ = std::fs::remove_file(manifest_path);
         let _ = std::fs::remove_file(bundle_path);
 
-        assert_eq!(submission.schema, "myelin-session-da-anchor-submission-v1");
+        assert_eq!(submission.schema, "myelin-session-da-anchor-submission-v2");
         assert!(submission.dry_run);
         assert!(!submission.submitted_to_rpc);
         assert!(!submission.accepted_by_rpc);
@@ -13968,7 +14491,7 @@ mod tests {
         assert_eq!(submission.molecule_transaction_hash, package.molecule_transaction_hash);
         assert!(submission.ckb_raw_tx_hash.is_some());
         assert!(submission.ckb_wtx_hash.is_some());
-        assert_eq!(submission.ckb_transaction_json["version"], "0xc001");
+        assert_eq!(submission.ckb_transaction_json["version"], "0x0");
         assert!(!submission.pre_submit.checked);
         assert_eq!(submission.pre_submit.input_count, 1);
         assert_eq!(submission.pre_submit.cell_dep_count, 0);
@@ -14138,7 +14661,7 @@ mod tests {
 
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
             .expect("settlement intent");
-        assert_eq!(intent.schema, "myelin-session-settlement-intent-v1");
+        assert_eq!(intent.schema, "myelin-session-settlement-intent-v2");
         assert_eq!(intent.kind, "disputed-close");
         assert_eq!(intent.session_id, bundle.session_id);
         assert_eq!(intent.final_state_root, bundle.state_root_after);
@@ -14146,7 +14669,7 @@ mod tests {
         assert_eq!(intent.da_segment_root, da_manifest.segment_root);
         assert_eq!(intent.challenge_deadline_ms, 60_000);
         assert!(intent.settlement_permitted);
-        assert_eq!(intent.court_economics.schema, "myelin-session-court-economics-v1");
+        assert_eq!(intent.court_economics.schema, "myelin-session-court-economics-v2");
         assert_eq!(intent.court_economics.mode, "disputed-close-explicit-policy-v1");
         assert_eq!(intent.court_economics.escrow_binding_mode, "session-escrow-input-cells-hash");
         assert_eq!(intent.court_economics.minimum_dispute_bond_shannons, 100_000_000);
@@ -14334,7 +14857,7 @@ mod tests {
 
         let package = session_settlement_package(intent_path.clone(), bundle_path.clone(), da_manifest_path.clone())
             .expect("settlement package");
-        assert_eq!(package.schema, "myelin-session-settlement-package-v1");
+        assert_eq!(package.schema, "myelin-session-settlement-package-v2");
         assert_eq!(package.session_id, intent.session_id);
         assert_eq!(package.chunk_index, intent.chunk_index);
         assert_eq!(package.court_bundle_hash, intent.court_bundle_hash);
@@ -14376,7 +14899,7 @@ mod tests {
         assert_eq!(package.settlement_authority.session_binding, "session-id-and-lineage-commit-participants-and-escrow");
         assert_eq!(package.settlement_authority.session_authority_commitment, expected_authority.session_authority_commitment);
         assert_eq!(package.settlement_authority.authority_authentication, expected_authority.authority_authentication);
-        assert_eq!(package.settlement_authority.authority_authentication.schema, "myelin-session-settlement-authority-auth-v1");
+        assert_eq!(package.settlement_authority.authority_authentication.schema, "myelin-session-settlement-authority-auth-v2");
         assert_eq!(package.settlement_authority.authority_authentication.mode, "ckb-threshold-lock");
         assert_eq!(
             package.settlement_authority.authority_authentication.signature_scheme,
@@ -14406,7 +14929,7 @@ mod tests {
         assert!(!package.settlement_authority.authority_authentication.production_ready);
         assert_eq!(package.settlement_authority.consumed_input_index, 1);
         assert_eq!(package.settlement_authority.required_lock_binding, "final-da-publication-lock-hash");
-        assert_eq!(package.carrier_payload_kind, "myelin-session-settlement-carrier-v1");
+        assert_eq!(package.carrier_payload_kind, "myelin-session-settlement-carrier-v2");
         assert_eq!(decode_hex_bytes(&package.carrier_payload).expect("carrier payload").len(), 160);
         assert_eq!(
             package.carrier_payload_data_hash,
@@ -14415,8 +14938,8 @@ mod tests {
         assert_eq!(package.settlement_cell_tx_id.len(), 64);
         assert_eq!(package.settlement_cell_wtxid.len(), 64);
         assert_eq!(package.molecule_transaction_hash.len(), 64);
-        assert!(package.settlement_projectable);
-        assert_eq!(package.ckb_projection.semantic_profile, "ckb-compatible");
+        assert!(package.settlement_wire_encoded);
+        assert_eq!(package.ckb_projection.projection_stage, "wire-encoded");
         assert!(!package.l1_court_script_implemented);
 
         let package_path = std::env::temp_dir().join(format!("myelin-session-package-{}.json", std::process::id()));
@@ -14637,7 +15160,7 @@ mod tests {
         let _ = std::fs::remove_file(da_manifest_path);
         let _ = std::fs::remove_file(bundle_path);
 
-        assert_eq!(submission.schema, "myelin-session-settlement-submission-v1");
+        assert_eq!(submission.schema, "myelin-session-settlement-submission-v2");
         assert!(submission.dry_run);
         assert!(!submission.submitted_to_rpc);
         assert!(!submission.accepted_by_rpc);
@@ -14650,7 +15173,7 @@ mod tests {
         assert_eq!(submission.molecule_transaction_hash, package.molecule_transaction_hash);
         assert!(submission.ckb_raw_tx_hash.is_some());
         assert!(submission.ckb_wtx_hash.is_some());
-        assert_eq!(submission.ckb_transaction_json["version"], "0xc001");
+        assert_eq!(submission.ckb_transaction_json["version"], "0x0");
         assert!(!submission.pre_submit.checked);
         assert_eq!(submission.pre_submit.input_count, 1);
         assert_eq!(submission.pre_submit.cell_dep_count, 0);
@@ -14755,7 +15278,7 @@ mod tests {
         let raw_hash = "aa".repeat(32);
         let expected_hash = format!("0x{raw_hash}");
         let submission = serde_json::json!({
-            "schema": "myelin-session-da-anchor-submission-v1",
+            "schema": "myelin-session-da-anchor-submission-v2",
             "ckb_raw_tx_hash": raw_hash,
             "rpc_result": expected_hash,
         });
@@ -14774,8 +15297,8 @@ mod tests {
         handle.join().expect("mock rpc thread");
         let _ = std::fs::remove_file(submission_path);
 
-        assert_eq!(report.schema, "myelin-session-submission-inclusion-v1");
-        assert_eq!(report.submission_schema, "myelin-session-da-anchor-submission-v1");
+        assert_eq!(report.schema, "myelin-session-submission-inclusion-v2");
+        assert_eq!(report.submission_schema, "myelin-session-da-anchor-submission-v2");
         assert_eq!(report.expected_ckb_tx_hash, expected_hash);
         assert_eq!(report.status.as_deref(), Some("committed"));
         assert_eq!(report.block_hash.as_deref(), Some(block_hash.as_str()));
@@ -14802,7 +15325,7 @@ mod tests {
         let package_data_hash = format!("0x{}", hex::encode(ckb_cell_data_hash(&decode_hex_bytes(&package_commitment).unwrap())));
         let verifier_code_hash = format!("0x{}", "44".repeat(32));
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "schema": "myelin-session-ckb-carrier-submission-v2",
             "ckb_raw_tx_hash": raw_hash,
             "rpc_result": expected_hash,
             "package_commitment": package_commitment,
@@ -14827,7 +15350,7 @@ mod tests {
         handle.join().expect("mock carrier inclusion rpc thread");
         let _ = std::fs::remove_file(submission_path);
 
-        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v1");
+        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v2");
         assert!(report.committed);
         assert!(report.live_l1_observed);
         assert_eq!(report.carrier_package_commitment.as_deref(), Some(package_commitment.as_str()));
@@ -14853,14 +15376,14 @@ mod tests {
         let package_commitment = format!("0x{}", "70".repeat(32));
         let payload = format!("0x{}", ["11", "22", "33", "44", "55"].map(|byte| byte.repeat(32)).join(""));
         let payload_bytes = decode_hex_bytes(&payload).unwrap();
-        let payload_type_args = carrier_payload_type_args_hex(Some("myelin-session-da-anchor-carrier-v1"), &payload_bytes);
+        let payload_type_args = carrier_payload_type_args_hex(Some("myelin-session-da-anchor-carrier-v2"), &payload_bytes);
         let verifier_code_hash = format!("0x{}", "44".repeat(32));
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "schema": "myelin-session-ckb-carrier-submission-v2",
             "ckb_raw_tx_hash": raw_hash,
             "rpc_result": expected_hash,
             "package_commitment": package_commitment,
-            "carrier_payload_kind": "myelin-session-da-anchor-carrier-v1",
+            "carrier_payload_kind": "myelin-session-da-anchor-carrier-v2",
             "carrier_payload": payload,
             "carrier_verifier": {
                 "type_script": { "code_hash": verifier_code_hash.clone(), "hash_type": "data2", "args": payload_type_args.clone() }
@@ -14884,10 +15407,10 @@ mod tests {
         handle.join().expect("mock carrier payload inclusion rpc thread");
         let _ = std::fs::remove_file(submission_path);
 
-        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v1");
+        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v2");
         assert!(report.committed);
         assert!(report.live_l1_observed);
-        assert_eq!(report.carrier_payload_kind.as_deref(), Some("myelin-session-da-anchor-carrier-v1"));
+        assert_eq!(report.carrier_payload_kind.as_deref(), Some("myelin-session-da-anchor-carrier-v2"));
         assert_eq!(report.carrier_package_commitment.as_deref(), Some(package_commitment.as_str()));
         assert_eq!(report.carrier_payload.as_deref(), Some(payload.as_str()));
         assert_eq!(report.carrier_output_data.as_deref(), Some(payload.as_str()));
@@ -14913,7 +15436,7 @@ mod tests {
         let expected_type_args = format!("0x{}", hex::encode(ckb_cell_data_hash(&decode_hex_bytes(&package_commitment).unwrap())));
         let verifier_code_hash = format!("0x{}", "44".repeat(32));
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "schema": "myelin-session-ckb-carrier-submission-v2",
             "ckb_raw_tx_hash": raw_hash,
             "rpc_result": expected_hash,
             "package_commitment": package_commitment,
@@ -14959,7 +15482,7 @@ mod tests {
         let expected_type_args = format!("0x{}", hex::encode(ckb_cell_data_hash(&decode_hex_bytes(&package_commitment).unwrap())));
         let verifier_code_hash = format!("0x{}", "44".repeat(32));
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "schema": "myelin-session-ckb-carrier-submission-v2",
             "ckb_raw_tx_hash": raw_hash,
             "rpc_result": expected_hash,
             "package_commitment": package_commitment,
@@ -15004,7 +15527,7 @@ mod tests {
         let wrong_expected_code_hash = format!("0x{}", "45".repeat(32));
         let observed_code_hash = format!("0x{}", "44".repeat(32));
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "schema": "myelin-session-ckb-carrier-submission-v2",
             "ckb_raw_tx_hash": raw_hash,
             "rpc_result": expected_hash,
             "package_commitment": package_commitment,
@@ -15051,7 +15574,7 @@ mod tests {
         let raw_hash = "cc".repeat(32);
         let expected_hash = format!("0x{raw_hash}");
         let submission = serde_json::json!({
-            "schema": "myelin-session-settlement-submission-v1",
+            "schema": "myelin-session-settlement-submission-v2",
             "ckb_raw_tx_hash": raw_hash,
             "rpc_result": null,
         });
@@ -15064,7 +15587,7 @@ mod tests {
         handle.join().expect("mock rpc thread");
         let _ = std::fs::remove_file(submission_path);
 
-        assert_eq!(report.submission_schema, "myelin-session-settlement-submission-v1");
+        assert_eq!(report.submission_schema, "myelin-session-settlement-submission-v2");
         assert_eq!(report.expected_ckb_tx_hash, expected_hash);
         assert_eq!(report.status.as_deref(), Some("pending"));
         assert!(report.found);
@@ -15078,9 +15601,9 @@ mod tests {
         let expected_hash = format!("0x{}", "aa".repeat(32));
         let block_hash = format!("0x{}", "bb".repeat(32));
         let inclusion = SessionSubmissionInclusionReport {
-            schema: "myelin-session-submission-inclusion-v1".to_owned(),
+            schema: "myelin-session-submission-inclusion-v2".to_owned(),
             submission: "session-da-anchor-submit.json".to_owned(),
-            submission_schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+            submission_schema: "myelin-session-da-anchor-submission-v2".to_owned(),
             rpc_url: "http://127.0.0.1:8114".to_owned(),
             expected_ckb_tx_hash: expected_hash.clone(),
             min_status: "committed".to_owned(),
@@ -15120,7 +15643,7 @@ mod tests {
         handle.join().expect("mock tip rpc thread");
         let _ = std::fs::remove_file(inclusion_path);
 
-        assert_eq!(report.schema, "myelin-session-submission-finality-v1");
+        assert_eq!(report.schema, "myelin-session-submission-finality-v2");
         assert_eq!(report.expected_ckb_tx_hash, expected_hash);
         assert_eq!(report.committed_block_hash.as_deref(), Some(block_hash.as_str()));
         assert_eq!(report.committed_block_number.as_deref(), Some("0x64"));
@@ -15137,9 +15660,9 @@ mod tests {
     fn session_submission_finality_rejects_shallow_confirmation_depth() {
         let expected_hash = format!("0x{}", "dd".repeat(32));
         let inclusion = SessionSubmissionInclusionReport {
-            schema: "myelin-session-submission-inclusion-v1".to_owned(),
+            schema: "myelin-session-submission-inclusion-v2".to_owned(),
             submission: "session-settlement-submit.json".to_owned(),
-            submission_schema: "myelin-session-settlement-submission-v1".to_owned(),
+            submission_schema: "myelin-session-settlement-submission-v2".to_owned(),
             rpc_url: "http://127.0.0.1:8114".to_owned(),
             expected_ckb_tx_hash: expected_hash.clone(),
             min_status: "committed".to_owned(),
@@ -15192,9 +15715,9 @@ mod tests {
         let expected_hash = format!("0x{}", "99".repeat(32));
         let block_hash = format!("0x{}", "aa".repeat(32));
         let inclusion = SessionSubmissionInclusionReport {
-            schema: "myelin-session-submission-inclusion-v1".to_owned(),
+            schema: "myelin-session-submission-inclusion-v2".to_owned(),
             submission: "session-da-anchor-submit.json".to_owned(),
-            submission_schema: "myelin-session-da-anchor-submission-v1".to_owned(),
+            submission_schema: "myelin-session-da-anchor-submission-v2".to_owned(),
             rpc_url: "http://127.0.0.1:8114".to_owned(),
             expected_ckb_tx_hash: expected_hash.clone(),
             min_status: "committed".to_owned(),
@@ -15239,7 +15762,7 @@ mod tests {
         handle.join().expect("mock stability rpc thread");
         let _ = std::fs::remove_file(inclusion_path);
 
-        assert_eq!(report.schema, "myelin-session-submission-stability-v1");
+        assert_eq!(report.schema, "myelin-session-submission-stability-v2");
         assert_eq!(report.expected_ckb_tx_hash, expected_hash);
         assert_eq!(report.expected_block_hash.as_deref(), Some(block_hash.as_str()));
         assert_eq!(report.observed_block_hash.as_deref(), Some(block_hash.as_str()));
@@ -15256,9 +15779,9 @@ mod tests {
         let original_block_hash = format!("0x{}", "bc".repeat(32));
         let moved_block_hash = format!("0x{}", "cd".repeat(32));
         let inclusion = SessionSubmissionInclusionReport {
-            schema: "myelin-session-submission-inclusion-v1".to_owned(),
+            schema: "myelin-session-submission-inclusion-v2".to_owned(),
             submission: "session-settlement-submit.json".to_owned(),
-            submission_schema: "myelin-session-settlement-submission-v1".to_owned(),
+            submission_schema: "myelin-session-settlement-submission-v2".to_owned(),
             rpc_url: "http://127.0.0.1:8114".to_owned(),
             expected_ckb_tx_hash: expected_hash.clone(),
             min_status: "committed".to_owned(),
@@ -15318,7 +15841,7 @@ mod tests {
         let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "11".repeat(32)), "index": "0x0"});
         let dep_out_point = serde_json::json!({"tx_hash": format!("0x{}", "22".repeat(32)), "index": "0x1"});
         let submission = serde_json::json!({
-            "schema": "myelin-session-da-anchor-submission-v1",
+            "schema": "myelin-session-da-anchor-submission-v2",
             "ckb_raw_tx_hash": "aa".repeat(32),
             "rpc_result": null,
             "ckb_transaction_json": {
@@ -15338,8 +15861,8 @@ mod tests {
         handle.join().expect("mock live-cell rpc thread");
         let _ = std::fs::remove_file(submission_path);
 
-        assert_eq!(report.schema, "myelin-session-submission-context-v1");
-        assert_eq!(report.submission_schema, "myelin-session-da-anchor-submission-v1");
+        assert_eq!(report.schema, "myelin-session-submission-context-v2");
+        assert_eq!(report.submission_schema, "myelin-session-da-anchor-submission-v2");
         assert_eq!(report.request_method, "get_live_cell");
         assert_eq!(report.input_count, 1);
         assert_eq!(report.cell_dep_count, 1);
@@ -15357,7 +15880,7 @@ mod tests {
         let dep_out_point = serde_json::json!({"tx_hash": format!("0x{}", "13".repeat(32)), "index": "0x5"});
         let verifier_code_hash = format!("0x{}", "14".repeat(32));
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "schema": "myelin-session-ckb-carrier-submission-v2",
             "ckb_raw_tx_hash": "ab".repeat(32),
             "rpc_result": "ab".repeat(32),
             "carrier_verifier": {
@@ -15389,7 +15912,7 @@ mod tests {
         handle.join().expect("mock live-cell rpc thread");
         let _ = std::fs::remove_file(submission_path);
 
-        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v1");
+        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v2");
         assert_eq!(report.expected_ckb_tx_hash, format!("0x{}", "ab".repeat(32)));
         assert_eq!(report.carrier_verifier_code_hash.as_deref(), Some(verifier_code_hash.as_str()));
         assert_eq!(report.carrier_verifier_code_dep_key.as_deref(), Some(ckb_out_point_key(&dep_out_point).unwrap().as_str()));
@@ -15405,7 +15928,7 @@ mod tests {
         let verifier_code_hash = format!("0x{}", "17".repeat(32));
         let wrong_data_hash = format!("0x{}", "18".repeat(32));
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "schema": "myelin-session-ckb-carrier-submission-v2",
             "ckb_raw_tx_hash": "ad".repeat(32),
             "rpc_result": "ad".repeat(32),
             "carrier_verifier": {
@@ -15435,7 +15958,7 @@ mod tests {
         handle.join().expect("mock carrier code hash mismatch live-cell rpc thread");
         let _ = std::fs::remove_file(submission_path);
 
-        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v1");
+        assert_eq!(report.submission_schema, "myelin-session-ckb-carrier-submission-v2");
         assert!(report.all_inputs_live);
         assert!(report.all_cell_deps_live);
         assert_eq!(report.carrier_verifier_code_hash.as_deref(), Some(verifier_code_hash.as_str()));
@@ -15450,7 +15973,7 @@ mod tests {
         let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "33".repeat(32)), "index": "0x0"});
         let dep_out_point = serde_json::json!({"tx_hash": format!("0x{}", "44".repeat(32)), "index": "0x1"});
         let submission = serde_json::json!({
-            "schema": "myelin-session-settlement-submission-v1",
+            "schema": "myelin-session-settlement-submission-v2",
             "ckb_raw_tx_hash": "bb".repeat(32),
             "rpc_result": null,
             "ckb_transaction_json": {
@@ -15470,7 +15993,7 @@ mod tests {
         handle.join().expect("mock live-cell rpc thread");
         let _ = std::fs::remove_file(submission_path);
 
-        assert_eq!(report.submission_schema, "myelin-session-settlement-submission-v1");
+        assert_eq!(report.submission_schema, "myelin-session-settlement-submission-v2");
         assert_eq!(report.live_input_count, 0);
         assert_eq!(report.live_cell_dep_count, 1);
         assert!(!report.all_inputs_live);
@@ -15483,7 +16006,7 @@ mod tests {
     fn session_submission_economics_accepts_balanced_transaction_with_fee() {
         let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "55".repeat(32)), "index": "0x0"});
         let submission = serde_json::json!({
-            "schema": "myelin-session-da-anchor-submission-v1",
+            "schema": "myelin-session-da-anchor-submission-v2",
             "ckb_raw_tx_hash": "aa".repeat(32),
             "rpc_result": null,
             "ckb_transaction_json": {
@@ -15506,8 +16029,8 @@ mod tests {
         handle.join().expect("mock economics rpc thread");
         let _ = std::fs::remove_file(submission_path);
 
-        assert_eq!(report.schema, "myelin-session-submission-economics-v1");
-        assert_eq!(report.submission_schema, "myelin-session-da-anchor-submission-v1");
+        assert_eq!(report.schema, "myelin-session-submission-economics-v2");
+        assert_eq!(report.submission_schema, "myelin-session-da-anchor-submission-v2");
         assert_eq!(report.request_method, "get_live_cell");
         assert_eq!(report.input_count, 1);
         assert_eq!(report.output_count, 1);
@@ -15539,7 +16062,7 @@ mod tests {
     fn session_submission_economics_rejects_underfunded_transaction() {
         let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "66".repeat(32)), "index": "0x0"});
         let submission = serde_json::json!({
-            "schema": "myelin-session-settlement-submission-v1",
+            "schema": "myelin-session-settlement-submission-v2",
             "ckb_raw_tx_hash": "bb".repeat(32),
             "rpc_result": null,
             "ckb_transaction_json": {
@@ -15575,7 +16098,7 @@ mod tests {
     fn session_submission_economics_rejects_insufficient_fee_rate() {
         let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "77".repeat(32)), "index": "0x0"});
         let submission = serde_json::json!({
-            "schema": "myelin-session-da-anchor-submission-v1",
+            "schema": "myelin-session-da-anchor-submission-v2",
             "ckb_raw_tx_hash": "cc".repeat(32),
             "rpc_result": null,
             "ckb_transaction_json": {
@@ -15611,7 +16134,7 @@ mod tests {
     fn session_submission_economics_rejects_excessive_fee_without_change() {
         let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "88".repeat(32)), "index": "0x0"});
         let submission = serde_json::json!({
-            "schema": "myelin-session-settlement-submission-v1",
+            "schema": "myelin-session-settlement-submission-v2",
             "ckb_raw_tx_hash": "dd".repeat(32),
             "rpc_result": null,
             "ckb_transaction_json": {
@@ -15649,7 +16172,7 @@ mod tests {
     fn session_submission_economics_reports_explicit_change_output() {
         let input_out_point = serde_json::json!({"tx_hash": format!("0x{}", "89".repeat(32)), "index": "0x0"});
         let submission = serde_json::json!({
-            "schema": "myelin-session-ckb-carrier-submission-v1",
+            "schema": "myelin-session-ckb-carrier-submission-v2",
             "ckb_raw_tx_hash": "de".repeat(32),
             "rpc_result": null,
             "carrier_payload": format!("0x{}", "11".repeat(160)),
@@ -15737,6 +16260,7 @@ mod tests {
             lock_code_hash: format!("0x{}", "33".repeat(32)),
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
+            output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "34".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             verifier_code_hash: format!("0x{}", "35".repeat(32)),
@@ -15759,7 +16283,7 @@ mod tests {
         let _ = std::fs::remove_file(package_path);
         let _ = std::fs::remove_file(verifier_source);
 
-        assert_eq!(report["schema"], "myelin-session-ckb-carrier-submission-v1");
+        assert_eq!(report["schema"], "myelin-session-ckb-carrier-submission-v2");
         assert_eq!(report["dry_run"], false);
         assert_eq!(report["submitted_to_rpc"], false);
         assert_eq!(report["accepted_by_rpc"], false);
@@ -15772,7 +16296,7 @@ mod tests {
         assert_eq!(report["carrier_identity"], package["da_manifest_hash"]);
         assert_eq!(
             report["carrier_type_args"],
-            carrier_payload_type_args_hex(Some("myelin-session-da-anchor-carrier-v1"), &payload_bytes)
+            carrier_payload_type_args_hex(Some("myelin-session-da-anchor-carrier-v2"), &payload_bytes)
         );
         assert_eq!(report["input_capacity_shannons"], input_capacity);
         assert_eq!(report["carrier_capacity_shannons"], carrier_capacity);
@@ -15825,6 +16349,7 @@ mod tests {
             lock_code_hash: format!("0x{}", "43".repeat(32)),
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
+            output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "44".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             verifier_code_hash: format!("0x{}", "45".repeat(32)),
@@ -15853,13 +16378,13 @@ mod tests {
         );
 
         let mut mismatched_kind = da_anchor_package_from_carrier_payload(&payload);
-        mismatched_kind["carrier_payload_kind"] = Value::String("myelin-session-settlement-carrier-v1".to_owned());
+        mismatched_kind["carrier_payload_kind"] = Value::String("myelin-session-settlement-carrier-v2".to_owned());
         let kind_path = write_temp_json("carrier-submission-mismatched-kind-package", &mismatched_kind);
         let kind_error =
             session_carrier_submission(base_args(kind_path.clone())).expect_err("carrier submission should reject package kind drift");
         let _ = std::fs::remove_file(kind_path);
         assert!(
-            kind_error.to_string().contains("DA-anchor package must use myelin-session-da-anchor-carrier-v1 carrier payload kind"),
+            kind_error.to_string().contains("DA-anchor package must use myelin-session-da-anchor-carrier-v2 carrier payload kind"),
             "{kind_error}"
         );
     }
@@ -15890,6 +16415,7 @@ mod tests {
             lock_code_hash: format!("0x{}", "b3".repeat(32)),
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
+            output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "b4".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             verifier_code_hash: format!("0x{}", "b5".repeat(32)),
@@ -15941,6 +16467,7 @@ mod tests {
             lock_code_hash: format!("0x{}", "be".repeat(32)),
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
+            output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "bf".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             verifier_code_hash: format!("0x{}", "c0".repeat(32)),
@@ -15999,6 +16526,7 @@ mod tests {
             lock_code_hash: format!("0x{}", "d3".repeat(32)),
             lock_hash_type: "data".to_owned(),
             lock_args: authority_lock_args.clone(),
+            output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "d4".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             verifier_code_hash: format!("0x{}", "d5".repeat(32)),
@@ -16017,8 +16545,8 @@ mod tests {
         .expect("build final settlement submission with authority input");
         let _ = std::fs::remove_file(package_path);
 
-        assert_eq!(report["schema"], "myelin-session-ckb-final-script-submission-v1");
-        assert_eq!(report["package_kind"], "myelin-session-settlement-package-v1");
+        assert_eq!(report["schema"], "myelin-session-ckb-final-script-submission-v2");
+        assert_eq!(report["package_kind"], "myelin-session-settlement-package-v2");
         assert_eq!(report["authority_input_present"], true);
         assert_eq!(report["authority_input"]["tx_hash"], authority_tx_hash);
         assert_eq!(report["authority_input"]["index"], authority_index);
@@ -16093,6 +16621,7 @@ mod tests {
             lock_code_hash: lock_code_hash.clone(),
             lock_hash_type: "data".to_owned(),
             lock_args: authority_lock_args.clone(),
+            output_lock_args: None,
             lock_code_dep_tx_hash: lock_dep_tx_hash.clone(),
             lock_code_dep_index: lock_dep_index.clone(),
             verifier_code_hash: verifier_code_hash.clone(),
@@ -16167,7 +16696,7 @@ mod tests {
             );
             cells
         };
-        let (url, handle) = spawn_carrier_submission_rpc_mock_with_request_count(valid_cells(), Some(accepted_tx_hash.clone()), 6);
+        let (url, handle) = spawn_carrier_submission_rpc_mock_with_request_count(valid_cells(), Some(accepted_tx_hash.clone()), 8);
         let report =
             session_carrier_submission(build_args(Some(url), true, true)).expect("submit final settlement after lock preflight");
         handle.join().expect("mock final-settlement lock preflight rpc thread");
@@ -16243,6 +16772,7 @@ mod tests {
             lock_code_hash: lock_code_hash.clone(),
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
+            output_lock_args: None,
             lock_code_dep_tx_hash: lock_dep_tx_hash.clone(),
             lock_code_dep_index: lock_dep_index.clone(),
             verifier_code_hash: verifier_code_hash.clone(),
@@ -16356,6 +16886,10 @@ mod tests {
         assert_eq!(report["pre_submit_lock_code_dep_live"], true);
         assert_eq!(report["pre_submit_verifier_code_dep_live"], true);
         assert_eq!(report["pre_submit_verifier_code_dep_data_hash_matches"], true);
+        validate_submission_rpc_result(&report, &accepted_tx_hash).expect("full-node admission evidence");
+        let mut tampered_admission = report.clone();
+        tampered_admission["rpc_admission"]["pool_accept_result"]["cycles"] = Value::String("not-a-quantity".to_owned());
+        assert!(validate_submission_rpc_result(&tampered_admission, &accepted_tx_hash).is_err());
     }
 
     #[test]
@@ -16420,6 +16954,7 @@ mod tests {
             lock_code_hash,
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
+            output_lock_args: None,
             lock_code_dep_tx_hash: lock_dep_tx_hash,
             lock_code_dep_index: lock_dep_index,
             verifier_code_hash,
@@ -16468,6 +17003,7 @@ mod tests {
             lock_code_hash: format!("0x{}", "83".repeat(32)),
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
+            output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "84".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             verifier_code_hash: format!("0x{}", "85".repeat(32)),
@@ -16514,6 +17050,7 @@ mod tests {
             lock_code_hash: format!("0x{}", "53".repeat(32)),
             lock_hash_type: "data".to_owned(),
             lock_args: "0x".to_owned(),
+            output_lock_args: None,
             lock_code_dep_tx_hash: format!("0x{}", "54".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             verifier_code_hash: format!("0x{}", "55".repeat(32)),
@@ -16570,7 +17107,7 @@ mod tests {
         let _ = std::fs::remove_file(finality_path);
         let _ = std::fs::remove_file(submission_path);
 
-        assert_eq!(report.schema, "myelin-session-submission-readiness-v1");
+        assert_eq!(report.schema, "myelin-session-submission-readiness-v2");
         assert_eq!(report.expected_ckb_tx_hash, expected_hash);
         assert!(report.report_hashes_match);
         assert!(report.submission_report_valid);
@@ -16815,7 +17352,7 @@ mod tests {
 
         assert_eq!(report.expected_ckb_tx_hash, expected_hash);
         assert!(report.report_hashes_match);
-        assert!(report.submission_report_valid);
+        assert!(!report.submission_report_valid);
         assert!(!report.submission_report_live_accepted);
         assert!(!report.submission_report_carrier_live_accepted);
         assert!(report.live_submission_required);
@@ -16838,7 +17375,7 @@ mod tests {
         let block_hash = format!("0x{}", "9c".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-carrier-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-carrier-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let submission_path = write_readiness_live_carrier_submission(&expected_hash, true);
@@ -16899,7 +17436,7 @@ mod tests {
         let block_hash = format!("0x{}", "9f".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let submission_path = write_readiness_live_final_script_submission(&expected_hash, true);
@@ -16955,7 +17492,7 @@ mod tests {
         let block_hash = format!("0x{}", "8a".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let base_submission_path = write_readiness_live_final_script_submission(&expected_hash, true);
@@ -17008,7 +17545,7 @@ mod tests {
         let block_hash = format!("0x{}", "8a".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let base_submission_path = write_readiness_live_final_script_submission(&expected_hash, true);
@@ -17063,7 +17600,7 @@ mod tests {
         let block_hash = format!("0x{}", "82".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let submission_path = write_readiness_live_final_script_submission(&expected_hash, true);
@@ -17121,7 +17658,7 @@ mod tests {
         let block_hash = format!("0x{}", "87".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let submission_path = write_readiness_live_final_settlement_production_submission(&expected_hash);
@@ -17173,7 +17710,7 @@ mod tests {
         let block_hash = format!("0x{}", "84".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let submission_path = write_readiness_live_final_script_submission(&expected_hash, true);
@@ -17267,7 +17804,7 @@ mod tests {
         let block_hash = format!("0x{}", "8b".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let submission_path = write_readiness_live_final_script_submission_without_preflight(&expected_hash);
@@ -17316,7 +17853,7 @@ mod tests {
         let block_hash = format!("0x{}", "8d".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let submission_path = write_readiness_live_final_settlement_submission(&expected_hash, false);
@@ -17363,7 +17900,7 @@ mod tests {
                 .expect("valid final settlement JSON");
         assert!(submission_report_final_l1_script_live_accepted(
             &valid_submission,
-            "myelin-session-ckb-final-script-submission-v1",
+            "myelin-session-ckb-final-script-submission-v2",
             &expected_hash
         ));
         let _ = std::fs::remove_file(valid_submission_path);
@@ -17375,7 +17912,7 @@ mod tests {
         let block_hash = format!("0x{}", "87".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let valid_submission_path = write_readiness_live_final_settlement_submission(&expected_hash, true);
@@ -17432,7 +17969,7 @@ mod tests {
         let block_hash = format!("0x{}", "8f".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-final-script-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-final-script-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let valid_submission_path = write_readiness_live_final_settlement_submission(&expected_hash, true);
@@ -17489,7 +18026,7 @@ mod tests {
         let block_hash = format!("0x{}", "9e".repeat(32));
         let (mut context, mut economics, mut inclusion, mut stability, mut finality) =
             readiness_fixture_reports(expected_hash.clone(), block_hash);
-        context.submission_schema = "myelin-session-ckb-carrier-submission-v1".to_owned();
+        context.submission_schema = "myelin-session-ckb-carrier-submission-v2".to_owned();
         economics.submission_schema = context.submission_schema.clone();
         inclusion.submission_schema = context.submission_schema.clone();
         let submission_path = write_readiness_recorded_carrier_submission(&expected_hash);
@@ -17803,17 +18340,17 @@ mod tests {
     }
 
     #[test]
-    fn session_fixture_tendermint_commit_court_bundle_verifies() {
-        let open = session_open_fixture("tendermint").expect("open session");
+    fn session_fixture_weighted_precommit_commit_court_bundle_verifies() {
+        let open = session_open_fixture("weighted-precommit").expect("open session");
         let open_path = std::env::temp_dir().join(format!("myelin-session-open-tm-{}.json", std::process::id()));
         std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
         let commit = session_commit_fixture(open_path.clone()).expect("commit session");
         let _ = std::fs::remove_file(open_path);
 
-        assert_eq!(commit.consensus_kind, "tendermint");
+        assert_eq!(commit.consensus_kind, "weighted-precommit");
         assert!(!commit.static_committee_evidence.finalised);
-        let tm = commit.tendermint_evidence.as_ref().expect("tendermint evidence");
-        assert_eq!(tm.consensus_kind, "tendermint");
+        let tm = commit.weighted_precommit_evidence.as_ref().expect("weighted_precommit evidence");
+        assert_eq!(tm.consensus_kind, "weighted-precommit");
         assert_eq!(tm.certificate_step, "precommit");
         assert!(tm.finalised);
         assert_eq!(tm.signatures.len(), 2);
@@ -17822,7 +18359,7 @@ mod tests {
         std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
         let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
         let _ = std::fs::remove_file(commit_path);
-        assert!(bundle.tendermint_evidence.is_some());
+        assert!(bundle.weighted_precommit_evidence.is_some());
 
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-tm-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
@@ -17831,14 +18368,14 @@ mod tests {
 
         assert!(verification.valid);
         assert!(verification.checks.iter().all(|check| check.ok));
-        assert!(verification.checks.iter().any(|check| check.name == "tendermint-certificate"));
+        assert!(verification.checks.iter().any(|check| check.name == "weighted-precommit-certificate"));
         assert!(!verification.checks.iter().any(|check| check.name == "committee-certificate"));
     }
 
     #[test]
     fn session_fixture_state_transition_is_consensus_agnostic() {
         let static_open = session_open_fixture("static-closed-committee").expect("open static");
-        let tm_open = session_open_fixture("tendermint").expect("open tendermint");
+        let tm_open = session_open_fixture("weighted-precommit").expect("open weighted_precommit");
         assert_eq!(static_open.session_id, tm_open.session_id);
         assert_eq!(static_open.initial_state_root, tm_open.initial_state_root);
 
@@ -17847,7 +18384,7 @@ mod tests {
         std::fs::write(&static_path, serde_json::to_vec(&static_open).unwrap()).unwrap();
         std::fs::write(&tm_path, serde_json::to_vec(&tm_open).unwrap()).unwrap();
         let static_commit = session_commit_fixture(static_path.clone()).expect("commit static");
-        let tm_commit = session_commit_fixture(tm_path.clone()).expect("commit tendermint");
+        let tm_commit = session_commit_fixture(tm_path.clone()).expect("commit weighted_precommit");
         let _ = std::fs::remove_file(static_path);
         let _ = std::fs::remove_file(tm_path);
 
@@ -17890,7 +18427,7 @@ mod tests {
     #[test]
     fn runtime_smoke_static_closed_committee_finalises_a_block() {
         let report = runtime_smoke("static-closed-committee").expect("smoke static");
-        assert_eq!(report.schema, "myelin-runtime-smoke-v1");
+        assert_eq!(report.schema, "myelin-runtime-smoke-v2");
         assert_eq!(report.consensus_kind, "static-closed-committee");
         assert_eq!(report.vm_profile, "no-vm-runtime-smoke");
         assert_eq!(report.ckb_spawn_ipc_enabled, CKB_SPAWN_IPC_SYSCALLS_ENABLED);
@@ -17906,10 +18443,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_smoke_tendermint_finalises_a_block() {
-        let report = runtime_smoke("tendermint").expect("smoke tendermint");
-        assert_eq!(report.schema, "myelin-runtime-smoke-v1");
-        assert_eq!(report.consensus_kind, "tendermint");
+    fn runtime_smoke_weighted_precommit_finalises_a_block() {
+        let report = runtime_smoke("weighted-precommit").expect("smoke weighted_precommit");
+        assert_eq!(report.schema, "myelin-runtime-smoke-v2");
+        assert_eq!(report.consensus_kind, "weighted-precommit");
         assert_eq!(report.vm_profile, "no-vm-runtime-smoke");
         assert_eq!(report.ckb_spawn_ipc_enabled, CKB_SPAWN_IPC_SYSCALLS_ENABLED);
         assert_eq!(report.cell_tx_id.len(), 64);
@@ -17930,18 +18467,18 @@ mod tests {
         // engines. Only the certificate_hash (the finalisation signature
         // domain) is allowed to differ.
         let static_report = runtime_smoke("static-closed-committee").expect("smoke static");
-        let tendermint_report = runtime_smoke("tendermint").expect("smoke tendermint");
+        let weighted_precommit_report = runtime_smoke("weighted-precommit").expect("smoke weighted_precommit");
 
-        assert_eq!(static_report.cell_tx_id, tendermint_report.cell_tx_id);
-        assert_eq!(static_report.cell_wtxid, tendermint_report.cell_wtxid);
-        assert_eq!(static_report.state_root_before, tendermint_report.state_root_before);
-        assert_eq!(static_report.state_root_after, tendermint_report.state_root_after);
-        assert_eq!(static_report.pool_size_before, tendermint_report.pool_size_before);
-        assert_eq!(static_report.pool_size_after, tendermint_report.pool_size_after);
-        assert_eq!(static_report.vm_profile, tendermint_report.vm_profile);
-        assert_eq!(static_report.ckb_spawn_ipc_enabled, tendermint_report.ckb_spawn_ipc_enabled);
+        assert_eq!(static_report.cell_tx_id, weighted_precommit_report.cell_tx_id);
+        assert_eq!(static_report.cell_wtxid, weighted_precommit_report.cell_wtxid);
+        assert_eq!(static_report.state_root_before, weighted_precommit_report.state_root_before);
+        assert_eq!(static_report.state_root_after, weighted_precommit_report.state_root_after);
+        assert_eq!(static_report.pool_size_before, weighted_precommit_report.pool_size_before);
+        assert_eq!(static_report.pool_size_after, weighted_precommit_report.pool_size_after);
+        assert_eq!(static_report.vm_profile, weighted_precommit_report.vm_profile);
+        assert_eq!(static_report.ckb_spawn_ipc_enabled, weighted_precommit_report.ckb_spawn_ipc_enabled);
         assert_ne!(
-            static_report.certificate_hash, tendermint_report.certificate_hash,
+            static_report.certificate_hash, weighted_precommit_report.certificate_hash,
             "the two engines must use different signature domains"
         );
     }

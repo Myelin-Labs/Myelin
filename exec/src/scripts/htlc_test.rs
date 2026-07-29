@@ -101,7 +101,7 @@ mod tests {
         let witness = build_recipient_witness(signature, secret);
 
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -148,7 +148,7 @@ mod tests {
         let witness = build_recipient_witness(signature, wrong_secret);
 
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -191,7 +191,7 @@ mod tests {
         let witness = build_sender_witness(signature);
 
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -235,7 +235,7 @@ mod tests {
         let witness = build_sender_witness(signature);
 
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -274,7 +274,7 @@ mod tests {
 
         let witness = build_recipient_witness(wrong_signature, secret);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],

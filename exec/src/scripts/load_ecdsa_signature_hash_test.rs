@@ -79,7 +79,7 @@ mod tests {
         let input_out_point = OutPoint::new([0x71; 32], 0);
         let resolved_input = build_resolved_input(code_hash);
         let tx_without_witness = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0x1122_3344_5566_7788)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -106,7 +106,7 @@ mod tests {
         let input_out_point = OutPoint::new([0x72; 32], 0);
         let resolved_input = build_resolved_input(code_hash);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 7)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -127,7 +127,7 @@ mod tests {
         let input_out_point = OutPoint::new([0x73; 32], 0);
         let resolved_input = build_resolved_input(code_hash);
         let tx_without_witness = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],

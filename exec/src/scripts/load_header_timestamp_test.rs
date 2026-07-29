@@ -53,7 +53,7 @@ mod tests {
         let header_hash = [0x77; 32];
         let provider = build_provider(code_hash, input_out_point, header_hash, EXPECTED_TIMESTAMP);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![header_hash],
@@ -75,7 +75,7 @@ mod tests {
         let header_hash = [0x79; 32];
         let provider = build_provider(code_hash, input_out_point, header_hash, 7);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![header_hash],

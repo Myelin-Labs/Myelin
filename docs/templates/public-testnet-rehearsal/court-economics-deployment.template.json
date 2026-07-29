@@ -1,6 +1,5 @@
 {
-  "_template_note": "Replace fields from the generated court_economics object before passing to session settlement-intent.",
-  "schema": "myelin-session-court-economics-deployment-v1",
+  "schema": "myelin-session-court-economics-deployment-v2",
   "network": "ckb-testnet",
   "verifier_code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "verifier_hash_type": "data2",

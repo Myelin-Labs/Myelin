@@ -1,13 +1,14 @@
 [package]
 name = "myelin-mempool"
-version = "0.1.0"
+version = "0.10.0"
 edition = "2021"
 license = "MIT"
 description = "Cell transaction memory pool"
 
 [dependencies]
 # Core dependencies
-myelin-exec = { path = "../exec", version = "0.1.0" }
+myelin-exec = { path = "../exec", version = "0.10.0" }
+myelin-state = { path = "../state", version = "0.10.0" }
 
 # Collections (deterministic)
 indexmap = "=2.2.6"

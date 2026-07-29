@@ -1,67 +1,39 @@
-# Myelin CKB Semantic Deviations
+# Myelin CKB semantic deviations
 
-> A focused list of every place where Myelin deliberately diverges
-> from upstream CKB semantics, together with the reason for the
-> divergence and the place in code that surfaces the deviation.
+This register lists deliberate differences between the current Myelin protocol boundary and upstream CKB. Wire-aligned behavior is listed separately so it is not mislabeled as a deviation.
 
-This document pairs with `MYELIN_CKB_PROJECTION_AUDIT.md`. The
-projection audit describes *how* the projection layer reports
-deviations. This document describes *what* the deviations are.
+## Deliberate deviations
 
-## 1. Deviation register
+| ID | Deviation | Code boundary | Reason and consequence |
+| --- | --- | --- | --- |
+| D-01 | `Script::hash_v1` is a Myelin-local BLAKE3/domain-separated identity, not the CKB script hash. | `exec/src/celltx/types.rs` | Local registries use a stable Myelin identity. CKB projection uses the CKB Molecule script hash instead. These hashes must never be substituted for one another. |
+| D-02 | `VmSemantics::MyelinExtended` exposes Myelin-only helper behavior. | `exec/src/vm/` | It exists for non-court workloads. Session and court paths force `CkbStrict` and record `vm_profile = "ckb-strict-basic"`; extended execution cannot support a CKB script-verification claim. |
+| D-03 | `SchedulerPlan` and `CellDAG` are trusted off-chain sidecars, not CKB transaction fields or witnesses. | `exec/src/scheduler/`, `cellscript-adapter/`, `state/src/conflict.rs` | CKB validates transaction conflicts through consumed Cells and scripts; Myelin additionally schedules logical application domains. The plan is bound to the raw txid and concrete conflict hashes, and its commitment is carried only in Myelin evidence. |
+| D-04 | Typed conflict hashes and typed-data hashes use Myelin BLAKE3 domains. | `exec/src/celltx/types.rs`, `state/src/conflict.rs` | These are scheduler/evidence commitments, not CKB consensus hashes. A conflict key may be Cell ID, one schema field, or a canonical composite, but it must be resolved from authenticated Cell state. |
+| D-05 | `MyelinBlock` contains `consensus_kind`, state roots, ordered raw-tx commitments, DA commitments, and a scheduler commitment. | `consensus/src/lib.rs` | It is a finite-session block, not a CKB header. Its canonical hash binds execution and finality evidence at the Myelin layer. |
+| D-06 | Finality is a configured closed validator set: static committee or weighted precommit. | `consensus/src/lib.rs` | This supports benchmarks and controlled sessions. It is not Nakamoto consensus or permissionless L2 security. The two signature domains are distinct, while both engines sign the same canonical session block. |
+| D-07 | State roots use Myelin's live/consumed/created Cell-state commitment rather than CKB's global state model. | `state/` | The root is local session evidence. Atomic transitions require the exact pre-root and produce an authenticated post-root; it is not a CKB header field. |
+| D-08 | The mempool uses deterministic package fee density, unlockability, conflict domains, and explicit base-root binding. | `mempool/` | Mempool policy is local and never part of a CKB projection claim. Multi-parent packages are rejected until a combined-overlay proof exists. |
+| D-09 | DA manifests, court bundles, settlement packages, and submission/readiness reports are Myelin host artifacts. | `cli/src/main.rs`, `state/src/segments/` | They are hash-bound input/evidence shapes. A dry run proves only request construction; RPC admission proves validation and observation but not commitment; commitment/finality requires separate chain evidence. None alone proves an on-chain court verdict. |
+| D-10 | The externally versioned CellScript compiler is connected through an attested process adapter. | `cellscript-adapter/` | Compiler metadata is untrusted until the binary/source/artifact/metadata hashes and pinned version are verified. Binding names are diagnostic only; state-side resolution creates the scheduler domains. |
+| D-11 | Higher-stage CKB projection evidence is obtained through an authoritative-node adapter rather than by embedding a CKB full node. | `ckb-adapter/` | Myelin commits the resolved context and node/rule identity, runs strict local VM verification over that context, and locally verifies inclusion proofs. Contextual consensus authority still comes from the selected CKB node; node trust, endpoint policy, and chain selection remain explicit operational inputs. |
 
-| ID | Deviation | Where it lives in code | Why it exists |
-|---|---|---|---|
-| D-01 | Myelin uses a custom `CellTx` version (`CELL_TX_VERSION = 0xC001`) instead of CKB's `0`. | `exec/src/lib.rs::CELL_TX_VERSION`, `exec/src/projection.rs::project_cell_tx_to_ckb` | Myelin is a finite off-chain Cell ledger, not a CKB full node. The version byte is reserved so a future Myelin wire layout can be distinguished from CKB at the byte level. Projection reports this as `ProjectionWarning::NonCkbTransactionVersion`. |
-| D-02 | Myelin has a `NetworkId` enum that is not present in CKB. | `exec/src/lib.rs::NetworkId` | Reserved for future session-network tagging. Not currently serialised into the CKB projection. |
-| D-03 | Myelin scheduler witnesses (CellScript typed-cell scheduler metadata) are not part of the CKB Molecule transaction layout. | `exec/src/celltx/types.rs::CellScriptSchedulerWitness`, `exec/src/celltx/types.rs::push_cellscript_scheduler_witness` | The scheduler witness is a Myelin-only artefact carried as a regular witness slot. The projection layer does not encode it into the CKB Molecule table; it is preserved as a typed witness for Myelin's own scheduler. |
-| D-04 | Myelin's `script` hash is domain-separated under `myelin:script-hash:v1` and is not the CKB script hash. | `exec/src/celltx/types.rs::Script::hash_v1` | The Myelin script hash is the local, versioned canonical form. CKB script hash is also exposed via `ckb_script_hash_molecule` for projection. |
-| D-05 | Myelin has an extended `VmSemantics::MyelinExtended` profile that allows `HeaderDep`-mapped `LOAD_CELL`, Myelin-only helper syscalls in the 3001..3004 range, the Myelin session header ABI, and a legacy group source encoding. CKB VM v2 spawn/IPC is a separate `vm-ipc` build feature, not part of the minimal court profile. | `exec/src/vm/mod.rs::VmSemantics`; `exec/src/vm/mod.rs::CKB_SPAWN_IPC_SYSCALLS_ENABLED` | The default semantic profile remains `MyelinExtended`. CKB-strict mode (`CkbStrict`) is selectable so the CKB-VM path is reproducible against upstream CKB semantics. The CLI's `teeworlds vm-probe` runs with `CkbStrict`, and court bundles record `vm_profile = "ckb-strict-basic"` with `ckb_spawn_ipc_required = false`. |
-| D-06 | Myelin `Header.proposals_hash` and `Header.nonce` are *kept* in the CKB RawHeader Molecule struct even though Myelin does not perform PoW. | `exec/src/serialization/molecule_compat.rs::CkbRawHeader`, `CkbHeader` | The CKB Molecule wire layout requires the bytes to exist at the expected positions. The doc comments were rewritten from "Proof-of-work" / "PoW nonce" to "Compact CKB header target field" / "CKB header nonce field" in the previous preparation pass, so the code is honest about being wire-faithful rather than mining. |
-| D-07 | Myelin `CellInput.since` follows the CKB `since` bit layout (bit 63 = relative, bit 62 = block number). | `exec/src/celltx/types.rs::CellInput` | The bit layout is the same as CKB. The only Myelin-specific field is the encoding, which is plain little-endian `u64` to match CKB. |
-| D-08 | Myelin `CellOutput.capacity` follows the CKB occupied-capacity formula (`8 + 32 + 1 + lock.args.len() + 32 + 1 + type.args.len() + data_len`). | `exec/src/celltx/types.rs::CellOutput::occupied_capacity` | The CKB formula is required for a CKB-shaped projection to remain valid. Myelin's `verify_capacity` enforces it. |
-| D-09 | Myelin `CellDep` supports `DepType::Code` and `DepType::DepGroup` like CKB. The DepGroup cell-data layout defaults to the CKB Molecule `OutPointVec` for projection; the historical `count || outpoints` Myelin layout is still available via `DepGroupDataAbi::Myelin`. | `exec/src/celltx/types.rs::parse_dep_group_data`, `parse_dep_group_data_for_abi` | Both encodings are supported so existing Myelin tests/builders don't break, while the CKB projection uses the canonical Molecule layout. |
-| D-10 | Myelin carries a witness-based typed-data-hash binding through `compute_typed_data_hash` for typed outputs. | `exec/src/celltx/types.rs::compute_typed_data_hash` | This is the typed-cell analogue of CKB's type-script commitment and is the input to the CKB-style projection's typed data. |
-| D-11 | Myelin uses a `fee_density * unlockability` mempool scoring policy rather than a CKB-style fee/cycles policy. | `mempool/src/scorer.rs` | The Myelin policy is the local one; it is not part of the CKB projection surface because CKB does not embed mempool policy. |
-| D-12 | Myelin has an extra `header_deps: Vec<[u8; 32]>` field on `CellTx` (CKB has this too but as `Vec<OutPoint>`). | `exec/src/celltx/types.rs::CellTx::new_with_header_deps` | This is a thin divergence: Myelin stores the 32-byte header hash directly to keep the projection layer simple. The CKB projection layer encodes `header_deps` as `OutPointVec`-style. |
-| D-13 | Myelin's `MyelinBlock` carries a `consensus_kind` field so the block knows which engine finalised it. | `consensus/src/lib.rs::MyelinBlock`, `cli/src/main.rs::demo_block` | A CKB header does not carry this; the engine is implicit. Myelin carries it explicitly because both static-committee and Tendermint modes are first-class. |
-| D-14 | Myelin's `MyelinBlock` carries a `scheduler_commitment: [u8; 32]` field that is the Myelin scheduler-report commitment. | `consensus/src/lib.rs::MyelinBlock` | CKB does not have a scheduler commitment; Myelin does because the CellDAG scheduler is first-class. The field is hashed into the block hash, so it is part of the protocol boundary. |
-| D-15 | Myelin's `MyelinBlock` carries `data_commitments: Vec<[u8; 32]>` for data-availability chunk commitments. | `consensus/src/lib.rs::MyelinBlock` | The Teeworlds acceptance path uses these to commit to the tape-chunk data. CKB uses transaction commitments for the same role, but at a different boundary. |
-| D-16 | Myelin consensus is closed-validator only. Static closed committee and Tendermint closed-validator precommit finality are both wired through `SelectedConsensus`. | `consensus/src/lib.rs::SelectedConsensus` | The README claim is explicit: this is a finite-session fast path, not permissionless BFT. The cross-engine signature-domain separation is what makes the Tendermint engine non-silent vs. the static engine. |
-| D-17 | Myelin's `execute_teeworlds_mock_tx` produces a court bundle that records `l1_court_implemented: false`. | `cli/src/main.rs::teeworlds_court_bundle` | The court bundle is the executable input shape for a future CKB court path, not a claim that the CKB on-chain court script is finished. |
+## CKB-aligned behavior that is not a deviation
 
-## 2. Deviations that are NOT surfaced today
+- New `CellTx` values use transaction version `0`.
+- Producer `OutPoint`s and ordered transaction commitments use the raw transaction hash; witnesses affect only the witness-inclusive hash.
+- Inputs, outputs, output data, cell deps, header deps, scripts, and witnesses use the CKB Molecule-shaped transaction boundary.
+- Header dependencies are 32-byte header hashes, matching CKB.
+- DepGroup data accepts only the CKB Molecule `OutPointVec`; the historical Myelin encoding was removed.
+- `CellInput.since`, output occupied-capacity checks, `DepType::Code`, and `DepType::DepGroup` follow the CKB-shaped model.
+- Strict script verification resolves lock/type groups, declared code deps and DepGroups, and applies one shared transaction cycle budget.
 
-The following Myelin-only behaviours are not yet represented in the
-projection report. They are listed here so future sweeps know what
-to add:
+## Enforcement rules
 
-```text
-- VmSemantics::MyelinExtended (D-05) is separated from the Teeworlds court path:
-  `teeworlds vm-probe` records `ckb_strict`, `vm_profile`, and the spawn/IPC
-  build flag, while `teeworlds court-bundle` records the minimal court profile.
-  A future sweep could surface a `SemanticDeviation::NonCkbStrictSyscallProfile`
-  when `CkbStrict` is not selected.
-- Myelin scheduler witnesses (D-03) are not encoded in the CKB
-  Molecule table. A future sweep could surface a
-  `SemanticDeviation::SchedulerWitnessPresent` warning when an
-  admitted scheduler witness is detected.
-```
+1. Pure projection begins at `Rejected` or `WireEncoded`; higher stages require a linked `CkbEvidenceProjection` receipt chain and cannot be asserted with booleans.
+2. `SchedulerPlan` data never changes CKB raw transaction bytes or identity.
+3. Compiler access metadata never supplies a final conflict key.
+4. Session/court commands reject non-strict VM profiles.
+5. Every higher projection stage must have canonical commitments and negative tests for forged, mismatched, stale, reordered, or reorged evidence.
 
-## 3. Conclusion
-
-Myelin is a CKB-shaped runtime, not a CKB clone. Every divergence
-from CKB is either:
-
-```text
-- a wire-faithful position Myelin must keep (D-06, D-07, D-08);
-- an explicit field on the CKB side that Myelin preserves
-  (header_deps, DepGroup, capacity);
-- a typed-cell extension that is surfaced as a deviation warning
-  or left out of the CKB projection (D-03, D-05);
-- a finite-session runtime decision (D-13, D-14, D-15, D-16,
-  D-17).
-```
-
-The projection report names the deviations that matter for the CKB
-side and leaves the rest in Myelin's own protocol boundary.
+See `MYELIN_CKB_PROJECTION_AUDIT.md` for the current stage model.

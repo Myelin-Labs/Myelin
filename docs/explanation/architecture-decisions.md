@@ -128,18 +128,18 @@ Worth it for the determinism.
 
 ---
 
-## ADR-004: Static committee first, Tendermint second, permissionless later
+## ADR-004: Static committee first, WeightedPrecommit second, permissionless later
 
 **Status.** Accepted.
 
 **Context.** A session runtime needs finality. Three options:
 Nakamoto PoW (like CKB mainnet), static committee (like a
-permissioned BFT), Tendermint-style BFT (like a known-set BFT with
+permissioned BFT), weighted-precommit BFT (like a known-set BFT with
 strict majority), or permissionless entry (like a public PoS
 chain).
 
 **Decision.** Ship two engines today (static closed committee,
-Tendermint-style weighted precommit), behind a single trait.
+weighted-precommit), behind a single trait.
 Permissionless validator entry is future work.
 
 **Consequence.**
@@ -153,7 +153,7 @@ Permissionless validator entry is future work.
   active.
 
 The cost: Myelin is **not** a permissionless L2 today. Static
-committee and Tendermint both assume a known validator set.
+committee and WeightedPrecommit both assume a known validator set.
 
 **Alternatives considered.**
 

@@ -77,10 +77,10 @@ THRESHOLD_LOCK_AUDIT_HASH="${MYELIN_THRESHOLD_LOCK_AUDIT_HASH:-0x$(hex_repeat d4
 
 run_step "Copy rehearsal sources and operator starter documents" bash -c '
   set -euo pipefail
-  cp cellscript/examples/myelin/da-anchor-carrier.cell "$0/"
-  cp cellscript/examples/myelin/settlement-carrier.cell "$0/"
-  cp cellscript/examples/myelin/da-anchor-final.cell "$0/"
-  cp cellscript/examples/myelin/settlement-final.cell "$0/"
+  cp fixtures/cellscript/da-anchor-carrier.cell "$0/"
+  cp fixtures/cellscript/settlement-carrier.cell "$0/"
+  cp fixtures/cellscript/da-anchor-final.cell "$0/"
+  cp fixtures/cellscript/settlement-final.cell "$0/"
   cp docs/templates/public-testnet-rehearsal/operator-custody-policy.json "$0/"
   cp docs/templates/public-testnet-rehearsal/operator-runbook.json "$0/"
 ' "$REHEARSAL_DIR"

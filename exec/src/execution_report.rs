@@ -12,11 +12,12 @@
 
 use crate::{
     celltx::{compute_typed_data_hash, CellTx, OutPoint},
-    projection::{project_cell_tx_to_ckb, CkbProjectionReport, SemanticProfile},
+    projection::{project_cell_tx_to_ckb, CkbProjectionReport},
+    scheduler::SchedulerPlan,
 };
 use serde::{Deserialize, Serialize};
 
-const STATE_TRANSITION_DOMAIN: &[u8] = b"myelin:celltx-execution-report:state-transition:v1";
+const EXECUTION_COMMITMENT_DOMAIN: &[u8] = b"myelin:celltx-execution-report:commitment:v2";
 
 /// Non-contextual execution status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,22 +46,19 @@ pub struct CellTxExecutionReport {
     pub typed_data_hashes: Vec<[u8; 32]>,
     /// Hashes of witnesses.
     pub witness_hashes: Vec<[u8; 32]>,
-    /// Conflict hashes declared through admitted CellScript scheduler witnesses.
+    /// Conflict hashes from the authenticated scheduler sidecar.
     pub conflict_hashes: Vec<[u8; 32]>,
     /// Scheduler report commitment for this non-contextual report.
     pub scheduler_report_hash: [u8; 32],
-    /// State root before the transition.
-    pub state_root_before: [u8; 32],
-    /// Deterministic state-transition commitment after this CellTx.
-    pub state_root_after: [u8; 32],
-    /// Semantic profile assigned by the CKB projection pass.
-    pub semantic_profile: SemanticProfile,
+    /// Non-contextual execution commitment. This is deliberately not labelled
+    /// as a state root; authoritative roots come from `StateTransitionEngine`.
+    pub execution_commitment: [u8; 32],
     /// CKB-style projection report.
     pub ckb_projection: CkbProjectionReport,
 }
 
 /// Build a deterministic non-contextual execution report for a CellTx.
-pub fn build_cell_tx_execution_report(tx: &CellTx, state_root_before: [u8; 32]) -> CellTxExecutionReport {
+pub fn build_cell_tx_execution_report(tx: &CellTx, scheduler_plan: &SchedulerPlan) -> CellTxExecutionReport {
     let txid = tx.id();
     let mut rejection_reasons = Vec::new();
 
@@ -78,17 +76,10 @@ pub fn build_cell_tx_execution_report(tx: &CellTx, state_root_before: [u8; 32]) 
         }
     }
 
-    let admitted_scheduler_witnesses = tx.admitted_cellscript_scheduler_witnesses().collect::<Result<Vec<_>, _>>();
-    let conflict_hashes = match admitted_scheduler_witnesses {
-        Ok(witnesses) => witnesses
-            .into_iter()
-            .flat_map(|witness| witness.accesses.into_iter().map(|access| access.conflict_hash))
-            .collect::<Vec<_>>(),
-        Err(error) => {
-            rejection_reasons.push(format!("scheduler witness error: {error}"));
-            Vec::new()
-        }
-    };
+    if scheduler_plan.txid() != txid {
+        rejection_reasons.push("scheduler plan is bound to a different raw transaction hash".to_owned());
+    }
+    let conflict_hashes = scheduler_plan.accesses().iter().map(|(conflict_hash, _)| *conflict_hash).collect::<Vec<_>>();
 
     let consumed_cells = tx.inputs.iter().map(|input| input.previous_output).collect::<Vec<_>>();
     let typed_data_hashes = tx
@@ -101,9 +92,8 @@ pub fn build_cell_tx_execution_report(tx: &CellTx, state_root_before: [u8; 32]) 
         .collect::<Vec<_>>();
     let witness_hashes = tx.witnesses.iter().map(|witness| blake3_hash(witness)).collect::<Vec<_>>();
     let scheduler_report_hash = scheduler_report_hash(txid, &conflict_hashes);
-    let state_root_after = state_transition_root(state_root_before, txid, &typed_data_hashes, &witness_hashes, scheduler_report_hash);
+    let execution_commitment = execution_commitment(txid, &typed_data_hashes, &witness_hashes, scheduler_report_hash);
     let ckb_projection = project_cell_tx_to_ckb(tx);
-    let semantic_profile = ckb_projection.semantic_profile;
     let status = if rejection_reasons.is_empty() {
         ExecutionReportStatus::Accepted
     } else {
@@ -119,9 +109,7 @@ pub fn build_cell_tx_execution_report(tx: &CellTx, state_root_before: [u8; 32]) 
         witness_hashes,
         conflict_hashes,
         scheduler_report_hash,
-        state_root_before,
-        state_root_after,
-        semantic_profile,
+        execution_commitment,
         ckb_projection,
     }
 }
@@ -141,16 +129,14 @@ fn scheduler_report_hash(txid: [u8; 32], conflict_hashes: &[[u8; 32]]) -> [u8; 3
     *hasher.finalize().as_bytes()
 }
 
-fn state_transition_root(
-    state_root_before: [u8; 32],
+fn execution_commitment(
     txid: [u8; 32],
     typed_data_hashes: &[[u8; 32]],
     witness_hashes: &[[u8; 32]],
     scheduler_report_hash: [u8; 32],
 ) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(STATE_TRANSITION_DOMAIN);
-    hasher.update(&state_root_before);
+    hasher.update(EXECUTION_COMMITMENT_DOMAIN);
     hasher.update(&txid);
     hasher.update(&(typed_data_hashes.len() as u32).to_le_bytes());
     for typed_data_hash in typed_data_hashes {
@@ -183,11 +169,12 @@ mod tests {
             vec![vec![0xBB]],
         )
         .unwrap();
-        let report = build_cell_tx_execution_report(&tx, [0; 32]);
+        let plan = SchedulerPlan::empty(&tx);
+        let report = build_cell_tx_execution_report(&tx, &plan);
         assert_eq!(report.status, ExecutionReportStatus::Accepted);
         assert_eq!(report.consumed_cells.len(), 1);
         assert_eq!(report.created_cell_count, 1);
-        assert_eq!(report.semantic_profile, SemanticProfile::CkbCompatible);
+        assert_eq!(report.ckb_projection.stage, crate::ProjectionStage::WireEncoded);
     }
 
     #[test]
@@ -197,8 +184,9 @@ mod tests {
                 .unwrap();
         tx.outputs_data.clear();
 
-        let report = build_cell_tx_execution_report(&tx, [0; 32]);
+        let plan = SchedulerPlan::empty(&tx);
+        let report = build_cell_tx_execution_report(&tx, &plan);
         assert!(matches!(report.status, ExecutionReportStatus::Rejected { .. }));
-        assert_eq!(report.semantic_profile, SemanticProfile::CkbInspiredOnly);
+        assert_eq!(report.ckb_projection.stage, crate::ProjectionStage::Rejected);
     }
 }

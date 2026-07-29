@@ -1,290 +1,89 @@
-# Myelin CKB-Style Projection Audit
+# Myelin CKB projection audit
 
-> The `myelin-exec::projection` layer answers one question: can this
-> Myelin CellTx / chunk be represented as a CKB-style
-> transaction / context? It does not run a CKB node and does not
-> claim L1 acceptance. The audit confirms the projection is
-> deterministic, honest about deviations, and the failure path
-> is not silently swallowed.
+## Result
 
-## 1. Report shape
+Myelin has two deliberately separate projection surfaces:
 
-`project_cell_tx_to_ckb(&CellTx) -> CkbProjectionReport`:
+- `project_cell_tx_to_ckb` is a pure wire projection. It emits only `Rejected` or `WireEncoded`.
+- `myelin-ckb-adapter` is the evidence engine. It can advance the same exact raw transaction through `ContextResolved`, `ConsensusValidated`, `ScriptsVerified`, `NodeAccepted`, `Committed`, and `Finalized` only by constructing and verifying linked receipts.
 
-```text
-source_txid               : [u8; 32]   Myelin transaction id
-semantic_profile          : SemanticProfile
-ckb_projection_possible   : bool
-blockers                  : Vec<ProjectionBlocker>
-warnings                  : Vec<ProjectionWarning>
-input_count               : usize
-cell_dep_count            : usize
-header_dep_count          : usize
-output_count              : usize
-witness_count             : usize
-molecule_transaction_bytes: Option<usize>
-ckb_raw_tx_hash           : Option<[u8; 32]>
-ckb_wtx_hash              : Option<[u8; 32]>
-```
+There is no caller-controlled boolean override. Deserializing a higher-stage report is not enough: `verify_projection` recomputes transaction identity, context and receipt commitments, header hashes, observation bindings, the CKB transaction Merkle root, confirmation depth, and canonical-block equality.
 
-`SemanticProfile`:
+## Stage model
 
-```text
-CkbCompatible    : CellTx projects successfully into a CKB-shaped
-                   transaction/context.
-CkbInspiredOnly  : CellTx follows Cell-style ideas but is not
-                   projectable; one or more blockers are present.
-MyelinNative     : CellTx uses Myelin-only helper semantics or
-                   metadata. (Currently the projection layer does
-                   not emit this; it is reserved for future use.)
-```
+| Stage | Required evidence | Producer |
+| --- | --- | --- |
+| `Rejected` | one or more wire/invariant blockers | `myelin-exec` |
+| `WireEncoded` | exact version-0 transaction, CKB Molecule bytes, raw hash, witness-inclusive hash | `myelin-exec` |
+| `ContextResolved` | all inputs, code deps, DepGroup members, and header deps resolved under one stable tip; node/chain/genesis/rule context committed | `myelin-ckb-adapter` |
+| `ConsensusValidated` | exact transaction accepted by CKB `test_tx_pool_accept` at the same tip; fee, cycles, and node result committed | `myelin-ckb-adapter` |
+| `ScriptsVerified` | strict local CKB-VM verification over that resolved context and one transaction cycle budget; local and node cycles recorded | `myelin-ckb-adapter` |
+| `NodeAccepted` | `send_transaction` returns the exact raw hash and `get_transaction(..., false)` observes that hash as pending, proposed, or committed | `myelin-ckb-adapter` |
+| `Committed` | the exact transaction is committed in the declared canonical block and its CKB transaction proof recomputes the block header's transactions root | `myelin-ckb-adapter` |
+| `Finalized` | the committed block remains canonical, the transaction remains committed there, and the configured confirmation depth is reached | `myelin-ckb-adapter` |
 
-`ProjectionBlocker` (a blocker makes `ckb_projection_possible = false`):
+An on-chain court verdict is outside this enum. It needs deployed-script, transaction, economic-policy, and chain evidence beyond transaction projection.
+
+## Immutable context boundary
+
+`ContextResolvedReceipt` commits to:
 
 ```text
-OutputsDataLengthMismatch { outputs, outputs_data }
-MoleculeEncodingFailed    { error }
-RawTransactionHashFailed  { error }
-WitnessTransactionHashFailed { error }
+chain and node version
+genesis hash and consensus-rules hash
+stable tip header
+raw transaction hash and canonical transaction-JSON hash
+every referenced OutPoint, role and source index
+complete CellOutput and data
+creation block identity where available
+every resolved header dependency
 ```
 
-`ProjectionWarning` (a warning does NOT make projection impossible):
+DepGroups are parsed only as CKB Molecule `OutPointVec` data and every member is resolved independently. The resolver samples the tip before and after resolution and retries or fails if it moved. Receipt verification rejects omitted, duplicated, reordered, mutated, stale, or transaction-unreferenced context.
+
+## Consensus and VM boundary
+
+`ConsensusValidatedReceipt` records the authoritative node's contextual fee/cycle result and binds it to the context commitment and validation tip. Myelin does not pretend that a partial local rewrite of CKB consensus rules is authoritative.
+
+`ScriptsVerifiedReceipt` independently runs all lock/type groups with `VmSemantics::CkbStrict` over the same resolved Cells and headers. Both the node cycle result and local cycle result are recorded. Their numeric values need not be identical because the two verifiers need not account for host overhead identically; acceptance requires both verdicts to succeed and both to remain within the configured transaction budget.
+
+## Acceptance, inclusion, and finality
+
+Node acceptance requires all three observations:
+
+1. `test_tx_pool_accept` succeeds for the exact transaction;
+2. `send_transaction` returns its exact raw transaction hash;
+3. `get_transaction` with `only_committed = false` observes that exact hash as pending, proposed, or committed.
+
+Commitment is stronger. Myelin re-queries the transaction, parses and verifies the committed header hash, checks the canonical header at that height, obtains the CKB transaction proof, and locally recomputes:
 
 ```text
-NonCkbTransactionVersion  { actual, ckb_fixture_version }
-EmptyWitnessSet
-CellbaseStyleContext
+proof(indices, lemmas, raw_tx_hash) -> raw_transactions_root
+merkle(raw_transactions_root, witnesses_root) -> transactions_root
+transactions_root == committed_header.transactions_root
 ```
 
-## 2. Required fields vs actual report
+The node's `verify_transaction_proof` response is retained as corroborating evidence, but offline verification does not trust it in place of recomputation.
 
-The audit asked for:
+Finality re-observes the transaction, re-queries the canonical block by height, rejects any block replacement, and requires the configured depth. This is depth-based operational finality, not a proof that CKB can never reorganize.
 
-```text
-projection_possible
-ckb_style_tx_hash
-cell_inputs
-cell_outputs
-cell_deps
-witnesses
-script_groups
-unsupported_features
-semantic_deviation_flags
-```
+## Identity and failure audit
 
-The actual report covers each of these:
+- producer `OutPoint`s and ordered transaction commitments use raw transaction identity;
+- changing only witnesses leaves the raw hash unchanged and changes the witness-inclusive hash;
+- scheduler plans bind to the raw txid but never enter CKB witnesses;
+- context, consensus, scripts, node, commitment, and finality receipts form a one-way commitment chain;
+- all receipt structs deny unknown fields;
+- tests mutate context, node cycles, proof-recovered hashes, confirmation counts, and canonical block identity and require rejection.
 
-| Required field | Where it lives in the report |
-|---|---|
-| `projection_possible` | `ckb_projection_possible: bool` |
-| `ckb_style_tx_hash` | `ckb_raw_tx_hash` (raw), `ckb_wtx_hash` (witness) |
-| `cell_inputs` | `input_count` (and the `inputs` are on the original `CellTx` when used by the Teeworlds CLI to materialise the Molecule transaction) |
-| `cell_outputs` | `output_count` |
-| `cell_deps` | `cell_dep_count` |
-| `witnesses` | `witness_count` |
-| `script_groups` | (out of scope for the CKB projection report itself; the VM verifier at `exec/src/vm/verifier.rs` produces the script-group evidence, not the projection layer) |
-| `unsupported_features` | `blockers: Vec<ProjectionBlocker>` |
-| `semantic_deviation_flags` | `warnings: Vec<ProjectionWarning>` |
+The pure wire projection fails closed for a nonzero version, mismatched output/data lengths, Molecule encoding failure, raw-hash failure, or witness-hash failure. The evidence engine additionally fails closed for unstable tips, missing/non-live Cells, malformed DepGroups, missing headers, context drift, node rejection, local VM failure, cycle-limit breach, hash mismatch, observation timeout, proof mismatch, reorg, and insufficient confirmation depth.
 
-The projection report is intentionally narrow: it answers the
-projection question only. The VM verifier answers the script-group
-question. This split is the same as the CKB reference
-(`project_raw → hash` vs. `run_script_groups → cycles / exit`).
+## Exercised evidence
 
-## 3. Verified properties
+The adapter has been exercised against the parent CKB 0.207.0 integration devnet through `myelin ckb prove`, `observe`, and `verify`. The full devnet gate also compiles four exact upstream CellScript v0.22.0 programs, deploys their ELF artifacts, commits valid DA and settlement transitions, and requires CKB to reject payload tampering and a competing settlement.
 
-### 3.1 Simple supported CellTx projects successfully
+This does not establish a public-testnet court or permissionless L2 security. Session/court package-local `ckb_projection` fields may still honestly remain `wire-encoded`; a package advances only when it carries or references a separately verified `CkbEvidenceProjection` for its exact transaction.
 
-Covered by `simple_cell_tx_projects_to_ckb_shape`:
+## Remaining boundary
 
-```text
-ckb_projection_possible   = true
-semantic_profile          = CkbCompatible
-blockers                  = []
-molecule_transaction_bytes > 0
-ckb_raw_tx_hash.is_some() = true
-ckb_wtx_hash.is_some()    = true
-```
-
-### 3.2 Unsupported Myelin-only features are explicitly reported
-
-Covered by `malformed_output_data_is_a_projection_blocker`:
-
-```text
-ckb_projection_possible = false
-semantic_profile        = CkbInspiredOnly
-blockers[0]             = OutputsDataLengthMismatch { outputs: 1, outputs_data: 0 }
-```
-
-The blocker names the specific deviation. There is no silent
-acceptance path.
-
-### 3.3 Projection failure is not silently treated as success
-
-`ckb_projection_possible` is set to `blockers.is_empty()`. If
-`MoleculeEncodingFailed`, `RawTransactionHashFailed`, or
-`WitnessTransactionHashFailed` is returned by the underlying CKB
-Molecule compatibility layer, the projection is marked impossible
-and the relevant `ProjectionBlocker` variant is added to the
-report.
-
-This is verified by:
-
-```text
-malformed_output_data_is_a_projection_blocker   (OutputsDataLengthMismatch)
-```
-
-and by construction: any error in `serialize_transaction_molecule`,
-`ckb_raw_transaction_hash_molecule`, or
-`ckb_transaction_witness_hash_molecule` is converted into a
-`ProjectionBlocker`, not silently dropped.
-
-### 3.4 Script dep mismatch is rejected
-
-The CKB Molecule compatibility layer is wire-faithful. Script
-dep mismatches appear as `MoleculeEncodingFailed { error }` when
-the script args are not a valid Molecule-encodable length, or as
-`RawTransactionHashFailed { error }` / `WitnessTransactionHashFailed { error }`
-when downstream hashing fails.
-
-In the projection layer specifically, the deps are encoded as part
-of the `RawTransaction` Molecule table. If a dep out-point is
-malformed at the CKB level, the Molecule layer rejects it before
-the hash is computed. This is a property of the Molecule layer;
-the projection layer surfaces it as a blocker.
-
-### 3.5 Witness mismatch is rejected
-
-`witness_change_does_not_affect_raw_tx_hash_but_affects_wtx_hash`
-proves that:
-
-```text
-- The CKB raw transaction hash is witness-independent.
-- The CKB wtxid is witness-dependent.
-- Any change in the witness set is reflected in the projection report.
-```
-
-A witness that breaks Molecule encoding is rejected by
-`MoleculeEncodingFailed`. A witness that survives encoding but
-breaks the witness hash is rejected by
-`WitnessTransactionHashFailed`. Either way, the projection report
-names the failure.
-
-### 3.6 State-root before/after is deterministic
-
-The state root is not part of the CKB projection report. It is
-part of the Myelin execution report (`build_cell_tx_execution_report`),
-which is what feeds the CKB court bundle. The state-transition
-hash is:
-
-```text
-myelin:celltx-execution-report:state-transition:v1
-  || state_root_before
-  || txid
-  || typed_data_hashes
-  || witness_hashes
-  || scheduler_report_hash
-```
-
-`state_root_after` is fully derived from the inputs and is
-deterministic. The execution-report tests in
-`exec/src/execution_report.rs::tests` already cover the positive
-and negative paths.
-
-### 3.7 Court-bundle data is reproducible
-
-Covered end-to-end by:
-
-```text
-cli/src/main.rs::teeworlds_court_bundle
-cli/src/main.rs::verify_teeworlds_court_bundle
-exec/src/serialization/molecule_compat.rs::serialize_transaction_molecule
-exec/src/serialization/molecule_compat.rs::deserialize_transaction_molecule
-```
-
-The court bundle materialises the CKB Molecule transaction bytes
-for a single disputed chunk, then recomputes the projection
-fields, the signature hashes, the challenge payload hash, and the
-static-committee certificate during verification. A passing
-verification means the bundle is reproducible from the embedded
-Molecule bytes.
-
-## 4. CKB-style semantic deviation flags
-
-The full list of explicit, non-fatal deviations Myelin reports:
-
-```text
-NonCkbTransactionVersion { actual, ckb_fixture_version }
-  Reported when the Myelin CellTx version is neither 0 nor
-  CELL_TX_VERSION (0xC001), or when the version is CELL_TX_VERSION
-  but the CKB fixture version is 0. Myelin uses its own
-  CELL_TX_VERSION by design; the warning names the gap so the
-  consumer can decide whether to project anyway.
-
-EmptyWitnessSet
-  Reported when the CellTx carries no witness bytes. The CellTx
-  still projects to a CKB-shaped transaction; the warning flags
-  the deviation because CKB witnesses carry lock-group material.
-
-CellbaseStyleContext
-  Reported when the CellTx has no inputs. CKB cellbase transactions
-  are the only allowed case; the warning flags the deviation for
-  any other context.
-```
-
-The full list of fatal blockers:
-
-```text
-OutputsDataLengthMismatch
-  The CKB model requires `len(outputs) == len(outputs_data)`.
-  Myelin enforces the same invariant at the type level
-  (`CellTx::new` returns an error on mismatch), so the projection
-  blocker is only triggered by code that mutates a `CellTx`
-  after construction.
-
-MoleculeEncodingFailed
-  The CKB Molecule compatibility layer refused to encode the
-  CellTx. This is the standard CKB wire-format rejection path;
-  the underlying error string is included.
-
-RawTransactionHashFailed
-  The CKB raw transaction hash could not be derived. Indicates
-  a wire-format issue at the RawTransaction level.
-
-WitnessTransactionHashFailed
-  The CKB wtxid could not be derived. Indicates a wire-format
-  issue at the witness level.
-```
-
-## 5. Test inventory (projection)
-
-```text
-cargo test -p myelin-exec --lib projection
-```
-
-6 tests, all passing as of this hardening pass:
-
-```text
-cellbase_style_context_is_a_warning_not_a_blocker
-ckb_style_tx_hash_is_deterministic
-empty_witness_set_is_a_warning_not_a_blocker
-malformed_output_data_is_a_projection_blocker
-simple_cell_tx_projects_to_ckb_shape
-witness_change_does_not_affect_raw_tx_hash_but_affects_wtx_hash
-```
-
-The Teeworlds court-bundle tests in `cli/src/main.rs::tests` add
-the end-to-end projection round-trip:
-
-```text
-teeworlds_chunk_projection_is_ckb_compatible
-teeworlds_court_bundle_is_single_chunk_projectable
-```
-
-## 6. Conclusion
-
-The CKB-style projection layer is deterministic, honest, and the
-failure paths are explicit. Every required report field is
-covered, the CKB-style tx hashes are reproducible, and the
-court-bundle round-trip proves that a recorded bundle can be
-recomputed from its embedded Molecule bytes.
+The next credibility milestone is not another projection enum value. It is a public CKB testnet rehearsal that binds deployed code OutPoints, durable DA receipts, production key custody, threshold-lock enforcement, court economics, operator policy, committed transaction proofs, and reorg/finality monitoring into one reproducible evidence bundle.

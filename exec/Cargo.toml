@@ -1,6 +1,6 @@
 [package]
 name = "myelin-exec"
-version = "0.1.0"
+version = "0.10.0"
 edition = "2021"
 authors = ["Myelin developers"]
 license = "MIT"
@@ -28,7 +28,7 @@ parking_lot = "0.12"
 ckb-vm = { version = "0.24", features = ["asm", "detect-asm"], optional = true }
 
 # Myelin dependencies
-myelin-hashes = { path = "../crypto/hashes", version = "0.1.0" }
+myelin-hashes = { path = "../crypto/hashes", version = "0.10.0" }
 
 # Logging
 log = "0.4"

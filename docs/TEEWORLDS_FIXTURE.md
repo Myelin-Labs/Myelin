@@ -51,7 +51,7 @@ The gate rebuilds the deterministic scripted tape, invokes xxuejie's
 `build-test-tx` through `myelin-cli teeworlds build-fixture`, runs the real
 RISC-V replayer through `teeworlds vm-probe` in CKB-strict mode, builds a
 single disputed-chunk court bundle, verifies the bundle, and validates the JSON
-evidence. It fails unless the fixture and court chunk are `ckb-compatible`, CKB
+evidence. It fails unless the fixture and court chunk are `wire-encoded`, CKB
 projection is possible, the static closed committee finalises the benchmark
 block, the VM probe succeeds, and every court-bundle verifier check passes.
 
@@ -192,8 +192,8 @@ Teeworlds mock transaction
 The preferred result for early demos is:
 
 ```text
-semantic_profile = "ckb-compatible"
-ckb_projection_possible = true
+projection_stage = "wire-encoded"
+wire_encoded = true
 ```
 
 If a Teeworlds chunk requires Myelin-native shortcuts, the report must mark that
@@ -204,8 +204,8 @@ For that reason, Mode A is the default demo path. It preserves the CKB witness
 contract and should keep:
 
 ```text
-semantic_profile = "ckb-compatible"
-ckb_projection_possible = true
+projection_stage = "wire-encoded"
+wire_encoded = true
 ```
 
 Mode B may be useful later for native session ergonomics, but it must remain
@@ -215,9 +215,9 @@ Current `teeworlds inspect`, `teeworlds bench`, and `teeworlds build-fixture`
 reports include:
 
 ```text
-fixture.ckb_projection_possible
-fixture.chunks[].ckb_projection.semantic_profile
-fixture.chunks[].ckb_projection.ckb_projection_possible
+fixture.wire_encoded
+fixture.chunks[].ckb_projection.projection_stage
+fixture.chunks[].ckb_projection.wire_encoded
 fixture.chunks[].ckb_projection.ckb_raw_tx_hash
 fixture.chunks[].ckb_projection.ckb_wtx_hash
 ```

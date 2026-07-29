@@ -3,7 +3,7 @@
 //
 // CellDAG: RW-Set dependency graph construction
 
-use crate::celltx::types::{CellTx, OutPoint, CELLSCRIPT_SCHEDULER_OP_READ_REF};
+use crate::celltx::types::{CellTx, OutPoint};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Node ID in the transaction DAG
@@ -27,16 +27,6 @@ pub enum AccessMode {
     Write,
 }
 
-impl AccessMode {
-    /// Derive access mode from scheduler operation
-    pub fn from_operation(op: u8) -> Self {
-        match op {
-            CELLSCRIPT_SCHEDULER_OP_READ_REF => AccessMode::Read,
-            _ => AccessMode::Write,
-        }
-    }
-}
-
 /// Conflict entry with access mode
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConflictEntry {
@@ -46,12 +36,59 @@ pub struct ConflictEntry {
     pub mode: AccessMode,
 }
 
+/// Scheduler accesses authenticated and bound to one raw transaction.
+///
+/// This is a sidecar admission object. It is deliberately not decoded from
+/// transaction witnesses by CellDAG: callers must obtain it from the
+/// CellScript artifact adapter or another trusted metadata source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchedulerPlan {
+    txid: [u8; 32],
+    accesses: Vec<([u8; 32], AccessMode)>,
+}
+
+impl SchedulerPlan {
+    /// Create a plan from already resolved conflict domains.
+    pub fn new(tx: &CellTx, accesses: impl IntoIterator<Item = ([u8; 32], AccessMode)>) -> Result<Self, DagError> {
+        let mut aggregated = BTreeMap::<[u8; 32], AccessMode>::new();
+        for (conflict_hash, mode) in accesses {
+            if conflict_hash == [0; 32] {
+                return Err(DagError::InvalidSchedulerPlan("zero conflict hash".to_owned()));
+            }
+            aggregated
+                .entry(conflict_hash)
+                .and_modify(|current| {
+                    if mode == AccessMode::Write {
+                        *current = AccessMode::Write;
+                    }
+                })
+                .or_insert(mode);
+        }
+        Ok(Self { txid: tx.id(), accesses: aggregated.into_iter().collect() })
+    }
+
+    /// Create an empty plan for a transaction without typed scheduling metadata.
+    pub fn empty(tx: &CellTx) -> Self {
+        Self { txid: tx.id(), accesses: Vec::new() }
+    }
+
+    /// Raw transaction hash this plan is bound to.
+    pub fn txid(&self) -> [u8; 32] {
+        self.txid
+    }
+
+    /// Aggregated logical accesses, sorted by conflict hash.
+    pub fn accesses(&self) -> &[([u8; 32], AccessMode)] {
+        &self.accesses
+    }
+}
+
 /// Cell transaction DAG
 ///
 /// Builds a dependency graph from RW-Sets:
 /// - Nodes: transactions
 /// - Edges: data dependencies (outputs -> inputs)
-/// - Conflicts: transactions competing for the same Cell or conflict_hash
+/// - Conflicts: typed transactions touching the same logical conflict domain
 #[derive(Debug, Clone)]
 pub struct CellDAG {
     /// Number of nodes (transactions)
@@ -62,9 +99,6 @@ pub struct CellDAG {
 
     /// Reverse adjacency: node → [predecessors]
     pub reverse_edges: BTreeMap<NodeId, Vec<NodeId>>,
-
-    /// Conflict groups: OutPoint -> [NodeIds competing for it]
-    pub conflicts: BTreeMap<OutPoint, Vec<NodeId>>,
 
     /// Conflict-hash-level entries: conflict_hash -> [ConflictEntry]
     ///
@@ -89,12 +123,18 @@ impl CellDAG {
         let node_count = txs.len();
         let mut edges: BTreeMap<NodeId, Vec<(NodeId, DagEdge)>> = BTreeMap::new();
         let mut reverse_edges: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
-        let mut conflicts: BTreeMap<OutPoint, Vec<NodeId>> = BTreeMap::new();
+        let mut txids: BTreeMap<[u8; 32], NodeId> = BTreeMap::new();
+        let mut consumers: BTreeMap<OutPoint, NodeId> = BTreeMap::new();
 
         // Step 1: Build producers map (OutPoint → NodeId)
         let mut producers: BTreeMap<OutPoint, NodeId> = BTreeMap::new();
         for (node_id, tx) in txs.iter().enumerate() {
-            let tx_hash = crate::celltx::sighash::compute_wtxid(tx);
+            // CKB OutPoints are identified by the raw transaction hash. Witness
+            // changes must not change the identity of a produced Cell.
+            let tx_hash = tx.id();
+            if let Some(first_node) = txids.insert(tx_hash, node_id) {
+                return Err(DagError::DuplicateTransaction { txid: tx_hash, first_node, duplicate_node: node_id });
+            }
             for (idx, _) in tx.outputs.iter().enumerate() {
                 let out_point = OutPoint::new(tx_hash, idx as u32);
                 producers.insert(out_point, node_id);
@@ -107,35 +147,35 @@ impl CellDAG {
             for input in &tx.inputs {
                 if let Some(&producer_id) = producers.get(&input.previous_output) {
                     // Dependency: producer → consumer
-                    edges.entry(producer_id).or_default().push((consumer_id, DagEdge::Dependency));
-
-                    reverse_edges.entry(consumer_id).or_default().push(producer_id);
+                    Self::add_edge(&mut edges, &mut reverse_edges, producer_id, consumer_id, DagEdge::Dependency)?;
                 } else {
                     // External Cell (not in this DAG)
                     // Will be resolved from state layer
                 }
 
-                // Track conflicts (multiple consumers for same Cell)
-                conflicts.entry(input.previous_output).or_default().push(consumer_id);
+                // A physical Cell can be consumed exactly once in a batch. This
+                // is a validity rule, not a scheduler ordering opportunity.
+                if let Some(first_consumer) = consumers.insert(input.previous_output, consumer_id) {
+                    return Err(DagError::DoubleSpend {
+                        out_point: input.previous_output,
+                        first_consumer,
+                        second_consumer: consumer_id,
+                    });
+                }
             }
 
             // Check deps (read-only edges)
             for dep in &tx.cell_deps {
                 if let Some(&producer_id) = producers.get(&dep.out_point) {
-                    edges.entry(producer_id).or_default().push((consumer_id, DagEdge::ReadDep));
-
-                    reverse_edges.entry(consumer_id).or_default().push(producer_id);
+                    Self::add_edge(&mut edges, &mut reverse_edges, producer_id, consumer_id, DagEdge::ReadDep)?;
                 }
             }
         }
 
-        // Step 3: Filter conflicts (keep only actual conflicts)
-        conflicts.retain(|_, consumers| consumers.len() > 1);
-
-        // Step 4: Compute topological layers
+        // Step 3: Compute topological layers
         let layers = Self::compute_layers(node_count, &edges, &reverse_edges)?;
 
-        Ok(CellDAG { node_count, edges, reverse_edges, conflicts, conflict_hash_conflicts: BTreeMap::new(), layers })
+        Ok(CellDAG { node_count, edges, reverse_edges, conflict_hash_conflicts: BTreeMap::new(), layers })
     }
 
     /// Build DAG from typed cell transactions with conflict_hash awareness.
@@ -147,23 +187,25 @@ impl CellDAG {
     /// READ  + WRITE same conflict_hash → dependency edge
     /// WRITE + WRITE same conflict_hash → dependency edge (different layers)
     /// ```
-    pub fn build_from_typed(txs: &[CellTx]) -> Result<Self, DagError> {
+    pub fn build_with_scheduler_plans(txs: &[CellTx], plans: &[SchedulerPlan]) -> Result<Self, DagError> {
+        if txs.len() != plans.len() {
+            return Err(DagError::SchedulerPlanCountMismatch { transactions: txs.len(), plans: plans.len() });
+        }
         let mut dag = Self::build(txs)?;
 
-        // Extract conflict_hash accesses from scheduler witnesses
+        // Extract and validate conflict_hash accesses. Each transaction is
+        // aggregated to at most one access per conflict domain, with Write
+        // dominating Read. This prevents legitimate consume+create updates
+        // from generating a self-edge.
         let mut conflict_hash_conflicts: BTreeMap<[u8; 32], Vec<ConflictEntry>> = BTreeMap::new();
 
-        for (node_id, tx) in txs.iter().enumerate() {
-            // Schema-discriminating decode: native 7-field Myelin witnesses
-            // decode directly; legacy cellscript 9-field witnesses are
-            // translated via the bridge (recomputing conflict_hash from this
-            // tx's concrete cells). Decode failures fall back to OutPoint deps.
-            for witness in tx.decoded_cellscript_scheduler_witnesses_with_legacy().into_iter().filter_map(Result::ok) {
-                for access in &witness.accesses {
-                    let mode = AccessMode::from_operation(access.operation);
-                    let entry = ConflictEntry { node_id, mode };
-                    conflict_hash_conflicts.entry(access.conflict_hash).or_default().push(entry);
-                }
+        for (node_id, (tx, plan)) in txs.iter().zip(plans).enumerate() {
+            let actual_txid = tx.id();
+            if plan.txid != actual_txid {
+                return Err(DagError::SchedulerPlanTxidMismatch { node_id, expected: actual_txid, actual: plan.txid });
+            }
+            for &(conflict_hash, mode) in &plan.accesses {
+                conflict_hash_conflicts.entry(conflict_hash).or_default().push(ConflictEntry { node_id, mode });
             }
         }
 
@@ -185,13 +227,7 @@ impl CellDAG {
                     // Earlier transaction must come first
                     let (from, to) = if a.node_id < b.node_id { (a.node_id, b.node_id) } else { (b.node_id, a.node_id) };
 
-                    // Avoid duplicate edges
-                    let already_has_edge = dag.edges.get(&from).is_some_and(|succs| succs.iter().any(|(s, _)| *s == to));
-
-                    if !already_has_edge {
-                        dag.edges.entry(from).or_default().push((to, DagEdge::Dependency));
-                        dag.reverse_edges.entry(to).or_default().push(from);
-                    }
+                    Self::add_edge(&mut dag.edges, &mut dag.reverse_edges, from, to, DagEdge::Dependency)?;
                 }
             }
         }
@@ -204,19 +240,22 @@ impl CellDAG {
         Ok(dag)
     }
 
-    /// Extract the conflict_hash accesses from a transaction's scheduler witness.
-    ///
-    /// Returns a vector of (conflict_hash, AccessMode) pairs.
-    /// Returns an empty vector if the transaction has no valid scheduler witness.
-    pub fn extract_conflict_accesses(tx: &CellTx) -> Vec<([u8; 32], AccessMode)> {
-        let mut result = Vec::new();
-        for witness in tx.decoded_cellscript_scheduler_witnesses_with_legacy().into_iter().flatten() {
-            for access in &witness.accesses {
-                let mode = AccessMode::from_operation(access.operation);
-                result.push((access.conflict_hash, mode));
-            }
+    fn add_edge(
+        edges: &mut BTreeMap<NodeId, Vec<(NodeId, DagEdge)>>,
+        reverse_edges: &mut BTreeMap<NodeId, Vec<NodeId>>,
+        from: NodeId,
+        to: NodeId,
+        edge: DagEdge,
+    ) -> Result<(), DagError> {
+        if from == to {
+            return Err(DagError::InvalidRWSet(format!("self-dependency for transaction node {from}")));
         }
-        result
+        if edges.get(&from).is_some_and(|successors| successors.iter().any(|(successor, _)| *successor == to)) {
+            return Ok(());
+        }
+        edges.entry(from).or_default().push((to, edge));
+        reverse_edges.entry(to).or_default().push(from);
+        Ok(())
     }
 
     /// Check if two transactions can be placed in the same layer
@@ -309,11 +348,6 @@ impl CellDAG {
         Ok(layers)
     }
 
-    /// Get all conflicts in the DAG
-    pub fn get_conflicts(&self) -> Vec<(&OutPoint, &[NodeId])> {
-        self.conflicts.iter().map(|(op, nodes)| (op, nodes.as_slice())).collect()
-    }
-
     /// Get successors of a node
     pub fn successors(&self, node: NodeId) -> Option<&[(NodeId, DagEdge)]> {
         self.edges.get(&node).map(|v| v.as_slice())
@@ -371,15 +405,68 @@ pub enum DagError {
     /// Invalid RW-Set (missing declarations)
     #[error("Invalid RW-Set: {0}")]
     InvalidRWSet(String),
+
+    /// Two transactions, or two inputs in one transaction, consume the same Cell.
+    #[error("Cell {out_point:?} is consumed more than once by nodes {first_consumer} and {second_consumer}")]
+    DoubleSpend {
+        /// Conflicting physical Cell.
+        out_point: OutPoint,
+        /// First consumer node.
+        first_consumer: NodeId,
+        /// Second consumer node.
+        second_consumer: NodeId,
+    },
+
+    /// The same raw transaction appears more than once in the batch.
+    #[error("Raw transaction {txid:02x?} appears more than once at nodes {first_node} and {duplicate_node}")]
+    DuplicateTransaction {
+        /// Raw transaction hash.
+        txid: [u8; 32],
+        /// First node.
+        first_node: NodeId,
+        /// Duplicate node.
+        duplicate_node: NodeId,
+    },
+
+    /// Number of scheduler plans does not match the transaction batch.
+    #[error("Scheduler plan count mismatch: {transactions} transactions, {plans} plans")]
+    SchedulerPlanCountMismatch {
+        /// Transaction count.
+        transactions: usize,
+        /// Plan count.
+        plans: usize,
+    },
+
+    /// A scheduler plan is bound to a different transaction.
+    #[error("Scheduler plan on node {node_id} is bound to {actual:02x?}, expected {expected:02x?}")]
+    SchedulerPlanTxidMismatch {
+        /// Transaction node.
+        node_id: NodeId,
+        /// Actual raw transaction hash.
+        expected: [u8; 32],
+        /// Hash carried by the plan.
+        actual: [u8; 32],
+    },
+
+    /// Scheduler metadata is malformed or not admitted.
+    #[error("Invalid scheduler plan: {0}")]
+    InvalidSchedulerPlan(String),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::celltx::types::{CellInput, CellOutput, Script};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_TX_TAG: AtomicU64 = AtomicU64::new(1);
+
+    fn unique_test_lock() -> Script {
+        Script::new([0x00; 32], 0, NEXT_TEST_TX_TAG.fetch_add(1, Ordering::Relaxed).to_le_bytes().to_vec())
+    }
 
     fn create_test_tx(inputs: Vec<OutPoint>, outputs_count: usize) -> CellTx {
-        let lock = Script::new([0x00; 32], 0, vec![]);
+        let lock = unique_test_lock();
         let inputs = inputs.into_iter().map(|op| CellInput::new(op, 0)).collect();
         let outputs = vec![CellOutput { lock: lock.clone(), type_: None, capacity: 1000 }; outputs_count];
         let outputs_data = vec![vec![]; outputs_count];
@@ -390,10 +477,10 @@ mod tests {
     fn test_dag_simple_chain() {
         // tx0 → tx1 → tx2 (simple chain)
         let tx0 = create_test_tx(vec![], 1);
-        let tx0_hash = crate::celltx::sighash::compute_wtxid(&tx0);
+        let tx0_hash = tx0.id();
 
         let tx1 = create_test_tx(vec![OutPoint::new(tx0_hash, 0)], 1);
-        let tx1_hash = crate::celltx::sighash::compute_wtxid(&tx1);
+        let tx1_hash = tx1.id();
 
         let tx2 = create_test_tx(vec![OutPoint::new(tx1_hash, 0)], 1);
 
@@ -410,18 +497,14 @@ mod tests {
         // tx0 produces Cell
         // tx1 and tx2 both try to consume it (conflict)
         let tx0 = create_test_tx(vec![], 1);
-        let tx0_hash = crate::celltx::sighash::compute_wtxid(&tx0);
+        let tx0_hash = tx0.id();
         let out = OutPoint::new(tx0_hash, 0);
 
         let tx1 = create_test_tx(vec![out], 1);
         let tx2 = create_test_tx(vec![out], 1);
 
-        let dag = CellDAG::build(&[tx0, tx1, tx2]).unwrap();
-
-        // Should detect conflict between tx1 and tx2
-        let conflicts = dag.get_conflicts();
-        assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].1.len(), 2); // tx1 and tx2
+        let error = CellDAG::build(&[tx0, tx1, tx2]).unwrap_err();
+        assert!(matches!(error, DagError::DoubleSpend { first_consumer: 1, second_consumer: 2, .. }));
     }
 
     #[test]
@@ -431,15 +514,13 @@ mod tests {
         // tx2 consumes output 1
         // (parallel, no conflict)
         let tx0 = create_test_tx(vec![], 2);
-        let tx0_hash = crate::celltx::sighash::compute_wtxid(&tx0);
+        let tx0_hash = tx0.id();
 
         let tx1 = create_test_tx(vec![OutPoint::new(tx0_hash, 0)], 1);
         let tx2 = create_test_tx(vec![OutPoint::new(tx0_hash, 1)], 1);
 
         let dag = CellDAG::build(&[tx0, tx1, tx2]).unwrap();
 
-        // No conflicts (different outputs)
-        assert!(dag.conflicts.is_empty());
         assert_eq!(dag.layers, vec![vec![0], vec![1, 2]]);
 
         // Both tx1 and tx2 depend on tx0
@@ -473,337 +554,80 @@ mod tests {
 
     // ─── Typed Cell Conflict Hash Tests ─────────────────────────────────────────
 
-    use crate::celltx::types::{
-        encode_cellscript_scheduler_witness_molecule, CellScriptSchedulerAccessWitness, CellScriptSchedulerWitness,
-        CELLSCRIPT_SCHEDULER_EFFECT_MUTATING, CELLSCRIPT_SCHEDULER_EFFECT_READ_ONLY, CELLSCRIPT_SCHEDULER_OP_CONSUME,
-        CELLSCRIPT_SCHEDULER_OP_READ_REF, CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP, CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-        TYPED_CELL_SCHEDULER_WITNESS_VERSION,
-    };
+    fn create_typed_test_tx(accesses: Vec<([u8; 32], AccessMode)>) -> (CellTx, SchedulerPlan) {
+        let lock = unique_test_lock();
+        let tx = CellTx::new(vec![], vec![], vec![CellOutput { lock, type_: None, capacity: 1000 }], vec![vec![]], vec![]).unwrap();
+        let plan = SchedulerPlan::new(&tx, accesses).unwrap();
+        (tx, plan)
+    }
 
-    fn create_typed_test_tx_with_witness(
-        outputs_count: usize,
-        access: Option<CellScriptSchedulerAccessWitness>,
-        effect_class: u8,
-    ) -> CellTx {
-        let lock = Script::new([0x00; 32], 0, vec![]);
-        let outputs = vec![CellOutput { lock: lock.clone(), type_: None, capacity: 1000 }; outputs_count];
-        let outputs_data = vec![vec![]; outputs_count];
-        let mut tx = CellTx::new(vec![], vec![], outputs, outputs_data, vec![]).unwrap();
-
-        if let Some(acc) = access {
-            let witness = CellScriptSchedulerWitness {
-                magic: 0xCE11,
-                version: TYPED_CELL_SCHEDULER_WITNESS_VERSION,
-                effect_class,
-                parallelizable: false,
-                estimated_cycles: 500,
-                access_count: 1,
-                accesses: vec![acc],
-            };
-            let encoded = encode_cellscript_scheduler_witness_molecule(&witness);
-            tx.push_cellscript_scheduler_witness(encoded).unwrap();
-        }
-
-        tx
+    fn build_typed(items: Vec<(CellTx, SchedulerPlan)>) -> CellDAG {
+        let (txs, plans): (Vec<_>, Vec<_>) = items.into_iter().unzip();
+        CellDAG::build_with_scheduler_plans(&txs, &plans).unwrap()
     }
 
     #[test]
-    fn test_typed_dag_write_write_same_conflict_hash_creates_dependency() {
-        // Two transactions both WRITE to the same conflict_hash → dependency edge
-        let pool_hash = [0xAA; 32];
+    fn typed_conflict_rules_are_applied_to_authenticated_plans() {
+        let shared = [0xAA; 32];
+        let other = [0xBB; 32];
 
-        let tx0 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_CONSUME,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                index: 0,
-                conflict_hash: pool_hash,
-                typed_data_hash: [0x01; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_MUTATING,
-        );
+        let dag = build_typed(vec![
+            create_typed_test_tx(vec![(shared, AccessMode::Write)]),
+            create_typed_test_tx(vec![(other, AccessMode::Write)]),
+            create_typed_test_tx(vec![(shared, AccessMode::Read)]),
+            create_typed_test_tx(vec![(shared, AccessMode::Write)]),
+        ]);
 
-        let tx1 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_CONSUME,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                index: 0,
-                conflict_hash: pool_hash,
-                typed_data_hash: [0x02; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_MUTATING,
-        );
-
-        let dag = CellDAG::build_from_typed(&[tx0, tx1]).unwrap();
-
-        // WRITE + WRITE same conflict_hash → dependency edge
-        assert!(dag.has_path(0, 1), "WRITE+WRITE same conflict_hash must create dependency");
-        assert_eq!(dag.layers.len(), 2, "WRITE+WRITE must be in different layers");
+        assert!(!dag.has_path(0, 1), "different conflict domains remain parallel");
+        assert!(dag.has_path(0, 2), "write precedes read on the same domain");
+        assert!(dag.has_path(2, 3), "read precedes a later write on the same domain");
+        assert!(dag.has_path(0, 3), "write ordering is transitive");
     }
 
     #[test]
-    fn test_typed_dag_read_read_same_conflict_hash_same_layer() {
-        // Two transactions both READ the same conflict_hash → same layer
-        let config_hash = [0xBB; 32];
+    fn read_read_is_parallel_and_write_conflicts_are_ordered() {
+        let key = [0xCC; 32];
+        let read_dag = build_typed(vec![
+            create_typed_test_tx(vec![(key, AccessMode::Read)]),
+            create_typed_test_tx(vec![(key, AccessMode::Read)]),
+        ]);
+        assert_eq!(read_dag.layers.len(), 1);
 
-        let tx0 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_READ_REF,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP,
-                index: 0,
-                conflict_hash: config_hash,
-                typed_data_hash: [0x00; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_READ_ONLY,
-        );
-
-        let tx1 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_READ_REF,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP,
-                index: 0,
-                conflict_hash: config_hash,
-                typed_data_hash: [0x00; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_READ_ONLY,
-        );
-
-        let dag = CellDAG::build_from_typed(&[tx0, tx1]).unwrap();
-
-        // READ + READ same conflict_hash → same layer (no dependency)
-        assert!(!dag.has_path(0, 1), "READ+READ same conflict_hash must NOT create dependency");
-        assert_eq!(dag.layers.len(), 1, "READ+READ must be in same layer");
+        let write_dag = build_typed(vec![
+            create_typed_test_tx(vec![(key, AccessMode::Read)]),
+            create_typed_test_tx(vec![(key, AccessMode::Write)]),
+        ]);
+        assert!(write_dag.has_path(0, 1));
+        assert_eq!(write_dag.layers.len(), 2);
     }
 
     #[test]
-    fn test_typed_dag_read_write_same_conflict_hash_creates_dependency() {
-        // One READ, one WRITE same conflict_hash → dependency edge
-        let pool_hash = [0xCC; 32];
-
-        let tx0 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_READ_REF,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP,
-                index: 0,
-                conflict_hash: pool_hash,
-                typed_data_hash: [0x00; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_READ_ONLY,
-        );
-
-        let tx1 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_CONSUME,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                index: 0,
-                conflict_hash: pool_hash,
-                typed_data_hash: [0x01; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_MUTATING,
-        );
-
-        let dag = CellDAG::build_from_typed(&[tx0, tx1]).unwrap();
-
-        // READ + WRITE same conflict_hash → dependency edge
-        assert!(dag.has_path(0, 1), "READ+WRITE same conflict_hash must create dependency");
-        assert_eq!(dag.layers.len(), 2, "READ+WRITE must be in different layers");
+    fn same_transaction_accesses_are_aggregated_without_self_edge() {
+        let key = [0xDD; 32];
+        let (tx, plan) = create_typed_test_tx(vec![(key, AccessMode::Read), (key, AccessMode::Write)]);
+        assert_eq!(plan.accesses(), &[(key, AccessMode::Write)]);
+        let dag = CellDAG::build_with_scheduler_plans(&[tx], &[plan]).unwrap();
+        assert_eq!(dag.layers, vec![vec![0]]);
+        assert!(dag.edges.is_empty());
     }
 
     #[test]
-    fn test_typed_dag_different_conflict_hash_parallel() {
-        // Two transactions with different conflict_hash → parallel (same layer)
-        let pool_a_hash = [0xDD; 32];
-        let pool_b_hash = [0xEE; 32];
-
-        let tx0 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_CONSUME,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                index: 0,
-                conflict_hash: pool_a_hash,
-                typed_data_hash: [0x01; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_MUTATING,
-        );
-
-        let tx1 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_CONSUME,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                index: 0,
-                conflict_hash: pool_b_hash,
-                typed_data_hash: [0x02; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_MUTATING,
-        );
-
-        let dag = CellDAG::build_from_typed(&[tx0, tx1]).unwrap();
-
-        // Different conflict_hash → parallel (no dependency)
-        assert!(!dag.has_path(0, 1), "different conflict_hash must be parallel");
-        assert_eq!(dag.layers.len(), 1, "different conflict domains must be in same layer");
+    fn scheduler_plan_is_bound_to_raw_transaction_hash() {
+        let key = [0xEE; 32];
+        let (tx_a, plan_a) = create_typed_test_tx(vec![(key, AccessMode::Write)]);
+        let tx_b = create_test_tx(vec![OutPoint::new([9; 32], 0)], 1);
+        let error = CellDAG::build_with_scheduler_plans(&[tx_b], &[plan_a]).unwrap_err();
+        assert!(matches!(error, DagError::SchedulerPlanTxidMismatch { node_id: 0, .. }));
+        assert_ne!(tx_a.id(), [0; 32]);
     }
 
     #[test]
-    fn test_typed_dag_can_parallel_utility() {
-        let pool_hash = [0xAA; 32];
-        let other_hash = [0xBB; 32];
-
-        // READ + READ same hash → can parallel
-        let reads_a: Vec<([u8; 32], AccessMode)> = vec![(pool_hash, AccessMode::Read)];
-        let reads_b: Vec<([u8; 32], AccessMode)> = vec![(pool_hash, AccessMode::Read)];
-        assert!(CellDAG::can_parallel(&reads_a, &reads_b));
-
-        // READ + WRITE same hash → cannot parallel
-        let write_b: Vec<([u8; 32], AccessMode)> = vec![(pool_hash, AccessMode::Write)];
-        assert!(!CellDAG::can_parallel(&reads_a, &write_b));
-
-        // Different hashes → can parallel
-        let other: Vec<([u8; 32], AccessMode)> = vec![(other_hash, AccessMode::Write)];
-        assert!(CellDAG::can_parallel(&reads_a, &other));
-
-        // WRITE + WRITE same hash → cannot parallel
-        let write_a: Vec<([u8; 32], AccessMode)> = vec![(pool_hash, AccessMode::Write)];
-        assert!(!CellDAG::can_parallel(&write_a, &write_b));
-    }
-
-    #[test]
-    fn test_typed_dag_mixed_conflict_domains() {
-        // 4 transactions: 2 swap pool A, 1 quote pool A, 1 swap pool B
-        // Pool A swaps → sequential (WRITE+WRITE)
-        // Pool A quote + swap → sequential (READ+WRITE)
-        // Pool A + Pool B → parallel (different conflict_hash)
-        let pool_a = [0xAA; 32];
-        let pool_b = [0xBB; 32];
-
-        // tx0: swap pool A (WRITE)
-        let tx0 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_CONSUME,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                index: 0,
-                conflict_hash: pool_a,
-                typed_data_hash: [0x01; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_MUTATING,
-        );
-
-        // tx1: swap pool B (WRITE) — parallel with tx0
-        let tx1 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_CONSUME,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                index: 0,
-                conflict_hash: pool_b,
-                typed_data_hash: [0x02; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_MUTATING,
-        );
-
-        // tx2: quote pool A (READ) — must be after tx0 (READ after WRITE)
-        let tx2 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_READ_REF,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_CELL_DEP,
-                index: 0,
-                conflict_hash: pool_a,
-                typed_data_hash: [0x00; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_READ_ONLY,
-        );
-
-        // tx3: swap pool A again (WRITE) — must be after tx2 (WRITE after READ)
-        let tx3 = create_typed_test_tx_with_witness(
-            1,
-            Some(CellScriptSchedulerAccessWitness {
-                operation: CELLSCRIPT_SCHEDULER_OP_CONSUME,
-                source: CELLSCRIPT_SCHEDULER_SOURCE_INPUT,
-                index: 0,
-                conflict_hash: pool_a,
-                typed_data_hash: [0x03; 32],
-            }),
-            CELLSCRIPT_SCHEDULER_EFFECT_MUTATING,
-        );
-
-        let dag = CellDAG::build_from_typed(&[tx0, tx1, tx2, tx3]).unwrap();
-
-        // tx0 and tx1 are parallel (different conflict domains)
-        assert!(!dag.has_path(0, 1), "pool A swap and pool B swap are parallel");
-
-        // tx0 → tx2 (WRITE → READ on pool A)
-        assert!(dag.has_path(0, 2), "pool A swap must precede pool A quote");
-
-        // tx2 → tx3 (READ → WRITE on pool A)
-        assert!(dag.has_path(2, 3), "pool A quote must precede pool A swap");
-
-        // tx0 → tx3 transitive (pool A chain)
-        assert!(dag.has_path(0, 3), "pool A first swap must precede pool A second swap");
-    }
-
-    #[test]
-    fn typed_dag_consumes_cellscript_legacy_witness_via_bridge() {
-        // PROOF TEST: a real cellscript-compiled witness (9-field legacy
-        // format) attached to two txs must drive typed conflict edges through
-        // the bridge → build_from_typed. Two txs sharing the same Output
-        // type-script + binding, one READ_REF and one CONSUME, must produce a
-        // dependency edge (READ+WRITE rule, dag.rs:184-191). This proves the
-        // compiler's scheduler metadata now reaches the DAG, not just the
-        // OutPoint-level structure.
-        use crate::celltx::witness_bridge::{CellscriptLegacyAccess, CellscriptLegacyWitness};
-        use crate::celltx::types::{
-            CellOutput, Script, CELLSCRIPT_SCHEDULER_OP_CREATE,
-            CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT, CELLSCRIPT_SCHEDULER_WITNESS_MAGIC,
-        };
-
-        let shared_type_script = Script::new([0x55; 32], 1, vec![0x01]);
-        let shared_binding = [0xAB; 32]; // same binding name hash on both txs
-
-        let make_tx = |op: u8| {
-            let lock = Script::new([0x00; 32], 0, vec![]);
-            let output = CellOutput { lock, type_: Some(shared_type_script.clone()), capacity: 1000 };
-            let mut tx = CellTx::new(vec![], vec![], vec![output], vec![vec![]], vec![]).unwrap();
-            let legacy = CellscriptLegacyWitness {
-                magic: u16::from_le_bytes(CELLSCRIPT_SCHEDULER_WITNESS_MAGIC),
-                version: 1,
-                effect_class: 3, // Creating
-                parallelizable: false,
-                touches_shared: vec![],
-                estimated_cycles: 100,
-                accesses: vec![CellscriptLegacyAccess {
-                    operation: op,
-                    source: CELLSCRIPT_SCHEDULER_SOURCE_OUTPUT,
-                    index: 0,
-                    binding_hash: shared_binding,
-                }],
-            };
-            tx.push_cellscript_scheduler_witness(legacy.encode()).unwrap();
-            tx
-        };
-
-        // tx0 and tx1 both CREATE a typed cell on Output[0] with the same
-        // type-script + binding. Same type-script + binding => the bridge
-        // recomputes the same conflict_hash for both, and WRITE+WRITE
-        // (CREATE+CREATE) => dependency edge tx0 → tx1 (dag.rs:184-191).
-        let tx_a = make_tx(CELLSCRIPT_SCHEDULER_OP_CREATE);
-        let tx_b = make_tx(CELLSCRIPT_SCHEDULER_OP_CREATE);
-        let dag = CellDAG::build_from_typed(&[tx_a, tx_b]).expect("DAG builds");
-
-        // The two txs have no OutPoint dependency (both create independent
-        // outputs with no inputs), so any edge between them MUST come from the
-        // typed conflict-hash path — i.e. the bridge successfully decoded the
-        // legacy witness and recomputed matching conflict hashes.
-        assert!(dag.has_path(0, 1), "WRITE→WRITE on shared typed cell must create a dependency edge via the legacy-witness bridge");
-        assert!(dag.layers.len() >= 2, "the conflict edge must place the two txs in separate layers");
+    fn can_parallel_uses_write_dominance() {
+        let shared = [0x11; 32];
+        let other = [0x22; 32];
+        assert!(CellDAG::can_parallel(&[(shared, AccessMode::Read)], &[(shared, AccessMode::Read)]));
+        assert!(!CellDAG::can_parallel(&[(shared, AccessMode::Read)], &[(shared, AccessMode::Write)]));
+        assert!(!CellDAG::can_parallel(&[(shared, AccessMode::Write)], &[(shared, AccessMode::Write)]));
+        assert!(CellDAG::can_parallel(&[(shared, AccessMode::Write)], &[(other, AccessMode::Write)]));
     }
 }

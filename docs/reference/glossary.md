@@ -35,7 +35,8 @@ typed-cell conflict hashes, and declared read/write domains. See
 [CellDAG scheduler](../architecture/scheduler.md).
 
 **CellScript** — The language Myelin's application code is written
-in. Vendored under `cellscript/` with an added `typed-cell` profile.
+in. Myelin invokes one exact upstream compiler through the attested
+`myelin-cellscript-adapter`; the compiler source is not vendored.
 See [CellScript & typed-cell metadata](../architecture/cellscript.md).
 
 **CellTx** — A unit of state transition: consumes Cells, creates
@@ -48,16 +49,13 @@ Cells, carries witnesses and dep references. See
 **CKB-VM** — The RISC-V-based virtual machine that runs every CKB
 script. See [What is CKB-VM?](../concepts/what-is-ckb-vm.md).
 
-**`ckb-compatible`** — A semantic profile meaning a CellTx is
-projectable into a CKB-style transaction without changing
-semantics. See [Semantic profiles](../concepts/semantic-profiles.md).
+**`wire-encoded`** — A projection stage proving canonical CKB
+Molecule transaction bytes and hashes. It does not prove contextual
+validity, script success, or node acceptance. See
+[VM profiles and projection stages](../concepts/semantic-profiles.md).
 
-**`ckb-inspired-only`** — A semantic profile meaning a CellTx
-follows the Cell model but has unsupported projection flags. See
-[Semantic profiles](../concepts/semantic-profiles.md).
-
-**Claim ladder** — The four-tier ladder from "designed to stay
-close to CKB semantics" up to "CKB-aligned adjudication path." See
+**Claim ladder** — The evidence ladder from CKB-shaped execution through
+wire/context/script/node receipts to an exercised L1 court. See
 [Claim ladder](../security/claim-ladder.md).
 
 **Closed committee** — A configured set of validators with a known
@@ -66,15 +64,16 @@ engine. See [Consensus engines](../architecture/consensus.md).
 
 **Committee certificate** — The signature set that finalises a
 `MyelinBlock`. Quorum-weighted for the static engine; strict-majority
-precommit for the Tendermint engine. See
+precommit for the WeightedPrecommit engine. See
 [Consensus engines](../architecture/consensus.md).
 
 **Conflict domain** — A typed grouping of Cells over which two
 CellTxs would conflict if both wrote to the same element. See
 [CellDAG scheduler](../architecture/scheduler.md).
 
-**Conflict hash** — A typed-cell metadata field that commits to
-`(read_set, write_set, conflict_domains)`. See
+**Conflict hash** — A Myelin scheduler-domain hash derived from the
+full type-script identity and one canonical state-resolved conflict-key
+value. It is not accepted directly from compiler metadata. See
 [CellScript & typed-cell metadata](../architecture/cellscript.md).
 
 **Court bundle** — A self-contained input to the future CKB court
@@ -170,7 +169,7 @@ format. Used by Myelin throughout. See
 
 **Myelin-only syscall** — A syscall that exists in Myelin's VM but
 has no CKB equivalent. CellTxs that use them get
-`semantic_profile = "myelin-native"`. See
+`projection_stage = "myelin-native"`. See
 [Semantic profiles](../concepts/semantic-profiles.md).
 
 ## O
@@ -215,16 +214,19 @@ accepted by CKB. See
 CellDAG and emits parallel batches. See
 [CellDAG scheduler](../architecture/scheduler.md).
 
-**Script group** — A set of inputs and outputs that share the same
-`type` script. Verified in parallel by the CKB-VM verifier. See
+**Script group** — A lock or type group containing the input/output
+indexes that share one complete script identity. Each group runs in an
+independent CKB-VM instance and all groups share one transaction cycle
+budget. See
 [Execution pipeline](../architecture/exec-pipeline.md).
 
 **SegmentProof** — A Merkle proof that a payload hash is included
 in a segment tree. See
 [State & data availability](../architecture/state.md).
 
-**Semantic profile** — The label that says what a transition means:
-`ckb-compatible`, `myelin-native`, or `ckb-inspired-only`. See
+**Semantic profile** — The VM/execution semantics used by a transition,
+such as strict CKB behavior or Myelin-only extensions. It is independent
+from projection evidence stages such as `wire-encoded` or `finalized`. See
 [Semantic profiles](../concepts/semantic-profiles.md).
 
 **Session** — The bounded context in which off-chain Cell execution
@@ -254,13 +256,14 @@ transaction they're validating. See
 
 ## T
 
-**Tendermint** — A consensus engine with weighted precommit
+**WeightedPrecommit** — A consensus engine with weighted precommit
 finality. Same trait as the static engine; different certificate
 shape. See [Consensus engines](../architecture/consensus.md).
 
-**Threshold-lock** — A canonical lock-args scheme enforced by the
-final settlement verifier. Requires an authority Cell with declared
-threshold-lock args. See
+**Threshold-lock** — The declared participant-threshold lock-args scheme
+for final settlement authority Cells. The devnet smoke verifies args and
+participant evidence but deliberately reports that canonical lock-code
+enforcement is still missing. See
 [Local CKB devnet smoke](../operations/devnet-smoke.md).
 
 **Type script** — The script that enforces state rules across a set
@@ -268,9 +271,10 @@ of Cells sharing a type. Runs at commit time for every output with
 a matching `type`. See
 [What is CKB?](../concepts/what-is-ckb.md).
 
-**Typed-cell metadata** — The compiler-emitted artefact that
-commits to a CellTx's read/write sets, scheduler witness, and
-proof obligations. See
+**Typed-cell metadata** — Compiler-emitted access and type metadata.
+Myelin authenticates the artifact/metadata digests, then resolves access
+locations against concrete Cell state; compiler binding names are not trusted
+conflict keys. See
 [CellScript & typed-cell metadata](../architecture/cellscript.md).
 
 ## V

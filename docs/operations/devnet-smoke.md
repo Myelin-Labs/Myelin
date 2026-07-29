@@ -2,18 +2,18 @@
 
 `scripts/myelin_ckb_devnet_smoke.sh` is the live-chain counterpart
 to the production gate. It starts a parent CKB devnet, deploys
-CellScript carrier verifiers, submits real carriers, and verifies
+four exact upstream CellScript v0.22.0 verifier artifacts, submits real transitions, and verifies
 that the chain actually accepts (or rejects) the right transactions.
 
 This page walks through what it does and what it proves.
 
 ## What "live CKB devnet" means here
 
-A CKB devnet is a local Nervos CKB node running in testnet mode.
+A CKB devnet is a local Nervos CKB node using a configurable integration specification.
 It exposes a JSON-RPC endpoint on `127.0.0.1:8114` by default. The
-devnet is a real CKB chain — it has the same consensus, same VM,
-same scripts as mainnet — but with zero economic value and a
-configurable genesis.
+It runs the real CKB node and VM implementation, but its genesis,
+consensus parameters, built-in Cells, mining, and economics are not
+mainnet evidence.
 
 For the Myelin smoke, the devnet is started from the parent
 `../ckb` checkout (or via OffCKB). It mines an "always success"
@@ -40,13 +40,13 @@ flowchart TB
     D["Deploy settlement<br/>CellScript carrier verifier"]:::dev
     E["Write 160-byte<br/>DA-anchor carrier payload"]:::sm
     F["Write 160-byte<br/>settlement carrier payload"]:::sm
-    G["Submit carriers<br/>(myelin session carrier-submission)"]:::sm
+    G["Full-node precheck + submit + observe<br/>(myelin session carrier-submission)"]:::sm
     H["Mine carriers<br/>until committed"]:::dev
     I["Run readiness chain<br/>(context/economics/<br/>inclusion/stability/finality)"]:::sm
     J["Submit tampered carrier<br/>(must be REJECTED)"]:::sm
     K["Deploy final DA +<br/>final settlement verifiers"]:::dev
     L["Submit final-script<br/>transactions"]:::sm
-    M["Emit<br/>myelin-ckb-devnet-smoke-v1<br/>report"]:::out
+    M["Emit<br/>myelin-ckb-devnet-smoke-v2<br/>report"]:::out
 
     A --> B --> C --> D
     C --> E
@@ -167,16 +167,17 @@ The transaction-local singleton creation + cross-transaction
 replay protection (through the consumed authority Cell) is the
 **current CKB-compatible anti-replay model**.
 
-The script additionally deploys secp256k1 threshold signatures and
+The script constructs and verifies secp256k1 participant signatures and
 deterministic threshold-lock args. Final-script submission requires
 the consumed authority Cell to use those declared lock args and
 exposes an `authority_threshold_lock_deployment_checked` readiness
 marker when the live lock code dep plus final DA and authority
 cells all match.
 
-Without `--threshold-lock-deployment-evidence`, the package-level
-authority stays `ckb_enforceable = false`. With checked mainnet
-deployment evidence, it can flip to `production_ready`.
+The smoke does not deploy a canonical threshold-enforcing lock; its
+devnet funding lock remains an integration fixture. Consequently the
+package-level authority stays `ckb_enforceable = false`, and the report
+retains `canonical-threshold-lock-enforcement-missing`.
 
 ## Court economics deployment
 
@@ -204,7 +205,7 @@ Without it, the intent stays at the testnet-beta level.
 
 ## The report
 
-The script emits `myelin-ckb-devnet-smoke-v1`, which proves:
+The script emits `myelin-ckb-devnet-smoke-v2`, which proves:
 
 ```text
 devnet CKB acceptance            -> true
@@ -215,34 +216,32 @@ live rejection of competing final-settlement output probe -> true
 ```
 
 The report also records the actual block hashes, transaction
-hashes, type-args, and outputs_data for every committed and
-rejected carrier. Anyone holding the report can re-query the devnet
-RPC and verify the same evidence.
+hashes, type args, and output data for every committed and rejected
+transition. Re-query requires preserving the ephemeral devnet data
+directory; the report alone remains an audit artifact, not a durable
+public-chain locator.
 
 ## What this smoke does NOT prove
 
 - **Not permissionless validator entry.** The smoke runs the
-  static-committee path; Tendermint is in the production gate but
+  static-committee path; WeightedPrecommit is in the production gate but
   the smoke uses static.
-- **Not production DA.** External DA SLA receipts are out of scope
-  here; the smoke runs the local-only DA path with `l1_da_published`
-  flipped by the live CellTx.
+- **Not production DA.** External DA SLA receipts are out of scope.
+  Submission acceptance is reported separately; `l1_da_published`
+  is not inferred from mempool admission.
 - **Not mainnet.** The devnet is a local node. Mainnet submission
   is a separate decision.
 
 ## Running it yourself
 
 ```bash
-# Start a CKB devnet (via OffCKB or parent ../ckb)
-offckb start  # or: cd ../ckb && target/release/ckb run --testnet --tmp
-
-# Run the smoke
-scripts/myelin_ckb_devnet_smoke.sh
+# Normally run through the production gate, which reproduces CellScript first.
+RUN_TEEWORLDS=0 scripts/myelin_production_gate.sh
 ```
 
 The script exits non-zero on any failure. The output report is
-written to `reports/myelin-ckb-devnet-smoke-v1.json` (or wherever
-the script is configured to write).
+written beneath its temporary `WORKDIR` (or the explicitly configured
+`REPORT` path).
 
 ## Where to go next
 

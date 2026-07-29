@@ -1,0 +1,16 @@
+{
+  "schema": "myelin-cellscript-toolchain-lock-v2",
+  "repository": "https://github.com/CellScript-Labs/CellScript",
+  "release_tag": "v0.22.0",
+  "package_version": "0.22.0",
+  "source_revision": "830b5971237401a74dd7848b200f48b4d2ed79f4",
+  "rust_toolchain": "1.97.1",
+  "metadata_schema_version": 55,
+  "source_metadata_schema_version": 1,
+  "artifact_metadata_schema_version": 1,
+  "constraints_metadata_schema_version": 1,
+  "ckb_sdk_repository": "https://github.com/nervosnetwork/ckb-sdk-rust",
+  "ckb_sdk_release_tag": "v5.1.0",
+  "ckb_sdk_package_version": "5.1.0",
+  "ckb_sdk_source_revision": "1fbf3d4c9b35ef90bdb9e6621a8d26edde6325ce"
+}

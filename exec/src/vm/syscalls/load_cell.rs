@@ -251,7 +251,7 @@ mod tests {
         let input_out_point = OutPoint::new([7u8; 32], 0);
         let dep_out_point = OutPoint::new([8u8; 32], 1);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![CellDep { out_point: dep_out_point, dep_type: DepType::Code }],
             header_deps: vec![],
@@ -273,7 +273,7 @@ mod tests {
             type_: Some(Script::new([2u8; 32], 1, vec![0xBB])),
         };
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![],
@@ -324,7 +324,7 @@ mod tests {
         };
         let expected = serialize_cell_output_molecule(&output).unwrap();
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![],
@@ -357,7 +357,7 @@ mod tests {
         let input_out_point = OutPoint::new([7u8; 32], 0);
         let dep_out_point = OutPoint::new([8u8; 32], 1);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![CellDep { out_point: dep_out_point, dep_type: DepType::Code }],
             header_deps: vec![],
@@ -404,7 +404,7 @@ mod tests {
     fn test_load_cell_by_field_supports_partial_reads() {
         let input_out_point = OutPoint::new([7u8; 32], 0);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -445,7 +445,7 @@ mod tests {
     fn test_load_cell_by_field_rejects_unknown_field() {
         let input_out_point = OutPoint::new([7u8; 32], 0);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -483,7 +483,7 @@ mod tests {
     fn test_load_cell_returns_item_missing_when_resolved_input_cell_not_found() {
         let input_out_point = OutPoint::new([7u8; 32], 0);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -512,7 +512,7 @@ mod tests {
     fn test_load_cell_full_serialization_starts_with_capacity() {
         let input_out_point = OutPoint::new([7u8; 32], 0);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -560,7 +560,7 @@ mod tests {
     fn test_load_cell_resolves_header_dep_source() {
         let header_hash = [0xAA; 32];
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![header_hash],
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn test_load_cell_header_dep_returns_index_out_of_bound() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![],
@@ -606,7 +606,7 @@ mod tests {
     fn test_load_cell_header_dep_returns_item_missing_when_cell_not_found() {
         let header_hash = [0xBB; 32];
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![header_hash],
@@ -624,7 +624,7 @@ mod tests {
     fn test_load_cell_header_dep_ecall_writes_capacity() {
         let header_hash = [0xCC; 32];
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![header_hash],
@@ -664,7 +664,7 @@ mod tests {
     fn test_load_cell_ckb_strict_rejects_header_dep_source() {
         let header_hash = [0xCD; 32];
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![header_hash],

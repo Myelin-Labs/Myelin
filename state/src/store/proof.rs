@@ -194,10 +194,7 @@ fn build_next_level(level: &[[u8; 32]]) -> Vec<[u8; 32]> {
     // within a level parallelizes trivially. `par_chunks(2)` preserves order
     // (rayon collects in iteration order), keeping the root byte-identical to
     // the serial implementation.
-    level
-        .par_chunks(2)
-        .map(|chunk| if chunk.len() == 2 { hash_internal(&chunk[0], &chunk[1]) } else { chunk[0] })
-        .collect()
+    level.par_chunks(2).map(|chunk| if chunk.len() == 2 { hash_internal(&chunk[0], &chunk[1]) } else { chunk[0] }).collect()
 }
 
 pub fn compute_merkle_root_from_leaves(leaves: &[[u8; 32]]) -> [u8; 32] {

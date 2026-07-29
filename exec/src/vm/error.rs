@@ -79,6 +79,10 @@ pub enum ScriptError {
     /// Invalid script hash type
     #[error("Invalid script hash type: {0}")]
     InvalidHashType(u8),
+
+    /// More than one distinct type-hash dependency matched the script.
+    #[error("Multiple distinct dependency cells match type script code hash: {0:?}")]
+    MultipleScriptMatches([u8; 32]),
 }
 
 /// Result type for VM operations

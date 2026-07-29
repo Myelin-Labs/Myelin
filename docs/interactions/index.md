@@ -45,7 +45,7 @@ flowchart TB
         M["Mempool<br/>admission queue"]:::l2
         S["CellDAG<br/>scheduler"]:::l2
         V["CKB-VM-style<br/>verifier"]:::l2
-        C["Committee<br/>certificate<br/>(static / Tendermint)"]:::l2
+        C["Committee<br/>certificate<br/>(static / WeightedPrecommit)"]:::l2
     end
     subgraph L1["L1 — CKB"]
         A["Asset custody<br/>(session lock Cells)"]:::l1

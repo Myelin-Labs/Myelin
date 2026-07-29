@@ -82,15 +82,14 @@ pub use vm::{
 };
 
 pub use celltx::{
-    compute_conflict_hash, compute_typed_data_hash, encode_ckb_dep_group_data, encode_dep_group_data, encode_dep_group_data_for_abi,
-    parse_ckb_dep_group_data, parse_dep_group_data, parse_dep_group_data_for_abi, CapacityError, CellAccounting, CellDep,
-    CellIdentity, CellInput, CellMutability, CellOutput, CellOwnership, CellTx, ConflictKeySpec, DepGroupDataAbi, DepType,
+    compute_conflict_hash, compute_typed_data_hash, encode_ckb_dep_group_data, parse_ckb_dep_group_data, CapacityError,
+    CellAccounting, CellDep, CellIdentity, CellInput, CellMutability, CellOutput, CellOwnership, CellTx, ConflictKeySpec, DepType,
     InMemoryTypedCellStore, OutPoint, RuntimeCellSemantics, Script, ScriptHashVersion, ScriptId, TypedCellDecl, TypedCellDeclError,
     TypedCellSemanticMetadata, TypedCellStore, CELLTX_SCHEMA_VERSION,
 };
 
 pub use execution_report::{build_cell_tx_execution_report, CellTxExecutionReport, ExecutionReportStatus};
-pub use projection::{project_cell_tx_to_ckb, CkbProjectionReport, ProjectionBlocker, ProjectionWarning, SemanticProfile};
+pub use projection::{project_cell_tx_to_ckb, CkbProjectionReport, ProjectionBlocker, ProjectionStage, ProjectionWarning};
 
 // Re-export serialization framework
 pub use serialization::{
@@ -136,7 +135,7 @@ pub use serialization::molecule_compat::{
 };
 
 /// Cell transaction version
-pub const CELL_TX_VERSION: u32 = 0xC001;
+pub const CELL_TX_VERSION: u32 = 0;
 
 /// Network ID (u32, little-endian)
 #[repr(u32)]

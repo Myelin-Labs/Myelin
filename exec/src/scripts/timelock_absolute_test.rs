@@ -37,7 +37,7 @@ mod tests {
         // Use exact target timestamp
         let since = encode_absolute_timestamp_since(TARGET_TIMESTAMP);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -61,7 +61,7 @@ mod tests {
         // Use a future timestamp (target + 1 day)
         let since = encode_absolute_timestamp_since(TARGET_TIMESTAMP + 86400);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -85,7 +85,7 @@ mod tests {
         // Use a past timestamp (target - 1 day)
         let since = encode_absolute_timestamp_since(TARGET_TIMESTAMP - 86400);
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -109,7 +109,7 @@ mod tests {
         // Use relative lock (bit63 = 1)
         let since = (1u64 << 63) | (1u64 << 62) | TARGET_TIMESTAMP;
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -133,7 +133,7 @@ mod tests {
         // Use block number lock instead of timestamp (bit62 = 0)
         let since = TARGET_TIMESTAMP;
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, since)],
             cell_deps: vec![],
             header_deps: vec![],

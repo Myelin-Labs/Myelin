@@ -1,14 +1,14 @@
 [package]
 name = "myelin-state"
-version = "0.1.0"
+version = "0.10.0"
 edition = "2021"
 license = "MIT"
 description = "Cell state management and data availability storage"
 
 [dependencies]
 # Core dependencies
-myelin-exec = { path = "../exec", version = "0.1.0" }
-myelin-hashes = { path = "../crypto/hashes", version = "0.1.0" }
+myelin-exec = { path = "../exec", version = "0.10.0" }
+myelin-hashes = { path = "../crypto/hashes", version = "0.10.0" }
 
 # Database
 rocksdb = { version = "0.24", default-features = false, features = ["snappy"] }

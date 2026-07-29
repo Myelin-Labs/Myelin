@@ -14,13 +14,20 @@
 #![allow(missing_docs)]
 
 pub mod cell_tree;
+pub mod conflict;
 pub mod index;
 mod molecule;
 pub mod store;
+pub mod transition;
 
 pub use cell_tree::{CellEntry, CellStateTree};
+pub use conflict::{ConflictCellSource, ConflictDomainRegistry, ConflictFieldReader, ConflictResolutionError, ResolvedConflictDomain};
 pub use index::{CellDB, CellMeta as IndexedCellMeta, ScriptIndex, SegmentInfo};
 pub use store::{compute_segment_root, MerkleTreeBuilder, SegmentMeta, SegmentProof, SegmentReader, SegmentWriter};
+pub use transition::{
+    ResolvedStateInput, StateTransitionContext, StateTransitionEngine, StateTransitionError, StateTransitionReceipt,
+    VerifiedStateTransaction,
+};
 
 /// Cell state errors
 #[derive(Debug, thiserror::Error)]

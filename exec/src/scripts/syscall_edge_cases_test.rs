@@ -33,7 +33,7 @@ mod tests {
     fn test_load_cell_data_offset_equals_data_length() {
         let dep_out_point = OutPoint::new([0xA1; 32], 0);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![CellDep { out_point: dep_out_point, dep_type: DepType::Code }],
             header_deps: vec![],
@@ -74,7 +74,7 @@ mod tests {
     fn test_load_cell_data_offset_exceeds_data_length() {
         let dep_out_point = OutPoint::new([0xA2; 32], 0);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![CellDep { out_point: dep_out_point, dep_type: DepType::Code }],
             header_deps: vec![],
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn test_load_witness_empty_witness() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(OutPoint::new([0xB1; 32], 0), 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -148,7 +148,7 @@ mod tests {
     fn test_load_witness_large_witness_partial_read() {
         let large_witness = vec![0xAA; 4096];
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(OutPoint::new([0xB2; 32], 0), 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn test_load_witness_header_dep_returns_index_out_of_bound() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![[0xDD; 32]],
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn test_load_header_invalid_index_returns_index_out_of_bound() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![[0xC1; 32]],
@@ -268,7 +268,7 @@ mod tests {
     fn test_load_header_header_dep_by_field_timestamp() {
         let header_hash = [0xC2; 32];
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![header_hash],
@@ -312,7 +312,7 @@ mod tests {
         let witness_data = vec![0x01, 0x02, 0x03];
 
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![header_hash],
@@ -426,7 +426,7 @@ mod tests {
         let header_hash = [0xE1; 32];
         let cell_data = vec![0xBE, 0xEF];
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![header_hash],
@@ -467,7 +467,7 @@ mod tests {
     fn test_load_cell_data_header_dep_item_missing() {
         let header_hash = [0xE2; 32];
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![header_hash],

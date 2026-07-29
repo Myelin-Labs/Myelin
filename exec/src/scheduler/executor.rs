@@ -43,20 +43,31 @@ impl ParallelExecutor {
         // Execute layer by layer
         for (layer_idx, layer) in dag.layers.iter().enumerate() {
             // Execute transactions in this layer in parallel
-            let layer_results: Vec<(NodeId, Result<ExecutionReceipt, String>)> = layer
+            let layer_results: Vec<(NodeId, ExecutionResult)> = layer
                 .par_iter()
                 .map(|&node_id| {
-                    let result = executor_fn(&txs[node_id], node_id);
+                    let failed_predecessors = dag
+                        .predecessors(node_id)
+                        .unwrap_or_default()
+                        .iter()
+                        .copied()
+                        .filter(|predecessor| !matches!(results.get(*predecessor), Some(Some(ExecutionResult::Success { .. }))))
+                        .collect::<Vec<_>>();
+                    let result = if failed_predecessors.is_empty() {
+                        match executor_fn(&txs[node_id], node_id) {
+                            Ok(receipt) => ExecutionResult::Success { node_id, layer: layer_idx, receipt },
+                            Err(error) => ExecutionResult::Failed { node_id, layer: layer_idx, error },
+                        }
+                    } else {
+                        ExecutionResult::DependencyFailed { node_id, layer: layer_idx, failed_predecessors }
+                    };
                     (node_id, result)
                 })
                 .collect();
 
             // Store results (deterministic order maintained by NodeId)
             for (node_id, result) in layer_results {
-                results[node_id] = Some(match result {
-                    Ok(receipt) => ExecutionResult::Success { node_id, layer: layer_idx, receipt },
-                    Err(error) => ExecutionResult::Failed { node_id, layer: layer_idx, error },
-                });
+                results[node_id] = Some(result);
             }
         }
 
@@ -82,18 +93,26 @@ impl ParallelExecutor {
     pub fn get_stats(results: &[ExecutionResult]) -> ExecutionStats {
         let total = results.len();
         let successful = results.iter().filter(|r| matches!(r, ExecutionResult::Success { .. })).count();
-        let failed = total - successful;
+        let failed = results.iter().filter(|r| matches!(r, ExecutionResult::Failed { .. })).count();
+        let dependency_failed = results.iter().filter(|r| matches!(r, ExecutionResult::DependencyFailed { .. })).count();
 
         let max_layer = results
             .iter()
             .map(|r| match r {
-                ExecutionResult::Success { layer, .. } => *layer,
-                ExecutionResult::Failed { layer, .. } => *layer,
+                ExecutionResult::Success { layer, .. }
+                | ExecutionResult::Failed { layer, .. }
+                | ExecutionResult::DependencyFailed { layer, .. } => *layer,
             })
             .max()
             .unwrap_or(0);
 
-        ExecutionStats { total_txs: total, successful_txs: successful, failed_txs: failed, max_layer_depth: max_layer + 1 }
+        ExecutionStats {
+            total_txs: total,
+            successful_txs: successful,
+            failed_txs: failed,
+            dependency_failed_txs: dependency_failed,
+            max_layer_depth: max_layer + 1,
+        }
     }
 }
 
@@ -118,6 +137,15 @@ pub enum ExecutionResult {
         /// Error message
         error: String,
     },
+    /// Transaction was not executed because at least one predecessor failed.
+    DependencyFailed {
+        /// Node ID in DAG.
+        node_id: NodeId,
+        /// Layer in topological sort.
+        layer: usize,
+        /// Failed or skipped predecessor nodes.
+        failed_predecessors: Vec<NodeId>,
+    },
 }
 
 impl ExecutionResult {
@@ -126,6 +154,7 @@ impl ExecutionResult {
         match self {
             Self::Success { node_id, .. } => *node_id,
             Self::Failed { node_id, .. } => *node_id,
+            Self::DependencyFailed { node_id, .. } => *node_id,
         }
     }
 
@@ -161,6 +190,8 @@ pub struct ExecutionStats {
     pub successful_txs: usize,
     /// Failed transactions
     pub failed_txs: usize,
+    /// Transactions skipped because a dependency did not execute successfully.
+    pub dependency_failed_txs: usize,
     /// Maximum layer depth (parallel width)
     pub max_layer_depth: usize,
 }
@@ -190,9 +221,12 @@ pub enum ExecutionError {
 mod tests {
     use super::*;
     use crate::celltx::types::{CellInput, CellOutput, OutPoint, Script};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_TX_TAG: AtomicU64 = AtomicU64::new(1);
 
     fn create_test_tx(inputs: Vec<OutPoint>) -> CellTx {
-        let lock = Script::new([0x00; 32], 0, vec![]);
+        let lock = Script::new([0x00; 32], 0, NEXT_TEST_TX_TAG.fetch_add(1, Ordering::Relaxed).to_le_bytes().to_vec());
         let inputs = inputs.into_iter().map(|op| CellInput::new(op, 0)).collect();
         CellTx::new(inputs, vec![], vec![CellOutput { lock, type_: None, capacity: 1000 }], vec![vec![]], vec![]).unwrap()
     }
@@ -232,6 +266,7 @@ mod tests {
         assert_eq!(stats.total_txs, 3);
         assert_eq!(stats.successful_txs, 2);
         assert_eq!(stats.failed_txs, 1);
+        assert_eq!(stats.dependency_failed_txs, 0);
         assert_eq!(stats.max_layer_depth, 2);
     }
 
@@ -242,7 +277,9 @@ mod tests {
         let txs = vec![create_test_tx(vec![]), create_test_tx(vec![])];
 
         let results = executor
-            .execute_sequential(&txs, |_tx, node_id| Ok(ExecutionReceipt { cycles: node_id as u64 * 100, exit_code: 0, gas_used: 0, logs: vec![] }))
+            .execute_sequential(&txs, |_tx, node_id| {
+                Ok(ExecutionReceipt { cycles: node_id as u64 * 100, exit_code: 0, gas_used: 0, logs: vec![] })
+            })
             .unwrap();
 
         assert_eq!(results.len(), 2);
@@ -265,12 +302,10 @@ mod tests {
         // layering and deterministic NodeId-ordered results.
         let executor = ParallelExecutor::default();
 
-        // tx0: no inputs, produces output at (compute_wtxid(tx0), 0). The DAG
-        // derives the producer edge from the wtxid map, so tx1's input must
-        // reference the producer by wtxid (not txid) for the edge to resolve.
+        // tx0: no inputs, produces output at (txid(tx0), 0).
         let tx0 = create_test_tx(vec![]);
-        let tx0_wtxid = crate::celltx::sighash::compute_wtxid(&tx0);
-        let tx1 = create_test_tx(vec![OutPoint::new(tx0_wtxid, 0)]);
+        let tx0_txid = tx0.id();
+        let tx1 = create_test_tx(vec![OutPoint::new(tx0_txid, 0)]);
         let tx2 = create_test_tx(vec![]);
         let txs = vec![tx0, tx1, tx2];
 
@@ -292,12 +327,10 @@ mod tests {
 
         // tx1 depends on tx0, so it must sit in a strictly later layer.
         let layer_of = |node_id: usize| -> usize {
-            match results
-                .iter()
-                .find(|r| r.node_id() == node_id)
-                .expect("result present")
-            {
-                ExecutionResult::Success { layer, .. } | ExecutionResult::Failed { layer, .. } => *layer,
+            match results.iter().find(|r| r.node_id() == node_id).expect("result present") {
+                ExecutionResult::Success { layer, .. }
+                | ExecutionResult::Failed { layer, .. }
+                | ExecutionResult::DependencyFailed { layer, .. } => *layer,
             }
         };
         assert!(layer_of(1) > layer_of(0), "tx1 (consumer of tx0) must be in a later layer than tx0");
@@ -308,6 +341,38 @@ mod tests {
         assert_eq!(stats.total_txs, 3);
         assert_eq!(stats.successful_txs, 3);
         assert_eq!(stats.failed_txs, 0);
+        assert_eq!(stats.dependency_failed_txs, 0);
         assert!(stats.max_layer_depth >= 2, "at least two layers exist");
+    }
+
+    #[test]
+    fn failed_predecessor_prevents_descendant_execution() {
+        let executor = ParallelExecutor::default();
+        let tx0 = create_test_tx(vec![]);
+        let tx1 = create_test_tx(vec![OutPoint::new(tx0.id(), 0)]);
+        let txs = vec![tx0, tx1];
+        let dag = CellDAG::build(&txs).expect("DAG builds");
+        let executions = std::sync::atomic::AtomicUsize::new(0);
+
+        let results = executor
+            .execute(&dag, &txs, |_tx, node_id| {
+                executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if node_id == 0 {
+                    Err("root failed".to_owned())
+                } else {
+                    Ok(ExecutionReceipt::default())
+                }
+            })
+            .expect("executor returns deterministic results");
+
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(results[0], ExecutionResult::Failed { .. }));
+        assert!(matches!(
+            results[1],
+            ExecutionResult::DependencyFailed {
+                ref failed_predecessors,
+                ..
+            } if failed_predecessors == &[0]
+        ));
     }
 }

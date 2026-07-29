@@ -127,7 +127,7 @@ mod tests {
     fn test_load_input_supports_partial_reads() {
         let input = CellInput::new(crate::celltx::OutPoint::new([0xAB; 32], 7), 0x1122_3344_5566_7788);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![input.clone()],
             cell_deps: vec![],
             header_deps: vec![],
@@ -160,7 +160,7 @@ mod tests {
         let input = CellInput::new(crate::celltx::OutPoint::new([0xAB; 32], 7), 0x1122_3344_5566_7788);
         let expected = serialize_cell_input_molecule(&input).unwrap();
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![input],
             cell_deps: vec![],
             header_deps: vec![],
@@ -192,7 +192,7 @@ mod tests {
     fn test_load_input_by_field_rejects_unknown_field() {
         let input = CellInput::new(crate::celltx::OutPoint::new([0xAB; 32], 7), 0x1122_3344_5566_7788);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![input],
             cell_deps: vec![],
             header_deps: vec![],
@@ -221,7 +221,7 @@ mod tests {
     fn test_load_input_ckb_strict_rejects_legacy_group_source_encoding() {
         let input = CellInput::new(crate::celltx::OutPoint::new([0xAB; 32], 7), 0x1122_3344_5566_7788);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![input],
             cell_deps: vec![],
             header_deps: vec![],

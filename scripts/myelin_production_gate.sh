@@ -8,7 +8,7 @@
 #   - cargo clippy --locked --workspace --all-targets -- -D warnings
 #   - cargo test --locked --workspace
 #   - cargo test -p myelin-consensus
-#   - cargo check --locked -p cellscript --all-targets
+#   - fail-closed CellScript process-adapter tests
 #   - myelin CLI smoke tests for both consensus modes
 #   - Teeworlds acceptance, if the Teeworlds repo path exists
 #   - stale-surface grep
@@ -28,10 +28,20 @@ fi
 TEEWORLDS_ROOT="${TEEWORLDS_ROOT:-${DEFAULT_TEEWORLDS_ROOT}}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/myelin-production-gate}"
 RUN_TEEWORLDS="${RUN_TEEWORLDS:-1}"
+RUN_CELLSCRIPT_TOOLCHAIN="${RUN_CELLSCRIPT_TOOLCHAIN:-1}"
+RUN_CKB_DEVNET="${RUN_CKB_DEVNET:-1}"
 
 mkdir -p "${OUTPUT_DIR}"
 
 cd "${MYELIN_ROOT}"
+
+# rocksdb's bindgen step needs libclang. Keep the Homebrew location scoped to
+# macOS so Linux builders can discover their system libclang normally.
+if [[ "$(uname -s)" == "Darwin" && -d "/opt/homebrew/opt/llvm/lib" ]]; then
+  export LIBCLANG_PATH="${LIBCLANG_PATH:-/opt/homebrew/opt/llvm/lib}"
+  export DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-/opt/homebrew/opt/llvm/lib}"
+  export DYLD_FALLBACK_LIBRARY_PATH="${DYLD_FALLBACK_LIBRARY_PATH:-/opt/homebrew/opt/llvm/lib}"
+fi
 
 run_step() {
   printf '\n==> %s\n' "$1"
@@ -57,6 +67,7 @@ run_step "Run focused Myelin protocol tests" \
     -p myelin-hashes \
     -p myelin-math \
     -p myelin-exec \
+    -p myelin-ckb-adapter \
     -p myelin-consensus \
     -p myelin-state \
     -p myelin-mempool \
@@ -69,8 +80,36 @@ run_step "Run myelin-mempool tests" cargo test --locked -p myelin-mempool
 # 6. consensus tests
 run_step "Run myelin-consensus tests" cargo test --locked -p myelin-consensus
 
-# 7. cellscript (must be invoked from the cellscript workspace root)
-run_step "Check cellscript (locked)" bash -c "cd cellscript && cargo check --locked -p cellscript --all-targets"
+# 7. CellScript is an independently versioned upstream toolchain. Test the
+# adapter and, by default, reproduce the exact locked 0.22 release compiler and
+# compile every Myelin-owned integration fixture through it.
+run_step "Test CellScript process adapter" cargo test --locked -p myelin-cellscript-adapter
+if [[ "${RUN_CELLSCRIPT_TOOLCHAIN}" == "1" ]]; then
+  run_step "Reproduce locked CellScript 0.22 compiler and compile Myelin fixtures" \
+    "${SCRIPT_DIR}/myelin_cellscript_toolchain_gate.sh"
+else
+  printf '\n==> Skip locked CellScript toolchain reproduction because RUN_CELLSCRIPT_TOOLCHAIN=%s\n' \
+    "${RUN_CELLSCRIPT_TOOLCHAIN}"
+fi
+
+# 7b. Exercise the exact compiled contracts on the parent CKB implementation.
+# This deploys all four verifier artefacts, submits valid carrier/final-script
+# transactions, and requires tamper/replay probes to be rejected by CKB.
+if [[ "${RUN_CKB_DEVNET}" == "1" ]]; then
+  CELLSCRIPT_TOOLCHAIN_ROOT="${CELLSCRIPT_TOOLCHAIN_ROOT:-/tmp/myelin-cellscript-toolchain-v0.22.0}"
+  CELLSCRIPT_BIN="${CELLSCRIPT_BIN:-${CELLSCRIPT_TOOLCHAIN_ROOT}/CellScript/target/release/cellc}"
+  CELLSCRIPT_ATTESTATION="${CELLSCRIPT_ATTESTATION:-${CELLSCRIPT_TOOLCHAIN_ROOT}/myelin-evidence/compiler-attestation.json}"
+  CKB_DEVNET_WORKDIR="$(mktemp -d "${OUTPUT_DIR}/ckb-devnet.XXXXXX")"
+  run_step "Deploy and exercise locked CellScript artefacts on parent CKB devnet" \
+    env \
+      CELLSCRIPT_BIN="${CELLSCRIPT_BIN}" \
+      CELLSCRIPT_ATTESTATION="${CELLSCRIPT_ATTESTATION}" \
+      WORKDIR="${CKB_DEVNET_WORKDIR}" \
+      REPORT="${CKB_DEVNET_WORKDIR}/report.json" \
+      "${SCRIPT_DIR}/myelin_ckb_devnet_smoke.sh"
+else
+  printf '\n==> Skip parent CKB devnet acceptance because RUN_CKB_DEVNET=%s\n' "${RUN_CKB_DEVNET}"
+fi
 
 # 8. CLI smoke for both consensus modes
 COMMITTEE_CONFIG="${OUTPUT_DIR}/static-committee.toml"
@@ -83,12 +122,12 @@ quorum_weight = 2
 
 [[static_committee.validators]]
 id = "validator-0"
-public_key = "0101010101010101010101010101010101010101010101010101010101010101"
+public_key = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 weight = 1
 
 [[static_committee.validators]]
 id = "validator-1"
-public_key = "0202020202020202020202020202020202020202020202020202020202020202"
+public_key = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
 weight = 1
 EOF
 
@@ -97,39 +136,39 @@ run_step "Smoke: myelin-cli static-closed-committee finalise" \
     --config "${COMMITTEE_CONFIG}" \
     --out "${COMMITTEE_REPORT}"
 
-TENDERMINT_CONFIG="${OUTPUT_DIR}/tendermint.toml"
-TENDERMINT_REPORT="${OUTPUT_DIR}/tendermint.json"
-cat > "${TENDERMINT_CONFIG}" <<'EOF'
-kind = "tendermint"
+WEIGHTED_PRECOMMIT_CONFIG="${OUTPUT_DIR}/weighted_precommit.toml"
+WEIGHTED_PRECOMMIT_REPORT="${OUTPUT_DIR}/weighted_precommit.json"
+cat > "${WEIGHTED_PRECOMMIT_CONFIG}" <<'EOF'
+kind = "weighted-precommit"
 
-[tendermint]
+[weighted_precommit]
 quorum_power = 2
 
-[[tendermint.validators]]
+[[weighted_precommit.validators]]
 id = "validator-0"
-public_key = "0101010101010101010101010101010101010101010101010101010101010101"
+public_key = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 weight = 1
 
-[[tendermint.validators]]
+[[weighted_precommit.validators]]
 id = "validator-1"
-public_key = "0202020202020202020202020202020202020202020202020202020202020202"
+public_key = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
 weight = 1
 EOF
 
-run_step "Smoke: myelin-cli tendermint finalise" \
+run_step "Smoke: myelin-cli weighted-precommit finalise" \
   cargo run -p myelin-cli -- committee finalise-demo \
-    --config "${TENDERMINT_CONFIG}" \
-    --out "${TENDERMINT_REPORT}"
+    --config "${WEIGHTED_PRECOMMIT_CONFIG}" \
+    --out "${WEIGHTED_PRECOMMIT_REPORT}"
 
 # 9. CLI JSON contract
 run_step "Validate CLI JSON contract" \
-  python3 - "${COMMITTEE_REPORT}" "${TENDERMINT_REPORT}" <<'PY'
+  python3 - "${COMMITTEE_REPORT}" "${WEIGHTED_PRECOMMIT_REPORT}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 committee = json.loads(Path(sys.argv[1]).read_text())
-tendermint = json.loads(Path(sys.argv[2]).read_text())
+weighted_precommit = json.loads(Path(sys.argv[2]).read_text())
 
 def require(condition, message):
     if not condition:
@@ -139,40 +178,40 @@ require(committee["consensus_kind"] == "static-closed-committee", "static commit
 require(committee["finalised"] is True, "static committee finalised")
 require(len(committee["signer_ids"]) >= 2, "static committee signer count")
 
-require(tendermint["consensus_kind"] == "tendermint", "tendermint kind")
-require(tendermint["finalised"] is True, "tendermint finalised")
-require(len(tendermint["signer_ids"]) >= 2, "tendermint signer count")
-require(tendermint["certificate_step"] == "precommit", "tendermint precommit")
-require(tendermint["certificate_round"] == 0, "tendermint round 0")
+require(weighted_precommit["consensus_kind"] == "weighted-precommit", "weighted_precommit kind")
+require(weighted_precommit["finalised"] is True, "weighted_precommit finalised")
+require(len(weighted_precommit["signer_ids"]) >= 2, "weighted_precommit signer count")
+require(weighted_precommit["certificate_step"] == "precommit", "weighted_precommit precommit")
+require(weighted_precommit["certificate_round"] == 0, "weighted_precommit round 0")
 print(json.dumps({
     "static_committee": committee["block_hash"],
-    "tendermint": tendermint["block_hash"],
+    "weighted-precommit": weighted_precommit["block_hash"],
 }, indent=2, sort_keys=True))
 PY
 
 # 10. Runtime smoke — exercise myelin-state + myelin-mempool + both consensus
 #     engines end-to-end through the binary, not just the unit tests.
 RUNTIME_STATIC_REPORT="${OUTPUT_DIR}/runtime-smoke-static.json"
-RUNTIME_TENDERMINT_REPORT="${OUTPUT_DIR}/runtime-smoke-tendermint.json"
+RUNTIME_WEIGHTED_PRECOMMIT_REPORT="${OUTPUT_DIR}/runtime-smoke-weighted-precommit.json"
 
 run_step "Smoke: runtime smoke (static-closed-committee)" \
   cargo run -p myelin-cli -- runtime smoke \
     --consensus static-closed-committee \
     --out "${RUNTIME_STATIC_REPORT}"
 
-run_step "Smoke: runtime smoke (tendermint)" \
+run_step "Smoke: runtime smoke (weighted-precommit)" \
   cargo run -p myelin-cli -- runtime smoke \
-    --consensus tendermint \
-    --out "${RUNTIME_TENDERMINT_REPORT}"
+    --consensus weighted-precommit \
+    --out "${RUNTIME_WEIGHTED_PRECOMMIT_REPORT}"
 
 run_step "Validate runtime smoke reports" \
-  python3 - "${RUNTIME_STATIC_REPORT}" "${RUNTIME_TENDERMINT_REPORT}" <<'PY'
+  python3 - "${RUNTIME_STATIC_REPORT}" "${RUNTIME_WEIGHTED_PRECOMMIT_REPORT}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 static_report = json.loads(Path(sys.argv[1]).read_text())
-tendermint_report = json.loads(Path(sys.argv[2]).read_text())
+weighted_precommit_report = json.loads(Path(sys.argv[2]).read_text())
 
 def require(condition, message):
     if not condition:
@@ -180,9 +219,9 @@ def require(condition, message):
 
 # Both reports must be in the v1 schema and finalised.
 for report, kind in ((static_report, "static-closed-committee"),
-                     (tendermint_report, "tendermint")):
-    require(report["schema"] == "myelin-runtime-smoke-v1",
-            f"{kind} schema must be myelin-runtime-smoke-v1")
+                     (weighted_precommit_report, "weighted-precommit")):
+    require(report["schema"] == "myelin-runtime-smoke-v2",
+            f"{kind} schema must be myelin-runtime-smoke-v2")
     require(report["consensus_kind"] == kind, f"{kind} consensus_kind")
     require(report["vm_profile"] == "no-vm-runtime-smoke", f"{kind} vm profile")
     require(isinstance(report["ckb_spawn_ipc_enabled"], bool), f"{kind} spawn/IPC flag")
@@ -200,19 +239,19 @@ for report, kind in ((static_report, "static-closed-committee"),
 # The CellTx + state mutation is consensus-independent: txid, wtxid, and
 # both state roots MUST be identical across both engines. Only the
 # certificate_hash (signature domain) is allowed to differ.
-require(static_report["cell_tx_id"] == tendermint_report["cell_tx_id"],
+require(static_report["cell_tx_id"] == weighted_precommit_report["cell_tx_id"],
         "cell txid must match across engines")
-require(static_report["cell_wtxid"] == tendermint_report["cell_wtxid"],
+require(static_report["cell_wtxid"] == weighted_precommit_report["cell_wtxid"],
         "cell wtxid must match across engines")
-require(static_report["state_root_before"] == tendermint_report["state_root_before"],
+require(static_report["state_root_before"] == weighted_precommit_report["state_root_before"],
         "state_root_before must match across engines")
-require(static_report["state_root_after"] == tendermint_report["state_root_after"],
+require(static_report["state_root_after"] == weighted_precommit_report["state_root_after"],
         "state_root_after must match across engines")
-require(static_report["vm_profile"] == tendermint_report["vm_profile"],
+require(static_report["vm_profile"] == weighted_precommit_report["vm_profile"],
         "vm profile must match across engines")
-require(static_report["ckb_spawn_ipc_enabled"] == tendermint_report["ckb_spawn_ipc_enabled"],
+require(static_report["ckb_spawn_ipc_enabled"] == weighted_precommit_report["ckb_spawn_ipc_enabled"],
         "spawn/IPC build flag must match across engines")
-require(static_report["certificate_hash"] != tendermint_report["certificate_hash"],
+require(static_report["certificate_hash"] != weighted_precommit_report["certificate_hash"],
         "the two engines must use different signature domains")
 
 print(json.dumps({
@@ -221,7 +260,7 @@ print(json.dumps({
     "ckb_spawn_ipc_enabled": static_report["ckb_spawn_ipc_enabled"],
     "state_root_after": static_report["state_root_after"],
     "static_certificate_hash": static_report["certificate_hash"],
-    "tendermint_certificate_hash": tendermint_report["certificate_hash"],
+    "weighted_precommit_certificate_hash": weighted_precommit_report["certificate_hash"],
 }, indent=2, sort_keys=True))
 PY
 
@@ -254,34 +293,34 @@ SESSION_PACKAGE_FINALITY_STATIC="${OUTPUT_DIR}/session-package-finality-static.j
 SESSION_PACKAGE_CONTEXT_STATIC="${OUTPUT_DIR}/session-package-context-static.json"
 SESSION_PACKAGE_ECONOMICS_STATIC="${OUTPUT_DIR}/session-package-economics-static.json"
 SESSION_PACKAGE_READINESS_STATIC="${OUTPUT_DIR}/session-package-readiness-static.json"
-SESSION_OPEN_TENDERMINT="${OUTPUT_DIR}/session-open-tendermint.json"
-SESSION_COMMIT_TENDERMINT="${OUTPUT_DIR}/session-commit-tendermint.json"
-SESSION_COURT_TENDERMINT="${OUTPUT_DIR}/session-court-tendermint.json"
-SESSION_VERIFY_TENDERMINT="${OUTPUT_DIR}/session-verify-tendermint.json"
-SESSION_DA_TENDERMINT="${OUTPUT_DIR}/session-da-tendermint.json"
-SESSION_DA_VERIFY_TENDERMINT="${OUTPUT_DIR}/session-da-verify-tendermint.json"
-SESSION_DA_STORE_TENDERMINT="${OUTPUT_DIR}/session-da-store-tendermint"
-SESSION_DA_ANCHOR_TENDERMINT="${OUTPUT_DIR}/session-da-anchor-tendermint.json"
-SESSION_DA_ANCHOR_VERIFY_TENDERMINT="${OUTPUT_DIR}/session-da-anchor-verify-tendermint.json"
-SESSION_DA_ANCHOR_SUBMIT_TENDERMINT="${OUTPUT_DIR}/session-da-anchor-submit-tendermint.json"
-SESSION_DA_ANCHOR_INCLUSION_TENDERMINT="${OUTPUT_DIR}/session-da-anchor-inclusion-tendermint.json"
-SESSION_DA_ANCHOR_STABILITY_TENDERMINT="${OUTPUT_DIR}/session-da-anchor-stability-tendermint.json"
-SESSION_DA_ANCHOR_FINALITY_TENDERMINT="${OUTPUT_DIR}/session-da-anchor-finality-tendermint.json"
-SESSION_DA_ANCHOR_CONTEXT_TENDERMINT="${OUTPUT_DIR}/session-da-anchor-context-tendermint.json"
-SESSION_DA_ANCHOR_ECONOMICS_TENDERMINT="${OUTPUT_DIR}/session-da-anchor-economics-tendermint.json"
-SESSION_DA_ANCHOR_READINESS_TENDERMINT="${OUTPUT_DIR}/session-da-anchor-readiness-tendermint.json"
-SESSION_SETTLEMENT_TENDERMINT="${OUTPUT_DIR}/session-settlement-tendermint.json"
-SESSION_SETTLEMENT_VERIFY_TENDERMINT="${OUTPUT_DIR}/session-settlement-verify-tendermint.json"
-SESSION_PACKAGE_TENDERMINT="${OUTPUT_DIR}/session-package-tendermint.json"
-SESSION_PACKAGE_VERIFY_TENDERMINT="${OUTPUT_DIR}/session-package-verify-tendermint.json"
-SESSION_PACKAGE_SUBMIT_TENDERMINT="${OUTPUT_DIR}/session-package-submit-tendermint.json"
-SESSION_PACKAGE_INCLUSION_TENDERMINT="${OUTPUT_DIR}/session-package-inclusion-tendermint.json"
-SESSION_PACKAGE_STABILITY_TENDERMINT="${OUTPUT_DIR}/session-package-stability-tendermint.json"
-SESSION_PACKAGE_FINALITY_TENDERMINT="${OUTPUT_DIR}/session-package-finality-tendermint.json"
-SESSION_PACKAGE_CONTEXT_TENDERMINT="${OUTPUT_DIR}/session-package-context-tendermint.json"
-SESSION_PACKAGE_ECONOMICS_TENDERMINT="${OUTPUT_DIR}/session-package-economics-tendermint.json"
-SESSION_PACKAGE_READINESS_TENDERMINT="${OUTPUT_DIR}/session-package-readiness-tendermint.json"
-rm -rf "${SESSION_DA_STORE_STATIC}" "${SESSION_DA_STORE_TENDERMINT}"
+SESSION_OPEN_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-open-weighted-precommit.json"
+SESSION_COMMIT_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-commit-weighted-precommit.json"
+SESSION_COURT_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-court-weighted-precommit.json"
+SESSION_VERIFY_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-verify-weighted-precommit.json"
+SESSION_DA_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-weighted-precommit.json"
+SESSION_DA_VERIFY_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-verify-weighted-precommit.json"
+SESSION_DA_STORE_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-store-weighted-precommit"
+SESSION_DA_ANCHOR_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-anchor-weighted-precommit.json"
+SESSION_DA_ANCHOR_VERIFY_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-anchor-verify-weighted-precommit.json"
+SESSION_DA_ANCHOR_SUBMIT_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-anchor-submit-weighted-precommit.json"
+SESSION_DA_ANCHOR_INCLUSION_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-anchor-inclusion-weighted-precommit.json"
+SESSION_DA_ANCHOR_STABILITY_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-anchor-stability-weighted-precommit.json"
+SESSION_DA_ANCHOR_FINALITY_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-anchor-finality-weighted-precommit.json"
+SESSION_DA_ANCHOR_CONTEXT_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-anchor-context-weighted-precommit.json"
+SESSION_DA_ANCHOR_ECONOMICS_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-anchor-economics-weighted-precommit.json"
+SESSION_DA_ANCHOR_READINESS_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-da-anchor-readiness-weighted-precommit.json"
+SESSION_SETTLEMENT_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-settlement-weighted-precommit.json"
+SESSION_SETTLEMENT_VERIFY_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-settlement-verify-weighted-precommit.json"
+SESSION_PACKAGE_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-package-weighted-precommit.json"
+SESSION_PACKAGE_VERIFY_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-package-verify-weighted-precommit.json"
+SESSION_PACKAGE_SUBMIT_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-package-submit-weighted-precommit.json"
+SESSION_PACKAGE_INCLUSION_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-package-inclusion-weighted-precommit.json"
+SESSION_PACKAGE_STABILITY_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-package-stability-weighted-precommit.json"
+SESSION_PACKAGE_FINALITY_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-package-finality-weighted-precommit.json"
+SESSION_PACKAGE_CONTEXT_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-package-context-weighted-precommit.json"
+SESSION_PACKAGE_ECONOMICS_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-package-economics-weighted-precommit.json"
+SESSION_PACKAGE_READINESS_WEIGHTED_PRECOMMIT="${OUTPUT_DIR}/session-package-readiness-weighted-precommit.json"
+rm -rf "${SESSION_DA_STORE_STATIC}" "${SESSION_DA_STORE_WEIGHTED_PRECOMMIT}"
 
 run_step "Session: open fixture (static-closed-committee)" \
   cargo run -p myelin-cli -- session open-fixture \
@@ -373,102 +412,102 @@ run_step "Session: dry-run settlement RPC submission (static-closed-committee)" 
     --dry-run \
     --out "${SESSION_PACKAGE_SUBMIT_STATIC}"
 
-run_step "Session: open fixture (tendermint)" \
+run_step "Session: open fixture (weighted-precommit)" \
   cargo run -p myelin-cli -- session open-fixture \
-    --consensus tendermint \
-    --out "${SESSION_OPEN_TENDERMINT}"
+    --consensus weighted-precommit \
+    --out "${SESSION_OPEN_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: commit fixture (tendermint)" \
+run_step "Session: commit fixture (weighted-precommit)" \
   cargo run -p myelin-cli -- session commit-fixture \
-    --session "${SESSION_OPEN_TENDERMINT}" \
-    --out "${SESSION_COMMIT_TENDERMINT}"
+    --session "${SESSION_OPEN_WEIGHTED_PRECOMMIT}" \
+    --out "${SESSION_COMMIT_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: court bundle (tendermint)" \
+run_step "Session: court bundle (weighted-precommit)" \
   cargo run -p myelin-cli -- session court-bundle \
-    --commit "${SESSION_COMMIT_TENDERMINT}" \
+    --commit "${SESSION_COMMIT_WEIGHTED_PRECOMMIT}" \
     --chunk-index 0 \
-    --out "${SESSION_COURT_TENDERMINT}"
+    --out "${SESSION_COURT_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: verify court bundle (tendermint)" \
+run_step "Session: verify court bundle (weighted-precommit)" \
   cargo run -p myelin-cli -- session verify-court-bundle \
-    --bundle "${SESSION_COURT_TENDERMINT}" \
-    --out "${SESSION_VERIFY_TENDERMINT}"
+    --bundle "${SESSION_COURT_WEIGHTED_PRECOMMIT}" \
+    --out "${SESSION_VERIFY_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: DA manifest (tendermint)" \
+run_step "Session: DA manifest (weighted-precommit)" \
   cargo run -p myelin-cli -- session da-manifest \
-    --bundle "${SESSION_COURT_TENDERMINT}" \
-    --storage-dir "${SESSION_DA_STORE_TENDERMINT}" \
-    --out "${SESSION_DA_TENDERMINT}"
+    --bundle "${SESSION_COURT_WEIGHTED_PRECOMMIT}" \
+    --storage-dir "${SESSION_DA_STORE_WEIGHTED_PRECOMMIT}" \
+    --out "${SESSION_DA_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: verify DA manifest (tendermint)" \
+run_step "Session: verify DA manifest (weighted-precommit)" \
   cargo run -p myelin-cli -- session verify-da-manifest \
-    --manifest "${SESSION_DA_TENDERMINT}" \
-    --bundle "${SESSION_COURT_TENDERMINT}" \
-    --storage-dir "${SESSION_DA_STORE_TENDERMINT}" \
-    --out "${SESSION_DA_VERIFY_TENDERMINT}"
+    --manifest "${SESSION_DA_WEIGHTED_PRECOMMIT}" \
+    --bundle "${SESSION_COURT_WEIGHTED_PRECOMMIT}" \
+    --storage-dir "${SESSION_DA_STORE_WEIGHTED_PRECOMMIT}" \
+    --out "${SESSION_DA_VERIFY_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: DA anchor package (tendermint)" \
+run_step "Session: DA anchor package (weighted-precommit)" \
   cargo run -p myelin-cli -- session da-anchor-package \
-    --manifest "${SESSION_DA_TENDERMINT}" \
-    --bundle "${SESSION_COURT_TENDERMINT}" \
-    --out "${SESSION_DA_ANCHOR_TENDERMINT}"
+    --manifest "${SESSION_DA_WEIGHTED_PRECOMMIT}" \
+    --bundle "${SESSION_COURT_WEIGHTED_PRECOMMIT}" \
+    --out "${SESSION_DA_ANCHOR_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: verify DA anchor package (tendermint)" \
+run_step "Session: verify DA anchor package (weighted-precommit)" \
   cargo run -p myelin-cli -- session verify-da-anchor-package \
-    --package "${SESSION_DA_ANCHOR_TENDERMINT}" \
-    --manifest "${SESSION_DA_TENDERMINT}" \
-    --bundle "${SESSION_COURT_TENDERMINT}" \
-    --out "${SESSION_DA_ANCHOR_VERIFY_TENDERMINT}"
+    --package "${SESSION_DA_ANCHOR_WEIGHTED_PRECOMMIT}" \
+    --manifest "${SESSION_DA_WEIGHTED_PRECOMMIT}" \
+    --bundle "${SESSION_COURT_WEIGHTED_PRECOMMIT}" \
+    --out "${SESSION_DA_ANCHOR_VERIFY_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: dry-run DA anchor RPC submission (tendermint)" \
+run_step "Session: dry-run DA anchor RPC submission (weighted-precommit)" \
   cargo run -p myelin-cli -- session submit-da-anchor-package \
-    --package "${SESSION_DA_ANCHOR_TENDERMINT}" \
+    --package "${SESSION_DA_ANCHOR_WEIGHTED_PRECOMMIT}" \
     --dry-run \
-    --out "${SESSION_DA_ANCHOR_SUBMIT_TENDERMINT}"
+    --out "${SESSION_DA_ANCHOR_SUBMIT_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: settlement intent (tendermint)" \
+run_step "Session: settlement intent (weighted-precommit)" \
   cargo run -p myelin-cli -- session settlement-intent \
-    --bundle "${SESSION_COURT_TENDERMINT}" \
-    --da-manifest "${SESSION_DA_TENDERMINT}" \
+    --bundle "${SESSION_COURT_WEIGHTED_PRECOMMIT}" \
+    --da-manifest "${SESSION_DA_WEIGHTED_PRECOMMIT}" \
     --kind disputed-close \
     --current-time-ms 60000 \
     --challenge-window-ms 60000 \
-    --out "${SESSION_SETTLEMENT_TENDERMINT}"
+    --out "${SESSION_SETTLEMENT_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: verify settlement intent (tendermint)" \
+run_step "Session: verify settlement intent (weighted-precommit)" \
   cargo run -p myelin-cli -- session verify-settlement-intent \
-    --intent "${SESSION_SETTLEMENT_TENDERMINT}" \
-    --bundle "${SESSION_COURT_TENDERMINT}" \
-    --da-manifest "${SESSION_DA_TENDERMINT}" \
-    --out "${SESSION_SETTLEMENT_VERIFY_TENDERMINT}"
+    --intent "${SESSION_SETTLEMENT_WEIGHTED_PRECOMMIT}" \
+    --bundle "${SESSION_COURT_WEIGHTED_PRECOMMIT}" \
+    --da-manifest "${SESSION_DA_WEIGHTED_PRECOMMIT}" \
+    --out "${SESSION_SETTLEMENT_VERIFY_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: settlement package (tendermint)" \
+run_step "Session: settlement package (weighted-precommit)" \
   cargo run -p myelin-cli -- session settlement-package \
-    --intent "${SESSION_SETTLEMENT_TENDERMINT}" \
-    --bundle "${SESSION_COURT_TENDERMINT}" \
-    --da-manifest "${SESSION_DA_TENDERMINT}" \
-    --out "${SESSION_PACKAGE_TENDERMINT}"
+    --intent "${SESSION_SETTLEMENT_WEIGHTED_PRECOMMIT}" \
+    --bundle "${SESSION_COURT_WEIGHTED_PRECOMMIT}" \
+    --da-manifest "${SESSION_DA_WEIGHTED_PRECOMMIT}" \
+    --out "${SESSION_PACKAGE_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: verify settlement package (tendermint)" \
+run_step "Session: verify settlement package (weighted-precommit)" \
   cargo run -p myelin-cli -- session verify-settlement-package \
-    --package "${SESSION_PACKAGE_TENDERMINT}" \
-    --intent "${SESSION_SETTLEMENT_TENDERMINT}" \
-    --bundle "${SESSION_COURT_TENDERMINT}" \
-    --da-manifest "${SESSION_DA_TENDERMINT}" \
-    --out "${SESSION_PACKAGE_VERIFY_TENDERMINT}"
+    --package "${SESSION_PACKAGE_WEIGHTED_PRECOMMIT}" \
+    --intent "${SESSION_SETTLEMENT_WEIGHTED_PRECOMMIT}" \
+    --bundle "${SESSION_COURT_WEIGHTED_PRECOMMIT}" \
+    --da-manifest "${SESSION_DA_WEIGHTED_PRECOMMIT}" \
+    --out "${SESSION_PACKAGE_VERIFY_WEIGHTED_PRECOMMIT}"
 
-run_step "Session: dry-run settlement RPC submission (tendermint)" \
+run_step "Session: dry-run settlement RPC submission (weighted-precommit)" \
   cargo run -p myelin-cli -- session submit-settlement-package \
-    --package "${SESSION_PACKAGE_TENDERMINT}" \
+    --package "${SESSION_PACKAGE_WEIGHTED_PRECOMMIT}" \
     --dry-run \
-    --out "${SESSION_PACKAGE_SUBMIT_TENDERMINT}"
+    --out "${SESSION_PACKAGE_SUBMIT_WEIGHTED_PRECOMMIT}"
 
 run_step "Session: mock CKB inclusion verification" \
   python3 - \
     "${SESSION_DA_ANCHOR_SUBMIT_STATIC}" "${SESSION_DA_ANCHOR_INCLUSION_STATIC}" \
-    "${SESSION_DA_ANCHOR_SUBMIT_TENDERMINT}" "${SESSION_DA_ANCHOR_INCLUSION_TENDERMINT}" \
+    "${SESSION_DA_ANCHOR_SUBMIT_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_INCLUSION_WEIGHTED_PRECOMMIT}" \
     "${SESSION_PACKAGE_SUBMIT_STATIC}" "${SESSION_PACKAGE_INCLUSION_STATIC}" \
-    "${SESSION_PACKAGE_SUBMIT_TENDERMINT}" "${SESSION_PACKAGE_INCLUSION_TENDERMINT}" <<'PY'
+    "${SESSION_PACKAGE_SUBMIT_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_INCLUSION_WEIGHTED_PRECOMMIT}" <<'PY'
 import json
 import subprocess
 import sys
@@ -552,7 +591,7 @@ try:
             check=True,
         )
         report = json.loads(out_path.read_text())
-        if report["schema"] != "myelin-session-submission-inclusion-v1":
+        if report["schema"] != "myelin-session-submission-inclusion-v2":
             raise SystemExit("production gate failed: inclusion schema")
         if report["request_method"] != "get_transaction":
             raise SystemExit("production gate failed: inclusion method")
@@ -570,9 +609,9 @@ PY
 run_step "Session: mock CKB committed-block stability verification" \
   python3 - \
     "${SESSION_DA_ANCHOR_INCLUSION_STATIC}" "${SESSION_DA_ANCHOR_STABILITY_STATIC}" \
-    "${SESSION_DA_ANCHOR_INCLUSION_TENDERMINT}" "${SESSION_DA_ANCHOR_STABILITY_TENDERMINT}" \
+    "${SESSION_DA_ANCHOR_INCLUSION_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_STABILITY_WEIGHTED_PRECOMMIT}" \
     "${SESSION_PACKAGE_INCLUSION_STATIC}" "${SESSION_PACKAGE_STABILITY_STATIC}" \
-    "${SESSION_PACKAGE_INCLUSION_TENDERMINT}" "${SESSION_PACKAGE_STABILITY_TENDERMINT}" <<'PY'
+    "${SESSION_PACKAGE_INCLUSION_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_STABILITY_WEIGHTED_PRECOMMIT}" <<'PY'
 import json
 import subprocess
 import sys
@@ -646,7 +685,7 @@ try:
             check=True,
         )
         report = json.loads(out_path.read_text())
-        if report["schema"] != "myelin-session-submission-stability-v1":
+        if report["schema"] != "myelin-session-submission-stability-v2":
             raise SystemExit("production gate failed: stability schema")
         if report["request_method"] != "get_transaction":
             raise SystemExit("production gate failed: stability method")
@@ -666,9 +705,9 @@ PY
 run_step "Session: mock CKB finality-depth verification" \
   python3 - \
     "${SESSION_DA_ANCHOR_INCLUSION_STATIC}" "${SESSION_DA_ANCHOR_FINALITY_STATIC}" \
-    "${SESSION_DA_ANCHOR_INCLUSION_TENDERMINT}" "${SESSION_DA_ANCHOR_FINALITY_TENDERMINT}" \
+    "${SESSION_DA_ANCHOR_INCLUSION_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_FINALITY_WEIGHTED_PRECOMMIT}" \
     "${SESSION_PACKAGE_INCLUSION_STATIC}" "${SESSION_PACKAGE_FINALITY_STATIC}" \
-    "${SESSION_PACKAGE_INCLUSION_TENDERMINT}" "${SESSION_PACKAGE_FINALITY_TENDERMINT}" <<'PY'
+    "${SESSION_PACKAGE_INCLUSION_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_FINALITY_WEIGHTED_PRECOMMIT}" <<'PY'
 import json
 import subprocess
 import sys
@@ -730,7 +769,7 @@ try:
             check=True,
         )
         report = json.loads(out_path.read_text())
-        if report["schema"] != "myelin-session-submission-finality-v1":
+        if report["schema"] != "myelin-session-submission-finality-v2":
             raise SystemExit("production gate failed: finality schema")
         if report["request_method"] != "get_tip_header":
             raise SystemExit("production gate failed: finality method")
@@ -750,9 +789,9 @@ PY
 run_step "Session: mock CKB live-cell context preflight" \
   python3 - \
     "${SESSION_DA_ANCHOR_SUBMIT_STATIC}" "${SESSION_DA_ANCHOR_CONTEXT_STATIC}" \
-    "${SESSION_DA_ANCHOR_SUBMIT_TENDERMINT}" "${SESSION_DA_ANCHOR_CONTEXT_TENDERMINT}" \
+    "${SESSION_DA_ANCHOR_SUBMIT_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_CONTEXT_WEIGHTED_PRECOMMIT}" \
     "${SESSION_PACKAGE_SUBMIT_STATIC}" "${SESSION_PACKAGE_CONTEXT_STATIC}" \
-    "${SESSION_PACKAGE_SUBMIT_TENDERMINT}" "${SESSION_PACKAGE_CONTEXT_TENDERMINT}" <<'PY'
+    "${SESSION_PACKAGE_SUBMIT_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_CONTEXT_WEIGHTED_PRECOMMIT}" <<'PY'
 import json
 import subprocess
 import sys
@@ -849,7 +888,7 @@ try:
             check=True,
         )
         report = json.loads(out_path.read_text())
-        if report["schema"] != "myelin-session-submission-context-v1":
+        if report["schema"] != "myelin-session-submission-context-v2":
             raise SystemExit("production gate failed: context schema")
         if report["request_method"] != "get_live_cell":
             raise SystemExit("production gate failed: context method")
@@ -865,9 +904,9 @@ PY
 run_step "Session: mock CKB capacity and fee preflight" \
   python3 - \
     "${SESSION_DA_ANCHOR_SUBMIT_STATIC}" "${SESSION_DA_ANCHOR_ECONOMICS_STATIC}" \
-    "${SESSION_DA_ANCHOR_SUBMIT_TENDERMINT}" "${SESSION_DA_ANCHOR_ECONOMICS_TENDERMINT}" \
+    "${SESSION_DA_ANCHOR_SUBMIT_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_ECONOMICS_WEIGHTED_PRECOMMIT}" \
     "${SESSION_PACKAGE_SUBMIT_STATIC}" "${SESSION_PACKAGE_ECONOMICS_STATIC}" \
-    "${SESSION_PACKAGE_SUBMIT_TENDERMINT}" "${SESSION_PACKAGE_ECONOMICS_TENDERMINT}" <<'PY'
+    "${SESSION_PACKAGE_SUBMIT_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_ECONOMICS_WEIGHTED_PRECOMMIT}" <<'PY'
 import json
 import subprocess
 import sys
@@ -991,7 +1030,7 @@ try:
             check=True,
         )
         report = json.loads(out_path.read_text())
-        if report["schema"] != "myelin-session-submission-economics-v1":
+        if report["schema"] != "myelin-session-submission-economics-v2":
             raise SystemExit("production gate failed: economics schema")
         if report["request_method"] != "get_live_cell":
             raise SystemExit("production gate failed: economics method")
@@ -1019,9 +1058,9 @@ PY
 run_step "Session: aggregate production submission readiness" \
   python3 - \
     "${SESSION_DA_ANCHOR_CONTEXT_STATIC}" "${SESSION_DA_ANCHOR_ECONOMICS_STATIC}" "${SESSION_DA_ANCHOR_INCLUSION_STATIC}" "${SESSION_DA_ANCHOR_STABILITY_STATIC}" "${SESSION_DA_ANCHOR_FINALITY_STATIC}" "${SESSION_DA_ANCHOR_READINESS_STATIC}" \
-    "${SESSION_DA_ANCHOR_CONTEXT_TENDERMINT}" "${SESSION_DA_ANCHOR_ECONOMICS_TENDERMINT}" "${SESSION_DA_ANCHOR_INCLUSION_TENDERMINT}" "${SESSION_DA_ANCHOR_STABILITY_TENDERMINT}" "${SESSION_DA_ANCHOR_FINALITY_TENDERMINT}" "${SESSION_DA_ANCHOR_READINESS_TENDERMINT}" \
+    "${SESSION_DA_ANCHOR_CONTEXT_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_ECONOMICS_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_INCLUSION_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_STABILITY_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_FINALITY_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_READINESS_WEIGHTED_PRECOMMIT}" \
     "${SESSION_PACKAGE_CONTEXT_STATIC}" "${SESSION_PACKAGE_ECONOMICS_STATIC}" "${SESSION_PACKAGE_INCLUSION_STATIC}" "${SESSION_PACKAGE_STABILITY_STATIC}" "${SESSION_PACKAGE_FINALITY_STATIC}" "${SESSION_PACKAGE_READINESS_STATIC}" \
-    "${SESSION_PACKAGE_CONTEXT_TENDERMINT}" "${SESSION_PACKAGE_ECONOMICS_TENDERMINT}" "${SESSION_PACKAGE_INCLUSION_TENDERMINT}" "${SESSION_PACKAGE_STABILITY_TENDERMINT}" "${SESSION_PACKAGE_FINALITY_TENDERMINT}" "${SESSION_PACKAGE_READINESS_TENDERMINT}" <<'PY'
+    "${SESSION_PACKAGE_CONTEXT_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_ECONOMICS_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_INCLUSION_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_STABILITY_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_FINALITY_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_READINESS_WEIGHTED_PRECOMMIT}" <<'PY'
 import json
 import subprocess
 import sys
@@ -1056,7 +1095,7 @@ for context_path, economics_path, inclusion_path, stability_path, finality_path,
         check=True,
     )
     report = json.loads(out_path.read_text())
-    if report["schema"] != "myelin-session-submission-readiness-v1":
+    if report["schema"] != "myelin-session-submission-readiness-v2":
         raise SystemExit("production gate failed: readiness schema")
     if report["report_hashes_match"] is not True:
         raise SystemExit("production gate failed: readiness hash binding")
@@ -1122,7 +1161,7 @@ PY
 run_step "Validate Session L2 reports" \
   python3 - \
     "${SESSION_OPEN_STATIC}" "${SESSION_COMMIT_STATIC}" "${SESSION_COURT_STATIC}" "${SESSION_VERIFY_STATIC}" "${SESSION_DA_STATIC}" "${SESSION_DA_VERIFY_STATIC}" "${SESSION_DA_ANCHOR_STATIC}" "${SESSION_DA_ANCHOR_VERIFY_STATIC}" "${SESSION_DA_ANCHOR_SUBMIT_STATIC}" "${SESSION_SETTLEMENT_STATIC}" "${SESSION_SETTLEMENT_VERIFY_STATIC}" "${SESSION_PACKAGE_STATIC}" "${SESSION_PACKAGE_VERIFY_STATIC}" "${SESSION_PACKAGE_SUBMIT_STATIC}" \
-    "${SESSION_OPEN_TENDERMINT}" "${SESSION_COMMIT_TENDERMINT}" "${SESSION_COURT_TENDERMINT}" "${SESSION_VERIFY_TENDERMINT}" "${SESSION_DA_TENDERMINT}" "${SESSION_DA_VERIFY_TENDERMINT}" "${SESSION_DA_ANCHOR_TENDERMINT}" "${SESSION_DA_ANCHOR_VERIFY_TENDERMINT}" "${SESSION_DA_ANCHOR_SUBMIT_TENDERMINT}" "${SESSION_SETTLEMENT_TENDERMINT}" "${SESSION_SETTLEMENT_VERIFY_TENDERMINT}" "${SESSION_PACKAGE_TENDERMINT}" "${SESSION_PACKAGE_VERIFY_TENDERMINT}" "${SESSION_PACKAGE_SUBMIT_TENDERMINT}" <<'PY'
+    "${SESSION_OPEN_WEIGHTED_PRECOMMIT}" "${SESSION_COMMIT_WEIGHTED_PRECOMMIT}" "${SESSION_COURT_WEIGHTED_PRECOMMIT}" "${SESSION_VERIFY_WEIGHTED_PRECOMMIT}" "${SESSION_DA_WEIGHTED_PRECOMMIT}" "${SESSION_DA_VERIFY_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_VERIFY_WEIGHTED_PRECOMMIT}" "${SESSION_DA_ANCHOR_SUBMIT_WEIGHTED_PRECOMMIT}" "${SESSION_SETTLEMENT_WEIGHTED_PRECOMMIT}" "${SESSION_SETTLEMENT_VERIFY_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_VERIFY_WEIGHTED_PRECOMMIT}" "${SESSION_PACKAGE_SUBMIT_WEIGHTED_PRECOMMIT}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1135,16 +1174,16 @@ def require(condition, message):
     if not condition:
         raise SystemExit(f"production gate failed: {message}")
 
-for report, kind in ((open_static, "static-closed-committee"), (open_tm, "tendermint")):
-    require(report["schema"] == "myelin-session-open-v1", f"{kind} session open schema")
+for report, kind in ((open_static, "static-closed-committee"), (open_tm, "weighted-precommit")):
+    require(report["schema"] == "myelin-session-open-v2", f"{kind} session open schema")
     require(report["consensus_kind"] == kind, f"{kind} session open consensus")
     require(report["vm_profile"] == "ckb-strict-basic", f"{kind} session open vm profile")
     require(report["ckb_spawn_ipc_required"] is False, f"{kind} session open spawn/IPC")
     require(len(report["session_id"]) == 64, f"{kind} session id")
     require(len(report["escrow_input_cells"]) >= 1, f"{kind} escrow cells")
 
-for report, kind in ((commit_static, "static-closed-committee"), (commit_tm, "tendermint")):
-    require(report["schema"] == "myelin-session-commit-v1", f"{kind} session commit schema")
+for report, kind in ((commit_static, "static-closed-committee"), (commit_tm, "weighted-precommit")):
+    require(report["schema"] == "myelin-session-commit-v2", f"{kind} session commit schema")
     require(report["consensus_kind"] == kind, f"{kind} session commit consensus")
     require(report["vm_profile"] == "ckb-strict-basic", f"{kind} session commit vm profile")
     require(report["ckb_spawn_ipc_required"] is False, f"{kind} session commit spawn/IPC")
@@ -1157,19 +1196,20 @@ for report, kind in ((commit_static, "static-closed-committee"), (commit_tm, "te
     require(report["block"]["block_hash"], f"{kind} block hash present")
 
 for report, verify, kind in ((court_static, verify_static, "static-closed-committee"),
-                             (court_tm, verify_tm, "tendermint")):
-    require(report["schema"] == "myelin-session-court-bundle-v1", f"{kind} court schema")
+                             (court_tm, verify_tm, "weighted-precommit")):
+    require(report["schema"] == "myelin-session-court-bundle-v2", f"{kind} court schema")
     require(report["vm_profile"] == "ckb-strict-basic", f"{kind} court vm profile")
     require(report["ckb_spawn_ipc_required"] is False, f"{kind} court spawn/IPC")
-    require(report["court_verifiable"] is True, f"{kind} court verifiable")
+    require(report["court_verifiable"] is False, f"{kind} court remains unverified until contextual CKB consensus evidence exists")
     require(report["l1_court_implemented"] is False, f"{kind} L1 court marker")
-    require(report["ckb_projection"]["semantic_profile"] == "ckb-compatible", f"{kind} projection profile")
+    require(report["ckb_projection"]["projection_stage"] == "wire-encoded", f"{kind} projection stage")
+    require(report["ckb_projection"]["wire_encoded"] is True, f"{kind} projection wire encoding")
     require(verify["valid"] is True, f"{kind} court verification")
     require(all(check["ok"] for check in verify["checks"]), f"{kind} all court checks pass")
 
 for da, verify, court, kind in ((da_static, da_verify_static, court_static, "static-closed-committee"),
-                                (da_tm, da_verify_tm, court_tm, "tendermint")):
-    require(da["schema"] == "myelin-session-da-manifest-v1", f"{kind} DA schema")
+                                (da_tm, da_verify_tm, court_tm, "weighted-precommit")):
+    require(da["schema"] == "myelin-session-da-manifest-v2", f"{kind} DA schema")
     require(da["da_profile"] == "single-segment-merkle-v1", f"{kind} DA profile")
     require(da["payload_kind"] == "session-court-molecule-transaction", f"{kind} DA payload kind")
     require(da["session_id"] == court["session_id"], f"{kind} DA session binding")
@@ -1209,8 +1249,8 @@ for da, verify, court, kind in ((da_static, da_verify_static, court_static, "sta
     require(all(check["ok"] for check in verify["checks"]), f"{kind} all DA checks pass")
 
 for anchor, verify, da, kind in ((da_anchor_static, da_anchor_verify_static, da_static, "static-closed-committee"),
-                                 (da_anchor_tm, da_anchor_verify_tm, da_tm, "tendermint")):
-    require(anchor["schema"] == "myelin-session-da-anchor-package-v1", f"{kind} DA anchor schema")
+                                 (da_anchor_tm, da_anchor_verify_tm, da_tm, "weighted-precommit")):
+    require(anchor["schema"] == "myelin-session-da-anchor-package-v2", f"{kind} DA anchor schema")
     require(anchor["session_id"] == da["session_id"], f"{kind} DA anchor session binding")
     require(anchor["chunk_index"] == da["chunk_index"], f"{kind} DA anchor chunk binding")
     require(anchor["consensus_kind"] == kind, f"{kind} DA anchor consensus")
@@ -1223,15 +1263,16 @@ for anchor, verify, da, kind in ((da_anchor_static, da_anchor_verify_static, da_
     require(len(anchor["da_anchor_cell_tx_id"]) == 64, f"{kind} DA anchor txid")
     require(len(anchor["da_anchor_cell_wtxid"]) == 64, f"{kind} DA anchor wtxid")
     require(len(anchor["molecule_transaction_hash"]) == 64, f"{kind} DA anchor molecule tx hash")
-    require(anchor["ckb_projection"]["semantic_profile"] == "ckb-compatible", f"{kind} DA anchor projection profile")
-    require(anchor["da_anchor_projectable"] is True, f"{kind} DA anchor projectable")
+    require(anchor["ckb_projection"]["projection_stage"] == "wire-encoded", f"{kind} DA anchor projection stage")
+    require(anchor["ckb_projection"]["wire_encoded"] is True, f"{kind} DA anchor wire encoding")
+    require(anchor["da_anchor_wire_encoded"] is True, f"{kind} DA anchor wire encoding")
     require(anchor["l1_da_publication_implemented"] is False, f"{kind} DA anchor L1 publication marker")
     require(verify["valid"] is True, f"{kind} DA anchor verification")
     require(all(check["ok"] for check in verify["checks"]), f"{kind} all DA anchor checks pass")
 
 for submit, anchor, kind in ((da_anchor_submit_static, da_anchor_static, "static-closed-committee"),
-                             (da_anchor_submit_tm, da_anchor_tm, "tendermint")):
-    require(submit["schema"] == "myelin-session-da-anchor-submission-v1", f"{kind} DA anchor submit schema")
+                             (da_anchor_submit_tm, da_anchor_tm, "weighted-precommit")):
+    require(submit["schema"] == "myelin-session-da-anchor-submission-v2", f"{kind} DA anchor submit schema")
     require(submit["dry_run"] is True, f"{kind} DA anchor submit dry-run")
     require(submit["request_method"] == "send_transaction", f"{kind} DA anchor submit method")
     require(submit["outputs_validator"] == "passthrough", f"{kind} DA anchor submit outputs validator")
@@ -1247,8 +1288,8 @@ for submit, anchor, kind in ((da_anchor_submit_static, da_anchor_static, "static
     require(submit["l1_da_published"] is False, f"{kind} DA anchor submit L1 marker")
 
 for settlement, verify, court, da, kind in ((settlement_static, settlement_verify_static, court_static, da_static, "static-closed-committee"),
-                                            (settlement_tm, settlement_verify_tm, court_tm, da_tm, "tendermint")):
-    require(settlement["schema"] == "myelin-session-settlement-intent-v1", f"{kind} settlement schema")
+                                            (settlement_tm, settlement_verify_tm, court_tm, da_tm, "weighted-precommit")):
+    require(settlement["schema"] == "myelin-session-settlement-intent-v2", f"{kind} settlement schema")
     require(settlement["kind"] == "disputed-close", f"{kind} settlement kind")
     require(settlement["session_id"] == court["session_id"], f"{kind} settlement session binding")
     require(settlement["chunk_index"] == court["chunk_index"], f"{kind} settlement chunk binding")
@@ -1263,7 +1304,7 @@ for settlement, verify, court, da, kind in ((settlement_static, settlement_verif
     require(settlement["challenge_deadline_ms"] == 60000, f"{kind} settlement challenge deadline")
     require(settlement["settlement_permitted"] is True, f"{kind} settlement permitted")
     economics = settlement["court_economics"]
-    require(economics["schema"] == "myelin-session-court-economics-v1", f"{kind} court economics schema")
+    require(economics["schema"] == "myelin-session-court-economics-v2", f"{kind} court economics schema")
     require(economics["mode"] == "disputed-close-explicit-policy-v1", f"{kind} court economics mode")
     require(economics["escrow_binding_mode"] == "session-escrow-input-cells-hash", f"{kind} court economics escrow binding mode")
     require(economics["minimum_dispute_bond_shannons"] == 100000000, f"{kind} court economics minimum bond")
@@ -1294,8 +1335,8 @@ for settlement, verify, court, da, kind in ((settlement_static, settlement_verif
     require(all(check["ok"] for check in verify["checks"]), f"{kind} all settlement checks pass")
 
 for package, verify, settlement, court, da, kind in ((package_static, package_verify_static, settlement_static, court_static, da_static, "static-closed-committee"),
-                                                     (package_tm, package_verify_tm, settlement_tm, court_tm, da_tm, "tendermint")):
-    require(package["schema"] == "myelin-session-settlement-package-v1", f"{kind} settlement package schema")
+                                                     (package_tm, package_verify_tm, settlement_tm, court_tm, da_tm, "weighted-precommit")):
+    require(package["schema"] == "myelin-session-settlement-package-v2", f"{kind} settlement package schema")
     require(package["session_id"] == settlement["session_id"], f"{kind} package session binding")
     require(package["chunk_index"] == settlement["chunk_index"], f"{kind} package chunk binding")
     require(package["consensus_kind"] == kind, f"{kind} package consensus")
@@ -1308,7 +1349,7 @@ for package, verify, settlement, court, da, kind in ((package_static, package_ve
     require(package["final_state_root"] == settlement["final_state_root"], f"{kind} package final root")
     authority = package["settlement_authority"]
     auth = authority["authority_authentication"]
-    require(authority["schema"] == "myelin-session-settlement-authority-v1", f"{kind} authority schema")
+    require(authority["schema"] == "myelin-session-settlement-authority-v2", f"{kind} authority schema")
     require(len(authority["data"]) == 386, f"{kind} authority data length")
     require(len(authority["data_hash"]) == 66, f"{kind} authority data hash")
     require(authority["data_semantics"] == "settlement-authority-lineage-v1", f"{kind} authority data semantics")
@@ -1316,7 +1357,7 @@ for package, verify, settlement, court, da, kind in ((package_static, package_ve
     require(authority["participant_set_hash"] == package["participant_set_hash"], f"{kind} authority participant binding")
     require(authority["escrow_input_cells_hash"] == package["escrow_input_cells_hash"], f"{kind} authority escrow binding")
     require(authority["session_lineage_commitment"] == package["session_lineage_commitment"], f"{kind} authority lineage binding")
-    require(auth["schema"] == "myelin-session-settlement-authority-auth-v1", f"{kind} authority authentication schema")
+    require(auth["schema"] == "myelin-session-settlement-authority-auth-v2", f"{kind} authority authentication schema")
     require(auth["mode"] == "ckb-threshold-lock", f"{kind} authority authentication mode")
     require(auth["signature_scheme"] == "secp256k1-recoverable-blake3-pubkey-hash20", f"{kind} authority authentication signature scheme")
     require(auth["threshold"] == 2, f"{kind} authority authentication threshold")
@@ -1342,15 +1383,16 @@ for package, verify, settlement, court, da, kind in ((package_static, package_ve
     require(len(package["settlement_cell_tx_id"]) == 64, f"{kind} package txid")
     require(len(package["settlement_cell_wtxid"]) == 64, f"{kind} package wtxid")
     require(len(package["molecule_transaction_hash"]) == 64, f"{kind} package molecule tx hash")
-    require(package["ckb_projection"]["semantic_profile"] == "ckb-compatible", f"{kind} package projection profile")
-    require(package["settlement_projectable"] is True, f"{kind} package projectable")
+    require(package["ckb_projection"]["projection_stage"] == "wire-encoded", f"{kind} package projection stage")
+    require(package["ckb_projection"]["wire_encoded"] is True, f"{kind} package wire encoding")
+    require(package["settlement_wire_encoded"] is True, f"{kind} package wire encoding")
     require(package["l1_court_script_implemented"] is False, f"{kind} package L1 court marker")
     require(verify["valid"] is True, f"{kind} package verification")
     require(all(check["ok"] for check in verify["checks"]), f"{kind} all package checks pass")
 
 for submit, package, kind in ((package_submit_static, package_static, "static-closed-committee"),
-                              (package_submit_tm, package_tm, "tendermint")):
-    require(submit["schema"] == "myelin-session-settlement-submission-v1", f"{kind} settlement submit schema")
+                              (package_submit_tm, package_tm, "weighted-precommit")):
+    require(submit["schema"] == "myelin-session-settlement-submission-v2", f"{kind} settlement submit schema")
     require(submit["dry_run"] is True, f"{kind} settlement submit dry-run")
     require(submit["request_method"] == "send_transaction", f"{kind} settlement submit method")
     require(submit["outputs_validator"] == "passthrough", f"{kind} settlement submit outputs validator")
@@ -1373,29 +1415,29 @@ for field in ("session_id", "cell_tx_id", "cell_wtxid", "state_root_before", "st
 require(commit_static["block"]["block_hash"] != commit_tm["block"]["block_hash"],
         "session block hashes must remain consensus-domain separated")
 require(commit_static["static_committee_evidence"]["finalised"] is True, "static session evidence finalised")
-require(commit_static["tendermint_evidence"] is None, "static session has no Tendermint evidence")
-require(commit_tm["static_committee_evidence"]["finalised"] is False, "Tendermint session static slot is informational")
-require(commit_tm["tendermint_evidence"]["finalised"] is True, "Tendermint session evidence finalised")
+require(commit_static["weighted_precommit_evidence"] is None, "static session has no WeightedPrecommit evidence")
+require(commit_tm["static_committee_evidence"]["finalised"] is False, "WeightedPrecommit session static slot is informational")
+require(commit_tm["weighted_precommit_evidence"]["finalised"] is True, "WeightedPrecommit session evidence finalised")
 
 print(json.dumps({
     "session_id": open_static["session_id"],
     "state_root_after": commit_static["state_root_after"],
     "static_block_hash": commit_static["block"]["block_hash"],
-    "tendermint_block_hash": commit_tm["block"]["block_hash"],
+    "weighted_precommit_block_hash": commit_tm["block"]["block_hash"],
     "static_checks": len(verify_static["checks"]),
     "static_da_checks": len(da_verify_static["checks"]),
     "static_da_anchor_checks": len(da_anchor_verify_static["checks"]),
     "static_da_anchor_submit_dry_run": da_anchor_submit_static["request_method"],
-    "tendermint_checks": len(verify_tm["checks"]),
-    "tendermint_da_checks": len(da_verify_tm["checks"]),
-    "tendermint_da_anchor_checks": len(da_anchor_verify_tm["checks"]),
-    "tendermint_da_anchor_submit_dry_run": da_anchor_submit_tm["request_method"],
+    "weighted_precommit_checks": len(verify_tm["checks"]),
+    "weighted_precommit_da_checks": len(da_verify_tm["checks"]),
+    "weighted_precommit_da_anchor_checks": len(da_anchor_verify_tm["checks"]),
+    "weighted_precommit_da_anchor_submit_dry_run": da_anchor_submit_tm["request_method"],
     "static_settlement_checks": len(settlement_verify_static["checks"]),
-    "tendermint_settlement_checks": len(settlement_verify_tm["checks"]),
+    "weighted_precommit_settlement_checks": len(settlement_verify_tm["checks"]),
     "static_package_checks": len(package_verify_static["checks"]),
     "static_package_submit_dry_run": package_submit_static["request_method"],
-    "tendermint_package_checks": len(package_verify_tm["checks"]),
-    "tendermint_package_submit_dry_run": package_submit_tm["request_method"],
+    "weighted_precommit_package_checks": len(package_verify_tm["checks"]),
+    "weighted_precommit_package_submit_dry_run": package_submit_tm["request_method"],
 }, indent=2, sort_keys=True))
 PY
 

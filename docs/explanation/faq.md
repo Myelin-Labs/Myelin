@@ -49,7 +49,7 @@ it.
 ### What's the difference between Myelin and a sidechain?
 
 A sidechain has its own consensus on a separate chain. Myelin
-doesn't — its finality is a configured committee or Tendermint BFT
+doesn't — its finality is a configured committee or WeightedPrecommit BFT
 inside a single process, with the L1 (CKB) as the custody and
 court layer.
 
@@ -112,7 +112,7 @@ verifier — the same RISC-V instruction set, the same syscall
 surface (with a small Myelin-only extension), the same
 determinism contract.
 
-The Myelin-only extension produces `semantic_profile =
+The Myelin-only extension produces `projection_stage =
 "myelin-native"` CellTxs, which can't project to CKB-style
 transactions. CKB-compatible CellTxs run with no Myelin-only
 syscalls.
@@ -121,8 +121,8 @@ syscalls.
 
 Projection is the function from a Myelin CellTx to a CKB-style
 transaction. The output is a `CkbProjectionReport` that says
-either `projection_possible: true` (the CellTx is CKB-projectable)
-or `projection_possible: false` with explicit deviation flags.
+either `wire_encoded: true` (the CellTx is CKB-projectable)
+or `wire_encoded: false` with explicit deviation flags.
 
 See [CKB-style projection](../architecture/projection.md).
 
@@ -149,7 +149,7 @@ projection layer connects the two.
 
 A committee certificate is the signature set that finalises a
 `MyelinBlock`. For the static closed committee, it's a list of
-signatures from quorum-weight validators. For Tendermint, it's a
+signatures from quorum-weight validators. For WeightedPrecommit, it's a
 list of precommits with strict-majority power.
 
 The certificate is what makes a `MyelinBlock` a `FinalisedBlock`.
@@ -234,11 +234,11 @@ Both are needed for Tier 1. The execution report alone is just
 
 The CellTx still executes in Myelin (if the executor accepts it),
 but its profile becomes `myelin-native` or `ckb-inspired-only`
-instead of `ckb-compatible`. The execution report and projection
+instead of `wire-encoded`. The execution report and projection
 report both carry the profile label and the explicit deviation
 list.
 
-Public demos should default to `ckb-compatible`. If a demo can't
+Public demos should default to `wire-encoded`. If a demo can't
 reach it, the labels should reflect that.
 
 ## Development

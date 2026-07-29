@@ -39,7 +39,7 @@ read them in order.
 
     ---
 
-    The three profiles (`ckb-compatible`, `myelin-native`,
+    The three profiles (`wire-encoded`, `myelin-native`,
     `ckb-inspired-only`) and how they shape what Myelin will
     and won't claim about a transition.
 

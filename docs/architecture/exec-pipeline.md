@@ -101,7 +101,7 @@ transitions (see [Semantic profiles](../concepts/semantic-profiles.md)).
 | **Myelin-only** | `myelin_state_root`, `myelin_session_id`, `myelin_chunk_index` |
 
 The Myelin-only syscalls carry no semantics on CKB; the projection
-layer flags any CellTx that uses them with `semantic_profile =
+layer flags any CellTx that uses them with `projection_stage =
 "myelin-native"` and lists each syscall in `unsupported_features`.
 
 > [!WARNING]
@@ -147,7 +147,7 @@ pub struct MyelinExecutionReport {
     pub scheduler_report_hash: [u8; 32],
     pub state_root_before:   [u8; 32],
     pub state_root_after:    [u8; 32],
-    pub semantic_profile:    SemanticProfile,
+    pub projection_stage:    SemanticProfile,
 }
 ```
 

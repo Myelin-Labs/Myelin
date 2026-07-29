@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn test_load_witness_supports_partial_reads() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![crate::celltx::CellInput::new(crate::celltx::OutPoint::new([0x01; 32], 0), 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn test_load_witness_rejects_invalid_source() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![],
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn test_load_witness_supports_output_and_group_output_sources() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![
                 crate::celltx::CellInput::new(crate::celltx::OutPoint::new([0x01; 32], 0), 0),
                 crate::celltx::CellInput::new(crate::celltx::OutPoint::new([0x02; 32], 0), 0),
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn test_load_witness_group_output_partial_read() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![crate::celltx::CellInput::new(crate::celltx::OutPoint::new([0x10; 32], 0), 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn test_load_witness_output_source_returns_index_out_when_witness_segment_missing() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![crate::celltx::CellInput::new(crate::celltx::OutPoint::new([0x01; 32], 0), 0)],
             cell_deps: vec![],
             header_deps: vec![],

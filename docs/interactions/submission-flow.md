@@ -3,8 +3,8 @@
 This page is the operational counterpart to [Data availability
 flow](da-flow.md). It walks through what happens after the evidence
 packages exist: building the CKB JSON-RPC request, submitting it,
-and the five-step readiness chain that proves the submission was
-actually accepted by the chain.
+and the readiness chain that separates full-node admission, transaction
+observation, canonical commitment, stability, and configured-depth finality.
 
 ## What "submit to L1" actually means
 
@@ -34,7 +34,7 @@ Each one goes through the same five-step readiness chain. The
   }
 }}%%
 flowchart LR
-    A["Submit<br/>(send_transaction)"]:::in
+    A["Admission<br/>(test + send + observe)"]:::in
     B["Context<br/>(inputs live)"]:::step
     C["Economics<br/>(fee policy)"]:::step
     D["Inclusion<br/>(committed)"]:::step
@@ -67,11 +67,14 @@ The submit command:
 
 1. Builds the CKB `send_transaction` JSON-RPC payload.
 2. In dry-run mode: writes the payload, doesn't talk to the chain.
-3. In live mode: POSTs to the configured RPC URL, captures the
-   transaction hash from the response.
+3. In live mode: requires `test_tx_pool_accept`, exact-hash
+   `send_transaction`, and `get_transaction(..., only_committed=false)`
+   observation of the same transaction.
 
-The submit report carries the exact request bytes that were (or
-would have been) sent.
+The submit report carries the exact request plus structured
+`rpc_admission` evidence. `accepted_by_rpc = true` therefore means
+full-node validation and mempool/chain observation; it does not mean
+the transaction has been committed.
 
 ## Step 2 — Context
 
@@ -246,10 +249,10 @@ DA SLA, and a typed operator policy.
 
 ## Where this runs
 
-In normal usage, the production gate runs all five steps with mock
-CKB RPC servers — proving the **request construction** without
-hitting a real chain. The devnet smoke (`scripts/myelin_ckb_devnet_smoke.sh`)
-runs the same steps against a live parent CKB devnet.
+The production gate keeps mock RPC tests for deterministic negative
+coverage and, by default, also runs the full flow against a live parent
+CKB devnet. The latter is real local-chain evidence but not a public
+testnet deployment.
 
 For the devnet path specifically, two extra pieces of evidence are
 required:

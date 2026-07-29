@@ -89,10 +89,10 @@ Copy the tracked Myelin CellScript verifier sources into the rehearsal
 artefact directory before submission:
 
 ```bash
-cp cellscript/examples/myelin/da-anchor-carrier.cell "$MYELIN_REHEARSAL_DIR/"
-cp cellscript/examples/myelin/settlement-carrier.cell "$MYELIN_REHEARSAL_DIR/"
-cp cellscript/examples/myelin/da-anchor-final.cell "$MYELIN_REHEARSAL_DIR/"
-cp cellscript/examples/myelin/settlement-final.cell "$MYELIN_REHEARSAL_DIR/"
+cp fixtures/cellscript/da-anchor-carrier.cell "$MYELIN_REHEARSAL_DIR/"
+cp fixtures/cellscript/settlement-carrier.cell "$MYELIN_REHEARSAL_DIR/"
+cp fixtures/cellscript/da-anchor-final.cell "$MYELIN_REHEARSAL_DIR/"
+cp fixtures/cellscript/settlement-final.cell "$MYELIN_REHEARSAL_DIR/"
 ```
 
 Copy the evidence document starters:
@@ -422,6 +422,9 @@ Acceptance:
 3. dry_run = false
 4. rpc_url is the public testnet endpoint
 5. rpc_result matches the projected ckb_raw_tx_hash
+6. rpc_admission.full_node_validated = true
+7. rpc_admission.submitted_hash_matches = true
+8. rpc_admission.transaction_observed = true
 ```
 
 ## Phase 5: Observe Public Testnet Inclusion, Stability, and Finality

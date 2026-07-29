@@ -14,7 +14,7 @@ report on disk."
 
     Build, verify, and project a real CellTx through Myelin with
     step-by-step Rust snippets. The shortest path from zero to a
-    `semantic_profile = "ckb-compatible"` report.
+    `projection_stage = "wire-encoded"` report.
 
 -   [Teeworlds end-to-end](teeworlds-end-to-end.md)
 

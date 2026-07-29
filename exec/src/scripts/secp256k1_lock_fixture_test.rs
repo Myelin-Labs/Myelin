@@ -77,7 +77,7 @@ mod tests {
 
     fn base_tx(input_out_point: OutPoint) -> CellTx {
         CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0x0102_0304_0506_0708)],
             cell_deps: vec![],
             header_deps: vec![],

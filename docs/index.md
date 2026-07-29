@@ -88,7 +88,7 @@ off-chain Cell ledger that still respects CKB's mental model.
     ---
 
     Every CellTx or chunk produces a projection report — either
-    `ckb_projection_possible = true`, or an explicit list of unsupported
+    `wire_encoded = true`, or an explicit list of unsupported
     features and semantic deviation flags.
 
 -   :material-scale-balance:{ .lg .middle } **Single-chunk court path**
@@ -119,7 +119,7 @@ about **where** work happens, not **what** work means:
 | Aspect | CKB (L1) | Myelin (off-chain session) |
 | --- | --- | --- |
 | Where state lives | Every full node | Finite session set |
-| Block finality | Nakamoto PoW consensus | Selectable: static committee or Tendermint-style BFT |
+| Block finality | Nakamoto PoW consensus | Selectable: static committee or weighted-precommit BFT |
 | Throughput target | ~1 block / tens of seconds | Many chunks / second inside one session |
 | Execution | CKB-VM, fully on-chain | CKB-VM-style, deterministic, off-chain |
 | Dispute path | Replay on chain | Single-chunk court bundle → CKB-VM verifier on L1 |

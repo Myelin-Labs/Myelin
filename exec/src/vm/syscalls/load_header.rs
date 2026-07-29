@@ -323,7 +323,7 @@ mod tests {
         let input_header_hash = ckb_header_hash_molecule(&input_header).unwrap();
         let input_out_point = crate::celltx::OutPoint::new([0x11; 32], 0);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![crate::celltx::CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![header_hash, input_header_hash],
@@ -357,7 +357,7 @@ mod tests {
         let dep_header_hash = [0x66; 32];
         let header_hash = [0x77; 32];
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![crate::celltx::CellInput::new(input_out_point, 0)],
             cell_deps: vec![crate::celltx::CellDep { out_point: dep_out_point, dep_type: crate::celltx::DepType::Code }],
             header_deps: vec![header_hash],
@@ -743,7 +743,7 @@ mod tests {
     fn test_load_header_returns_item_missing_when_input_header_not_found() {
         let input_out_point = crate::celltx::OutPoint::new([0x11; 32], 0);
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![crate::celltx::CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -842,7 +842,7 @@ mod tests {
     fn test_load_header_returns_item_missing_when_header_dep_not_found() {
         let missing_header_hash = [0x99; 32];
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![missing_header_hash],

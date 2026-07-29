@@ -8,14 +8,13 @@ use super::error::{ScriptError, ScriptResult, VMError};
 use super::machine::ScriptVersion;
 use super::scheduler::{FullSuspendedState, ProgramPiece, ProgramPlace, ProgramResolver, RunMode, VmScheduler};
 use super::{VmSemantics, MAX_SCRIPT_SIZE, MAX_VM_MEMORY};
-use crate::celltx::{CellOutput, CellTx, Script};
+use crate::celltx::{parse_ckb_dep_group_data, CellOutput, CellTx, DepType, OutPoint, Script};
 use crate::serialization::molecule_compat::{
-    ckb_raw_transaction_hash_molecule, ckb_script_hash_molecule, deserialize_resolved_cell_molecule,
+    ckb_cell_data_hash, ckb_raw_transaction_hash_molecule, ckb_script_hash_molecule, deserialize_resolved_cell_molecule,
     deserialize_resolved_header_molecule, serialize_resolved_cell_molecule, serialize_resolved_header_molecule,
     serialize_transaction_molecule, CkbHeader,
 };
 use crate::serialization::{split_vm_abi_trailer, VmAbiError, VmAbiFormat, VmAbiNegotiator, VmSerializable};
-use rayon::prelude::*;
 use std::{collections::HashSet, sync::Arc};
 
 /// Script group type
@@ -85,6 +84,7 @@ type SyscallFactory = dyn Fn(u64, &super::scheduler::VmRuntime) -> ScriptResult<
 
 struct GroupRuntime {
     script_code: Vec<u8>,
+    script_version: ScriptVersion,
     program_resolver: ProgramResolver,
     syscall_factory: Arc<SyscallFactory>,
 }
@@ -419,14 +419,18 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
     /// Verify all scripts in the transaction and return the total consumed cycles.
     pub fn verify_with_cycles(&self) -> ScriptResult<u64> {
         let script_groups = self.extract_script_groups()?;
-        let group_results: Vec<ScriptResult<u64>> =
-            script_groups.par_iter().map(|group| self.verify_script_group(group, self.max_cycles)).collect();
-
-        // Keep error selection deterministic by folding results in the stable
-        // script-group order produced by extract_script_groups.
-        group_results
-            .into_iter()
-            .try_fold(0u64, |total_cycles, group_cycles| group_cycles.map(|cycles| total_cycles.saturating_add(cycles)))
+        let mut total_cycles = 0u64;
+        for group in &script_groups {
+            let remaining = self
+                .max_cycles
+                .checked_sub(total_cycles)
+                .ok_or(ScriptError::VM(VMError::CyclesExceeded { limit: self.max_cycles, actual: total_cycles }))?;
+            let group_cycles = self.verify_script_group(group, remaining)?;
+            total_cycles = total_cycles
+                .checked_add(group_cycles)
+                .ok_or(ScriptError::VM(VMError::CyclesExceeded { limit: self.max_cycles, actual: u64::MAX }))?;
+        }
+        Ok(total_cycles)
     }
 
     /// Verify all scripts with a resumable transaction-level state machine.
@@ -590,7 +594,7 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
     fn create_scheduler(&self, group: &ScriptGroup) -> ScriptResult<VmScheduler> {
         let prepared = self.prepare_group_runtime(group)?;
         Ok(VmScheduler::new(
-            self.version,
+            prepared.script_version,
             self.max_cycles,
             self.max_memory,
             self.max_script_size,
@@ -605,7 +609,7 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
         let prepared = self.prepare_group_runtime(group)?;
 
         VmScheduler::resume(
-            self.version,
+            prepared.script_version,
             self.max_cycles,
             self.max_memory,
             self.max_script_size,
@@ -618,12 +622,20 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
     }
 
     fn prepare_group_runtime(&self, group: &ScriptGroup) -> ScriptResult<GroupRuntime> {
-        if group.script.hash_type != 0 {
-            return Err(ScriptError::InvalidHashType(group.script.hash_type));
-        }
-
-        let raw_script_code =
-            self.data_provider.load_cell_data(&group.script.code_hash).ok_or(ScriptError::ScriptNotFound(group.script.code_hash))?;
+        let (raw_script_code, script_version) = match self.semantics {
+            VmSemantics::CkbStrict => (self.resolve_ckb_script(&group.script)?, self.ckb_script_version(&group.script)?),
+            VmSemantics::MyelinExtended => {
+                if group.script.hash_type != 0 {
+                    return Err(ScriptError::InvalidHashType(group.script.hash_type));
+                }
+                (
+                    self.data_provider
+                        .load_cell_data(&group.script.code_hash)
+                        .ok_or(ScriptError::ScriptNotFound(group.script.code_hash))?,
+                    self.version,
+                )
+            }
+        };
         let (script_code, artifact_abi_format) = split_vm_abi_trailer(&raw_script_code)
             .map_err(|err| ScriptError::VM(VMError::InvalidData(format!("invalid VM ABI artifact trailer: {}", err))))?;
         let script_code = script_code.to_vec();
@@ -807,7 +819,75 @@ impl<D: CellDataProvider> TransactionScriptVerifier<D> {
             }
         });
 
-        Ok(GroupRuntime { script_code, program_resolver, syscall_factory })
+        Ok(GroupRuntime { script_code, script_version, program_resolver, syscall_factory })
+    }
+
+    fn ckb_script_version(&self, script: &Script) -> ScriptResult<ScriptVersion> {
+        match script.hash_type {
+            0 => Ok(ScriptVersion::V0),
+            1 | 4 => Ok(ScriptVersion::V2),
+            2 => Ok(ScriptVersion::V1),
+            other => Err(ScriptError::InvalidHashType(other)),
+        }
+    }
+
+    fn resolve_ckb_script(&self, script: &Script) -> ScriptResult<Vec<u8>> {
+        if !matches!(script.hash_type, 0 | 1 | 2 | 4) {
+            return Err(ScriptError::InvalidHashType(script.hash_type));
+        }
+
+        let mut matching_data = Vec::new();
+        for outpoint in self.expanded_code_dep_outpoints()? {
+            let cell = self
+                .data_provider
+                .load_cell_by_outpoint(&outpoint.tx_hash, outpoint.index)
+                .ok_or_else(|| VMError::ItemMissing(format!("missing declared code dependency {outpoint}")))?;
+            let data = cell.data.unwrap_or_default();
+            let matches = match script.hash_type {
+                0 | 2 | 4 => ckb_cell_data_hash(&data) == script.code_hash,
+                1 => {
+                    cell.cell_output
+                        .type_
+                        .as_ref()
+                        .map(ckb_script_hash_molecule)
+                        .transpose()
+                        .map_err(|error| VMError::InvalidData(format!("invalid dependency type script: {error}")))?
+                        == Some(script.code_hash)
+                }
+                _ => unreachable!("hash type checked above"),
+            };
+            if matches {
+                matching_data.push(data);
+            }
+        }
+
+        let Some(first) = matching_data.first().cloned() else {
+            return Err(ScriptError::ScriptNotFound(script.code_hash));
+        };
+        if script.hash_type == 1 && matching_data.iter().skip(1).any(|data| data != &first) {
+            return Err(ScriptError::MultipleScriptMatches(script.code_hash));
+        }
+        Ok(first)
+    }
+
+    fn expanded_code_dep_outpoints(&self) -> ScriptResult<Vec<OutPoint>> {
+        let mut expanded = Vec::new();
+        for dep in &self.tx.cell_deps {
+            match dep.dep_type {
+                DepType::Code => expanded.push(dep.out_point),
+                DepType::DepGroup => {
+                    let group_cell = self
+                        .data_provider
+                        .load_cell_by_outpoint(&dep.out_point.tx_hash, dep.out_point.index)
+                        .ok_or_else(|| VMError::ItemMissing(format!("missing dep-group cell {}", dep.out_point)))?;
+                    let data = group_cell.data.unwrap_or_default();
+                    let members = parse_ckb_dep_group_data(&data)
+                        .map_err(|error| VMError::InvalidData(format!("invalid CKB dep-group {}: {error}", dep.out_point)))?;
+                    expanded.extend(members);
+                }
+            }
+        }
+        Ok(expanded)
     }
 }
 
@@ -900,7 +980,7 @@ impl CellDataProvider for SimpleDataProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::celltx::{CellInput, OutPoint};
+    use crate::celltx::{encode_ckb_dep_group_data, CellDep, CellInput, DepType, OutPoint};
     use crate::scripts::{always_success_code_hash, ALWAYS_SUCCESS_SCRIPT};
     use crate::serialization::molecule_compat::{
         ckb_raw_transaction_hash_molecule, ckb_script_hash_molecule, serialize_transaction_molecule,
@@ -922,7 +1002,7 @@ mod tests {
         );
 
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -934,10 +1014,56 @@ mod tests {
         TransactionScriptVerifier::new(tx, Arc::new(provider)).with_version(ScriptVersion::V2).with_max_cycles(10_000)
     }
 
+    fn two_group_always_success_verifier(max_cycles: u64) -> TransactionScriptVerifier<SimpleDataProvider> {
+        let code_hash_a = [0xA1; 32];
+        let code_hash_b = [0xB2; 32];
+        let outpoint_a = OutPoint::new([0x11; 32], 0);
+        let outpoint_b = OutPoint::new([0x22; 32], 0);
+        let mut provider = SimpleDataProvider::new();
+        provider.add_script(code_hash_a, ALWAYS_SUCCESS_SCRIPT.to_vec());
+        provider.add_script(code_hash_b, ALWAYS_SUCCESS_SCRIPT.to_vec());
+        provider.add_cell(
+            outpoint_a.tx_hash,
+            outpoint_a.index,
+            ResolvedCell {
+                cell_output: CellOutput { capacity: 1_000, lock: Script::new(code_hash_a, 0, vec![]), type_: None },
+                data: Some(vec![]),
+            },
+        );
+        provider.add_cell(
+            outpoint_b.tx_hash,
+            outpoint_b.index,
+            ResolvedCell {
+                cell_output: CellOutput { capacity: 1_000, lock: Script::new(code_hash_b, 0, vec![]), type_: None },
+                data: Some(vec![]),
+            },
+        );
+        let tx = Arc::new(
+            CellTx::new(
+                vec![CellInput::new(outpoint_a, 0), CellInput::new(outpoint_b, 0)],
+                vec![],
+                vec![CellOutput { capacity: 2_000, lock: Script::new(code_hash_a, 0, vec![]), type_: None }],
+                vec![vec![]],
+                vec![],
+            )
+            .unwrap(),
+        );
+        TransactionScriptVerifier::new(tx, Arc::new(provider)).with_version(ScriptVersion::V2).with_max_cycles(max_cycles)
+    }
+
+    #[test]
+    fn total_cycle_limit_is_shared_across_script_groups() {
+        let total_cycles = two_group_always_success_verifier(100_000).verify_with_cycles().unwrap();
+        assert!(total_cycles > 1);
+
+        let error = two_group_always_success_verifier(total_cycles - 1).verify_with_cycles().unwrap_err();
+        assert!(matches!(error, ScriptError::VM(VMError::CyclesExceeded { limit, .. }) if limit == total_cycles - 1));
+    }
+
     #[test]
     fn test_verifier_creation() {
         let tx = Arc::new(CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![],
             cell_deps: vec![],
             header_deps: vec![],
@@ -1222,6 +1348,93 @@ mod tests {
         let verifier = TransactionScriptVerifier::new(tx, provider).with_semantics(VmSemantics::CkbStrict);
 
         assert_eq!(verifier.semantics, VmSemantics::CkbStrict);
+    }
+
+    fn ckb_strict_verifier_for_hash_type(hash_type: u8, use_dep_group: bool) -> TransactionScriptVerifier<SimpleDataProvider> {
+        let input_outpoint = OutPoint::new([0x71; 32], hash_type as u32);
+        let code_outpoint = OutPoint::new([0x72; 32], hash_type as u32);
+        let group_outpoint = OutPoint::new([0x73; 32], hash_type as u32);
+        let dep_type_script = Script::new([0x74; 32], 0, vec![hash_type]);
+        let code_hash = if hash_type == 1 {
+            ckb_script_hash_molecule(&dep_type_script).unwrap()
+        } else {
+            ckb_cell_data_hash(ALWAYS_SUCCESS_SCRIPT)
+        };
+        let lock = Script::new(code_hash, hash_type, vec![]);
+        let dep = CellDep {
+            out_point: if use_dep_group { group_outpoint } else { code_outpoint },
+            dep_type: if use_dep_group { DepType::DepGroup } else { DepType::Code },
+        };
+        let tx = Arc::new(
+            CellTx::new(
+                vec![CellInput::new(input_outpoint, 0)],
+                vec![dep],
+                vec![CellOutput { capacity: 1_000, lock: lock.clone(), type_: None }],
+                vec![vec![]],
+                vec![],
+            )
+            .unwrap(),
+        );
+        let mut provider = SimpleDataProvider::new();
+        provider.add_cell(
+            input_outpoint.tx_hash,
+            input_outpoint.index,
+            ResolvedCell { cell_output: CellOutput { capacity: 1_000, lock, type_: None }, data: Some(vec![]) },
+        );
+        provider.add_cell(
+            code_outpoint.tx_hash,
+            code_outpoint.index,
+            ResolvedCell {
+                cell_output: CellOutput {
+                    capacity: 1_000,
+                    lock: Script::new([0x75; 32], 0, vec![]),
+                    type_: (hash_type == 1).then_some(dep_type_script),
+                },
+                data: Some(ALWAYS_SUCCESS_SCRIPT.to_vec()),
+            },
+        );
+        if use_dep_group {
+            provider.add_cell(
+                group_outpoint.tx_hash,
+                group_outpoint.index,
+                ResolvedCell {
+                    cell_output: CellOutput { capacity: 1_000, lock: Script::new([0x76; 32], 0, vec![]), type_: None },
+                    data: Some(encode_ckb_dep_group_data(&[code_outpoint]).unwrap()),
+                },
+            );
+        }
+        TransactionScriptVerifier::new(tx, Arc::new(provider)).with_semantics(VmSemantics::CkbStrict).with_max_cycles(100_000)
+    }
+
+    #[test]
+    fn ckb_strict_resolves_all_active_hash_types_from_declared_code_deps() {
+        for hash_type in [0, 1, 2, 4] {
+            let verifier = ckb_strict_verifier_for_hash_type(hash_type, false);
+            let groups = verifier.extract_script_groups().unwrap();
+            let runtime = verifier
+                .prepare_group_runtime(&groups[0])
+                .unwrap_or_else(|error| panic!("hash type {hash_type} failed to resolve: {error}"));
+            let expected_version = match hash_type {
+                0 => ScriptVersion::V0,
+                2 => ScriptVersion::V1,
+                1 | 4 => ScriptVersion::V2,
+                _ => unreachable!(),
+            };
+            assert_eq!(runtime.script_version, expected_version);
+            assert_eq!(runtime.script_code, ALWAYS_SUCCESS_SCRIPT);
+        }
+    }
+
+    #[test]
+    fn ckb_strict_expands_ckb_molecule_dep_groups() {
+        ckb_strict_verifier_for_hash_type(4, true).verify().unwrap();
+    }
+
+    #[test]
+    fn ckb_strict_rejects_private_script_registry_without_declared_dep() {
+        let mut verifier = ckb_strict_verifier_for_hash_type(4, false);
+        Arc::make_mut(&mut verifier.tx).cell_deps.clear();
+        assert!(matches!(verifier.verify(), Err(ScriptError::ScriptNotFound(_))));
     }
 
     #[test]

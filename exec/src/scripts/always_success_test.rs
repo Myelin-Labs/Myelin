@@ -28,7 +28,7 @@ mod tests {
 
         // Create transaction spending an input protected by the always-success lock
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],
@@ -64,7 +64,7 @@ mod tests {
         // Don't add the referenced script bytes
 
         let tx = CellTx {
-            version: 0xC001,
+            version: 0,
             inputs: vec![CellInput::new(input_out_point, 0)],
             cell_deps: vec![],
             header_deps: vec![],
