@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Pluggable closed-validator finality
+
+- Added `proof-of-authority` as a third independent `ConsensusKind`, alongside `static-closed-committee` and `tendermint`; `poa` is accepted as a CLI/config alias while reports use the canonical name.
+- Added an ordered authority set with deterministic `height mod authority_count` rotation, an independent `myelin:proof-of-authority-seal:v1` signature domain, and seals bound to the exact height, authority id, and canonical `MyelinBlock` hash.
+- Added a single typed `FinalityProof` dispatch surface so static quorum certificates, PoA seals, and Tendermint decisions cannot be passed to the wrong engine by shape-compatible accident.
+- Added PoA evidence to runtime, Session, and Teeworlds paths. Tests assert identical CellTx ids, witness hashes, scheduler commitments, and pre/post state roots across all three engines; only consensus-bound block/finality material differs.
+- Extended the production gate with PoA config parsing, finality, runtime, and Session court-bundle verification.
+
+All three choices use known validator/authority sets. PoA is an operational trust-model option, not a permissionless-security upgrade.
+
+### Public CKB testnet exercise
+
+- Funded account `ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsq28mv6vp689txs9pyfyhj89qhavalf6ssq3y3h3m` successfully exercised the standard CKB secp256k1-blake160 sighash lock on public `ckb_testnet`.
+- Transaction `0xbc662a7d0a452a61e50928a0e50b2b6a1c66c942988b4de8ace72c92a46131de` passed `test_tx_pool_accept` with 1,652,597 cycles and a 100,000-shannon (0.001 CKB) fee, was submitted with the same raw hash, and committed at height 21,908,123 in block `0x2c6a9f92c8aff3b4c10d4c073a28f42f6d5b7dc6a48961e61aa2270bc08e1a18`.
+- The self-transfer output was re-read as a live Cell with 9,999.999 CKB capacity, and the block remained canonical through eight observed confirmations. This validates transaction construction, standard-lock signing, public RPC admission, commitment, and Cell recovery; it is not a public-testnet deployment of the full Session/court/DA path.
+
 ## 0.10.0 — 2026-07-29
 
 Myelin 0.10.0 turns the retained finite-Cell runtime into an evidence-bound CKB execution kernel. It hardens transaction identity, conflict scheduling, state transitions, mempool admission, validator authentication, CKB projection, and the Session L2 path. It also removes the vendored CellScript compiler in favor of an attested adapter to one exact upstream toolchain.

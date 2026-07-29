@@ -1,14 +1,54 @@
 # Closed-validator finality
 
-Myelin finalises finite-session `MyelinBlock`s with one of two configured engines:
+Myelin finalises finite-session `MyelinBlock`s with one of three configured engines:
 
 - `static-closed-committee` — one weighted commit certificate;
+- `proof-of-authority` — one height-bound seal from the deterministically
+  scheduled authority;
 - `tendermint` — deterministic proposer selection plus signed proposal,
   prevote, precommit, locking, nil votes, round changes, and a final
   precommit decision certificate.
 
-Both use secp256k1 Schnorr signatures with distinct domains. They are
+All use secp256k1 Schnorr signatures with distinct domains. They are
 closed-validator mechanisms, not permissionless consensus protocols.
+
+| Engine | Finality proof | Safety assumption | Typical use |
+| --- | --- | --- | --- |
+| Static committee | Weighted quorum certificate | Configured quorum does not sign conflicting blocks | Small controlled sessions |
+| Proof of authority | One scheduled authority seal | Scheduled key is honest and available at its height | Simple operator-led sessions |
+| Tendermint | Greater-than-two-thirds precommit decision | Less than one third of voting power is Byzantine | Multi-validator sessions needing BFT rounds |
+
+The public dispatch type is `FinalityProof`. Its three variants are structurally
+different, so a PoA seal cannot be silently interpreted as a committee
+certificate or Tendermint decision.
+
+## Proof-of-authority configuration
+
+Authority order is consensus-critical. For `N` configured authorities:
+
+```text
+scheduled_authority(height) = authorities[height mod N]
+seal_digest = BLAKE3(domain || height || authority_id || block_hash)
+```
+
+```toml
+kind = "proof-of-authority"
+
+[proof_of_authority]
+
+[[proof_of_authority.authorities]]
+id = "validator-0"
+public_key = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+
+[[proof_of_authority.authorities]]
+id = "validator-1"
+public_key = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+```
+
+The engine rejects empty sets, duplicate ids or keys, invalid keys, the wrong
+scheduled signer, signer/key mismatches, and any height, hash, or signature
+drift. `poa` is accepted as an input alias; reports emit
+`proof-of-authority`.
 
 ## Tendermint configuration
 
@@ -67,6 +107,6 @@ peer discovery, timeout scheduling, validator-set changes, and durable WAL I/O
 are operator/runtime responsibilities outside the deterministic state machine.
 
 `MyelinBlock` commits to session lineage, consensus kind, real pre/post state
-roots, ordered raw txids, DA commitments, and the scheduler commitment. The two
-engines must produce identical transaction and state fields for the same
-workload; their certificate material differs.
+roots, ordered raw txids, DA commitments, and the scheduler commitment. All
+three engines must produce identical transaction and state fields for the same
+workload; their consensus-bound block hashes and proof material differ.

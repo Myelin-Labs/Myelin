@@ -25,7 +25,7 @@ In order:
 11. Runtime smoke for static-closed-committee and tendermint
 12. Session fixture open/commit/court/DA/settlement plus mock CKB context,
     economics, inclusion, stability, finality, and aggregate readiness
-    verification for both consensus modes
+    verification for all three consensus modes
 13. Dependency-tree scan for forbidden workflow crates
 14. Stale-surface grep
 15. Forbidden parent-path audit
@@ -45,9 +45,9 @@ In order:
 | 5b/5c | The state and mempool crates have larger test sets; running them is required for production-readiness. |
 | 6 | The consensus crate has 22 tests; this is the consensus completeness gate. |
 | 7 | The cellscript compiler is a separate workspace and is required for the typed-cell execution path. |
-| 8-10 | The CLI smoke tests prove that both consensus modes are reachable from the binary. |
-| 11 | Runtime smoke proves `CellPool`, `CellStateTree`, and both consensus engines are wired through the CLI. |
-| 12 | Session fixture checks prove the Session L2 spine can open, commit, materialise a court bundle, verify that bundle, emit and verify a DA manifest, emit and verify a deterministic CKB-compatible DA anchor package, emit and verify a disputed-close settlement intent, emit and verify a deterministic CKB-compatible settlement package, and run mock CKB context, capacity/fee-rate economics, inclusion, committed-block stability, confirmation-depth finality, and aggregate readiness verification for both consensus modes. Configurable `session open` / `session commit` commands are covered by CLI tests. |
+| 8-10 | The CLI smoke tests prove that static committee, PoA, and Tendermint are reachable from the binary. |
+| 11 | Runtime smoke proves `CellPool`, `CellStateTree`, and all three consensus engines are wired through the CLI while preserving identical transaction/state results. |
+| 12 | Session fixture checks prove all three engines can open, commit, materialise and verify a court bundle. The downstream consensus-neutral DA, anchor, disputed-close settlement, package, mock CKB context, economics, inclusion, stability, depth-finality, and readiness paths are fully exercised for the two quorum-based modes. Configurable `session open` / `session commit` commands are covered by CLI tests. |
 | 13 | The dependency-tree scan guards against broad workflow surfaces leaking back into hot-path crates. |
 | 14 | The stale-surface grep is the structural guard against re-introducing the removed Spora / NovaSeal / certifier / website / cellscript_gate.sh / release-note vocabulary. |
 | 15 | The forbidden parent-path audit is the structural guard against re-introducing a Cargo `path = ".../Spora/..."` reference. |

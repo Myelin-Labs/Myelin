@@ -250,6 +250,11 @@ encodes the settlement intent. See
 validator set and a quorum-weight finality rule. See
 [Consensus engines](../architecture/consensus.md).
 
+**Proof of authority (PoA)** — A closed-authority consensus engine in which
+the configured authority order selects exactly one height-bound signer by
+`height mod authority_count`. See
+[Consensus engines](../architecture/consensus.md).
+
 **Syscall** — A VM-level call that scripts use to inspect the
 transaction they're validating. See
 [What is CKB-VM?](../concepts/what-is-ckb-vm.md).

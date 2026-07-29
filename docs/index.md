@@ -119,7 +119,7 @@ about **where** work happens, not **what** work means:
 | Aspect | CKB (L1) | Myelin (off-chain session) |
 | --- | --- | --- |
 | Where state lives | Every full node | Finite session set |
-| Block finality | Nakamoto PoW consensus | Selectable: static committee or finite-session Tendermint |
+| Block finality | Nakamoto PoW consensus | Selectable: static committee, rotating PoA, or finite-session Tendermint |
 | Throughput target | ~1 block / tens of seconds | Many chunks / second inside one session |
 | Execution | CKB-VM, fully on-chain | CKB-VM-style, deterministic, off-chain |
 | Dispute path | Replay on chain | Single-chunk court bundle → CKB-VM verifier on L1 |

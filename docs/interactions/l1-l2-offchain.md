@@ -37,7 +37,7 @@ flowchart TB
         EX["CKB-VM-style verifier<br/>(script groups, syscalls)"]:::l2
         ST["State store<br/>(live / consumed / created Cells<br/>+ state root)"]:::l2
         DM["DA manifest<br/>(Merkle SegmentProof)"]:::l2
-        CO["Committee<br/>(static or Tendermint)"]:::l2
+        CO["Finality engine<br/>(static / PoA / Tendermint)"]:::l2
         BL["MyelinBlock<br/>+ committee certificate"]:::l2
         CB["Court bundle<br/>(per-chunk)"]:::l2
         SP["Settlement package<br/>(per-session)"]:::l2

@@ -149,14 +149,21 @@ data commitments
 scheduler commitment
 ```
 
-Two selectable closed-validator engines exist:
+Three selectable closed-validator/authority engines exist:
 
 - `static-closed-committee` — quorum by configured weight;
+- `proof-of-authority` — one height-bound seal from
+  `authorities[height mod authority_count]`;
 - `tendermint` — deterministic proposer, proposal/prevote/precommit phases,
   lock/valid-round rules, nil votes, round changes, equivocation rejection, and
   a strictly-greater-than-two-thirds decision certificate.
 
-Both use real secp256k1 Schnorr signatures and separate signature domains. For the same workload, transaction identities and state roots must be identical; only certificate material differs. Neither engine is a permissionless-security claim.
+All use real secp256k1 Schnorr signatures and separate signature domains. A
+typed `FinalityProof` enum prevents committee certificates, PoA seals, and
+Tendermint decisions from being dispatched to the wrong engine. For the same
+workload, transaction identities, scheduler commitments, and state roots must
+be identical; consensus-bound block hashes and finality material differ. None
+is a permissionless-security claim.
 
 Tendermint round state is serializable for caller-managed WAL persistence.
 Networking, timeout scheduling, validator-set changes, and permissionless

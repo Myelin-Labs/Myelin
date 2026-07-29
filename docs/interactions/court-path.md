@@ -40,7 +40,7 @@ projection_report          -> CkbProjectionReport for the chunk
 challenge_payload          -> canonical bytes for challenge signing
 challenge_payload_hash     -> hash(challenge_payload)
 scheduler_report_hash      -> the scheduler's report hash from session commit
-committee_certificate      -> static-closed-committee or Tendermint decision cert
+finality_proof             -> static certificate, PoA seal, or Tendermint decision
 l1_court_implemented       -> false (deterministic input ready for one)
 ```
 

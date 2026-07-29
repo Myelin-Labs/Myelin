@@ -9,7 +9,7 @@
 #   - cargo test --locked --workspace
 #   - cargo test -p myelin-consensus
 #   - fail-closed CellScript process-adapter tests
-#   - myelin CLI smoke tests for both consensus modes
+#   - myelin CLI smoke tests for all three consensus modes
 #   - Teeworlds acceptance, if the Teeworlds repo path exists
 #   - stale-surface grep
 #   - forbidden parent-path audit
@@ -111,7 +111,7 @@ else
   printf '\n==> Skip parent CKB devnet acceptance because RUN_CKB_DEVNET=%s\n' "${RUN_CKB_DEVNET}"
 fi
 
-# 8. CLI smoke for both consensus modes
+# 8. CLI smoke for all three consensus modes
 COMMITTEE_CONFIG="${OUTPUT_DIR}/static-committee.toml"
 COMMITTEE_REPORT="${OUTPUT_DIR}/static-committee.json"
 cat > "${COMMITTEE_CONFIG}" <<'EOF'
@@ -135,6 +135,31 @@ run_step "Smoke: myelin-cli static-closed-committee finalise" \
   cargo run -p myelin-cli -- committee finalise-demo \
     --config "${COMMITTEE_CONFIG}" \
     --out "${COMMITTEE_REPORT}"
+
+POA_CONFIG="${OUTPUT_DIR}/proof-of-authority.toml"
+POA_REPORT="${OUTPUT_DIR}/proof-of-authority.json"
+cat > "${POA_CONFIG}" <<'EOF'
+kind = "proof-of-authority"
+
+[proof_of_authority]
+
+[[proof_of_authority.authorities]]
+id = "validator-0"
+public_key = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+
+[[proof_of_authority.authorities]]
+id = "validator-1"
+public_key = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+
+[[proof_of_authority.authorities]]
+id = "validator-2"
+public_key = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+EOF
+
+run_step "Smoke: myelin-cli proof-of-authority finalise" \
+  cargo run -p myelin-cli -- committee finalise-demo \
+    --config "${POA_CONFIG}" \
+    --out "${POA_REPORT}"
 
 WEIGHTED_PRECOMMIT_CONFIG="${OUTPUT_DIR}/tendermint.toml"
 WEIGHTED_PRECOMMIT_REPORT="${OUTPUT_DIR}/tendermint.json"
@@ -172,13 +197,14 @@ run_step "Smoke: myelin-cli Tendermint finalise" \
 
 # 9. CLI JSON contract
 run_step "Validate CLI JSON contract" \
-  python3 - "${COMMITTEE_REPORT}" "${WEIGHTED_PRECOMMIT_REPORT}" <<'PY'
+  python3 - "${COMMITTEE_REPORT}" "${POA_REPORT}" "${WEIGHTED_PRECOMMIT_REPORT}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 committee = json.loads(Path(sys.argv[1]).read_text())
-weighted_precommit = json.loads(Path(sys.argv[2]).read_text())
+poa = json.loads(Path(sys.argv[2]).read_text())
+weighted_precommit = json.loads(Path(sys.argv[3]).read_text())
 
 def require(condition, message):
     if not condition:
@@ -188,6 +214,12 @@ require(committee["consensus_kind"] == "static-closed-committee", "static commit
 require(committee["finalised"] is True, "static committee finalised")
 require(len(committee["signer_ids"]) >= 2, "static committee signer count")
 
+require(poa["consensus_kind"] == "proof-of-authority", "PoA kind")
+require(poa["finalised"] is True, "PoA finalised")
+require(len(poa["signer_ids"]) == 1, "PoA signer count")
+require(poa["certificate_step"] == "seal", "PoA seal step")
+require(poa["certificate_round"] is None, "PoA has no round")
+
 require(weighted_precommit["consensus_kind"] == "tendermint", "Tendermint kind")
 require(weighted_precommit["finalised"] is True, "weighted_precommit finalised")
 require(len(weighted_precommit["signer_ids"]) >= 3, "Tendermint signer count")
@@ -195,13 +227,15 @@ require(weighted_precommit["certificate_step"] == "precommit", "weighted_precomm
 require(weighted_precommit["certificate_round"] == 0, "weighted_precommit round 0")
 print(json.dumps({
     "static_committee": committee["block_hash"],
+    "proof_of_authority": poa["block_hash"],
     "tendermint": weighted_precommit["block_hash"],
 }, indent=2, sort_keys=True))
 PY
 
-# 10. Runtime smoke — exercise myelin-state + myelin-mempool + both consensus
+# 10. Runtime smoke — exercise myelin-state + myelin-mempool + all three consensus
 #     engines end-to-end through the binary, not just the unit tests.
 RUNTIME_STATIC_REPORT="${OUTPUT_DIR}/runtime-smoke-static.json"
+RUNTIME_POA_REPORT="${OUTPUT_DIR}/runtime-smoke-proof-of-authority.json"
 RUNTIME_WEIGHTED_PRECOMMIT_REPORT="${OUTPUT_DIR}/runtime-smoke-weighted-precommit.json"
 
 run_step "Smoke: runtime smoke (static-closed-committee)" \
@@ -214,21 +248,28 @@ run_step "Smoke: runtime smoke (tendermint)" \
     --consensus tendermint \
     --out "${RUNTIME_WEIGHTED_PRECOMMIT_REPORT}"
 
+run_step "Smoke: runtime smoke (proof-of-authority)" \
+  cargo run -p myelin-cli -- runtime smoke \
+    --consensus proof-of-authority \
+    --out "${RUNTIME_POA_REPORT}"
+
 run_step "Validate runtime smoke reports" \
-  python3 - "${RUNTIME_STATIC_REPORT}" "${RUNTIME_WEIGHTED_PRECOMMIT_REPORT}" <<'PY'
+  python3 - "${RUNTIME_STATIC_REPORT}" "${RUNTIME_POA_REPORT}" "${RUNTIME_WEIGHTED_PRECOMMIT_REPORT}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 static_report = json.loads(Path(sys.argv[1]).read_text())
-weighted_precommit_report = json.loads(Path(sys.argv[2]).read_text())
+poa_report = json.loads(Path(sys.argv[2]).read_text())
+weighted_precommit_report = json.loads(Path(sys.argv[3]).read_text())
 
 def require(condition, message):
     if not condition:
         raise SystemExit(f"production gate failed: {message}")
 
-# Both reports must be in the v1 schema and finalised.
+# All reports must use the current schema and be finalised.
 for report, kind in ((static_report, "static-closed-committee"),
+                     (poa_report, "proof-of-authority"),
                      (weighted_precommit_report, "tendermint")):
     require(report["schema"] == "myelin-runtime-smoke-v2",
             f"{kind} schema must be myelin-runtime-smoke-v2")
@@ -247,14 +288,22 @@ for report, kind in ((static_report, "static-closed-committee"),
             f"{kind} state must mutate")
 
 # The CellTx + state mutation is consensus-independent: txid, wtxid, and
-# both state roots MUST be identical across both engines. Only the
-# certificate_hash (signature domain) is allowed to differ.
+# both state roots MUST be identical across all engines. Only the
+# consensus-bound certificate_hash is allowed to differ.
+require(static_report["cell_tx_id"] == poa_report["cell_tx_id"],
+        "cell txid must match PoA")
 require(static_report["cell_tx_id"] == weighted_precommit_report["cell_tx_id"],
         "cell txid must match across engines")
+require(static_report["cell_wtxid"] == poa_report["cell_wtxid"],
+        "cell wtxid must match PoA")
 require(static_report["cell_wtxid"] == weighted_precommit_report["cell_wtxid"],
         "cell wtxid must match across engines")
+require(static_report["state_root_before"] == poa_report["state_root_before"],
+        "state_root_before must match PoA")
 require(static_report["state_root_before"] == weighted_precommit_report["state_root_before"],
         "state_root_before must match across engines")
+require(static_report["state_root_after"] == poa_report["state_root_after"],
+        "state_root_after must match PoA")
 require(static_report["state_root_after"] == weighted_precommit_report["state_root_after"],
         "state_root_after must match across engines")
 require(static_report["vm_profile"] == weighted_precommit_report["vm_profile"],
@@ -262,7 +311,11 @@ require(static_report["vm_profile"] == weighted_precommit_report["vm_profile"],
 require(static_report["ckb_spawn_ipc_enabled"] == weighted_precommit_report["ckb_spawn_ipc_enabled"],
         "spawn/IPC build flag must match across engines")
 require(static_report["certificate_hash"] != weighted_precommit_report["certificate_hash"],
-        "the two engines must use different signature domains")
+        "static and Tendermint finality domains must differ")
+require(static_report["certificate_hash"] != poa_report["certificate_hash"],
+        "static and PoA finality domains must differ")
+require(poa_report["certificate_hash"] != weighted_precommit_report["certificate_hash"],
+        "PoA and Tendermint finality domains must differ")
 
 print(json.dumps({
     "txid": static_report["cell_tx_id"],
@@ -270,6 +323,7 @@ print(json.dumps({
     "ckb_spawn_ipc_enabled": static_report["ckb_spawn_ipc_enabled"],
     "state_root_after": static_report["state_root_after"],
     "static_certificate_hash": static_report["certificate_hash"],
+    "proof_of_authority_certificate_hash": poa_report["certificate_hash"],
     "weighted_precommit_certificate_hash": weighted_precommit_report["certificate_hash"],
 }, indent=2, sort_keys=True))
 PY
@@ -511,6 +565,65 @@ run_step "Session: dry-run settlement RPC submission (weighted-precommit)" \
     --package "${SESSION_PACKAGE_WEIGHTED_PRECOMMIT}" \
     --dry-run \
     --out "${SESSION_PACKAGE_SUBMIT_WEIGHTED_PRECOMMIT}"
+
+# PoA is exercised through the consensus-sensitive Session spine. The
+# downstream DA/settlement package shapes are already exercised above for both
+# quorum-based engines and are consensus-neutral after court verification.
+SESSION_OPEN_POA="${OUTPUT_DIR}/session-open-proof-of-authority.json"
+SESSION_COMMIT_POA="${OUTPUT_DIR}/session-commit-proof-of-authority.json"
+SESSION_COURT_POA="${OUTPUT_DIR}/session-court-proof-of-authority.json"
+SESSION_VERIFY_POA="${OUTPUT_DIR}/session-verify-proof-of-authority.json"
+
+run_step "Session: open fixture (proof-of-authority)" \
+  cargo run -p myelin-cli -- session open-fixture \
+    --consensus proof-of-authority \
+    --out "${SESSION_OPEN_POA}"
+
+run_step "Session: commit fixture (proof-of-authority)" \
+  cargo run -p myelin-cli -- session commit-fixture \
+    --session "${SESSION_OPEN_POA}" \
+    --out "${SESSION_COMMIT_POA}"
+
+run_step "Session: court bundle (proof-of-authority)" \
+  cargo run -p myelin-cli -- session court-bundle \
+    --commit "${SESSION_COMMIT_POA}" \
+    --chunk-index 0 \
+    --out "${SESSION_COURT_POA}"
+
+run_step "Session: verify court bundle (proof-of-authority)" \
+  cargo run -p myelin-cli -- session verify-court-bundle \
+    --bundle "${SESSION_COURT_POA}" \
+    --out "${SESSION_VERIFY_POA}"
+
+run_step "Validate proof-of-authority Session finality evidence" \
+  python3 - "${SESSION_COMMIT_POA}" "${SESSION_COURT_POA}" "${SESSION_VERIFY_POA}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+commit, court, verification = [json.loads(Path(path).read_text()) for path in sys.argv[1:]]
+
+def require(condition, message):
+    if not condition:
+        raise SystemExit(f"production gate failed: {message}")
+
+for report, label in ((commit, "commit"), (court, "court")):
+    require(report["consensus_kind"] == "proof-of-authority", f"PoA {label} consensus kind")
+    require(report["static_committee_evidence"]["finalised"] is False, f"PoA {label} static evidence inactive")
+    require(report["weighted_precommit_evidence"] is None, f"PoA {label} Tendermint evidence absent")
+    proof = report["proof_of_authority_evidence"]
+    require(proof is not None, f"PoA {label} seal present")
+    require(proof["consensus_kind"] == "proof-of-authority", f"PoA {label} proof kind")
+    require(proof["certificate_step"] == "seal", f"PoA {label} proof step")
+    require(proof["height"] == 1, f"PoA {label} height")
+    require(proof["authority_id"] == "validator-1", f"PoA {label} scheduled authority")
+    require(proof["finalised"] is True, f"PoA {label} finalised")
+
+require(commit["block"]["block_hash"] == court["block"]["block_hash"], "PoA court preserves canonical block")
+require(verification["valid"] is True, "PoA court verification")
+require(all(check["ok"] for check in verification["checks"]), "PoA court checks")
+require(any(check["name"] == "proof-of-authority-seal" for check in verification["checks"]), "PoA seal checked")
+PY
 
 run_step "Session: mock CKB inclusion verification" \
   python3 - \

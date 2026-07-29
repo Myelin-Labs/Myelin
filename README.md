@@ -214,9 +214,10 @@ The adapter verifies compiler identity, source revision, target profile, metadat
 | --- | --- |
 | Typed Cell execution, state-resolved conflicts, atomic state roots | Implemented and tested |
 | Strict local CKB-VM verification with a shared transaction cycle budget | Implemented and tested |
-| Static-committee and full-round Tendermint closed-validator finality | Implemented and tested |
+| Static committee, rotating PoA, and full-round Tendermint closed-validator finality | Implemented and tested |
 | Exact CellScript v0.22.0 reproduction | Implemented and gated |
 | Live CKB admission, commitment, transaction proof, depth, and reorg checks | Exercised on parent CKB 0.207.0 devnet |
+| Standard-lock transaction admission and commitment on public CKB testnet | Exercised; full Session/court/DA deployment pending |
 | Canonical CKB `secp256k1_blake160_multisig_all` settlement construction and verification | Implemented; public-testnet exercise pending |
 | Full disputed-chunk court and economics | Not implemented |
 | Provider-neutral DA certificate core | Implemented; real provider/auditor adapters pending |

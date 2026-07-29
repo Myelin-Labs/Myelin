@@ -5,15 +5,19 @@
 
 //! Myelin consensus selection.
 //!
-//! The first concrete engine is a static closed committee. It is intended for
-//! session benchmarking, fixture generation, and the phase-one fast path. It is
-//! not a permissionless consensus protocol.
+//! The selectable engines are intended for session benchmarking, fixture
+//! generation, and closed-validator operation. None is a permissionless
+//! consensus protocol.
 
 use secp256k1::{schnorr::Signature, Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
+mod proof_of_authority;
 mod tendermint;
+pub use proof_of_authority::{
+    Authority, FinalisedProofOfAuthorityBlock, ProofOfAuthority, ProofOfAuthorityConfig, ProofOfAuthoritySeal,
+};
 pub use tendermint::{
     TendermintDecision, TendermintProgress, TendermintProposal, TendermintRoundState, TendermintStep, TendermintVote,
 };
@@ -39,6 +43,8 @@ const WEIGHTED_PRECOMMIT_DOMAIN: &[u8] = b"myelin:weighted-precommit:v1";
 pub enum ConsensusKind {
     /// Configured validators finalise blocks once the quorum weight is reached.
     StaticClosedCommittee,
+    /// Deterministic rotating authority seals one block at each height.
+    ProofOfAuthority,
     /// Tendermint proposal/prevote/precommit finality for finite sessions.
     Tendermint,
 }
@@ -52,6 +58,7 @@ impl ConsensusKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             ConsensusKind::StaticClosedCommittee => "static-closed-committee",
+            ConsensusKind::ProofOfAuthority => "proof-of-authority",
             ConsensusKind::Tendermint => "tendermint",
         }
     }
@@ -64,6 +71,8 @@ pub struct ConsensusConfig {
     pub kind: ConsensusKind,
     /// Static committee configuration when `kind` is `StaticClosedCommittee`.
     pub static_committee: Option<StaticCommitteeConfig>,
+    /// Proof-of-authority configuration when `kind` is `ProofOfAuthority`.
+    pub proof_of_authority: Option<ProofOfAuthorityConfig>,
     /// Tendermint configuration when `kind` is `Tendermint`.
     pub tendermint: Option<TendermintConfig>,
 }
@@ -71,12 +80,27 @@ pub struct ConsensusConfig {
 impl ConsensusConfig {
     /// Build a static closed-committee config directly.
     pub fn static_closed_committee(static_committee: StaticCommitteeConfig) -> Self {
-        Self { kind: ConsensusKind::StaticClosedCommittee, static_committee: Some(static_committee), tendermint: None }
+        Self {
+            kind: ConsensusKind::StaticClosedCommittee,
+            static_committee: Some(static_committee),
+            proof_of_authority: None,
+            tendermint: None,
+        }
+    }
+
+    /// Build a proof-of-authority config directly.
+    pub fn proof_of_authority(proof_of_authority: ProofOfAuthorityConfig) -> Self {
+        Self {
+            kind: ConsensusKind::ProofOfAuthority,
+            static_committee: None,
+            proof_of_authority: Some(proof_of_authority),
+            tendermint: None,
+        }
     }
 
     /// Build a Tendermint config directly.
     pub fn tendermint(tendermint: TendermintConfig) -> Self {
-        Self { kind: ConsensusKind::Tendermint, static_committee: None, tendermint: Some(tendermint) }
+        Self { kind: ConsensusKind::Tendermint, static_committee: None, proof_of_authority: None, tendermint: Some(tendermint) }
     }
 
     /// Legacy constructor retained for source migration.
@@ -96,7 +120,13 @@ impl ConsensusConfig {
                     .ok_or_else(|| ConsensusError::InvalidConfig("static-closed-committee requires [static_committee]".to_owned()))?;
                 Ok(Self::static_closed_committee(raw_committee.try_into()?))
             }
-            ConsensusKind::WeightedPrecommit => {
+            ConsensusKind::ProofOfAuthority => {
+                let raw_poa = raw
+                    .proof_of_authority
+                    .ok_or_else(|| ConsensusError::InvalidConfig("proof-of-authority requires [proof_of_authority]".to_owned()))?;
+                Ok(Self::proof_of_authority(raw_poa.try_into()?))
+            }
+            ConsensusKind::Tendermint => {
                 let raw_weighted_precommit = raw
                     .tendermint
                     .or(raw.weighted_precommit)
@@ -112,6 +142,7 @@ impl ConsensusConfig {
 struct RawConsensusConfig {
     kind: String,
     static_committee: Option<RawStaticCommitteeConfig>,
+    proof_of_authority: Option<RawProofOfAuthorityConfig>,
     weighted_precommit: Option<RawWeightedPrecommitConfig>,
     tendermint: Option<RawWeightedPrecommitConfig>,
 }
@@ -129,6 +160,19 @@ struct RawCommitteeValidator {
     id: String,
     public_key: String,
     weight: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProofOfAuthorityConfig {
+    authorities: Vec<RawAuthority>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthority {
+    id: String,
+    public_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,10 +212,24 @@ impl TryFrom<RawWeightedPrecommitConfig> for WeightedPrecommitConfig {
     }
 }
 
+impl TryFrom<RawProofOfAuthorityConfig> for ProofOfAuthorityConfig {
+    type Error = ConsensusError;
+
+    fn try_from(raw: RawProofOfAuthorityConfig) -> Result<Self> {
+        let authorities = raw
+            .authorities
+            .into_iter()
+            .map(|authority| Ok(Authority { id: authority.id, public_key: parse_hex_32(&authority.public_key)? }))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { authorities })
+    }
+}
+
 fn parse_consensus_kind(kind: &str) -> Result<ConsensusKind> {
     match kind {
         "static-closed-committee" => Ok(ConsensusKind::StaticClosedCommittee),
-        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::WeightedPrecommit),
+        "proof-of-authority" | "poa" => Ok(ConsensusKind::ProofOfAuthority),
+        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::Tendermint),
         other => Err(ConsensusError::UnknownEngine(other.to_owned())),
     }
 }
@@ -387,6 +445,39 @@ pub struct FinalisedBlock {
     pub certificate: CommitteeCertificate,
 }
 
+/// Engine-specific, structurally typed finality proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinalityProof {
+    /// Static committee quorum certificate.
+    StaticClosedCommittee(CommitteeCertificate),
+    /// Scheduled authority seal.
+    ProofOfAuthority(ProofOfAuthoritySeal),
+    /// Tendermint precommit decision.
+    Tendermint(TendermintDecision),
+}
+
+impl FinalityProof {
+    /// Consensus engine required to verify this proof shape.
+    pub const fn kind(&self) -> ConsensusKind {
+        match self {
+            Self::StaticClosedCommittee(_) => ConsensusKind::StaticClosedCommittee,
+            Self::ProofOfAuthority(_) => ConsensusKind::ProofOfAuthority,
+            Self::Tendermint(_) => ConsensusKind::Tendermint,
+        }
+    }
+}
+
+/// Engine-neutral finalised block returned by typed dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalisedConsensusBlock {
+    /// Finalised block.
+    pub block: MyelinBlock,
+    /// Verified block hash.
+    pub block_hash: Hash32,
+    /// Verified engine-specific proof.
+    pub proof: FinalityProof,
+}
+
 /// Common interface for selectable Myelin consensus engines.
 pub trait ConsensusEngine {
     /// Engine kind.
@@ -411,6 +502,8 @@ pub trait ConsensusEngine {
 pub enum SelectedConsensus {
     /// Static closed committee.
     StaticClosedCommittee(StaticClosedCommittee),
+    /// Deterministic rotating proof of authority.
+    ProofOfAuthority(ProofOfAuthority),
     /// Tendermint proposal/prevote/precommit finality.
     Tendermint(Tendermint),
 }
@@ -425,12 +518,41 @@ impl SelectedConsensus {
                     .ok_or_else(|| ConsensusError::InvalidConfig("missing static committee config".to_owned()))?;
                 Ok(Self::StaticClosedCommittee(StaticClosedCommittee::new(committee)?))
             }
-            ConsensusKind::WeightedPrecommit => {
+            ConsensusKind::ProofOfAuthority => {
+                let proof_of_authority = config
+                    .proof_of_authority
+                    .ok_or_else(|| ConsensusError::InvalidConfig("missing proof-of-authority config".to_owned()))?;
+                Ok(Self::ProofOfAuthority(ProofOfAuthority::new(proof_of_authority)?))
+            }
+            ConsensusKind::Tendermint => {
                 let tendermint =
                     config.tendermint.ok_or_else(|| ConsensusError::InvalidConfig("missing tendermint config".to_owned()))?;
                 Ok(Self::Tendermint(Tendermint::new(tendermint)?))
             }
         }
+    }
+
+    /// Verify an engine-specific proof through one selected dispatch surface.
+    pub fn finalise_with_proof(&self, block: MyelinBlock, proof: FinalityProof) -> Result<FinalisedConsensusBlock> {
+        let expected = self.kind();
+        let actual = proof.kind();
+        if actual != expected {
+            return Err(ConsensusError::WrongFinalityProof { expected: expected.as_str(), actual: actual.as_str() });
+        }
+        let block_hash = block.hash();
+        match (self, &proof) {
+            (Self::StaticClosedCommittee(engine), FinalityProof::StaticClosedCommittee(certificate)) => {
+                engine.finalise_block(block.clone(), certificate.clone())?;
+            }
+            (Self::ProofOfAuthority(engine), FinalityProof::ProofOfAuthority(seal)) => {
+                engine.finalise_block_with_seal(block.clone(), seal.clone())?;
+            }
+            (Self::Tendermint(engine), FinalityProof::Tendermint(decision)) => {
+                engine.finalise_block_with_decision(block.clone(), decision.clone())?;
+            }
+            _ => unreachable!("proof kind was checked before dispatch"),
+        }
+        Ok(FinalisedConsensusBlock { block, block_hash, proof })
     }
 }
 
@@ -438,6 +560,7 @@ impl ConsensusEngine for SelectedConsensus {
     fn kind(&self) -> ConsensusKind {
         match self {
             SelectedConsensus::StaticClosedCommittee(engine) => engine.kind(),
+            SelectedConsensus::ProofOfAuthority(_) => ConsensusKind::ProofOfAuthority,
             SelectedConsensus::Tendermint(engine) => engine.kind(),
         }
     }
@@ -445,6 +568,7 @@ impl ConsensusEngine for SelectedConsensus {
     fn verify_certificate(&self, block_hash: Hash32, certificate: &CommitteeCertificate) -> Result<()> {
         match self {
             SelectedConsensus::StaticClosedCommittee(engine) => engine.verify_certificate(block_hash, certificate),
+            SelectedConsensus::ProofOfAuthority(_) => Err(ConsensusError::TypedFinalityProofRequired("proof-of-authority")),
             SelectedConsensus::Tendermint(engine) => engine.verify_certificate(block_hash, certificate),
         }
     }
@@ -756,6 +880,14 @@ pub enum ConsensusError {
         /// Actual engine.
         actual: &'static str,
     },
+    /// A typed proof was dispatched to a different selected engine.
+    #[error("wrong finality proof: expected {expected}, got {actual}")]
+    WrongFinalityProof {
+        /// Proof kind required by the selected engine.
+        expected: &'static str,
+        /// Supplied proof kind.
+        actual: &'static str,
+    },
     /// Certificate points at another block.
     #[error("certificate block hash does not match")]
     WrongBlockHash,
@@ -778,6 +910,12 @@ pub enum ConsensusError {
     /// Validator id is duplicated.
     #[error("duplicate validator")]
     DuplicateValidator,
+    /// Authority id is duplicated.
+    #[error("duplicate proof-of-authority id: {0}")]
+    DuplicateAuthority(String),
+    /// One public key is assigned to more than one authority id.
+    #[error("duplicate proof-of-authority public key")]
+    DuplicateAuthorityKey,
     /// Validator is not part of the configured committee.
     #[error("unknown validator: {0}")]
     UnknownValidator(String),
@@ -790,6 +928,14 @@ pub enum ConsensusError {
     /// Local signing key does not correspond to the configured validator key.
     #[error("signing key does not match configured validator: {0}")]
     SignerKeyMismatch(String),
+    /// A seal was not produced by the authority scheduled for this height.
+    #[error("unexpected proof-of-authority signer: expected {expected}, got {actual}")]
+    UnexpectedAuthority {
+        /// Scheduled authority id.
+        expected: String,
+        /// Supplied authority id.
+        actual: String,
+    },
     /// Certificate has insufficient voting weight.
     #[error("quorum not met: signed {signed_weight}, required {quorum_weight}")]
     QuorumNotMet {
@@ -803,6 +949,9 @@ pub enum ConsensusError {
     /// `WeightedPrecommitCertificate` instead.
     #[error("weighted_precommit does not implement verify_certificate; use verify_precommit_certificate with a typed WeightedPrecommitCertificate")]
     LegacyCertificatePathUnsupported,
+    /// The selected engine requires its typed finality proof.
+    #[error("{0} requires the typed finality proof API")]
+    TypedFinalityProofRequired(&'static str),
     /// A proposal was not signed by the deterministic proposer for the round.
     #[error("unexpected Tendermint proposer: expected {expected}, got {actual}")]
     UnexpectedProposer {
@@ -920,6 +1069,52 @@ weight = 1
 "#;
         let selected = SelectedConsensus::from_config(ConsensusConfig::from_toml_str(toml).unwrap()).unwrap();
         assert_eq!(selected.kind(), ConsensusKind::StaticClosedCommittee);
+    }
+
+    #[test]
+    fn selected_proof_of_authority_loads_and_dispatches_typed_seal() {
+        let toml = format!(
+            r#"
+kind = "proof-of-authority"
+
+[proof_of_authority]
+
+[[proof_of_authority.authorities]]
+id = "alice"
+public_key = "{}"
+
+[[proof_of_authority.authorities]]
+id = "bob"
+public_key = "{}"
+
+[[proof_of_authority.authorities]]
+id = "carol"
+public_key = "{}"
+"#,
+            hex::encode(signer("alice", 1).public_key()),
+            hex::encode(signer("bob", 2).public_key()),
+            hex::encode(signer("carol", 3).public_key())
+        );
+        let config = ConsensusConfig::from_toml_str(&toml).unwrap();
+        let engine = ProofOfAuthority::new(config.proof_of_authority.clone().unwrap()).unwrap();
+        let selected = SelectedConsensus::from_config(config).unwrap();
+        assert_eq!(selected.kind(), ConsensusKind::ProofOfAuthority);
+
+        let block = block_for(ConsensusKind::ProofOfAuthority);
+        assert_eq!(engine.expected_authority(block.number).id, "bob");
+        let seal = engine.seal_from_signer(block.hash(), block.number, &signer("bob", 2)).unwrap();
+        let finalised = selected.finalise_with_proof(block.clone(), FinalityProof::ProofOfAuthority(seal)).unwrap();
+        assert_eq!(finalised.block, block);
+        assert_eq!(finalised.proof.kind(), ConsensusKind::ProofOfAuthority);
+
+        let wrong_proof = FinalityProof::StaticClosedCommittee(CommitteeCertificate { block_hash: block.hash(), signatures: vec![] });
+        assert_eq!(
+            selected.finalise_with_proof(block, wrong_proof),
+            Err(ConsensusError::WrongFinalityProof {
+                expected: ConsensusKind::ProofOfAuthority.as_str(),
+                actual: ConsensusKind::StaticClosedCommittee.as_str(),
+            })
+        );
     }
 
     fn weighted_precommit() -> WeightedPrecommit {

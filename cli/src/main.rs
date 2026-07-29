@@ -8,9 +8,9 @@
 use clap::{Args, Parser, Subcommand};
 use myelin_ckb_adapter::{parse_ckb_json_transaction, verify_projection, CkbEvidenceEngine, CkbEvidenceProjection, HttpCkbRpc};
 use myelin_consensus::{
-    CommitteeCertificate, CommitteeSignature, CommitteeSigner, ConsensusConfig, ConsensusEngine, ConsensusKind, MyelinBlock,
-    SelectedConsensus, StaticClosedCommittee, StaticCommitteeConfig, TendermintDecision, TendermintStep, WeightedPrecommit,
-    WeightedPrecommitConfig,
+    Authority, CommitteeCertificate, CommitteeSignature, CommitteeSigner, ConsensusConfig, ConsensusEngine, ConsensusKind,
+    FinalityProof, MyelinBlock, ProofOfAuthority, ProofOfAuthorityConfig, ProofOfAuthoritySeal, SelectedConsensus,
+    StaticClosedCommittee, StaticCommitteeConfig, TendermintDecision, TendermintStep, WeightedPrecommit, WeightedPrecommitConfig,
 };
 use myelin_exec::{
     build_cell_tx_execution_report, celltx::compute_wtxid, ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule,
@@ -1477,7 +1477,8 @@ fn finalise_demo_from_config(path: PathBuf) -> Result<CommitteeDemoReport> {
     let selected = SelectedConsensus::from_config(config.clone())?;
     match config.kind {
         ConsensusKind::StaticClosedCommittee => finalise_static_demo(config, selected),
-        ConsensusKind::WeightedPrecommit => finalise_weighted_precommit_demo(config, selected),
+        ConsensusKind::ProofOfAuthority => finalise_proof_of_authority_demo(config, selected),
+        ConsensusKind::Tendermint => finalise_weighted_precommit_demo(config, selected),
     }
 }
 
@@ -1492,7 +1493,7 @@ fn finalise_static_demo(config: ConsensusConfig, selected: SelectedConsensus) ->
     let signer_ids = quorum_signers(&static_config)?;
     let signers = fixture_signers_for_ids(&signer_ids)?;
     let certificate = committee.certificate_from_signers(block_hash, &signers)?;
-    selected.finalise_block(block, certificate)?;
+    selected.finalise_with_proof(block, FinalityProof::StaticClosedCommittee(certificate))?;
     Ok(CommitteeDemoReport {
         consensus_kind: ConsensusKind::StaticClosedCommittee.as_str(),
         block_hash: hex::encode(block_hash),
@@ -1501,6 +1502,32 @@ fn finalise_static_demo(config: ConsensusConfig, selected: SelectedConsensus) ->
         certificate_height: height,
         certificate_round: None,
         certificate_step: "commit",
+        finalised: true,
+    })
+}
+
+fn finalise_proof_of_authority_demo(config: ConsensusConfig, selected: SelectedConsensus) -> Result<CommitteeDemoReport> {
+    let proof_of_authority_config = config
+        .proof_of_authority
+        .ok_or_else(|| CliError::InvalidFixture("demo finality requires a proof-of-authority config".to_owned()))?;
+    let proof_of_authority = ProofOfAuthority::new(proof_of_authority_config)?;
+    let block = demo_block(vec![[0xA2; 32]], ConsensusKind::ProofOfAuthority);
+    let block_hash = block.hash();
+    let height = block.number;
+    let authority_id = proof_of_authority.expected_authority(height).id.clone();
+    let signer = fixture_signers_for_ids(std::slice::from_ref(&authority_id))?
+        .pop()
+        .ok_or_else(|| CliError::InvalidFixture("scheduled authority signer is missing".to_owned()))?;
+    let seal = proof_of_authority.seal_from_signer(block_hash, height, &signer)?;
+    selected.finalise_with_proof(block, FinalityProof::ProofOfAuthority(seal))?;
+    Ok(CommitteeDemoReport {
+        consensus_kind: ConsensusKind::ProofOfAuthority.as_str(),
+        block_hash: hex::encode(block_hash),
+        quorum_weight: 1,
+        signer_ids: vec![authority_id],
+        certificate_height: height,
+        certificate_round: None,
+        certificate_step: "seal",
         finalised: true,
     })
 }
@@ -1518,18 +1545,7 @@ fn finalise_weighted_precommit_demo(config: ConsensusConfig, selected: SelectedC
     let all_signers = fixture_signers_for_ids(&all_signer_ids)?;
     let decision = tendermint_decision_from_signers(&weighted_precommit, &block, &voting_signers, &all_signers)?;
     let round = decision.round;
-    match selected {
-        SelectedConsensus::Tendermint(engine) => {
-            engine.finalise_block_with_decision(block, decision)?;
-        }
-        other => {
-            return Err(myelin_consensus::ConsensusError::WrongEngine {
-                expected: ConsensusKind::WeightedPrecommit.as_str(),
-                actual: other.kind().as_str(),
-            }
-            .into());
-        }
-    }
+    selected.finalise_with_proof(block, FinalityProof::Tendermint(decision))?;
     Ok(CommitteeDemoReport {
         consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
         block_hash: hex::encode(block_hash),
@@ -1708,7 +1724,8 @@ impl TeeworldsBundleBlock {
         };
         let consensus_kind = match self.consensus_kind.as_str() {
             "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
-            "tendermint" | "weighted-precommit" => ConsensusKind::WeightedPrecommit,
+            "proof-of-authority" | "poa" => ConsensusKind::ProofOfAuthority,
+            "tendermint" | "weighted-precommit" => ConsensusKind::Tendermint,
             other => return Err(format!("unknown consensus_kind in bundle block: {other}")),
         };
         let ordered_cell_tx_commitments = self
@@ -1766,6 +1783,8 @@ struct TeeworldsCourtBundleReport {
     /// weighted precommit certificate. The same `signatures` field carries
     /// both modes; the `consensus_kind` field disambiguates.
     static_committee_evidence: StaticCommitteeEvidenceReport,
+    /// PoA seal evidence; present only for proof-of-authority bundles.
+    proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceReport>,
     /// WeightedPrecommit-only fields: precommit round, certificate step, height.
     /// `None` for static-closed-committee bundles.
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceReport>,
@@ -1810,6 +1829,8 @@ struct TeeworldsCourtBundleInput {
     /// is bound to. This is the data-binding guarantee.
     block: TeeworldsBundleBlock,
     static_committee_evidence: StaticCommitteeEvidenceInput,
+    /// Optional scheduled-authority seal evidence.
+    proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceInput>,
     /// Optional WeightedPrecommit precommit evidence. When present, the challenge
     /// payload hash binds to the WeightedPrecommit block hash and the static
     /// committee evidence block hash is reported for completeness only.
@@ -1848,6 +1869,16 @@ struct WeightedPrecommitEvidenceInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProofOfAuthorityEvidenceInput {
+    block_hash: String,
+    height: u64,
+    authority_id: String,
+    signature: String,
+    signature_hash: String,
+    finalised: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct CommitteeSignatureEvidenceInput {
     validator_id: String,
     signature: String,
@@ -1873,6 +1904,18 @@ struct WeightedPrecommitEvidenceReport {
     round: u32,
     signer_ids: Vec<String>,
     signatures: Vec<CommitteeSignatureEvidenceReport>,
+    certificate_step: &'static str,
+    finalised: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProofOfAuthorityEvidenceReport {
+    consensus_kind: &'static str,
+    block_hash: String,
+    height: u64,
+    authority_id: String,
+    signature: String,
+    signature_hash: String,
     certificate_step: &'static str,
     finalised: bool,
 }
@@ -1963,7 +2006,8 @@ fn inspect_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize, consensus: &str)
 fn parse_teeworlds_consensus(consensus: &str) -> Result<ConsensusKind> {
     match consensus {
         "static-closed-committee" => Ok(ConsensusKind::StaticClosedCommittee),
-        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::WeightedPrecommit),
+        "proof-of-authority" | "poa" => Ok(ConsensusKind::ProofOfAuthority),
+        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::Tendermint),
         other => Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     }
 }
@@ -2162,7 +2206,8 @@ fn teeworlds_court_bundle(
     }
     let consensus_kind = match consensus {
         "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
-        "tendermint" | "weighted-precommit" => ConsensusKind::WeightedPrecommit,
+        "proof-of-authority" | "poa" => ConsensusKind::ProofOfAuthority,
+        "tendermint" | "weighted-precommit" => ConsensusKind::Tendermint,
         other => return Err(CliError::InvalidFixture(format!("unknown consensus engine for court-bundle: {other}"))),
     };
 
@@ -2225,7 +2270,7 @@ fn teeworlds_court_bundle(
     };
     let canonical_block_hash = canonical_block.hash();
 
-    let (static_evidence, weighted_precommit_evidence, evidence_notes) = match consensus_kind {
+    let (static_evidence, proof_of_authority_evidence, weighted_precommit_evidence, evidence_notes) = match consensus_kind {
         ConsensusKind::StaticClosedCommittee => {
             // Build a static-closed-committee cert over the same canonical
             // block. The cert's `block_hash` MUST equal `canonical_block_hash`.
@@ -2253,9 +2298,41 @@ fn teeworlds_court_bundle(
                 signatures,
                 finalised: true,
             };
-            (evidence, None, vec!["This bundle carries static-closed-committee evidence over the canonical MyelinBlock.".to_owned()])
+            (
+                evidence,
+                None,
+                None,
+                vec!["This bundle carries static-closed-committee evidence over the canonical MyelinBlock.".to_owned()],
+            )
         }
-        ConsensusKind::WeightedPrecommit => {
+        ConsensusKind::ProofOfAuthority => {
+            let proof_of_authority = proof_of_authority_fixture_engine();
+            let authority_id = proof_of_authority.expected_authority(canonical_block.number).id.clone();
+            let signer = fixture_signers(&[&authority_id]).remove(0);
+            let seal = proof_of_authority
+                .seal_from_signer(canonical_block_hash, canonical_block.number, &signer)
+                .expect("proof-of-authority fixture seal");
+            proof_of_authority
+                .finalise_block_with_seal(canonical_block.clone(), seal.clone())
+                .expect("proof-of-authority fixture finality");
+            let evidence = ProofOfAuthorityEvidenceReport {
+                consensus_kind: ConsensusKind::ProofOfAuthority.as_str(),
+                block_hash: hex::encode(canonical_block_hash),
+                height: seal.height,
+                authority_id: seal.authority_id,
+                signature: hex::encode(seal.signature),
+                signature_hash: hex::encode(blake3_32(b"myelin:proof-of-authority-signature-hash:v1", &seal.signature)),
+                certificate_step: "seal",
+                finalised: true,
+            };
+            (
+                inactive_static_evidence(canonical_block_hash),
+                Some(evidence),
+                None,
+                vec!["This bundle carries a scheduled proof-of-authority seal over the canonical MyelinBlock.".to_owned()],
+            )
+        }
+        ConsensusKind::Tendermint => {
             // Build a WeightedPrecommit precommit cert over the same canonical
             // block. The cert's `block_hash` and `height` MUST equal
             // `canonical_block_hash` and `canonical_block.number`. The
@@ -2309,7 +2386,7 @@ fn teeworlds_court_bundle(
             let mut notes =
                 vec!["This bundle carries WeightedPrecommit precommit evidence over the canonical MyelinBlock.".to_owned()];
             notes.push("The static-closed-committee evidence slot is informational; the challenge-payload-hash binds to the canonical block hash.".to_owned());
-            (static_evidence, Some(weighted_precommit_evidence), notes)
+            (static_evidence, None, Some(weighted_precommit_evidence), notes)
         }
     };
     let block_hash = canonical_block_hash;
@@ -2364,6 +2441,7 @@ fn teeworlds_court_bundle(
         ckb_spawn_ipc_required: false,
         ckb_projection,
         static_committee_evidence: static_evidence,
+        proof_of_authority_evidence,
         weighted_precommit_evidence,
         court_verifiable,
         l1_court_implemented: false,
@@ -2534,11 +2612,45 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
     // The active block hash is the reconstructed hash. The supplied
     // static-committee / WeightedPrecommit `block_hash` fields must equal it.
     let active_block_hash = reconstructed_block_hash;
-    let supplied_evidence_block_hash = match &bundle.weighted_precommit_evidence {
-        Some(tm) => parse_hex_32(&tm.block_hash)
-            .ok_or_else(|| CliError::InvalidFixture("weighted_precommit block_hash must be 32-byte hex".to_owned()))?,
-        None => parse_hex_32(&bundle.static_committee_evidence.block_hash)
-            .ok_or_else(|| CliError::InvalidFixture("static committee block_hash must be 32-byte hex".to_owned()))?,
+    let proof_shape_ok = match reconstructed_block.consensus_kind {
+        ConsensusKind::StaticClosedCommittee => {
+            bundle.proof_of_authority_evidence.is_none()
+                && bundle.weighted_precommit_evidence.is_none()
+                && bundle.static_committee_evidence.finalised
+        }
+        ConsensusKind::ProofOfAuthority => {
+            bundle.proof_of_authority_evidence.is_some()
+                && bundle.weighted_precommit_evidence.is_none()
+                && !bundle.static_committee_evidence.finalised
+        }
+        ConsensusKind::Tendermint => {
+            bundle.proof_of_authority_evidence.is_none()
+                && bundle.weighted_precommit_evidence.is_some()
+                && !bundle.static_committee_evidence.finalised
+        }
+    };
+    push_check(
+        &mut checks,
+        "finality-proof-shape",
+        proof_shape_ok,
+        Some(format!("exactly one {} proof", reconstructed_block.consensus_kind.as_str())),
+        Some(format!(
+            "static={}, poa={}, tendermint={}",
+            bundle.static_committee_evidence.finalised,
+            bundle.proof_of_authority_evidence.is_some(),
+            bundle.weighted_precommit_evidence.is_some()
+        )),
+        "the evidence shape matches the canonical block consensus kind",
+    );
+    let supplied_evidence_block_hash = if let Some(poa) = &bundle.proof_of_authority_evidence {
+        parse_hex_32(&poa.block_hash)
+            .ok_or_else(|| CliError::InvalidFixture("proof-of-authority block_hash must be 32-byte hex".to_owned()))?
+    } else if let Some(tm) = &bundle.weighted_precommit_evidence {
+        parse_hex_32(&tm.block_hash)
+            .ok_or_else(|| CliError::InvalidFixture("weighted_precommit block_hash must be 32-byte hex".to_owned()))?
+    } else {
+        parse_hex_32(&bundle.static_committee_evidence.block_hash)
+            .ok_or_else(|| CliError::InvalidFixture("static committee block_hash must be 32-byte hex".to_owned()))?
     };
     push_check(
         &mut checks,
@@ -2568,21 +2680,29 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
         "challenge payload hash recomputes from bundle fields",
     );
 
-    let signature_hashes_ok = match &bundle.weighted_precommit_evidence {
-        Some(tm) => tm.signatures.iter().all(|signature| {
+    let signature_hashes_ok = if let Some(poa) = &bundle.proof_of_authority_evidence {
+        decode_hex_field(&poa.signature, "signature")
+            .map(|bytes| hex::encode(blake3_32(b"myelin:proof-of-authority-signature-hash:v1", &bytes)) == poa.signature_hash)
+            .unwrap_or(false)
+    } else if let Some(tm) = &bundle.weighted_precommit_evidence {
+        tm.signatures.iter().all(|signature| {
             decode_hex_field(&signature.signature, "signature")
                 .map(|bytes| hex::encode(blake3_32(b"myelin:tendermint-signature-hash:v1", &bytes)) == signature.signature_hash)
                 .unwrap_or(false)
-        }),
-        None => bundle.static_committee_evidence.signatures.iter().all(|signature| {
+        })
+    } else {
+        bundle.static_committee_evidence.signatures.iter().all(|signature| {
             decode_hex_field(&signature.signature, "signature")
                 .map(|bytes| hex::encode(blake3_32(b"myelin:static-committee-signature-hash:v1", &bytes)) == signature.signature_hash)
                 .unwrap_or(false)
-        }),
+        })
     };
-    let signature_count = match &bundle.weighted_precommit_evidence {
-        Some(tm) => tm.signatures.len(),
-        None => bundle.static_committee_evidence.signatures.len(),
+    let signature_count = if bundle.proof_of_authority_evidence.is_some() {
+        1
+    } else if let Some(tm) = &bundle.weighted_precommit_evidence {
+        tm.signatures.len()
+    } else {
+        bundle.static_committee_evidence.signatures.len()
     };
     push_check(
         &mut checks,
@@ -2593,24 +2713,49 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
         "each signature hash matches its embedded signature bytes",
     );
 
-    let signer_ids = match &bundle.weighted_precommit_evidence {
-        Some(tm) => tm.signatures.iter().map(|signature| signature.validator_id.clone()).collect::<Vec<_>>(),
-        None => bundle.static_committee_evidence.signatures.iter().map(|signature| signature.validator_id.clone()).collect::<Vec<_>>(),
+    let signer_ids = if let Some(poa) = &bundle.proof_of_authority_evidence {
+        vec![poa.authority_id.clone()]
+    } else if let Some(tm) = &bundle.weighted_precommit_evidence {
+        tm.signatures.iter().map(|signature| signature.validator_id.clone()).collect::<Vec<_>>()
+    } else {
+        bundle.static_committee_evidence.signatures.iter().map(|signature| signature.validator_id.clone()).collect::<Vec<_>>()
     };
-    let expected_signer_ids = match &bundle.weighted_precommit_evidence {
-        Some(tm) => &tm.signer_ids,
-        None => &bundle.static_committee_evidence.signer_ids,
+    let expected_signer_ids = if let Some(poa) = &bundle.proof_of_authority_evidence {
+        vec![poa.authority_id.clone()]
+    } else if let Some(tm) = &bundle.weighted_precommit_evidence {
+        tm.signer_ids.clone()
+    } else {
+        bundle.static_committee_evidence.signer_ids.clone()
     };
     push_check(
         &mut checks,
         "committee-signer-ids",
-        signer_ids == *expected_signer_ids,
+        signer_ids == expected_signer_ids,
         Some(format!("{:?}", signer_ids)),
         Some(format!("{:?}", expected_signer_ids)),
         "signer id list matches embedded certificate signatures",
     );
 
-    if let Some(tm) = &bundle.weighted_precommit_evidence {
+    if let Some(poa) = &bundle.proof_of_authority_evidence {
+        let proof_of_authority = proof_of_authority_fixture_engine();
+        let signature = parse_hex_64(&poa.signature)
+            .ok_or_else(|| CliError::InvalidFixture("proof-of-authority signature must be 64-byte hex".to_owned()))?;
+        let seal = ProofOfAuthoritySeal {
+            block_hash: active_block_hash,
+            height: poa.height,
+            authority_id: poa.authority_id.clone(),
+            signature,
+        };
+        let seal_ok = proof_of_authority.finalise_block_with_seal(reconstructed_block.clone(), seal).is_ok();
+        push_check(
+            &mut checks,
+            "proof-of-authority-seal",
+            seal_ok && poa.finalised,
+            Some(format!("scheduled authority at height {}", poa.height)),
+            Some(format!("authority {}, finalised {}", poa.authority_id, poa.finalised)),
+            "proof-of-authority seal verifies against the deterministic fixture schedule",
+        );
+    } else if let Some(tm) = &bundle.weighted_precommit_evidence {
         // Verify the Tendermint decision certificate. Proposal/prevote
         // transitions are executed by the runtime; the portable finality
         // certificate carries the round's signed precommits.
@@ -2851,7 +2996,27 @@ fn finalise_teeworlds_fixture_block(chunks: &[TeeworldsChunkReport], consensus_k
                 finalised: evidence.finalised,
             }
         }
-        ConsensusKind::WeightedPrecommit => {
+        ConsensusKind::ProofOfAuthority => {
+            let block = demo_block(data_commitments, ConsensusKind::ProofOfAuthority);
+            let engine = proof_of_authority_fixture_engine();
+            let block_hash = block.hash();
+            let height = block.number;
+            let authority_id = engine.expected_authority(height).id.clone();
+            let signer = fixture_signers(&[&authority_id]).remove(0);
+            let seal = engine.seal_from_signer(block_hash, height, &signer).expect("proof-of-authority fixture seal");
+            engine.finalise_block_with_seal(block, seal).expect("proof-of-authority fixture finality");
+            CommitteeDemoReport {
+                consensus_kind: ConsensusKind::ProofOfAuthority.as_str(),
+                block_hash: hex::encode(block_hash),
+                quorum_weight: 1,
+                signer_ids: vec![authority_id],
+                certificate_height: height,
+                certificate_round: None,
+                certificate_step: "seal",
+                finalised: true,
+            }
+        }
+        ConsensusKind::Tendermint => {
             let weighted_precommit_block = MyelinBlock {
                 version: 1,
                 parent_hash: [0; 32],
@@ -2906,6 +3071,19 @@ fn weighted_precommit_fixture_config() -> WeightedPrecommitConfig {
             .map(|signer| signer.validator(1))
             .collect(),
     }
+}
+
+fn proof_of_authority_fixture_config() -> ProofOfAuthorityConfig {
+    ProofOfAuthorityConfig {
+        authorities: fixture_signers(&["validator-0", "validator-1", "validator-2"])
+            .iter()
+            .map(|signer| Authority { id: signer.validator_id().to_owned(), public_key: signer.public_key() })
+            .collect(),
+    }
+}
+
+fn proof_of_authority_fixture_engine() -> ProofOfAuthority {
+    ProofOfAuthority::new(proof_of_authority_fixture_config()).expect("proof-of-authority fixture engine")
 }
 
 fn fixture_signers(ids: &[&str]) -> Vec<CommitteeSigner> {
@@ -5428,6 +5606,7 @@ struct SessionCommitReport {
     molecule_transaction_hex: String,
     molecule_transaction_hash: String,
     static_committee_evidence: StaticCommitteeEvidenceReport,
+    proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceReport>,
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceReport>,
     finalised: bool,
 }
@@ -5466,6 +5645,7 @@ struct SessionCommitMultiReport {
     state_root_after: String,
     block: TeeworldsBundleBlock,
     static_committee_evidence: StaticCommitteeEvidenceReport,
+    proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceReport>,
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceReport>,
     finalised: bool,
 }
@@ -5490,6 +5670,7 @@ struct SessionCommitInput {
     molecule_transaction_hex: String,
     molecule_transaction_hash: String,
     static_committee_evidence: StaticCommitteeEvidenceInput,
+    proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceInput>,
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceInput>,
     finalised: bool,
 }
@@ -5516,6 +5697,7 @@ struct SessionCourtBundleReport {
     challenge_payload_hash: String,
     ckb_projection: TeeworldsChunkProjectionReport,
     static_committee_evidence: StaticCommitteeEvidenceReport,
+    proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceReport>,
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceReport>,
     court_verifiable: bool,
     l1_court_implemented: bool,
@@ -5544,6 +5726,7 @@ struct SessionCourtBundleInput {
     challenge_payload_hash: String,
     ckb_projection: TeeworldsChunkProjectionInput,
     static_committee_evidence: StaticCommitteeEvidenceInput,
+    proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceInput>,
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceInput>,
     court_verifiable: bool,
 }
@@ -6578,7 +6761,7 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
         scheduler_commitment,
     };
     let block_hash = block.hash();
-    let (static_committee_evidence, weighted_precommit_evidence) = finality_evidence_for_block(&block)?;
+    let (static_committee_evidence, proof_of_authority_evidence, weighted_precommit_evidence) = finality_evidence_for_block(&block)?;
     let bundle_block = block_report_from_myelin_block(&block, block_hash);
 
     Ok(SessionCommitMultiReport {
@@ -6603,6 +6786,7 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
         state_root_after: hex::encode(state_root_after),
         block: bundle_block,
         static_committee_evidence,
+        proof_of_authority_evidence,
         weighted_precommit_evidence,
         finalised: true,
     })
@@ -6681,7 +6865,7 @@ fn session_commit_from_open(path: PathBuf, chunk_index: u64) -> Result<SessionCo
         scheduler_commitment,
     };
     let block_hash = block.hash();
-    let (static_committee_evidence, weighted_precommit_evidence) = finality_evidence_for_block(&block)?;
+    let (static_committee_evidence, proof_of_authority_evidence, weighted_precommit_evidence) = finality_evidence_for_block(&block)?;
     let bundle_block = block_report_from_myelin_block(&block, block_hash);
 
     Ok(SessionCommitReport {
@@ -6707,6 +6891,7 @@ fn session_commit_from_open(path: PathBuf, chunk_index: u64) -> Result<SessionCo
         molecule_transaction_hex: hex::encode(molecule_transaction),
         molecule_transaction_hash: hex::encode(molecule_transaction_hash),
         static_committee_evidence,
+        proof_of_authority_evidence,
         weighted_precommit_evidence,
         finalised: true,
     })
@@ -6809,6 +6994,7 @@ fn session_court_bundle(path: PathBuf, chunk_index: u64) -> Result<SessionCourtB
         challenge_payload_hash: hex::encode(challenge_payload_hash),
         ckb_projection,
         static_committee_evidence: static_evidence_report_from_input(commit.static_committee_evidence),
+        proof_of_authority_evidence: commit.proof_of_authority_evidence.map(proof_of_authority_evidence_report_from_input),
         weighted_precommit_evidence: commit.weighted_precommit_evidence.map(weighted_precommit_evidence_report_from_input),
         court_verifiable,
         l1_court_implemented: false,
@@ -7007,11 +7193,15 @@ fn verify_session_court_bundle(path: PathBuf) -> Result<SessionCourtBundleVerifi
         "challenge payload hash recomputes from bundle fields",
     );
 
-    let evidence_block_hash = match &bundle.weighted_precommit_evidence {
-        Some(tm) => parse_hex_32(&tm.block_hash)
-            .ok_or_else(|| CliError::InvalidFixture("weighted_precommit block_hash must be 32-byte hex".to_owned()))?,
-        None => parse_hex_32(&bundle.static_committee_evidence.block_hash)
-            .ok_or_else(|| CliError::InvalidFixture("static committee block_hash must be 32-byte hex".to_owned()))?,
+    let evidence_block_hash = if let Some(poa) = &bundle.proof_of_authority_evidence {
+        parse_hex_32(&poa.block_hash)
+            .ok_or_else(|| CliError::InvalidFixture("proof-of-authority block_hash must be 32-byte hex".to_owned()))?
+    } else if let Some(tm) = &bundle.weighted_precommit_evidence {
+        parse_hex_32(&tm.block_hash)
+            .ok_or_else(|| CliError::InvalidFixture("weighted_precommit block_hash must be 32-byte hex".to_owned()))?
+    } else {
+        parse_hex_32(&bundle.static_committee_evidence.block_hash)
+            .ok_or_else(|| CliError::InvalidFixture("static committee block_hash must be 32-byte hex".to_owned()))?
     };
     push_check(
         &mut checks,
@@ -12405,7 +12595,65 @@ fn verify_session_finality_checks(
     block_hash: [u8; 32],
     bundle: &SessionCourtBundleInput,
 ) -> Result<()> {
-    if let Some(tm) = &bundle.weighted_precommit_evidence {
+    let consensus_kind = parse_session_consensus(&bundle.consensus_kind)?;
+    let proof_shape_ok = match consensus_kind {
+        ConsensusKind::StaticClosedCommittee => {
+            bundle.proof_of_authority_evidence.is_none()
+                && bundle.weighted_precommit_evidence.is_none()
+                && bundle.static_committee_evidence.finalised
+        }
+        ConsensusKind::ProofOfAuthority => {
+            bundle.proof_of_authority_evidence.is_some()
+                && bundle.weighted_precommit_evidence.is_none()
+                && !bundle.static_committee_evidence.finalised
+        }
+        ConsensusKind::Tendermint => {
+            bundle.proof_of_authority_evidence.is_none()
+                && bundle.weighted_precommit_evidence.is_some()
+                && !bundle.static_committee_evidence.finalised
+        }
+    };
+    push_check(
+        checks,
+        "finality-proof-shape",
+        proof_shape_ok,
+        Some(format!("exactly one {} proof", consensus_kind.as_str())),
+        Some(format!(
+            "static={}, poa={}, tendermint={}",
+            bundle.static_committee_evidence.finalised,
+            bundle.proof_of_authority_evidence.is_some(),
+            bundle.weighted_precommit_evidence.is_some()
+        )),
+        "the evidence shape matches the selected consensus engine",
+    );
+
+    if let Some(poa) = &bundle.proof_of_authority_evidence {
+        let proof_of_authority = proof_of_authority_fixture_engine();
+        let signature = parse_hex_64(&poa.signature)
+            .ok_or_else(|| CliError::InvalidFixture("proof-of-authority signature must be 64-byte hex".to_owned()))?;
+        let seal = ProofOfAuthoritySeal { block_hash, height: poa.height, authority_id: poa.authority_id.clone(), signature };
+        let reconstructed_block =
+            bundle.block.to_myelin_block().map_err(|error| CliError::InvalidFixture(format!("bundle block: {error}")))?;
+        let seal_ok = proof_of_authority.finalise_block_with_seal(reconstructed_block, seal).is_ok();
+        let signature_hash_ok =
+            hex::encode(blake3_32(b"myelin:proof-of-authority-signature-hash:v1", &signature)) == poa.signature_hash;
+        push_check(
+            checks,
+            "proof-of-authority-seal",
+            seal_ok && poa.finalised,
+            Some(format!("scheduled authority at height {}", poa.height)),
+            Some(format!("authority {}, finalised {}", poa.authority_id, poa.finalised)),
+            "PoA seal verifies against the deterministic authority schedule",
+        );
+        push_check(
+            checks,
+            "proof-of-authority-signature-hash",
+            signature_hash_ok,
+            Some("signature hash recomputes".to_owned()),
+            Some(poa.signature_hash.clone()),
+            "PoA evidence hash matches the embedded signature bytes",
+        );
+    } else if let Some(tm) = &bundle.weighted_precommit_evidence {
         let weighted_precommit_engine = weighted_precommit_fixture_engine();
         let precommits = tm
             .signatures
@@ -12484,7 +12732,8 @@ fn verify_session_finality_checks(
 fn parse_session_consensus(consensus: &str) -> Result<ConsensusKind> {
     match consensus {
         "static-closed-committee" => Ok(ConsensusKind::StaticClosedCommittee),
-        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::WeightedPrecommit),
+        "proof-of-authority" | "poa" => Ok(ConsensusKind::ProofOfAuthority),
+        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::Tendermint),
         other => Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     }
 }
@@ -12756,7 +13005,7 @@ fn session_fixture_output_data(session_id: [u8; 32], chunk_index: u64) -> Vec<u8
 
 fn finality_evidence_for_block(
     block: &MyelinBlock,
-) -> Result<(StaticCommitteeEvidenceReport, Option<WeightedPrecommitEvidenceReport>)> {
+) -> Result<(StaticCommitteeEvidenceReport, Option<ProofOfAuthorityEvidenceReport>, Option<WeightedPrecommitEvidenceReport>)> {
     let block_hash = block.hash();
     match block.consensus_kind {
         ConsensusKind::StaticClosedCommittee => {
@@ -12774,9 +13023,27 @@ fn finality_evidence_for_block(
                 signatures,
                 finalised: true,
             };
-            Ok((evidence, None))
+            Ok((evidence, None, None))
         }
-        ConsensusKind::WeightedPrecommit => {
+        ConsensusKind::ProofOfAuthority => {
+            let proof_of_authority = proof_of_authority_fixture_engine();
+            let authority_id = proof_of_authority.expected_authority(block.number).id.clone();
+            let signer = fixture_signers(&[&authority_id]).remove(0);
+            let seal = proof_of_authority.seal_from_signer(block_hash, block.number, &signer)?;
+            proof_of_authority.finalise_block_with_seal(block.clone(), seal.clone())?;
+            let evidence = ProofOfAuthorityEvidenceReport {
+                consensus_kind: ConsensusKind::ProofOfAuthority.as_str(),
+                block_hash: hex::encode(block_hash),
+                height: seal.height,
+                authority_id: seal.authority_id,
+                signature: hex::encode(seal.signature),
+                signature_hash: hex::encode(blake3_32(b"myelin:proof-of-authority-signature-hash:v1", &seal.signature)),
+                certificate_step: "seal",
+                finalised: true,
+            };
+            Ok((inactive_static_evidence(block_hash), Some(evidence), None))
+        }
+        ConsensusKind::Tendermint => {
             let weighted_precommit_engine = weighted_precommit_fixture_engine();
             let signer_ids = vec!["validator-0".to_owned(), "validator-1".to_owned(), "validator-2".to_owned()];
             let voting_signers = fixture_signers(&["validator-0", "validator-1", "validator-2"]);
@@ -12804,17 +13071,19 @@ fn finality_evidence_for_block(
                 certificate_step: "precommit",
                 finalised: true,
             };
-            let committee_config = static_fixture_committee_config();
-            let static_evidence = StaticCommitteeEvidenceReport {
-                consensus_kind: ConsensusKind::StaticClosedCommittee.as_str(),
-                block_hash: hex::encode(block_hash),
-                quorum_weight: committee_config.quorum_weight,
-                signer_ids: vec![],
-                signatures: vec![],
-                finalised: false,
-            };
-            Ok((static_evidence, Some(weighted_precommit_evidence)))
+            Ok((inactive_static_evidence(block_hash), None, Some(weighted_precommit_evidence)))
         }
+    }
+}
+
+fn inactive_static_evidence(block_hash: [u8; 32]) -> StaticCommitteeEvidenceReport {
+    StaticCommitteeEvidenceReport {
+        consensus_kind: ConsensusKind::StaticClosedCommittee.as_str(),
+        block_hash: hex::encode(block_hash),
+        quorum_weight: static_fixture_committee_config().quorum_weight,
+        signer_ids: vec![],
+        signatures: vec![],
+        finalised: false,
     }
 }
 
@@ -12883,6 +13152,19 @@ fn weighted_precommit_evidence_report_from_input(input: WeightedPrecommitEvidenc
     }
 }
 
+fn proof_of_authority_evidence_report_from_input(input: ProofOfAuthorityEvidenceInput) -> ProofOfAuthorityEvidenceReport {
+    ProofOfAuthorityEvidenceReport {
+        consensus_kind: ConsensusKind::ProofOfAuthority.as_str(),
+        block_hash: input.block_hash,
+        height: input.height,
+        authority_id: input.authority_id,
+        signature: input.signature,
+        signature_hash: input.signature_hash,
+        certificate_step: "seal",
+        finalised: input.finalised,
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct RuntimeSmokeReport {
     /// Schema tag for downstream consumers.
@@ -12916,7 +13198,8 @@ struct RuntimeSmokeReport {
 fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
     let consensus_kind = match consensus {
         "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
-        "tendermint" | "weighted-precommit" => ConsensusKind::WeightedPrecommit,
+        "proof-of-authority" | "poa" => ConsensusKind::ProofOfAuthority,
+        "tendermint" | "weighted-precommit" => ConsensusKind::Tendermint,
         other => return Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     };
 
@@ -12985,7 +13268,17 @@ fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
             let finalised = committee.finalise_block(block.clone(), cert).expect("static fixture finality");
             hex::encode(finalised.block_hash)
         }
-        ConsensusKind::WeightedPrecommit => {
+        ConsensusKind::ProofOfAuthority => {
+            let proof_of_authority = proof_of_authority_fixture_engine();
+            let authority_id = proof_of_authority.expected_authority(block.number).id.clone();
+            let signer = fixture_signers(&[&authority_id]).remove(0);
+            let seal =
+                proof_of_authority.seal_from_signer(block.hash(), block.number, &signer).expect("proof-of-authority fixture seal");
+            let finalised =
+                proof_of_authority.finalise_block_with_seal(block.clone(), seal).expect("proof-of-authority fixture finality");
+            hex::encode(finalised.block_hash)
+        }
+        ConsensusKind::Tendermint => {
             let weighted_precommit_engine = weighted_precommit_fixture_engine();
             let all_signers = fixture_signers(&["validator-0", "validator-1", "validator-2", "validator-3"]);
             let voting_signers = fixture_signers(&["validator-0", "validator-1", "validator-2"]);
@@ -14722,6 +15015,35 @@ mod tests {
         // WeightedPrecommit evidence is in the bundle; otherwise the bundle would
         // be claiming both engines.
         assert!(!verification.checks.iter().any(|check| check.name == "committee-certificate"));
+    }
+
+    #[test]
+    fn teeworlds_court_bundle_proof_of_authority_path_verifies() {
+        let path = std::env::temp_dir().join(format!("myelin-poa-court-bundle-test-{}.json", std::process::id()));
+        let json = serde_json::json!({
+            "tx": {
+                "witnesses": ["0x", "0x7469636b6e657874", "0x6d6170", "0x636667"]
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let report = teeworlds_court_bundle(path.clone(), 4, 0, "proof-of-authority").unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert!(!report.static_committee_evidence.finalised);
+        assert!(report.weighted_precommit_evidence.is_none());
+        let poa = report.proof_of_authority_evidence.as_ref().expect("PoA evidence");
+        assert_eq!(poa.consensus_kind, "proof-of-authority");
+        assert_eq!(poa.authority_id, "validator-1");
+        assert_eq!(poa.certificate_step, "seal");
+        assert!(poa.finalised);
+
+        let bundle_path = write_temp_json("myelin-poa-court-bundle-report", &report);
+        let verification = verify_teeworlds_court_bundle(bundle_path.clone()).unwrap();
+        let _ = std::fs::remove_file(bundle_path);
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "proof-of-authority-seal"));
+        assert!(verification.checks.iter().any(|check| check.name == "finality-proof-shape"));
     }
 
     #[test]
@@ -19246,29 +19568,74 @@ mod tests {
     }
 
     #[test]
+    fn session_fixture_proof_of_authority_commit_court_bundle_verifies() {
+        let open = session_open_fixture("proof-of-authority").expect("open PoA session");
+        let open_path = write_temp_json("myelin-session-open-poa", &open);
+        let commit = session_commit_fixture(open_path.clone()).expect("commit PoA session");
+        let _ = std::fs::remove_file(open_path);
+
+        assert_eq!(commit.consensus_kind, "proof-of-authority");
+        assert!(!commit.static_committee_evidence.finalised);
+        assert!(commit.weighted_precommit_evidence.is_none());
+        let poa = commit.proof_of_authority_evidence.as_ref().expect("PoA evidence");
+        assert_eq!(poa.consensus_kind, "proof-of-authority");
+        assert_eq!(poa.certificate_step, "seal");
+        assert_eq!(poa.authority_id, "validator-1");
+        assert!(poa.finalised);
+
+        let commit_path = write_temp_json("myelin-session-commit-poa", &commit);
+        let bundle = session_court_bundle(commit_path.clone(), 0).expect("PoA court bundle");
+        let _ = std::fs::remove_file(commit_path);
+        assert!(bundle.proof_of_authority_evidence.is_some());
+
+        let bundle_path = write_temp_json("myelin-session-court-poa", &bundle);
+        let verification = verify_session_court_bundle(bundle_path.clone()).expect("verify PoA court bundle");
+        let _ = std::fs::remove_file(bundle_path);
+        assert!(verification.valid);
+        assert!(verification.checks.iter().all(|check| check.ok));
+        assert!(verification.checks.iter().any(|check| check.name == "proof-of-authority-seal"));
+    }
+
+    #[test]
     fn session_fixture_state_transition_is_consensus_agnostic() {
         let static_open = session_open_fixture("static-closed-committee").expect("open static");
+        let poa_open = session_open_fixture("proof-of-authority").expect("open PoA");
         let tm_open = session_open_fixture("tendermint").expect("open Tendermint");
+        assert_eq!(static_open.session_id, poa_open.session_id);
         assert_eq!(static_open.session_id, tm_open.session_id);
+        assert_eq!(static_open.initial_state_root, poa_open.initial_state_root);
         assert_eq!(static_open.initial_state_root, tm_open.initial_state_root);
 
         let static_path = std::env::temp_dir().join(format!("myelin-session-open-static-cross-{}.json", std::process::id()));
+        let poa_path = std::env::temp_dir().join(format!("myelin-session-open-poa-cross-{}.json", std::process::id()));
         let tm_path = std::env::temp_dir().join(format!("myelin-session-open-tm-cross-{}.json", std::process::id()));
         std::fs::write(&static_path, serde_json::to_vec(&static_open).unwrap()).unwrap();
+        std::fs::write(&poa_path, serde_json::to_vec(&poa_open).unwrap()).unwrap();
         std::fs::write(&tm_path, serde_json::to_vec(&tm_open).unwrap()).unwrap();
         let static_commit = session_commit_fixture(static_path.clone()).expect("commit static");
+        let poa_commit = session_commit_fixture(poa_path.clone()).expect("commit PoA");
         let tm_commit = session_commit_fixture(tm_path.clone()).expect("commit weighted_precommit");
         let _ = std::fs::remove_file(static_path);
+        let _ = std::fs::remove_file(poa_path);
         let _ = std::fs::remove_file(tm_path);
 
+        assert_eq!(static_commit.session_id, poa_commit.session_id);
         assert_eq!(static_commit.session_id, tm_commit.session_id);
+        assert_eq!(static_commit.cell_tx_id, poa_commit.cell_tx_id);
         assert_eq!(static_commit.cell_tx_id, tm_commit.cell_tx_id);
+        assert_eq!(static_commit.cell_wtxid, poa_commit.cell_wtxid);
         assert_eq!(static_commit.cell_wtxid, tm_commit.cell_wtxid);
+        assert_eq!(static_commit.state_root_before, poa_commit.state_root_before);
         assert_eq!(static_commit.state_root_before, tm_commit.state_root_before);
+        assert_eq!(static_commit.state_root_after, poa_commit.state_root_after);
         assert_eq!(static_commit.state_root_after, tm_commit.state_root_after);
+        assert_eq!(static_commit.ordered_cell_tx_commitments, poa_commit.ordered_cell_tx_commitments);
         assert_eq!(static_commit.ordered_cell_tx_commitments, tm_commit.ordered_cell_tx_commitments);
+        assert_eq!(static_commit.data_commitments, poa_commit.data_commitments);
         assert_eq!(static_commit.data_commitments, tm_commit.data_commitments);
+        assert_eq!(static_commit.scheduler_commitment, poa_commit.scheduler_commitment);
         assert_eq!(static_commit.scheduler_commitment, tm_commit.scheduler_commitment);
+        assert_ne!(static_commit.block.block_hash, poa_commit.block.block_hash);
         assert_ne!(
             static_commit.block.block_hash, tm_commit.block.block_hash,
             "block hash is consensus-domain separated because MyelinBlock carries consensus_kind"
@@ -19334,17 +19701,34 @@ mod tests {
     }
 
     #[test]
+    fn runtime_smoke_proof_of_authority_finalises_a_block() {
+        let report = runtime_smoke("proof-of-authority").expect("smoke PoA");
+        assert_eq!(report.schema, "myelin-runtime-smoke-v2");
+        assert_eq!(report.consensus_kind, "proof-of-authority");
+        assert_eq!(report.pool_size_before, 0);
+        assert_eq!(report.pool_size_after, 1);
+        assert_ne!(report.state_root_before, report.state_root_after);
+        assert_eq!(report.certificate_hash.len(), 64);
+        assert!(report.finalised);
+    }
+
+    #[test]
     fn runtime_smoke_state_is_consensus_agnostic_but_certificates_differ() {
         // The CellTx + state mutation is consensus-independent: the
-        // txid, wtxid, and state roots MUST be identical across both
-        // engines. Only the certificate_hash (the finalisation signature
-        // domain) is allowed to differ.
+        // txid, wtxid, and state roots MUST be identical across all three
+        // engines. Only the certificate_hash (consensus kind and finality
+        // signature domain) is allowed to differ.
         let static_report = runtime_smoke("static-closed-committee").expect("smoke static");
+        let poa_report = runtime_smoke("proof-of-authority").expect("smoke PoA");
         let weighted_precommit_report = runtime_smoke("tendermint").expect("smoke Tendermint");
 
+        assert_eq!(static_report.cell_tx_id, poa_report.cell_tx_id);
         assert_eq!(static_report.cell_tx_id, weighted_precommit_report.cell_tx_id);
+        assert_eq!(static_report.cell_wtxid, poa_report.cell_wtxid);
         assert_eq!(static_report.cell_wtxid, weighted_precommit_report.cell_wtxid);
+        assert_eq!(static_report.state_root_before, poa_report.state_root_before);
         assert_eq!(static_report.state_root_before, weighted_precommit_report.state_root_before);
+        assert_eq!(static_report.state_root_after, poa_report.state_root_after);
         assert_eq!(static_report.state_root_after, weighted_precommit_report.state_root_after);
         assert_eq!(static_report.pool_size_before, weighted_precommit_report.pool_size_before);
         assert_eq!(static_report.pool_size_after, weighted_precommit_report.pool_size_after);
@@ -19352,8 +19736,10 @@ mod tests {
         assert_eq!(static_report.ckb_spawn_ipc_enabled, weighted_precommit_report.ckb_spawn_ipc_enabled);
         assert_ne!(
             static_report.certificate_hash, weighted_precommit_report.certificate_hash,
-            "the two engines must use different signature domains"
+            "the engines must use different finality domains"
         );
+        assert_ne!(static_report.certificate_hash, poa_report.certificate_hash);
+        assert_ne!(poa_report.certificate_hash, weighted_precommit_report.certificate_hash);
     }
 
     #[test]

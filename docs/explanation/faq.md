@@ -147,13 +147,14 @@ projection layer connects the two.
 
 ### What's a committee certificate?
 
-A committee certificate is the signature set that finalises a
-`MyelinBlock`. For the static closed committee, it's a list of
-signatures from quorum-weight validators. For Tendermint, it is a decision
+A finality proof is the engine-specific signature evidence that finalises a
+`MyelinBlock`. For the static closed committee, it is a list of
+signatures from quorum-weight validators. For PoA, it is one height-bound seal
+from the scheduled authority. For Tendermint, it is a decision
 certificate containing more-than-two-thirds signed precommits after a full
 proposal/prevote/precommit round.
 
-The certificate is what makes a `MyelinBlock` a `FinalisedBlock`.
+The typed proof is what makes a `MyelinBlock` a finalised consensus block.
 
 ## Operations
 

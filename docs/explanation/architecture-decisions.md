@@ -128,18 +128,19 @@ Worth it for the determinism.
 
 ---
 
-## ADR-004: Static committee first, Tendermint second, permissionless later
+## ADR-004: Pluggable closed-validator finality, permissionless later
 
 **Status.** Accepted.
 
-**Context.** A session runtime needs finality. Three options:
+**Context.** A session runtime needs finality. Relevant options include:
 Nakamoto PoW (like CKB mainnet), static committee (like a
-permissioned finality), Tendermint (known-set BFT with a strict
+permissioned finality), rotating proof of authority, Tendermint (known-set BFT with a strict
 greater-than-two-thirds quorum), or permissionless entry (like a public PoS
 chain).
 
-**Decision.** Ship two engines today (static closed committee and
-finite-session Tendermint), behind a single trait.
+**Decision.** Ship three engines today (static closed committee, deterministic
+rotating PoA, and finite-session Tendermint), behind one typed selection and
+finality-proof dispatch surface.
 Permissionless validator entry is future work.
 
 **Consequence.**
@@ -153,7 +154,7 @@ Permissionless validator entry is future work.
   active.
 
 The cost: Myelin is **not** a permissionless L2 today. Static
-committee and Tendermint both assume a known validator set.
+committee, PoA, and Tendermint all assume a known validator or authority set.
 
 **Alternatives considered.**
 

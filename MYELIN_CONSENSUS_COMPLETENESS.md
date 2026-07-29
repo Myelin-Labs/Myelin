@@ -2,10 +2,11 @@
 
 ## Scope
 
-Myelin exposes two finite-session, closed-validator engines:
+Myelin exposes three finite-session, closed-validator/authority engines:
 
 ```text
 ConsensusKind::StaticClosedCommittee
+ConsensusKind::ProofOfAuthority
 ConsensusKind::Tendermint
 ```
 
@@ -18,6 +19,21 @@ publication and court layer.
 signatures against configured validator weights. It rejects unknown or
 duplicate validators, zero weight, invalid keys/signatures, wrong block hashes,
 wrong engine selection, overflow, and sub-quorum certificates.
+
+## Proof of authority
+
+`ProofOfAuthority` preserves the configured authority order and selects
+`authorities[height mod authority_count]`. A typed `ProofOfAuthoritySeal` binds
+the canonical block hash, height, authority id, and an independent Schnorr
+signature domain. Construction and verification reject empty authority sets,
+duplicate ids or public keys, invalid keys, an unscheduled signer, signer/key
+mismatch, and height/hash/signature drift.
+
+PoA optimizes operational simplicity, not Byzantine fault tolerance: one
+scheduled authority can halt a height, and a compromised scheduled key can
+finalise a bad session block unless higher-layer court/custody controls catch
+it. It is therefore a closed-authority option, not a security upgrade over the
+other engines.
 
 ## Tendermint
 
@@ -58,6 +74,20 @@ final decision certificate.
 
 ## Configuration
 
+PoA:
+
+```toml
+kind = "proof-of-authority"
+
+[proof_of_authority]
+
+[[proof_of_authority.authorities]]
+id = "validator-0"
+public_key = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+```
+
+Tendermint:
+
 ```toml
 kind = "tendermint"
 
@@ -79,10 +109,12 @@ cargo test --locked -p myelin-consensus
 cargo test --locked -p myelin-cli
 ```
 
-The focused Tendermint suite covers a successful full round, nil quorum and
+The PoA suite covers rotation, config validation, signer schedule and key
+matching, typed dispatch, and tampered height/hash/signature rejection. The
+focused Tendermint suite covers a successful full round, nil quorum and
 round advance, lock retention, equivocation, invalid proposer/signature,
 serializable state recovery, unsafe quorum rejection, and exact decision
-finalisation. CLI session and runtime tests execute the full round path and
+finalisation. CLI Session and runtime tests exercise all three engines and
 assert consensus-independent CellTx/state roots.
 
 ## Remaining network/runtime work

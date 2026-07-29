@@ -50,7 +50,7 @@ pure projector remains wire-only; these commands emit
 
 The config file uses the same TOML schema documented in
 [Consensus engines](../architecture/consensus.md#static-closed-committee).
-The subcommand picks `static-closed-committee` or `tendermint`
+The subcommand picks `static-closed-committee`, `proof-of-authority`, or `tendermint`
 based on the `kind` field.
 
 ## `runtime` — end-to-end smoke
@@ -59,9 +59,9 @@ based on the `kind` field.
 | --- | --- |
 | `runtime smoke` | Exercises the runtime spine: a small CellTx batch through mempool → scheduler → verifier → state. Useful as a single-shot sanity check. |
 
-The smoke command runs both consensus engines and asserts the
+The production gate runs all three consensus engines and asserts the
 session ID, CellTx commitments, scheduler commitment, and state
-roots are identical between them — only the certificate shape
+roots are identical between them — only the finality proof shape
 differs.
 
 ## `session` — the Session L2 path
