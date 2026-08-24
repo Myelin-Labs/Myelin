@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Select a finality module once and bind it at genesis</title>
+  <desc id="desc">A module is selected from a closed catalogue, committed in session genesis, and checked again during operation and recovery.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="14" markerHeight="14" refX="11" refY="7" orient="auto">
+      <path d="M1 1l11 6-11 6z" fill="#55BFC0"/>
+    </marker>
+    <style>
+      .eyebrow{font:650 17px Inter,ui-sans-serif,system-ui,sans-serif;letter-spacing:4px;fill:#55BFC0}
+      .title{font:650 43px Inter,ui-sans-serif,system-ui,sans-serif;fill:#0B1F2A}
+      .head-light{font:650 26px Inter,ui-sans-serif,system-ui,sans-serif;fill:#F4F0E8}
+      .head-dark{font:650 26px Inter,ui-sans-serif,system-ui,sans-serif;fill:#0B1F2A}
+      .body-light{font:450 18px Inter,ui-sans-serif,system-ui,sans-serif;fill:#F4F0E8}
+      .body-dark{font:450 18px Inter,ui-sans-serif,system-ui,sans-serif;fill:#0B1F2A}
+      .small{font:600 15px Inter,ui-sans-serif,system-ui,sans-serif;letter-spacing:.8px}
+      .foot{font:550 18px Inter,ui-sans-serif,system-ui,sans-serif;fill:#F4F0E8}
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" rx="28" fill="#F4F0E8"/>
+  <text x="80" y="72" class="eyebrow">PLUGGABLE, WITH A STABLE IDENTITY</text>
+  <text x="80" y="130" class="title">Select once. Recover under the same rules.</text>
+
+  <g transform="translate(80 205)">
+    <rect width="400" height="500" rx="28" fill="#0B1F2A"/>
+    <text x="36" y="62" class="small" fill="#55BFC0">01 · CLOSED CATALOGUE</text>
+    <text x="36" y="112" class="head-light">Choose a module</text>
+    <text x="36" y="148" class="body-light">Audited code already in this build.</text>
+    <g transform="translate(36 205)">
+      <rect width="328" height="62" rx="17" fill="#F4F0E8" fill-opacity=".08" stroke="#55BFC0"/>
+      <circle cx="31" cy="31" r="10" fill="#55BFC0"/>
+      <text x="55" y="38" class="body-light">Static committee</text>
+    </g>
+    <g transform="translate(36 286)">
+      <rect width="328" height="62" rx="17" fill="#F4F0E8" fill-opacity=".08" stroke="#55BFC0"/>
+      <circle cx="31" cy="31" r="10" fill="#55BFC0"/>
+      <text x="55" y="38" class="body-light">Proof of authority</text>
+    </g>
+    <g transform="translate(36 367)">
+      <rect width="328" height="62" rx="17" fill="#F4F0E8" fill-opacity=".08" stroke="#55BFC0"/>
+      <circle cx="31" cy="31" r="10" fill="#55BFC0"/>
+      <text x="55" y="38" class="body-light">Tendermint</text>
+    </g>
+  </g>
+
+  <path d="M500 455h80" stroke="#55BFC0" stroke-width="6" stroke-linecap="round" marker-end="url(#arrow)"/>
+
+  <g transform="translate(600 205)">
+    <rect width="400" height="500" rx="28" fill="#F4F0E8" stroke="#0B1F2A" stroke-width="3"/>
+    <text x="36" y="62" class="small" fill="#55BFC0">02 · SESSION GENESIS</text>
+    <text x="36" y="112" class="head-dark">Commit its identity</text>
+    <text x="36" y="148" class="body-dark">The choice becomes part of the session.</text>
+
+    <g transform="translate(100 205)">
+      <path d="M38 78V54a62 62 0 01124 0v24" stroke="#55BFC0" stroke-width="18" fill="none" stroke-linecap="round"/>
+      <rect x="15" y="70" width="170" height="150" rx="26" fill="#0B1F2A"/>
+      <circle cx="100" cy="128" r="18" fill="#55BFC0"/>
+      <path d="M100 145v31" stroke="#55BFC0" stroke-width="11" stroke-linecap="round"/>
+      <text x="100" y="202" text-anchor="middle" class="small" fill="#F4F0E8">MODULE ID</text>
+    </g>
+
+    <g transform="translate(36 445)">
+      <rect width="72" height="32" rx="16" fill="#55BFC0"/><text x="36" y="22" text-anchor="middle" class="small" fill="#0B1F2A">KIND</text>
+      <rect x="82" width="82" height="32" rx="16" fill="#55BFC0"/><text x="123" y="22" text-anchor="middle" class="small" fill="#0B1F2A">CONFIG</text>
+      <rect x="174" width="86" height="32" rx="16" fill="#55BFC0"/><text x="217" y="22" text-anchor="middle" class="small" fill="#0B1F2A">MODULE</text>
+      <rect x="270" width="82" height="32" rx="16" fill="#55BFC0"/><text x="311" y="22" text-anchor="middle" class="small" fill="#0B1F2A">WAL</text>
+    </g>
+  </g>
+
+  <path d="M1020 455h80" stroke="#55BFC0" stroke-width="6" stroke-linecap="round" marker-end="url(#arrow)"/>
+
+  <g transform="translate(1120 205)">
+    <rect width="400" height="500" rx="28" fill="#0B1F2A"/>
+    <text x="36" y="62" class="small" fill="#55BFC0">03 · OPERATE &amp; RECOVER</text>
+    <text x="36" y="112" class="head-light">Check every record</text>
+    <text x="36" y="148" class="body-light">Durable evidence leads back to genesis.</text>
+    <g transform="translate(36 205)">
+      <rect width="328" height="62" rx="17" fill="#F4F0E8" fill-opacity=".08"/>
+      <text x="26" y="38" class="body-light">Proof · network · WAL · block</text>
+    </g>
+    <g transform="translate(36 292)">
+      <path d="M0 0h328v3H0z" fill="#55BFC0"/>
+      <text x="0" y="54" class="small" fill="#55BFC0">RECOVERY CHECK</text>
+      <text x="0" y="91" class="body-light">Same identity → writer opens</text>
+    </g>
+    <g transform="translate(36 415)">
+      <rect width="328" height="54" rx="17" fill="#55BFC0"/>
+      <text x="164" y="34" text-anchor="middle" class="small" fill="#0B1F2A">MISMATCH → WRITER CLOSED</text>
+    </g>
+  </g>
+
+  <g transform="translate(80 770)">
+    <rect width="1440" height="64" rx="32" fill="#0B1F2A"/>
+    <text x="720" y="40" text-anchor="middle" class="foot">Selectable between sessions · fixed within one session</text>
+  </g>
+</svg>

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Session block-production policy
+
+- Added `myelin-session-producer` with `Instant`, `Interval`, `Open`, and `Never` automatic policies plus serialised manual production from the source or an explicit ordered batch.
+- Added count and byte limits, availability-started open windows, explicitly configurable fixed-cadence empty blocks, race-free availability notifications, a reusable host schedule, and a single-writer commit hand-off.
+- Added reserving transaction-source semantics so a failed finality/commit attempt or an orderly shutdown releases uncommitted work; source acknowledgement happens only after durable head advancement.
+- Kept production timing outside execution and finality. The commit port must still prepare the exact session block, obtain and verify the genesis-bound proof, and atomically advance the durable head.
+
 ### Pluggable closed-validator finality
 
 - Added `proof-of-authority` as a third independent `ConsensusKind`, alongside `static-closed-committee` and `tendermint`; `poa` is accepted as a CLI/config alias while reports use the canonical name.

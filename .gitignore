@@ -19,6 +19,7 @@ __pycache__/
 .mavis/
 .zcode/
 .playwright-mcp/
+.codex-research/
 
 # Cargo
 !Cargo.lock

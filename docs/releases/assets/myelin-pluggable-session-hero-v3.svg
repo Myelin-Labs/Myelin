@@ -1,0 +1,223 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="1080" viewBox="0 0 2000 1080" role="img" aria-labelledby="title desc">
+  <title id="title">A long-running service built from finite Myelin verdicts</title>
+  <desc id="desc">A continuous application event stream is divided into fixed input ranges. Each range starts at the previous accepted state root, runs as one bounded Cell transition through CKB-VM, receives configured session finality, and advances the durable Myelin session head atomically. Work after the current head remains pending for the next finite transition, and recovery reopens from the exact durable head.</desc>
+  <defs>
+    <linearGradient id="soft" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#AACECF" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#F4F5F4" stop-opacity="0.95"/>
+    </linearGradient>
+    <style>
+      .title{font:700 52px 'Liberation Sans',Arial,sans-serif;letter-spacing:.2px;fill:#031E32}
+      .subtitle{font:600 25px 'Liberation Sans',Arial,sans-serif;fill:#1F9795}
+      .lane{font:700 18px 'Liberation Sans',Arial,sans-serif;letter-spacing:2px;fill:#031E32}
+      .range{font:700 14px 'Liberation Sans',Arial,sans-serif;letter-spacing:1px;fill:#1F9795}
+      .body{font:500 17px 'Liberation Sans',Arial,sans-serif;fill:#031E32}
+      .small{font:600 14px 'Liberation Sans',Arial,sans-serif;fill:#031E32}
+      .tiny{font:600 12px 'Liberation Sans',Arial,sans-serif;letter-spacing:.5px;fill:#637780}
+      .root{font:700 18px 'Liberation Sans',Arial,sans-serif;fill:#031E32}
+      .root-note{font:600 13px 'Liberation Sans',Arial,sans-serif;letter-spacing:.5px;fill:#1F9795}
+      .module{font:700 16px 'Liberation Sans',Arial,sans-serif;letter-spacing:.5px;fill:#031E32}
+      .module-note{font:500 14px 'Liberation Sans',Arial,sans-serif;fill:#637780}
+      .light{font:700 15px 'Liberation Sans',Arial,sans-serif;fill:#FFFFFF}
+      .step{font:700 13px 'Liberation Sans',Arial,sans-serif;fill:#FFFFFF}
+    </style>
+  </defs>
+
+  <rect width="2000" height="1080" fill="#FFFFFF"/>
+  <text x="1000" y="75" text-anchor="middle" class="title">A LONG-RUNNING SERVICE, BUILT FROM FINITE VERDICTS</text>
+  <text x="1000" y="120" text-anchor="middle" class="subtitle">The application stays live. Each accepted prefix closes.</text>
+
+  <!-- Live application lane: one uninterrupted stream, partitioned only for verification. -->
+  <text x="80" y="190" class="lane">LIVE APPLICATION</text>
+  <line x1="80" y1="207" x2="1920" y2="207" stroke="#1F9795" stroke-width="3"/>
+  <text x="1900" y="190" text-anchor="end" class="tiny">EVENTS CONTINUE TO ARRIVE</text>
+
+  <line x1="145" y1="300" x2="1875" y2="300" stroke="#AACECF" stroke-width="10" stroke-linecap="round"/>
+  <g fill="#1F9795">
+    <circle cx="190" cy="300" r="10"/><rect x="225" y="290" width="20" height="20" rx="4"/><circle cx="283" cy="300" r="8"/>
+    <rect x="340" y="288" width="24" height="24" rx="5"/><circle cx="410" cy="300" r="10"/><circle cx="485" cy="300" r="8"/>
+    <circle cx="685" cy="300" r="9"/><rect x="733" y="289" width="22" height="22" rx="4"/><circle cx="800" cy="300" r="10"/>
+    <rect x="862" y="289" width="22" height="22" rx="4"/><circle cx="930" cy="300" r="8"/>
+    <rect x="1118" y="288" width="24" height="24" rx="5"/><circle cx="1182" cy="300" r="9"/><circle cx="1248" cy="300" r="10"/>
+    <rect x="1308" y="289" width="22" height="22" rx="4"/><circle cx="1375" cy="300" r="8"/>
+  </g>
+  <g fill="#A0A8AF">
+    <circle cx="1595" cy="300" r="9"/><rect x="1640" y="290" width="20" height="20" rx="4"/><circle cx="1705" cy="300" r="8"/>
+    <rect x="1760" y="290" width="20" height="20" rx="4"/><circle cx="1825" cy="300" r="9"/>
+  </g>
+
+  <!-- Closing gates define fixed ranges without stopping the application. -->
+  <g stroke="#031E32" stroke-width="4" fill="none" stroke-linecap="round">
+    <path d="M160 250v-18h440v18"/>
+    <path d="M615 250v-18h420v18"/>
+    <path d="M1050 250v-18h420v18"/>
+  </g>
+  <text x="380" y="220" text-anchor="middle" class="range">FIXED INPUT RANGE 37</text>
+  <text x="825" y="220" text-anchor="middle" class="range">FIXED INPUT RANGE 38</text>
+  <text x="1260" y="220" text-anchor="middle" class="range">FIXED INPUT RANGE 39</text>
+  <text x="1690" y="238" text-anchor="middle" class="tiny">NOT YET CLOSED</text>
+
+  <g>
+    <line x1="600" y1="254" x2="600" y2="350" stroke="#1F9795" stroke-width="5" stroke-linecap="round"/>
+    <line x1="1035" y1="254" x2="1035" y2="350" stroke="#1F9795" stroke-width="5" stroke-linecap="round"/>
+    <line x1="1470" y1="254" x2="1470" y2="350" stroke="#1F9795" stroke-width="5" stroke-linecap="round"/>
+    <g fill="#FFFFFF" stroke="#1F9795" stroke-width="3">
+      <circle cx="600" cy="300" r="15"/><circle cx="1035" cy="300" r="15"/><circle cx="1470" cy="300" r="15"/>
+    </g>
+    <g fill="#1F9795">
+      <rect x="595" y="295" width="10" height="10" rx="2"/>
+      <rect x="1030" y="295" width="10" height="10" rx="2"/>
+      <rect x="1465" y="295" width="10" height="10" rx="2"/>
+    </g>
+  </g>
+
+  <!-- Each fixed range is lowered into exactly one finite transition span. -->
+  <g stroke="#AACECF" stroke-width="2" stroke-dasharray="7 8">
+    <line x1="380" y1="315" x2="380" y2="480"/>
+    <line x1="825" y1="315" x2="825" y2="480"/>
+    <line x1="1260" y1="315" x2="1260" y2="480"/>
+  </g>
+  <g fill="#FFFFFF" stroke="#1F9795" stroke-width="3">
+    <path d="M350 438h60l-10 36h-40z"/>
+    <path d="M795 438h60l-10 36h-40z"/>
+    <path d="M1230 438h60l-10 36h-40z"/>
+  </g>
+
+  <!-- Myelin lineage: adjacent spans share the same accepted state root. -->
+  <text x="80" y="500" class="lane">MYELIN SESSION LINEAGE</text>
+  <line x1="80" y1="517" x2="1920" y2="517" stroke="#1F9795" stroke-width="3"/>
+  <text x="1900" y="500" text-anchor="end" class="tiny">EVERY COMMITTED PREFIX IS FINITE</text>
+
+  <line x1="165" y1="665" x2="1470" y2="665" stroke="#031E32" stroke-width="6" stroke-linecap="round"/>
+  <line x1="1470" y1="665" x2="1875" y2="665" stroke="#AACECF" stroke-width="5" stroke-dasharray="11 12" stroke-linecap="round"/>
+
+  <!-- Transition 37 -->
+  <g>
+    <path d="M180 578v-16h405v16" fill="none" stroke="#1F9795" stroke-width="3"/>
+    <circle cx="205" cy="665" r="40" fill="#FFFFFF" stroke="#1F9795" stroke-width="5"/>
+    <text x="205" y="672" text-anchor="middle" class="root">S36</text>
+    <g fill="#1F9795">
+      <rect x="270" y="653" width="24" height="24" rx="5"/>
+      <rect x="305" y="655" width="20" height="20" rx="4"/>
+      <rect x="336" y="651" width="28" height="28" rx="6"/>
+    </g>
+    <g fill="#031E32">
+      <rect x="392" y="620" width="108" height="90" rx="12"/>
+      <rect x="378" y="635" width="14" height="11"/><rect x="378" y="660" width="14" height="11"/><rect x="378" y="685" width="14" height="11"/>
+      <rect x="500" y="635" width="14" height="11"/><rect x="500" y="660" width="14" height="11"/><rect x="500" y="685" width="14" height="11"/>
+    </g>
+    <text x="446" y="661" text-anchor="middle" class="light">CKB-VM</text>
+    <text x="446" y="684" text-anchor="middle" class="step">FINITE</text>
+    <circle cx="548" cy="665" r="28" fill="#1F9795"/>
+    <path d="M535 666l9 10 18-23" fill="none" stroke="#031E32" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="600" cy="665" r="40" fill="#FFFFFF" stroke="#1F9795" stroke-width="5"/>
+    <text x="600" y="672" text-anchor="middle" class="root">S37</text>
+    <text x="382" y="552" text-anchor="middle" class="range">FINITE TRANSITION 37</text>
+  </g>
+
+  <!-- Transition 38 -->
+  <g>
+    <path d="M615 578v-16h405v16" fill="none" stroke="#1F9795" stroke-width="3"/>
+    <g fill="#1F9795">
+      <rect x="705" y="653" width="24" height="24" rx="5"/>
+      <rect x="740" y="655" width="20" height="20" rx="4"/>
+      <rect x="771" y="651" width="28" height="28" rx="6"/>
+    </g>
+    <g fill="#031E32">
+      <rect x="827" y="620" width="108" height="90" rx="12"/>
+      <rect x="813" y="635" width="14" height="11"/><rect x="813" y="660" width="14" height="11"/><rect x="813" y="685" width="14" height="11"/>
+      <rect x="935" y="635" width="14" height="11"/><rect x="935" y="660" width="14" height="11"/><rect x="935" y="685" width="14" height="11"/>
+    </g>
+    <text x="881" y="661" text-anchor="middle" class="light">CKB-VM</text>
+    <text x="881" y="684" text-anchor="middle" class="step">FINITE</text>
+    <circle cx="983" cy="665" r="28" fill="#1F9795"/>
+    <path d="M970 666l9 10 18-23" fill="none" stroke="#031E32" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="1035" cy="665" r="40" fill="#FFFFFF" stroke="#1F9795" stroke-width="5"/>
+    <text x="1035" y="672" text-anchor="middle" class="root">S38</text>
+    <text x="817" y="552" text-anchor="middle" class="range">FINITE TRANSITION 38</text>
+  </g>
+
+  <!-- Transition 39 and durable head -->
+  <g>
+    <path d="M1050 578v-16h405v16" fill="none" stroke="#1F9795" stroke-width="3"/>
+    <g fill="#1F9795">
+      <rect x="1140" y="653" width="24" height="24" rx="5"/>
+      <rect x="1175" y="655" width="20" height="20" rx="4"/>
+      <rect x="1206" y="651" width="28" height="28" rx="6"/>
+    </g>
+    <g fill="#031E32">
+      <rect x="1262" y="620" width="108" height="90" rx="12"/>
+      <rect x="1248" y="635" width="14" height="11"/><rect x="1248" y="660" width="14" height="11"/><rect x="1248" y="685" width="14" height="11"/>
+      <rect x="1370" y="635" width="14" height="11"/><rect x="1370" y="660" width="14" height="11"/><rect x="1370" y="685" width="14" height="11"/>
+    </g>
+    <text x="1316" y="661" text-anchor="middle" class="light">CKB-VM</text>
+    <text x="1316" y="684" text-anchor="middle" class="step">FINITE</text>
+    <circle cx="1418" cy="665" r="28" fill="#1F9795"/>
+    <path d="M1405 666l9 10 18-23" fill="none" stroke="#031E32" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="1470" cy="665" r="49" fill="url(#soft)" stroke="#031E32" stroke-width="5"/>
+    <circle cx="1470" cy="665" r="38" fill="#FFFFFF" stroke="#1F9795" stroke-width="4"/>
+    <text x="1470" y="672" text-anchor="middle" class="root">S39</text>
+    <text x="1252" y="552" text-anchor="middle" class="range">FINITE TRANSITION 39</text>
+  </g>
+
+  <!-- Root annotations show exact hand-off and recovery semantics. -->
+  <text x="205" y="730" text-anchor="middle" class="root-note">START ROOT</text>
+  <text x="600" y="730" text-anchor="middle" class="root-note">ACCEPTED RESULT</text>
+  <text x="1035" y="730" text-anchor="middle" class="root-note">ACCEPTED RESULT</text>
+  <text x="1470" y="742" text-anchor="middle" class="root-note">DURABLE HEAD</text>
+  <text x="600" y="763" text-anchor="middle" class="tiny">NEXT START ROOT</text>
+  <text x="1035" y="763" text-anchor="middle" class="tiny">NEXT START ROOT</text>
+
+  <line x1="1470" y1="714" x2="1470" y2="790" stroke="#1F9795" stroke-width="3" stroke-dasharray="7 8"/>
+  <g transform="translate(1470 820)">
+    <circle cx="0" cy="0" r="29" fill="#FFFFFF" stroke="#1F9795" stroke-width="4"/>
+    <path d="M0-17v17M-14 8a17 17 0 1 0 28 0" fill="none" stroke="#031E32" stroke-width="4" stroke-linecap="round"/>
+  </g>
+  <text x="1470" y="870" text-anchor="middle" class="small">RECOVERY REOPENS FROM THIS EXACT HEAD</text>
+
+  <!-- Pending work is visibly outside the finalised prefix. -->
+  <g fill="#A0A8AF">
+    <rect x="1575" y="654" width="22" height="22" rx="4"/>
+    <circle cx="1635" cy="665" r="10"/>
+    <rect x="1680" y="655" width="20" height="20" rx="4"/>
+  </g>
+  <path d="M1740 638h62M1740 665h92M1740 692h46" stroke="#AACECF" stroke-width="4" stroke-linecap="round"/>
+  <text x="1695" y="600" text-anchor="middle" class="range">NEXT BOUNDED BATCH</text>
+  <text x="1695" y="625" text-anchor="middle" class="tiny">PENDING · NOT YET IN THE HEAD</text>
+
+  <!-- The four recurring responsibilities, shown as a quiet legend rather than process cards. -->
+  <line x1="80" y1="928" x2="1920" y2="928" stroke="#AACECF" stroke-width="2"/>
+
+  <g transform="translate(170 980)">
+    <path d="M0-20v40M36-20v40M0-12h36" fill="none" stroke="#1F9795" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="18" cy="-12" r="7" fill="#031E32"/>
+    <text x="58" y="-2" class="module">PRODUCTION</text>
+    <text x="58" y="22" class="module-note">closes one fixed range</text>
+  </g>
+
+  <g transform="translate(635 980)">
+    <rect x="0" y="-26" width="54" height="52" rx="7" fill="#031E32"/>
+    <g fill="#031E32">
+      <rect x="-8" y="-17" width="8" height="7"/><rect x="-8" y="-3" width="8" height="7"/><rect x="-8" y="11" width="8" height="7"/>
+      <rect x="54" y="-17" width="8" height="7"/><rect x="54" y="-3" width="8" height="7"/><rect x="54" y="11" width="8" height="7"/>
+    </g>
+    <text x="27" y="5" text-anchor="middle" class="step">VM</text>
+    <text x="82" y="-2" class="module">EXECUTION</text>
+    <text x="82" y="22" class="module-note">checks the bounded CellTx</text>
+  </g>
+
+  <g transform="translate(1110 980)">
+    <circle cx="24" cy="0" r="25" fill="#1F9795"/>
+    <path d="M12 0l8 9 17-21" fill="none" stroke="#031E32" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="70" y="-2" class="module">FINALITY</text>
+    <text x="70" y="22" class="module-note">accepts the exact block</text>
+  </g>
+
+  <g transform="translate(1570 980)">
+    <ellipse cx="28" cy="-17" rx="28" ry="10" fill="#AACECF" stroke="#031E32" stroke-width="3"/>
+    <path d="M0-17v34c0 6 13 10 28 10s28-4 28-10v-34" fill="url(#soft)" stroke="#031E32" stroke-width="3"/>
+    <ellipse cx="28" cy="0" rx="28" ry="10" fill="none" stroke="#1F9795" stroke-width="2"/>
+    <text x="82" y="-2" class="module">STORAGE</text>
+    <text x="82" y="22" class="module-note">advances the head atomically</text>
+  </g>
+</svg>

@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="1100" viewBox="0 0 2000 1100" role="img" aria-labelledby="title desc">
+  <title id="title">A Myelin block is a transition record, not a state</title>
+  <desc id="desc">The CellTx is Myelin's finite execution unit. A Myelin block contains an ordered set of CellTx commitments together with one state root before execution and one state root after execution. After its configured finality proof verifies, the durable session head stores both the exact block hash and its post-state root. The next block must use that head's block hash as parent and its state root as the next pre-state. Exact CKB evidence attaches to an individual projected CellTx, not to the session block as a whole.</desc>
+  <defs>
+    <linearGradient id="soft" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#AACECF" stop-opacity="0.7"/>
+      <stop offset="1" stop-color="#F4F5F4" stop-opacity="0.94"/>
+    </linearGradient>
+    <style>
+      .title{font:700 52px 'Liberation Sans',Arial,sans-serif;letter-spacing:.2px;fill:#031E32}
+      .subtitle{font:600 25px 'Liberation Sans',Arial,sans-serif;fill:#1F9795}
+      .lane{font:700 18px 'Liberation Sans',Arial,sans-serif;letter-spacing:1.8px;fill:#031E32}
+      .block-title{font:700 20px 'Liberation Sans',Arial,sans-serif;letter-spacing:.8px;fill:#031E32}
+      .block-sub{font:600 13px 'Liberation Sans',Arial,sans-serif;letter-spacing:.6px;fill:#1F9795}
+      .body{font:500 16px 'Liberation Sans',Arial,sans-serif;fill:#031E32}
+      .small{font:600 14px 'Liberation Sans',Arial,sans-serif;fill:#031E32}
+      .tiny{font:600 12px 'Liberation Sans',Arial,sans-serif;letter-spacing:.4px;fill:#637780}
+      .root{font:700 17px 'Liberation Sans',Arial,sans-serif;fill:#031E32}
+      .head{font:700 15px 'Liberation Sans',Arial,sans-serif;letter-spacing:.7px;fill:#031E32}
+      .light{font:700 14px 'Liberation Sans',Arial,sans-serif;fill:#FFFFFF}
+      .evidence{font:700 15px 'Liberation Sans',Arial,sans-serif;fill:#031E32}
+      .footer{font:600 17px 'Liberation Sans',Arial,sans-serif;fill:#031E32}
+    </style>
+  </defs>
+
+  <rect width="2000" height="1100" fill="#FFFFFF"/>
+  <text x="1000" y="75" text-anchor="middle" class="title">A BLOCK IS A TRANSITION RECORD, NOT A STATE</text>
+  <text x="1000" y="120" text-anchor="middle" class="subtitle">Each durable head couples the accepted block hash with its post-state root</text>
+
+  <!-- The finite execution unit. -->
+  <text x="80" y="195" class="lane">ONE FINITE CELLTX</text>
+  <line x1="80" y1="212" x2="450" y2="212" stroke="#1F9795" stroke-width="3"/>
+  <text x="265" y="245" text-anchor="middle" class="tiny">CONSUME CELLS · RUN SCRIPTS · CREATE CELLS</text>
+
+  <line x1="105" y1="355" x2="425" y2="355" stroke="#AACECF" stroke-width="8" stroke-linecap="round"/>
+  <g transform="translate(105 355)">
+    <path d="M0-27l23-13 23 13v27L23 13 0 0z" fill="url(#soft)" stroke="#1F9795" stroke-width="3"/>
+    <path d="M56-17l16-9 16 9V2L72 11 56 2z" fill="#FFFFFF" stroke="#1F9795" stroke-width="3"/>
+    <text x="44" y="58" text-anchor="middle" class="small">input Cells</text>
+  </g>
+
+  <g transform="translate(226 300)">
+    <rect x="0" y="0" width="104" height="110" rx="12" fill="#031E32"/>
+    <g fill="#031E32">
+      <rect x="-13" y="18" width="13" height="10"/><rect x="-13" y="50" width="13" height="10"/><rect x="-13" y="82" width="13" height="10"/>
+      <rect x="104" y="18" width="13" height="10"/><rect x="104" y="50" width="13" height="10"/><rect x="104" y="82" width="13" height="10"/>
+    </g>
+    <text x="52" y="52" text-anchor="middle" class="light">CKB-VM</text>
+    <text x="52" y="76" text-anchor="middle" class="light">VERDICT</text>
+  </g>
+
+  <g transform="translate(376 355)">
+    <path d="M0-27l23-13 23 13v27L23 13 0 0z" fill="#FFFFFF" stroke="#1F9795" stroke-width="3"/>
+    <path d="M56-17l16-9 16 9V2L72 11 56 2z" fill="url(#soft)" stroke="#1F9795" stroke-width="3"/>
+    <text x="36" y="58" text-anchor="middle" class="small">output Cells</text>
+  </g>
+  <circle cx="174" cy="355" r="9" fill="#1F9795"/>
+  <circle cx="363" cy="355" r="9" fill="#1F9795"/>
+  <text x="265" y="450" text-anchor="middle" class="block-sub">ONE VERIFIED STATE TRANSITION</text>
+
+  <!-- One CellTx is shown again as a member of the ordered block batch. -->
+  <line x1="330" y1="420" x2="330" y2="615" stroke="#AACECF" stroke-width="2" stroke-dasharray="7 8"/>
+  <line x1="330" y1="615" x2="790" y2="615" stroke="#AACECF" stroke-width="2" stroke-dasharray="7 8"/>
+  <text x="520" y="599" text-anchor="middle" class="tiny">THE SAME CELLTX BECOMES ONE MEMBER OF A BLOCK</text>
+
+  <!-- Session structure. Heads bind two different commitments. -->
+  <text x="520" y="195" class="lane">ONE CONTINUOUS SESSION</text>
+  <line x1="520" y1="212" x2="1920" y2="212" stroke="#1F9795" stroke-width="3"/>
+  <text x="1900" y="195" text-anchor="end" class="tiny">BLOCK LINEAGE + STATE CONTINUITY</text>
+
+  <!-- Block 37 spans from head 36 to head 37; brackets contain both hash and state lanes. -->
+  <path d="M590 292v-24h670v24M590 706v24h670v-24" fill="none" stroke="#1F9795" stroke-width="4" stroke-linecap="round"/>
+  <text x="925" y="257" text-anchor="middle" class="block-title">MYELIN BLOCK 37</text>
+  <text x="925" y="283" text-anchor="middle" class="block-sub">ONE ORDERED, BOUNDED TRANSITION SET</text>
+
+  <!-- Block hash lane. -->
+  <text x="535" y="336" class="tiny">BLOCK HASH</text>
+  <line x1="610" y1="365" x2="1240" y2="365" stroke="#031E32" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="610" cy="365" r="42" fill="#FFFFFF" stroke="#031E32" stroke-width="4"/>
+  <text x="610" y="372" text-anchor="middle" class="root">H(B36)</text>
+  <text x="925" y="346" text-anchor="middle" class="small">parent_hash = H(B36)</text>
+  <circle cx="1240" cy="365" r="48" fill="url(#soft)" stroke="#031E32" stroke-width="5"/>
+  <text x="1240" y="372" text-anchor="middle" class="root">H(B37)</text>
+
+  <!-- State continuity lane inside the same block. -->
+  <text x="535" y="528" class="tiny">CELL STATE</text>
+  <line x1="610" y1="555" x2="1240" y2="555" stroke="#031E32" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="610" cy="555" r="42" fill="#FFFFFF" stroke="#1F9795" stroke-width="5"/>
+  <text x="610" y="562" text-anchor="middle" class="root">S36</text>
+  <text x="610" y="620" text-anchor="middle" class="block-sub">STATE_ROOT_BEFORE</text>
+
+  <!-- Ordered transaction batch. -->
+  <g transform="translate(755 515)">
+    <rect x="0" y="0" width="86" height="80" rx="10" fill="#031E32"/>
+    <text x="43" y="35" text-anchor="middle" class="light">CellTx a</text>
+    <path d="M31 53l8 8 17-19" fill="none" stroke="#1F9795" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <g transform="translate(885 515)">
+    <rect x="0" y="0" width="86" height="80" rx="10" fill="#031E32"/>
+    <text x="43" y="35" text-anchor="middle" class="light">CellTx b</text>
+    <path d="M31 53l8 8 17-19" fill="none" stroke="#1F9795" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <g transform="translate(1015 515)">
+    <rect x="0" y="0" width="86" height="80" rx="10" fill="#031E32"/>
+    <text x="43" y="35" text-anchor="middle" class="light">CellTx n</text>
+    <path d="M31 53l8 8 17-19" fill="none" stroke="#1F9795" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <circle cx="862" cy="555" r="6" fill="#1F9795"/>
+  <circle cx="992" cy="555" r="6" fill="#1F9795"/>
+  <text x="928" y="637" text-anchor="middle" class="block-sub">ORDERED CELLTX COMMITMENTS</text>
+
+  <circle cx="1240" cy="555" r="48" fill="url(#soft)" stroke="#1F9795" stroke-width="5"/>
+  <text x="1240" y="562" text-anchor="middle" class="root">S37</text>
+  <text x="1240" y="620" text-anchor="middle" class="block-sub">STATE_ROOT_AFTER</text>
+
+  <!-- Finality is a proof over the exact block, outside block contents. -->
+  <line x1="1160" y1="465" x2="1202" y2="465" stroke="#AACECF" stroke-width="4"/>
+  <circle cx="1130" cy="465" r="35" fill="#1F9795"/>
+  <path d="M1113 465l12 13 24-30" fill="none" stroke="#031E32" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="1080" y="420" text-anchor="middle" class="block-sub">CONFIGURED FINALITY</text>
+  <text x="1080" y="443" text-anchor="middle" class="tiny">VERIFIES H(B37)</text>
+
+  <!-- Head 36 and head 37 visibly couple block hash and state root. -->
+  <line x1="610" y1="407" x2="610" y2="513" stroke="#AACECF" stroke-width="5"/>
+  <circle cx="610" cy="460" r="8" fill="#1F9795"/>
+  <text x="610" y="688" text-anchor="middle" class="head">HEAD 36</text>
+  <text x="610" y="710" text-anchor="middle" class="tiny">BLOCK HASH + STATE ROOT</text>
+
+  <line x1="1240" y1="413" x2="1240" y2="507" stroke="#1F9795" stroke-width="6"/>
+  <circle cx="1240" cy="460" r="9" fill="#031E32"/>
+  <text x="1240" y="688" text-anchor="middle" class="head">DURABLE HEAD 37</text>
+  <text x="1240" y="710" text-anchor="middle" class="tiny">H(B37) + S37</text>
+
+  <!-- Block 38 starts from both parts of head 37. -->
+  <path d="M1295 292v-24h570v24M1295 706v24h570v-24" fill="none" stroke="#AACECF" stroke-width="4" stroke-linecap="round"/>
+  <text x="1580" y="257" text-anchor="middle" class="block-title">MYELIN BLOCK 38</text>
+  <text x="1580" y="283" text-anchor="middle" class="block-sub">STARTS FROM THE EXACT HEAD 37</text>
+
+  <line x1="1288" y1="365" x2="1840" y2="365" stroke="#031E32" stroke-width="5" stroke-linecap="round"/>
+  <text x="1530" y="346" text-anchor="middle" class="small">parent_hash = H(B37)</text>
+  <circle cx="1840" cy="365" r="42" fill="#FFFFFF" stroke="#031E32" stroke-width="4"/>
+  <text x="1840" y="372" text-anchor="middle" class="root">H(B38)</text>
+
+  <line x1="1288" y1="555" x2="1840" y2="555" stroke="#031E32" stroke-width="5" stroke-linecap="round"/>
+  <g fill="#031E32">
+    <rect x="1430" y="522" width="70" height="66" rx="9"/>
+    <rect x="1535" y="522" width="70" height="66" rx="9"/>
+    <rect x="1640" y="522" width="70" height="66" rx="9"/>
+  </g>
+  <g class="light" text-anchor="middle">
+    <text x="1465" y="562">tx</text><text x="1570" y="562">tx</text><text x="1675" y="562">tx</text>
+  </g>
+  <circle cx="1840" cy="555" r="42" fill="#FFFFFF" stroke="#1F9795" stroke-width="5"/>
+  <text x="1840" y="562" text-anchor="middle" class="root">S38</text>
+  <line x1="1840" y1="407" x2="1840" y2="513" stroke="#AACECF" stroke-width="5"/>
+  <text x="1840" y="688" text-anchor="middle" class="head">HEAD 38</text>
+  <text x="1840" y="710" text-anchor="middle" class="tiny">H(B38) + S38</text>
+
+  <!-- Exact CKB evidence branches from one CellTx, not from the session block. -->
+  <line x1="928" y1="595" x2="928" y2="790" stroke="#1F9795" stroke-width="3" stroke-dasharray="8 8"/>
+  <circle cx="928" cy="790" r="8" fill="#1F9795"/>
+  <text x="80" y="810" class="lane">CKB EVIDENCE FOR ONE EXACT CELLTX</text>
+  <line x1="80" y1="827" x2="1920" y2="827" stroke="#AACECF" stroke-width="2"/>
+
+  <line x1="330" y1="900" x2="1470" y2="900" stroke="#AACECF" stroke-width="5" stroke-linecap="round"/>
+  <g>
+    <circle cx="330" cy="900" r="25" fill="#1F9795"/>
+    <text x="330" y="906" text-anchor="middle" class="light">1</text>
+    <text x="330" y="950" text-anchor="middle" class="evidence">EXACT CELLTX</text>
+    <text x="330" y="975" text-anchor="middle" class="tiny">FROM BLOCK 37</text>
+
+    <circle cx="710" cy="900" r="25" fill="#1F9795"/>
+    <text x="710" y="906" text-anchor="middle" class="light">2</text>
+    <text x="710" y="950" text-anchor="middle" class="evidence">CANONICAL WIRE BYTES</text>
+    <text x="710" y="975" text-anchor="middle" class="tiny">WIRE-ENCODED CLAIM</text>
+
+    <circle cx="1090" cy="900" r="25" fill="#1F9795"/>
+    <text x="1090" y="906" text-anchor="middle" class="light">3</text>
+    <text x="1090" y="950" text-anchor="middle" class="evidence">LINKED ADAPTER RECEIPTS</text>
+    <text x="1090" y="975" text-anchor="middle" class="tiny">CONTEXT · SCRIPTS · NODE · COMMITMENT · DEPTH</text>
+
+    <circle cx="1470" cy="900" r="25" fill="#031E32"/>
+    <text x="1470" y="906" text-anchor="middle" class="light">4</text>
+    <text x="1470" y="950" text-anchor="middle" class="evidence">HIGHER CKB CLAIMS</text>
+    <text x="1470" y="975" text-anchor="middle" class="tiny">ONLY AS FAR AS THE RECEIPTS PROVE</text>
+  </g>
+
+  <!-- The precise relationship, stated once. -->
+  <line x1="80" y1="1030" x2="1920" y2="1030" stroke="#1F9795" stroke-width="2"/>
+  <text x="1000" y="1067" text-anchor="middle" class="footer">A block may contain many CellTx values · it commits one pre-root and one post-root · an empty block may leave the root unchanged</text>
+</svg>

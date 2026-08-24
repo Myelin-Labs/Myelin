@@ -62,13 +62,15 @@ The boundaries are intentional:
 
 ### Continuous service modules
 
-The reusable continuous-session path is split into five optional workspace crates:
+The reusable continuous-session path is split into seven optional workspace crates:
 
 | Crate | Boundary |
 | --- | --- |
 | `myelin-session` | Continuous heads, deterministic block preparation, exact consensus-config binding, audited recovery, consensus WAL, and transactional outbox |
+| `myelin-session-producer` | Strictly configurable `Instant`, `Interval`, lazy `Open`, `Never`, and manual production; bounded reserving batches; reusable host scheduling; and a single-writer hand-off to finality and atomic commit |
 | `myelin-session-store-rocksdb` | Versioned RocksDB schema, synchronous WAL, atomic head/block/snapshot/outbox CAS, and durable per-peer network queues |
 | `myelin-session-network` | Recipient-bound Schnorr envelopes, closed-peer authorization, replay/equivocation checks, mTLS gRPC transport, and ACK-after-durability delivery |
+| `myelin-session-runtime` | Embeddable composition root, dependency-ordered lifecycle supervision, health enforcement, and the session writer gate |
 | `myelin-session-escrow` | Optional finalized-CKB funding attachment, conserved balances, expiry/debit constraints, pluggable typed assets, evidence-bound exit construction, and finalized-settlement verification |
 | `myelin-wallet-auth` | Standard CKB Blake160 identity derivation, CKB-personalized login/PoA digests, and compact recoverable secp256k1 signatures |
 

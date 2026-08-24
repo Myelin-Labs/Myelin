@@ -186,6 +186,7 @@ nav:
   - Releases & positioning:
       - releases/index.md
       - Introducing Myelin (Nervos Talk draft): releases/nervos-talk-introducing-myelin.md
+      - Myelin update — from one verified game chunk to a modular session chain: releases/nervos-talk-pluggable-session-chain.md
 
 validation:
   links:
