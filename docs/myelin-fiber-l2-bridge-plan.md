@@ -137,7 +137,7 @@ custom records as a commitment pointer channel, not as DA storage.
 The first version should define one deterministic binary payload:
 
 ```text
-domain: "myelin-fiber-commitment-v1"
+domain: "myelin-fiber-commitment"
 version: u16
 session_id: [u8; 32]
 chunk_index: u64
@@ -222,7 +222,7 @@ Deliverables:
 
 - this document;
 - a canonical `MyelinSessionFiberBinding` JSON schema;
-- a canonical `myelin-fiber-commitment-v1` binary payload schema;
+- a canonical `myelin-fiber-commitment` binary payload schema;
 - a list of exact Fiber RPC methods used by the bridge;
 - a list of exact Myelin CLI/session reports consumed by the bridge.
 

@@ -1,5 +1,5 @@
 {
-  "schema": "myelin-operator-custody-policy-v1",
+  "schema": "myelin-operator-custody-policy",
   "key_storage": "public-testnet-rehearsal-hsm-or-multisig-wallet",
   "signing_approval": "dual-control-approval",
   "rotation_policy": "documented-rotation-and-revocation",

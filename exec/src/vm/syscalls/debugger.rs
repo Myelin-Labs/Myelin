@@ -15,12 +15,12 @@ use ckb_vm::{
 ///
 /// Prints debug message (only in debug builds)
 pub struct Debugger {
-    script_hash: [u8; 32],
+    _script_hash: [u8; 32],
 }
 
 impl Debugger {
     pub fn new(script_hash: [u8; 32]) -> Self {
-        Self { script_hash }
+        Self { _script_hash: script_hash }
     }
 }
 
@@ -41,13 +41,13 @@ impl<M: SupportMachine> Syscalls<M> for Debugger {
         let len = machine.registers()[A1].to_u64() as usize;
 
         // Read debug message from VM memory
-        let message = machine.memory_mut().load_bytes(addr, len as u64)?;
+        let _message = machine.memory_mut().load_bytes(addr, len as u64)?;
 
         // Print debug message (only in debug mode)
         #[cfg(debug_assertions)]
         {
-            let msg_str = String::from_utf8_lossy(message.as_ref());
-            log::debug!("Script {:?} DEBUG: {}", hex::encode(&self.script_hash[..8]), msg_str);
+            let msg_str = String::from_utf8_lossy(_message.as_ref());
+            log::debug!("Script {:?} DEBUG: {}", hex::encode(&self._script_hash[..8]), msg_str);
         }
 
         // Return success

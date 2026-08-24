@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package myelin.session.network.v1;
+
+service SessionNetwork {
+  rpc Push(Envelope) returns (PushResponse);
+}
+
+message Envelope {
+  uint32 protocol_version = 1;
+  bytes session_id = 2;
+  string sender_id = 3;
+  uint64 sequence = 4;
+  uint64 timestamp_ms = 5;
+  string message_class = 6;
+  bytes payload = 7;
+  bytes signature = 8;
+  string recipient_id = 9;
+  bytes consensus_module_commitment = 10;
+  uint32 module_message_version = 11;
+  uint32 message_type_tag = 12;
+  bytes payload_hash = 13;
+}
+
+message PushResponse {
+  bytes message_id = 1;
+  bool duplicate = 2;
+}

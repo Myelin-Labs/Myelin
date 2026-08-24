@@ -302,10 +302,10 @@ impl TypedCellStore for InMemoryTypedCellStore {
 /// Length prefixes are inserted between variable-length fields so that
 /// `(args="X", conflict_key_value="")` cannot collide with
 /// `(args="", conflict_key_value="X")` — the same canonical form used by
-/// `Script::hash_v1` and `encode_conflict_key_value_composite`.
+/// `Script::hash` and `encode_conflict_key_value_composite`.
 pub fn compute_conflict_hash(type_script: &Script, conflict_key_value: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"myelin-typed-cell/conflict-hash/v1");
+    hasher.update(b"myelin-typed-cell/conflict-hash");
     hasher.update(&type_script.code_hash);
     hasher.update(&[type_script.hash_type]);
     hasher.update(&(type_script.args.len() as u32).to_le_bytes());
@@ -327,7 +327,7 @@ pub fn compute_conflict_hash(type_script: &Script, conflict_key_value: &[u8]) ->
 /// `(args="", data="X")` — see `compute_conflict_hash` for the same rule.
 pub fn compute_typed_data_hash(type_script: &Script, data: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"myelin-typed-cell/typed-data-hash/v1");
+    hasher.update(b"myelin-typed-cell/typed-data-hash");
     hasher.update(&type_script.code_hash);
     hasher.update(&[type_script.hash_type]);
     hasher.update(&(type_script.args.len() as u32).to_le_bytes());
@@ -675,8 +675,8 @@ pub enum TypedCellDeclError {
     EphemeralWithNonLocalSettlement,
 }
 
-/// Domain used by the versioned script hash format.
-pub const SCRIPT_HASH_V1_DOMAIN: &[u8] = b"myelin-cell/script-hash";
+/// Domain used by the canonical script hash format.
+pub const SCRIPT_HASH_DOMAIN: &[u8] = b"myelin-cell/script-hash";
 /// Additional bytes a live-cell state entry needs beyond the raw output body.
 const CELL_ENTRY_OVERHEAD_EXCLUDING_OUTPUT_BODY: u64 = 32 + 4 + 8 + 1;
 /// Static transient-mass factor used before block-context VM cycles are known.
@@ -833,13 +833,6 @@ pub enum CapacityError {
     },
 }
 
-/// Script hash format selector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScriptHashVersion {
-    /// Domain-separated format with an explicit version byte.
-    V1,
-}
-
 /// OutPoint: uniquely identifies a Cell (tx_hash || output_index)
 ///
 /// Reference: CKB OutPoint
@@ -911,26 +904,13 @@ impl Script {
 
     /// Calculate the canonical script hash currently used by the protocol.
     pub fn hash(&self) -> [u8; 32] {
-        self.hash_v1()
-    }
-
-    /// Calculate the V1 script hash with explicit domain separation and versioning.
-    pub fn hash_v1(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(SCRIPT_HASH_V1_DOMAIN);
-        hasher.update(&[1u8]);
+        hasher.update(SCRIPT_HASH_DOMAIN);
         hasher.update(&self.code_hash);
         hasher.update(&[self.hash_type]);
         hasher.update(&(self.args.len() as u32).to_le_bytes());
         hasher.update(&self.args);
         *hasher.finalize().as_bytes()
-    }
-
-    /// Calculate the script hash using an explicit format version.
-    pub fn hash_with_version(&self, version: ScriptHashVersion) -> [u8; 32] {
-        match version {
-            ScriptHashVersion::V1 => self.hash_v1(),
-        }
     }
 
     /// Serialize the script reference to bytes.
@@ -1456,13 +1436,10 @@ mod tests {
     }
 
     #[test]
-    fn test_script_hash_v1_is_versioned_and_distinct() {
+    fn test_script_hash_is_domain_separated_and_changes_with_committed_fields() {
         let script = Script::new([0x11; 32], 1, vec![0xAA, 0xBB]);
-        let canonical = script.hash();
-        let versioned = script.hash_v1();
-
-        assert_eq!(canonical, versioned);
-        assert_eq!(versioned, script.hash_with_version(ScriptHashVersion::V1));
+        assert_eq!(script.hash(), script.hash());
+        assert_ne!(script.hash(), Script::new([0x11; 32], 1, vec![0xAA, 0xBC]).hash());
     }
 
     #[test]
@@ -1597,12 +1574,12 @@ mod tests {
         // conflict_hash does NOT change when data changes
         let script = test_script(0xAA, 1, 4);
         let conflict_key = b"pool_id=A";
-        let data_v1 = b"reserve_a=100";
-        let data_v2 = b"reserve_a=200";
+        let data_before = b"reserve_a=100";
+        let data_after = b"reserve_a=200";
 
         let ch = compute_conflict_hash(&script, conflict_key);
-        let tdh1 = compute_typed_data_hash(&script, data_v1);
-        let tdh2 = compute_typed_data_hash(&script, data_v2);
+        let tdh1 = compute_typed_data_hash(&script, data_before);
+        let tdh2 = compute_typed_data_hash(&script, data_after);
 
         assert_eq!(ch, compute_conflict_hash(&script, conflict_key), "conflict_hash is stable");
         assert_ne!(tdh1, tdh2, "typed_data_hash changes with data");

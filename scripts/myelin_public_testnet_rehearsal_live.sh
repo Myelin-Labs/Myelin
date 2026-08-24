@@ -29,6 +29,7 @@ Usage:
 Common role selection:
   MYELIN_REHEARSAL_ROLES="da-anchor"
   MYELIN_REHEARSAL_ROLES="da-anchor settlement"
+  MYELIN_REHEARSAL_ROLES="settlement-final"
 
 This script submits live public-testnet transactions. It refuses to run unless
 MYELIN_REHEARSAL_LIVE_SUBMIT=1 is set.
@@ -93,6 +94,8 @@ myelin() {
 
 role_config() {
   local role="$1"
+  final_settlement=false
+  submission_extra_args=()
   case "$role" in
     da-anchor)
       role_slug="da-anchor"
@@ -124,8 +127,31 @@ role_config() {
       carrier_capacity="${CKB_TESTNET_SETTLEMENT_CARRIER_CAPACITY_SHANNONS:-${CKB_TESTNET_CARRIER_CAPACITY_SHANNONS:-}}"
       fee_shannons="${CKB_TESTNET_SETTLEMENT_FEE_SHANNONS:-${CKB_TESTNET_FEE_SHANNONS:-}}"
       ;;
+    settlement-final)
+      role_slug="settlement-final"
+      package_path="$REHEARSAL_DIR/session-settlement-package.json"
+      verifier_source="$REHEARSAL_DIR/settlement-final.cell"
+      verifier_role="final-l1-script"
+      verifier_code_hash="${CKB_TESTNET_SETTLEMENT_FINAL_VERIFIER_CODE_HASH:-}"
+      verifier_dep_tx_hash="${CKB_TESTNET_SETTLEMENT_FINAL_VERIFIER_DEP_TX_HASH:-}"
+      verifier_dep_index="${CKB_TESTNET_SETTLEMENT_FINAL_VERIFIER_DEP_INDEX:-}"
+      witness="${CKB_TESTNET_SETTLEMENT_FINAL_WITNESS:-}"
+      input_tx_hash="${CKB_TESTNET_SETTLEMENT_FINAL_INPUT_TX_HASH:-}"
+      input_index="${CKB_TESTNET_SETTLEMENT_FINAL_INPUT_INDEX:-}"
+      input_capacity="${CKB_TESTNET_SETTLEMENT_FINAL_INPUT_CAPACITY_SHANNONS:-}"
+      carrier_capacity="${CKB_TESTNET_SETTLEMENT_FINAL_CARRIER_CAPACITY_SHANNONS:-${CKB_TESTNET_CARRIER_CAPACITY_SHANNONS:-}}"
+      fee_shannons="${CKB_TESTNET_SETTLEMENT_FINAL_FEE_SHANNONS:-${CKB_TESTNET_FEE_SHANNONS:-}}"
+      evidence_tx_hash="${CKB_TESTNET_SETTLEMENT_FINAL_EVIDENCE_TX_HASH:-}"
+      evidence_index="${CKB_TESTNET_SETTLEMENT_FINAL_EVIDENCE_INDEX:-}"
+      evidence_capacity="${CKB_TESTNET_SETTLEMENT_FINAL_EVIDENCE_CAPACITY_SHANNONS:-}"
+      authority_tx_hash="${CKB_TESTNET_SETTLEMENT_AUTHORITY_INPUT_TX_HASH:-}"
+      authority_index="${CKB_TESTNET_SETTLEMENT_AUTHORITY_INPUT_INDEX:-}"
+      authority_capacity="${CKB_TESTNET_SETTLEMENT_AUTHORITY_INPUT_CAPACITY_SHANNONS:-}"
+      multisig_signatures="${CKB_TESTNET_SETTLEMENT_MULTISIG_SIGNATURES:-}"
+      final_settlement=true
+      ;;
     *)
-      echo "unsupported rehearsal role: ${role}; expected da-anchor or settlement" >&2
+      echo "unsupported rehearsal role: ${role}; expected da-anchor, settlement, or settlement-final" >&2
       exit 1
       ;;
   esac
@@ -147,7 +173,33 @@ run_role() {
   require_value "${role}_verifier_dep_index" "$verifier_dep_index"
   require_value "${role}_witness" "$witness"
 
-  local submission="$REHEARSAL_DIR/${role_slug}-carrier-submission.json"
+  if [[ "$final_settlement" == "true" ]]; then
+    require_value "${role}_evidence_tx_hash" "$evidence_tx_hash"
+    require_value "${role}_evidence_index" "$evidence_index"
+    require_value "${role}_evidence_capacity_shannons" "$evidence_capacity"
+    require_value "${role}_authority_tx_hash" "$authority_tx_hash"
+    require_value "${role}_authority_index" "$authority_index"
+    require_value "${role}_authority_capacity_shannons" "$authority_capacity"
+    require_value "${role}_multisig_signatures" "$multisig_signatures"
+    if [[ "${CKB_TESTNET_LOCK_HASH_TYPE:-}" != "data1" || "$CKB_TESTNET_LOCK_CODE_HASH" != "0x36c971b8d41fbd94aabca77dc75e826729ac98447b46f91e00796155dddb0d29" ]]; then
+      echo "settlement-final requires canonical multisig-v2 CKB_TESTNET_LOCK_CODE_HASH and CKB_TESTNET_LOCK_HASH_TYPE=data1" >&2
+      exit 1
+    fi
+    submission_extra_args+=(
+      --evidence-cell-dep-tx-hash "$evidence_tx_hash"
+      --evidence-cell-dep-index "$evidence_index"
+      --evidence-cell-dep-capacity-shannons "$evidence_capacity"
+      --authority-input-tx-hash "$authority_tx_hash"
+      --authority-input-index "$authority_index"
+      --authority-input-capacity-shannons "$authority_capacity"
+    )
+    read -r -a signature_values <<<"$multisig_signatures"
+    for signature in "${signature_values[@]}"; do
+      submission_extra_args+=(--multisig-signature "$signature")
+    done
+  fi
+
+  local submission="$REHEARSAL_DIR/${role_slug}-submission.json"
   local context="$REHEARSAL_DIR/${role_slug}-context.json"
   local economics="$REHEARSAL_DIR/${role_slug}-economics.json"
   local inclusion="$REHEARSAL_DIR/${role_slug}-inclusion.json"
@@ -155,7 +207,7 @@ run_role() {
   local finality="$REHEARSAL_DIR/${role_slug}-finality.json"
   local readiness="$REHEARSAL_DIR/${role_slug}-readiness.json"
 
-  run_step "Phase 4: submit ${role_slug} carrier to public testnet" \
+  run_step "Phase 4: submit ${role_slug} transaction to public testnet" \
     myelin session carrier-submission \
       --package "$package_path" \
       --input-tx-hash "$input_tx_hash" \
@@ -176,6 +228,7 @@ run_role() {
       --verifier-role "$verifier_role" \
       --witness "$witness" \
       --rpc-url "$CKB_TESTNET_RPC" \
+      "${submission_extra_args[@]}" \
       --submit \
       --require-accepted \
       --out "$submission"
@@ -265,7 +318,7 @@ require_file "$REHEARSAL_DIR/operator-runbook.json"
 cd "$ROOT"
 SUMMARY_PATH="${SUMMARY_PATH:-"${REHEARSAL_DIR}/public-testnet-live-summary.json"}"
 jq -n \
-  --arg schema "myelin-public-testnet-live-rehearsal-summary-v1" \
+  --arg schema "myelin-public-testnet-live-rehearsal-summary" \
   --arg dir "$REHEARSAL_DIR" \
   --arg rpc "$CKB_TESTNET_RPC" \
   --arg min_status "$MIN_STATUS" \

@@ -1,0 +1,24 @@
+[package]
+name = "myelin-session-escrow"
+version = "0.10.0"
+edition = "2021"
+license = "MIT"
+description = "Optional conserved escrow and CKB exit capability for Myelin sessions"
+
+[dependencies]
+blake3.workspace = true
+myelin-ckb-adapter.workspace = true
+myelin-consensus.workspace = true
+myelin-exec.workspace = true
+myelin-session.workspace = true
+myelin-state.workspace = true
+secp256k1.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

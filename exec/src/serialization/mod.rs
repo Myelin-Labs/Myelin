@@ -12,7 +12,7 @@
 //!    - Native Myelin execution does not carry a legacy serializer dependency or ABI path
 //!
 //! 2. **VM-facing ABI 必须经过显式格式边界**
-//!    - Molecule v1 (`0x8001`) 是 launch/public VM ABI
+//!    - Molecule (`0x8001`) 是 launch/public VM ABI
 //!    - Non-Molecule VM object ABI versions are rejected
 //!
 //! 3. **VM ABI 是独立抽象层**
@@ -23,7 +23,7 @@
 //!
 //! - Layer 1 (共识): CKB/Molecule-shaped bytes 或显式流式哈希
 //! - Layer 2 (存储): Molecule-compatible records and envelopes for active state/execution utilities
-//! - Layer 3 (VM ABI): Molecule v1 for public script-visible data
+//! - Layer 3 (VM ABI): Molecule for public script-visible data
 
 /// VM ABI 序列化辅助函数
 pub mod vm_abi;
@@ -350,14 +350,14 @@ impl VmAbiFormat {
     /// Return the negotiated ABI version for this wire format.
     pub const fn abi_version(self) -> u16 {
         match self {
-            Self::Molecule => VmAbiNegotiator::ABI_VERSION_MOLECULE_V1,
+            Self::Molecule => VmAbiNegotiator::ABI_VERSION_MOLECULE,
         }
     }
 
     /// Resolve a VM ABI version into a wire format.
     pub fn from_abi_version(version: u16) -> Result<Self, VmAbiError> {
         match version {
-            VmAbiNegotiator::ABI_VERSION_MOLECULE_V1 => Ok(Self::Molecule),
+            VmAbiNegotiator::ABI_VERSION_MOLECULE => Ok(Self::Molecule),
             other => Err(VmAbiError::UnsupportedAbiVersion(other)),
         }
     }
@@ -409,8 +409,8 @@ pub fn split_vm_abi_trailer(bytes: &[u8]) -> Result<(&[u8], Option<VmAbiFormat>)
 pub struct VmAbiNegotiator;
 
 impl VmAbiNegotiator {
-    /// Molecule-based ABI v1 版本号，launch/public VM ABI。
-    pub const ABI_VERSION_MOLECULE_V1: u16 = 0x8001;
+    /// Molecule-based launch/public VM ABI identifier.
+    pub const ABI_VERSION_MOLECULE: u16 = 0x8001;
 
     /// 协商脚本和 VM 之间的 ABI 版本
     ///
@@ -422,7 +422,7 @@ impl VmAbiNegotiator {
     /// * `Ok(u16)` - 协商成功的 ABI 版本
     /// * `Err(VmAbiError)` - 协商失败
     pub fn negotiate(script_version: u16, vm_capabilities: &[u16]) -> Result<u16, VmAbiError> {
-        if script_version != Self::ABI_VERSION_MOLECULE_V1 {
+        if script_version != Self::ABI_VERSION_MOLECULE {
             return Err(VmAbiError::UnsupportedAbiVersion(script_version));
         }
 
@@ -440,7 +440,7 @@ impl VmAbiNegotiator {
     ///
     /// Public/default negotiation advertises only Molecule.
     pub fn default_capabilities() -> Vec<u16> {
-        vec![Self::ABI_VERSION_MOLECULE_V1]
+        vec![Self::ABI_VERSION_MOLECULE]
     }
 }
 
@@ -569,24 +569,24 @@ mod tests {
 
     #[test]
     fn test_vm_abi_negotiation_success() {
-        let caps = vec![VmAbiNegotiator::ABI_VERSION_MOLECULE_V1];
-        let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, &caps);
-        assert_eq!(result.unwrap(), VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
+        let caps = vec![VmAbiNegotiator::ABI_VERSION_MOLECULE];
+        let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE, &caps);
+        assert_eq!(result.unwrap(), VmAbiNegotiator::ABI_VERSION_MOLECULE);
     }
 
     #[test]
     fn test_vm_abi_negotiation_rejects_non_molecule_capabilities() {
         let caps = vec![0x0001];
-        let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, &caps);
+        let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE, &caps);
         assert!(matches!(
             result,
-            Err(VmAbiError::VersionMismatch { expected: VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, actual: 0x0001 })
+            Err(VmAbiError::VersionMismatch { expected: VmAbiNegotiator::ABI_VERSION_MOLECULE, actual: 0x0001 })
         ));
     }
 
     #[test]
     fn test_vm_abi_negotiation_failure() {
-        let caps = vec![0x0002]; // 只支持 v2
+        let caps = vec![0x0002]; // Supports a different ABI revision only.
         let result = VmAbiNegotiator::negotiate(0x0001, &caps);
         assert!(matches!(result, Err(VmAbiError::UnsupportedAbiVersion(0x0001))));
     }
@@ -594,7 +594,7 @@ mod tests {
     #[test]
     fn test_default_capabilities() {
         let caps = VmAbiNegotiator::default_capabilities();
-        assert_eq!(caps, vec![VmAbiNegotiator::ABI_VERSION_MOLECULE_V1]);
+        assert_eq!(caps, vec![VmAbiNegotiator::ABI_VERSION_MOLECULE]);
         assert!(!caps.contains(&0x0001));
     }
 
@@ -660,7 +660,7 @@ mod tests {
         }
 
         fn abi_version() -> u16 {
-            VmAbiNegotiator::ABI_VERSION_MOLECULE_V1
+            VmAbiNegotiator::ABI_VERSION_MOLECULE
         }
     }
 
@@ -672,7 +672,7 @@ mod tests {
         let restored = TestVmData::from_vm_bytes(&bytes).unwrap();
 
         assert_eq!(data, restored);
-        assert_eq!(TestVmData::abi_version(), VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
+        assert_eq!(TestVmData::abi_version(), VmAbiNegotiator::ABI_VERSION_MOLECULE);
     }
 
     #[test]
@@ -761,11 +761,11 @@ mod tests {
     #[test]
     fn test_version_upgrade_with_multiple_versions() {
         #[derive(Debug, Clone, PartialEq, Eq)]
-        struct MultiVersionData {
+        struct EvolvingData {
             value: u32,
         }
 
-        impl VersionedSerializable for MultiVersionData {
+        impl VersionedSerializable for EvolvingData {
             const CURRENT_VERSION: u8 = 3;
 
             fn to_versioned_payload(&self) -> Result<Vec<u8>, SerializationError> {
@@ -775,14 +775,14 @@ mod tests {
             fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
                 match version {
                     1 => {
-                        // v1 had a single byte value
+                        // The oldest stored layout used one byte.
                         if bytes.is_empty() {
                             return Err(SerializationError::DeserializationFailed("empty bytes".to_string()));
                         }
                         Ok(Self { value: bytes[0] as u32 })
                     }
                     2 => {
-                        // v2 had a u16 value
+                        // The intermediate stored layout used a u16.
                         if bytes.len() < 2 {
                             return Err(SerializationError::DeserializationFailed("insufficient bytes".to_string()));
                         }
@@ -791,7 +791,7 @@ mod tests {
                     }
                     3 => {
                         if bytes.len() != 4 {
-                            return Err(SerializationError::DeserializationFailed("v3 value must be u32le".to_string()));
+                            return Err(SerializationError::DeserializationFailed("current value must be u32le".to_string()));
                         }
                         Ok(Self { value: u32::from_le_bytes(bytes.try_into().expect("slice length checked")) })
                     }
@@ -800,32 +800,32 @@ mod tests {
             }
         }
 
-        // Test v1 → v3 migration
-        let v1_envelope = VersionedEnvelope {
-            format_version: VersionedEnvelope::<MultiVersionData>::FORMAT_VERSION_MOLECULE,
+        // Test migration from the oldest stored layout.
+        let older_envelope = VersionedEnvelope {
+            format_version: VersionedEnvelope::<EvolvingData>::FORMAT_VERSION_MOLECULE,
             schema_version: 1,
             payload: vec![42],
-            _phantom: std::marker::PhantomData::<MultiVersionData>,
+            _phantom: std::marker::PhantomData::<EvolvingData>,
         };
-        let result = v1_envelope.parse().unwrap();
+        let result = older_envelope.parse().unwrap();
         assert_eq!(result.value, 42);
 
-        // Test v2 → v3 migration
-        let v2_envelope = VersionedEnvelope {
-            format_version: VersionedEnvelope::<MultiVersionData>::FORMAT_VERSION_MOLECULE,
+        // Test migration from the intermediate stored layout.
+        let current_envelope = VersionedEnvelope {
+            format_version: VersionedEnvelope::<EvolvingData>::FORMAT_VERSION_MOLECULE,
             schema_version: 2,
             payload: vec![0x39, 0x05], // 1337 in little-endian
-            _phantom: std::marker::PhantomData::<MultiVersionData>,
+            _phantom: std::marker::PhantomData::<EvolvingData>,
         };
-        let result = v2_envelope.parse().unwrap();
+        let result = current_envelope.parse().unwrap();
         assert_eq!(result.value, 1337);
     }
 
     #[test]
     fn test_vm_abi_negotiation_with_empty_capabilities() {
-        let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, &[]);
+        let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE, &[]);
         assert!(result.is_err());
-        assert!(matches!(result, Err(VmAbiError::VersionMismatch { expected: VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, actual: 0 })));
+        assert!(matches!(result, Err(VmAbiError::VersionMismatch { expected: VmAbiNegotiator::ABI_VERSION_MOLECULE, actual: 0 })));
     }
 
     #[test]
@@ -833,8 +833,8 @@ mod tests {
         let caps = vec![0x0001, 0x0002, 0x8001];
 
         // Should find exact match
-        let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, &caps).unwrap();
-        assert_eq!(result, VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
+        let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE, &caps).unwrap();
+        assert_eq!(result, VmAbiNegotiator::ABI_VERSION_MOLECULE);
 
         let result = VmAbiNegotiator::negotiate(0x8002, &caps);
         assert!(matches!(result, Err(VmAbiError::UnsupportedAbiVersion(0x8002))));

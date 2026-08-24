@@ -249,7 +249,7 @@ impl MoleculeSerializer {
         true
     }
 
-    /// Molecule-based VM ABI v1.
+    /// Molecule-based VM ABI.
     pub const fn abi_version() -> u16 {
         0x8001
     }

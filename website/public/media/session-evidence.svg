@@ -32,7 +32,7 @@
 
   <g font-family="'JetBrains Mono', monospace" font-size="18">
     <text x="96" y="178" fill="#8d9bd0">schema</text>
-    <text x="364" y="178" fill="#f5f7ff">myelin-session-court-bundle-v1</text>
+    <text x="364" y="178" fill="#f5f7ff">myelin-session-court-bundle</text>
     <text x="96" y="220" fill="#8d9bd0">consensus_kind</text>
     <text x="364" y="220" fill="#f5f7ff">static-closed-committee</text>
     <text x="96" y="262" fill="#8d9bd0">vm_profile</text>

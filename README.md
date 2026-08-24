@@ -60,6 +60,20 @@ The boundaries are intentional:
 - **Consensus finalizes a session result; it does not make execution valid.** VM verification and state transition are consensus-independent.
 - **Evidence stages are earned from receipts.** A caller cannot promote a projection with a boolean flag.
 
+### Continuous service modules
+
+The reusable continuous-session path is split into five optional workspace crates:
+
+| Crate | Boundary |
+| --- | --- |
+| `myelin-session` | Continuous heads, deterministic block preparation, exact consensus-config binding, audited recovery, consensus WAL, and transactional outbox |
+| `myelin-session-store-rocksdb` | Versioned RocksDB schema, synchronous WAL, atomic head/block/snapshot/outbox CAS, and durable per-peer network queues |
+| `myelin-session-network` | Recipient-bound Schnorr envelopes, closed-peer authorization, replay/equivocation checks, mTLS gRPC transport, and ACK-after-durability delivery |
+| `myelin-session-escrow` | Optional finalized-CKB funding attachment, conserved balances, expiry/debit constraints, pluggable typed assets, evidence-bound exit construction, and finalized-settlement verification |
+| `myelin-wallet-auth` | Standard CKB Blake160 identity derivation, CKB-personalized login/PoA digests, and compact recoverable secp256k1 signatures |
+
+These crates are adapters, not a daemon that silently changes Myelin's scope. An application may embed a one-process PoA driver or connect an external coordinator through the finality and network interfaces. PoA, static committee, and Tendermint here are closed-validator session engines; none makes Myelin a permissionless chain.
+
 ## Quick start
 
 The repository pins its Rust toolchain and tracks `Cargo.lock`.
@@ -138,7 +152,7 @@ The logical identity is derived from authenticated Cell state:
 
 ```text
 conflict_hash = BLAKE3(
-  "myelin-typed-cell/conflict-hash/v1"
+  "myelin-typed-cell/conflict-hash"
   || full type-script identity
   || canonical conflict-key value
 )

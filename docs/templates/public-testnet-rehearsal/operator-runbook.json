@@ -1,5 +1,5 @@
 {
-  "schema": "myelin-operator-runbook-v1",
+  "schema": "myelin-operator-runbook",
   "reorg_response": "wait-for-stability-requery-and-escalate-on-mismatch",
   "fee_bump_response": "bounded-fee-bump-with-max-fee-cap",
   "retry_response": "idempotent-retry-by-ckb-tx-hash-and-package-commitment",

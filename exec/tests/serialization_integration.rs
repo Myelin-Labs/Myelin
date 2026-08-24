@@ -102,19 +102,19 @@ fn test_versioned_envelope_format() {
 #[test]
 fn test_abi_version_negotiation_scenarios() {
     // Scenario 1: Molecule exact match
-    let caps = vec![VmAbiNegotiator::ABI_VERSION_MOLECULE_V1];
-    let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, &caps);
-    assert_eq!(result.unwrap(), VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
+    let caps = vec![VmAbiNegotiator::ABI_VERSION_MOLECULE];
+    let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE, &caps);
+    assert_eq!(result.unwrap(), VmAbiNegotiator::ABI_VERSION_MOLECULE);
 
     // Scenario 2: Molecule request when VM only advertises an obsolete ABI
     let caps = vec![0x0001];
-    let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, &caps);
+    let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE, &caps);
     assert!(result.is_err());
 
     // Scenario 3: Multiple capabilities with Molecule present
-    let caps = vec![0x0001, 0x0002, VmAbiNegotiator::ABI_VERSION_MOLECULE_V1];
-    let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1, &caps);
-    assert_eq!(result.unwrap(), VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
+    let caps = vec![0x0001, 0x0002, VmAbiNegotiator::ABI_VERSION_MOLECULE];
+    let result = VmAbiNegotiator::negotiate(VmAbiNegotiator::ABI_VERSION_MOLECULE, &caps);
+    assert_eq!(result.unwrap(), VmAbiNegotiator::ABI_VERSION_MOLECULE);
 
     // Scenario 4: Non-Molecule script request is unsupported
     let caps = vec![0x0002, 0x0003];
@@ -126,7 +126,7 @@ fn test_abi_version_negotiation_scenarios() {
 #[test]
 fn test_default_vm_capabilities() {
     let caps = VmAbiNegotiator::default_capabilities();
-    assert_eq!(caps, vec![VmAbiNegotiator::ABI_VERSION_MOLECULE_V1]);
+    assert_eq!(caps, vec![VmAbiNegotiator::ABI_VERSION_MOLECULE]);
     assert!(!caps.contains(&0x0001));
 }
 

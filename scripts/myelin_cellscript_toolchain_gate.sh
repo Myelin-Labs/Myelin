@@ -43,6 +43,8 @@ cargo run --locked -q -p myelin-cellscript-adapter -- build-attest "${SOURCE_ROO
 CELLC="${SOURCE_ROOT}/target/release/cellc"
 cargo run --locked -q -p myelin-cellscript-adapter -- verify "${CELLC}" "${ATTESTATION}"
 
+(cd "${SOURCE_ROOT}" && cargo test --locked --test entry_witness_abi)
+
 for fixture in da-anchor-carrier settlement-carrier da-anchor-final settlement-final; do
   cargo run --locked -q -p myelin-cellscript-adapter -- compile \
     "${CELLC}" \

@@ -10,8 +10,8 @@ fn typed_cell_hash_fixed_vectors() {
     let conflict_key = b"invoice:INV-2026-0001";
     let data = b"invoice-state:issued:amount=1250000";
 
-    assert_eq!(hex(compute_conflict_hash(&script, conflict_key)), "7041cd328a8317c1a0ffecda4fbcc0a46c68cc5867d72b1d6dcc2f35030af66f");
-    assert_eq!(hex(compute_typed_data_hash(&script, data)), "7d03c13d9d04f0077d5c72181abe04d68f2170dd2bbb82f731c2d969b0ce6c71");
+    assert_eq!(hex(compute_conflict_hash(&script, conflict_key)), "ae22ab496af025a61b4838f4cff61b0ca3c880cc3f0e9671d98bd11efec5ae5a");
+    assert_eq!(hex(compute_typed_data_hash(&script, data)), "58aef33001edd12860e0d0509ef341d8a1637ec09e9e460fb4c2500157db260d");
     assert_eq!(
         hex(encode_conflict_key_value_composite(&[b"borrower:acme", b"invoice:INV-2026-0001"])),
         "0d000000626f72726f7765723a61636d6515000000696e766f6963653a494e562d323032362d30303031"

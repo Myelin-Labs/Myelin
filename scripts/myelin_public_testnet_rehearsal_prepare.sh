@@ -13,6 +13,7 @@ ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 REHEARSAL_DIR="${MYELIN_REHEARSAL_DIR:-$(mktemp -d /tmp/myelin-public-testnet-rehearsal-prepare.XXXXXX)}"
 SUMMARY_PATH="${SUMMARY_PATH:-"${REHEARSAL_DIR}/rehearsal-prepare-summary.json"}"
 PROVENANCE="${MYELIN_REHEARSAL_PROVENANCE:-local-fixture-disposable-keys}"
+CKB_TESTNET_RPC="${CKB_TESTNET_RPC:-}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -69,11 +70,9 @@ COURT_VERIFIER_CODE_DEP_TX_HASH="${MYELIN_COURT_VERIFIER_CODE_DEP_TX_HASH:-0x$(h
 COURT_VERIFIER_CODE_DEP_INDEX="${MYELIN_COURT_VERIFIER_CODE_DEP_INDEX:-0x0}"
 COURT_VERIFIER_SOURCE_HASH="${MYELIN_COURT_VERIFIER_SOURCE_HASH:-0x$(hex_repeat e3 32)}"
 COURT_VERIFIER_AUDIT_HASH="${MYELIN_COURT_VERIFIER_AUDIT_HASH:-0x$(hex_repeat e4 32)}"
-THRESHOLD_LOCK_CODE_HASH="${MYELIN_THRESHOLD_LOCK_CODE_HASH:-0x$(hex_repeat a1 32)}"
-THRESHOLD_LOCK_CODE_DEP_TX_HASH="${MYELIN_THRESHOLD_LOCK_CODE_DEP_TX_HASH:-0x$(hex_repeat b2 32)}"
+THRESHOLD_LOCK_CODE_HASH="${MYELIN_THRESHOLD_LOCK_CODE_HASH:-0x36c971b8d41fbd94aabca77dc75e826729ac98447b46f91e00796155dddb0d29}"
+THRESHOLD_LOCK_CODE_DEP_TX_HASH="${MYELIN_THRESHOLD_LOCK_CODE_DEP_TX_HASH:-0x2eefdeb21f3a3edf697c28a52601b4419806ed60bb427420455cc29a090b26d5}"
 THRESHOLD_LOCK_CODE_DEP_INDEX="${MYELIN_THRESHOLD_LOCK_CODE_DEP_INDEX:-0x0}"
-THRESHOLD_LOCK_SOURCE_HASH="${MYELIN_THRESHOLD_LOCK_SOURCE_HASH:-0x$(hex_repeat c3 32)}"
-THRESHOLD_LOCK_AUDIT_HASH="${MYELIN_THRESHOLD_LOCK_AUDIT_HASH:-0x$(hex_repeat d4 32)}"
 
 run_step "Copy rehearsal sources and operator starter documents" bash -c '
   set -euo pipefail
@@ -160,7 +159,8 @@ myelin session settlement-intent \
   --current-time-ms 60000 \
   --challenge-window-ms 60000 \
   --out "$REHEARSAL_DIR/session-settlement-intent.base.json"
-myelin session court-economics-deployment-evidence \
+court_deployment_args=(
+  session court-economics-deployment-evidence
   --intent "$REHEARSAL_DIR/session-settlement-intent.base.json" \
   --network ckb-testnet \
   --verifier-code-hash "$COURT_VERIFIER_CODE_HASH" \
@@ -168,10 +168,13 @@ myelin session court-economics-deployment-evidence \
   --verifier-code-dep-tx-hash "$COURT_VERIFIER_CODE_DEP_TX_HASH" \
   --verifier-code-dep-index "$COURT_VERIFIER_CODE_DEP_INDEX" \
   --audited-source-hash "$COURT_VERIFIER_SOURCE_HASH" \
-  --audit-report-hash "$COURT_VERIFIER_AUDIT_HASH" \
-  --ckb-enforceable-checked \
-  --testnet-beta-ready \
+  --audit-report-hash "$COURT_VERIFIER_AUDIT_HASH"
   --out "$REHEARSAL_DIR/court-economics-deployment.json"
+)
+if [[ "${MYELIN_COURT_DEPLOYMENT_CHECKED:-0}" == "1" ]]; then
+  court_deployment_args+=(--ckb-enforceable-checked --testnet-beta-ready)
+fi
+myelin "${court_deployment_args[@]}"
 myelin session settlement-intent \
   --bundle "$REHEARSAL_DIR/session-court.json" \
   --da-manifest "$REHEARSAL_DIR/session-da.json" \
@@ -191,23 +194,32 @@ myelin session settlement-package \
   --bundle "$REHEARSAL_DIR/session-court.json" \
   --da-manifest "$REHEARSAL_DIR/session-da.json" \
   --out "$REHEARSAL_DIR/session-settlement-package.base.json"
-myelin session authority-signature-evidence \
-  --package "$REHEARSAL_DIR/session-settlement-package.base.json" \
-  --signer-secret-key "$AUTHORITY_SIGNER_KEY_0" \
-  --signer-secret-key "$AUTHORITY_SIGNER_KEY_1" \
+authority_signature_args=(
+  session authority-signature-evidence
+  --package "$REHEARSAL_DIR/session-settlement-package.base.json"
+  --signer-secret-key "$AUTHORITY_SIGNER_KEY_0"
+  --signer-secret-key "$AUTHORITY_SIGNER_KEY_1"
   --out "$REHEARSAL_DIR/authority-signature-evidence.json"
-myelin session threshold-lock-deployment-evidence \
+)
+while IFS= read -r participant_hash; do
+  authority_signature_args+=(--participant-pubkey-hash "$participant_hash")
+done < <(jq -r '.settlement_authority.authority_authentication.ckb_multisig_participant_pubkey_hashes[]' "$REHEARSAL_DIR/session-settlement-package.base.json")
+myelin "${authority_signature_args[@]}"
+threshold_deployment_args=(
+  session threshold-lock-deployment-evidence
   --package "$REHEARSAL_DIR/session-settlement-package.base.json" \
   --network ckb-testnet \
   --code-hash "$THRESHOLD_LOCK_CODE_HASH" \
-  --hash-type data2 \
+  --hash-type data1 \
   --code-dep-tx-hash "$THRESHOLD_LOCK_CODE_DEP_TX_HASH" \
-  --code-dep-index "$THRESHOLD_LOCK_CODE_DEP_INDEX" \
-  --audited-source-hash "$THRESHOLD_LOCK_SOURCE_HASH" \
-  --audit-report-hash "$THRESHOLD_LOCK_AUDIT_HASH" \
-  --ckb-enforceable-checked \
-  --testnet-beta-ready \
+  --code-dep-index "$THRESHOLD_LOCK_CODE_DEP_INDEX"
+  --code-dep-type dep_group
   --out "$REHEARSAL_DIR/threshold-lock-deployment.json"
+)
+if [[ -n "$CKB_TESTNET_RPC" ]]; then
+  threshold_deployment_args+=(--rpc-url "$CKB_TESTNET_RPC" --ckb-enforceable-checked --testnet-beta-ready)
+fi
+myelin "${threshold_deployment_args[@]}"
 myelin session settlement-package \
   --intent "$REHEARSAL_DIR/session-settlement-intent.json" \
   --bundle "$REHEARSAL_DIR/session-court.json" \
@@ -224,7 +236,7 @@ myelin session verify-settlement-package \
 assert_valid "$REHEARSAL_DIR/session-settlement-package-verify.json"
 
 jq -n \
-  --arg schema "myelin-public-testnet-rehearsal-prepare-summary-v1" \
+  --arg schema "myelin-public-testnet-rehearsal-prepare-summary" \
   --arg dir "$REHEARSAL_DIR" \
   --arg provenance "$PROVENANCE" \
   --slurpfile court "$REHEARSAL_DIR/session-court-verify.json" \

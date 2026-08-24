@@ -20,7 +20,7 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────┐
-//! │  Layer 3: VM/Script ABI 层 (Molecule v1 public)                 │
+//! │  Layer 3: VM/Script ABI 层 (Molecule public)                 │
 //! │  - ResolvedHeader, ResolvedCell, Witness Payload                │
 //! │  - 脚本可见的所有数据结构                                        │
 //! │  - 需要: canonical, partial read, version兼容                  │
@@ -43,7 +43,7 @@
 //!    - Native Myelin execution does not carry a legacy serializer dependency or ABI path
 //!
 //! 2. **VM-facing ABI 必须经过显式格式边界**
-//!    - Molecule v1 (`0x8001`) 是 launch/public VM ABI
+//!    - Molecule (`0x8001`) 是 launch/public VM ABI
 //!    - Non-Molecule VM object ABI versions are rejected
 //!
 //! 3. **VM ABI 是独立抽象层**
@@ -84,7 +84,7 @@ pub use vm::{
 pub use celltx::{
     compute_conflict_hash, compute_typed_data_hash, encode_ckb_dep_group_data, parse_ckb_dep_group_data, CapacityError,
     CellAccounting, CellDep, CellIdentity, CellInput, CellMutability, CellOutput, CellOwnership, CellTx, ConflictKeySpec, DepType,
-    InMemoryTypedCellStore, OutPoint, RuntimeCellSemantics, Script, ScriptHashVersion, ScriptId, TypedCellDecl, TypedCellDeclError,
+    InMemoryTypedCellStore, OutPoint, RuntimeCellSemantics, Script, ScriptId, TypedCellDecl, TypedCellDeclError,
     TypedCellSemanticMetadata, TypedCellStore, CELLTX_SCHEMA_VERSION,
 };
 

@@ -138,7 +138,7 @@ CLI commands now expose the first deterministic Session L2 path directly.
 Implemented commands:
 
 ```bash
-myelin session open --app-id myelin-custom-game-session-v1 --participant alice --participant bob --escrow-cell '<tx_hash_hex>:0:1000:<lock_hash_hex>' --out reports/session-open.json
+myelin session open --app-id myelin-custom-game-session --participant alice --participant bob --escrow-cell '<tx_hash_hex>:0:1000:<lock_hash_hex>' --out reports/session-open.json
 myelin session open-fixture --out reports/session-open.json
 myelin session commit --session reports/session-open.json --chunk-index 7 --out reports/session-commit.json
 myelin session commit-fixture --session reports/session-open.json --out reports/session-commit.json
@@ -396,7 +396,7 @@ Acceptance criteria:
   verifiers against live CKB RPC evidence for both carriers, submit
   self-consistent zero-hash-field compact carriers under both deployed
   verifiers, require CKB script verification to reject both, and emit
-  `myelin-ckb-devnet-smoke-v1`. The smoke copies the checked-in
+  `myelin-ckb-devnet-smoke`. The smoke copies the checked-in
   `cellscript/examples/myelin/da-anchor-carrier.cell` and
   `cellscript/examples/myelin/settlement-carrier.cell` sources into the
   throw-away workdir, compiles each source under `typed-cell` first, records the

@@ -6,25 +6,25 @@
 use myelin_exec::{SerializationError, VersionedEnvelope, VersionedSerializable};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UserDataV1 {
+struct StoredUserData {
     name: String,
     age: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UserDataV2 {
+struct UserData {
     name: String,
     birth_year: u32,
     email: Option<String>,
 }
 
-impl UserDataV2 {
+impl UserData {
     fn new(name: &str, birth_year: u32, email: Option<&str>) -> Self {
         Self { name: name.to_string(), birth_year, email: email.map(|s| s.to_string()) }
     }
 }
 
-impl VersionedSerializable for UserDataV2 {
+impl VersionedSerializable for UserData {
     const CURRENT_VERSION: u8 = 2;
 
     fn to_versioned_payload(&self) -> Result<Vec<u8>, SerializationError> {
@@ -44,9 +44,9 @@ impl VersionedSerializable for UserDataV2 {
     fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
         match version {
             1 => {
-                let v1 = UserDataV1::from_payload(bytes)?;
+                let stored = StoredUserData::from_payload(bytes)?;
                 let current_year: u32 = 2026;
-                Ok(Self { name: v1.name, birth_year: current_year.saturating_sub(v1.age), email: None })
+                Ok(Self { name: stored.name, birth_year: current_year.saturating_sub(stored.age), email: None })
             }
             2 => Self::from_payload(bytes),
             _ => Err(SerializationError::UpgradePathNotAvailable { from: version, to: Self::CURRENT_VERSION }),
@@ -54,7 +54,7 @@ impl VersionedSerializable for UserDataV2 {
     }
 }
 
-impl UserDataV1 {
+impl StoredUserData {
     fn to_payload(&self) -> Vec<u8> {
         let mut out = Vec::new();
         push_string(&mut out, &self.name);
@@ -71,7 +71,7 @@ impl UserDataV1 {
     }
 }
 
-impl UserDataV2 {
+impl UserData {
     fn from_payload(bytes: &[u8]) -> Result<Self, SerializationError> {
         let mut offset = 0;
         let name = read_string(bytes, &mut offset)?;
@@ -90,29 +90,29 @@ impl UserDataV2 {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Schema Migration Example ===\n");
 
-    let user_v2 = UserDataV2::new("Alice", 1990, Some("alice@example.com"));
-    let envelope = VersionedEnvelope::new(&user_v2)?;
+    let user = UserData::new("Alice", 1990, Some("alice@example.com"));
+    let envelope = VersionedEnvelope::new(&user)?;
     let stored_bytes = envelope.to_bytes();
 
-    println!("Stored v2 user with schema version {}", envelope.schema_version());
+    println!("Stored current user schema {}", envelope.schema_version());
 
-    let restored_envelope = VersionedEnvelope::<UserDataV2>::from_bytes(&stored_bytes)?;
+    let restored_envelope = VersionedEnvelope::<UserData>::from_bytes(&stored_bytes)?;
     let restored_user = restored_envelope.parse()?;
-    assert_eq!(user_v2, restored_user);
-    println!("Read v2 data successfully");
+    assert_eq!(user, restored_user);
+    println!("Read current data successfully");
 
-    let user_v1 = UserDataV1 { name: "Bob".to_string(), age: 30 };
+    let stored_user = StoredUserData { name: "Bob".to_string(), age: 30 };
     let old_envelope =
-        VersionedEnvelope::<UserDataV2>::from_parts(VersionedEnvelope::<UserDataV2>::FORMAT_VERSION_MOLECULE, 1, user_v1.to_payload());
+        VersionedEnvelope::<UserData>::from_parts(VersionedEnvelope::<UserData>::FORMAT_VERSION_MOLECULE, 1, stored_user.to_payload());
     let old_stored_bytes = old_envelope.to_bytes();
 
-    let migrated_envelope = VersionedEnvelope::<UserDataV2>::from_bytes(&old_stored_bytes)?;
+    let migrated_envelope = VersionedEnvelope::<UserData>::from_bytes(&old_stored_bytes)?;
     let migrated_user = migrated_envelope.parse()?;
 
     assert_eq!(migrated_user.name, "Bob");
     assert_eq!(migrated_user.birth_year, 1996);
     assert_eq!(migrated_user.email, None);
-    println!("Migrated v1 data to v2 successfully");
+    println!("Migrated stored data to the current schema successfully");
 
     Ok(())
 }

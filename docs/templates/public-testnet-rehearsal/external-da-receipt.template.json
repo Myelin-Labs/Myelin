@@ -1,6 +1,6 @@
 {
   "_template_note": "Replace every placeholder. Provider signature must be over the exact receipt fields for this payload_hash and segment_root.",
-  "schema": "myelin-external-da-receipt-v2",
+  "schema": "myelin-external-da-receipt",
   "provider": "replace-with-provider-name",
   "namespace": "session-court-payloads",
   "payload_hash": "0000000000000000000000000000000000000000000000000000000000000000",

@@ -34,8 +34,8 @@ fn test_resolved_header_vm_serializable() {
         uncles_hash: [0x77; 32],
     };
 
-    // Test ABI version — ResolvedHeader uses Molecule v1 for VM-facing serialization
-    assert_eq!(ResolvedHeader::abi_version(), VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
+    // Test ABI version — ResolvedHeader uses Molecule for VM-facing serialization
+    assert_eq!(ResolvedHeader::abi_version(), VmAbiNegotiator::ABI_VERSION_MOLECULE);
 
     // Test serialization roundtrip
     let bytes = header.to_vm_bytes();
@@ -55,8 +55,8 @@ fn test_resolved_cell_vm_serializable() {
         data: Some(vec![0xEE; 100]),
     };
 
-    // Test ABI version — ResolvedCell uses Molecule v1 for VM-facing serialization
-    assert_eq!(ResolvedCell::abi_version(), VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
+    // Test ABI version — ResolvedCell uses Molecule for VM-facing serialization
+    assert_eq!(ResolvedCell::abi_version(), VmAbiNegotiator::ABI_VERSION_MOLECULE);
 
     // Test serialization roundtrip
     let bytes = cell.to_vm_bytes();
@@ -169,9 +169,9 @@ fn test_vm_serializable_error_handling() {
 /// Test ABI version compatibility check
 #[test]
 fn test_abi_version_compatibility() {
-    // ResolvedHeader and ResolvedCell use Molecule v1
-    assert!(ResolvedHeader::is_abi_compatible(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1));
-    assert!(ResolvedCell::is_abi_compatible(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1));
+    // ResolvedHeader and ResolvedCell use Molecule
+    assert!(ResolvedHeader::is_abi_compatible(VmAbiNegotiator::ABI_VERSION_MOLECULE));
+    assert!(ResolvedCell::is_abi_compatible(VmAbiNegotiator::ABI_VERSION_MOLECULE));
 
     // Old pre-Molecule ABI numbers are not compatible.
     assert!(!ResolvedHeader::is_abi_compatible(0x0001));

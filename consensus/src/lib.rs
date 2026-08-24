@@ -9,17 +9,25 @@
 //! generation, and closed-validator operation. None is a permissionless
 //! consensus protocol.
 
+use myelin_wallet_auth::{compressed_public_key, sign_recoverable};
 use secp256k1::{schnorr::Signature, Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
+mod catalog;
+mod proof_codec;
 mod proof_of_authority;
 mod tendermint;
+pub use catalog::{
+    ConsensusCatalog, ConsensusModuleDescriptor, EncodedConsensusMessage, CONSENSUS_MESSAGE_FORMAT_VERSION,
+    CONSENSUS_MODULE_PROTOCOL_VERSION,
+};
 pub use proof_of_authority::{
     Authority, FinalisedProofOfAuthorityBlock, ProofOfAuthority, ProofOfAuthorityConfig, ProofOfAuthoritySeal,
 };
 pub use tendermint::{
-    TendermintDecision, TendermintProgress, TendermintProposal, TendermintRoundState, TendermintStep, TendermintVote,
+    TendermintDecision, TendermintDriverMessage, TendermintProgress, TendermintProposal, TendermintRoundState, TendermintStep,
+    TendermintVote,
 };
 
 /// Public name for the finite-session Tendermint engine. The legacy Rust type
@@ -34,9 +42,16 @@ pub type Hash32 = [u8; 32];
 /// Fixed-width phase-one committee signature.
 pub type Signature64 = [u8; 64];
 
-const BLOCK_HASH_DOMAIN: &[u8] = b"myelin:block:v1";
-const STATIC_SIGNATURE_DOMAIN: &[u8] = b"myelin:static-committee-signature:v1";
-const WEIGHTED_PRECOMMIT_DOMAIN: &[u8] = b"myelin:weighted-precommit:v1";
+/// Compressed public key used by CKB-compatible PoA authorities.
+pub type CkbPublicKey33 = [u8; 33];
+
+/// Compact recoverable ECDSA signature used by CKB-compatible PoA seals.
+pub type CkbSignature65 = [u8; 65];
+
+const BLOCK_HASH_DOMAIN: &[u8] = b"myelin:block";
+const STATIC_SIGNATURE_DOMAIN: &[u8] = b"myelin:static-committee-signature";
+const WEIGHTED_PRECOMMIT_DOMAIN: &[u8] = b"myelin:weighted-precommit";
+const CONSENSUS_CONFIG_DOMAIN: &[u8] = b"myelin:consensus-config";
 
 /// Consensus engine selected for a Myelin session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +75,19 @@ impl ConsensusKind {
             ConsensusKind::StaticClosedCommittee => "static-closed-committee",
             ConsensusKind::ProofOfAuthority => "proof-of-authority",
             ConsensusKind::Tendermint => "tendermint",
+        }
+    }
+
+    /// Parse only the canonical protocol spelling of a consensus kind.
+    ///
+    /// User-facing config migration aliases are deliberately not accepted at
+    /// persistence, proof, network, or recovery boundaries.
+    pub fn from_canonical_str(value: &str) -> Result<Self> {
+        match value {
+            "static-closed-committee" => Ok(Self::StaticClosedCommittee),
+            "proof-of-authority" => Ok(Self::ProofOfAuthority),
+            "tendermint" => Ok(Self::Tendermint),
+            other => Err(ConsensusError::UnknownEngine(other.to_owned())),
         }
     }
 }
@@ -134,6 +162,23 @@ impl ConsensusConfig {
                 Ok(Self::tendermint(raw_weighted_precommit.try_into()?))
             }
         }
+    }
+
+    /// Canonical commitment to the selected validator set, ordering rules,
+    /// weights, and quorum policy.
+    pub fn commitment(&self) -> Result<Hash32> {
+        SelectedConsensus::from_config(self.clone()).map(|engine| engine.config_commitment())
+    }
+
+    /// Build the exact registered module descriptor selected by this config.
+    pub fn module_descriptor(&self) -> Result<ConsensusModuleDescriptor> {
+        ConsensusCatalog::build(self.clone()).map(|engine| engine.module_descriptor())
+    }
+
+    /// Commitment to the registered module protocol, proof/message schemas,
+    /// capabilities, and exact validator/authority configuration.
+    pub fn module_commitment(&self) -> Result<Hash32> {
+        self.module_descriptor().map(|descriptor| descriptor.commitment())
     }
 }
 
@@ -219,7 +264,7 @@ impl TryFrom<RawProofOfAuthorityConfig> for ProofOfAuthorityConfig {
         let authorities = raw
             .authorities
             .into_iter()
-            .map(|authority| Ok(Authority { id: authority.id, public_key: parse_hex_32(&authority.public_key)? }))
+            .map(|authority| Ok(Authority { id: authority.id, public_key: parse_hex_33(&authority.public_key)? }))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self { authorities })
     }
@@ -238,6 +283,12 @@ fn parse_hex_32(value: &str) -> Result<Hash32> {
     let stripped = value.strip_prefix("0x").unwrap_or(value);
     let decoded = hex::decode(stripped).map_err(|err| ConsensusError::InvalidConfig(format!("invalid hex key: {err}")))?;
     decoded.try_into().map_err(|_| ConsensusError::InvalidConfig("public key must be 32 bytes".to_owned()))
+}
+
+fn parse_hex_33(value: &str) -> Result<CkbPublicKey33> {
+    let stripped = value.strip_prefix("0x").unwrap_or(value);
+    let decoded = hex::decode(stripped).map_err(|err| ConsensusError::InvalidConfig(format!("invalid hex key: {err}")))?;
+    decoded.try_into().map_err(|_| ConsensusError::InvalidConfig("compressed public key must be 33 bytes".to_owned()))
 }
 
 /// A finite-session block finalised by a selected Myelin consensus engine.
@@ -361,6 +412,16 @@ impl CommitteeSigner {
         XOnlyPublicKey::from_keypair(&keypair).0.serialize()
     }
 
+    /// Derive the compressed secp256k1 public key used by CKB PoA seals.
+    pub fn ckb_public_key(&self) -> CkbPublicKey33 {
+        compressed_public_key(self.secret_key.secret_bytes()).expect("a validated secret key always derives a public key")
+    }
+
+    /// Sign a CKB-personalized PoA digest using compact recoverable ECDSA.
+    pub(crate) fn sign_ckb_recoverable(&self, digest: Hash32) -> CkbSignature65 {
+        sign_recoverable(self.secret_key.secret_bytes(), digest).expect("a validated secret key always signs a 32-byte digest")
+    }
+
     /// Build the corresponding public validator entry.
     pub fn validator(&self, weight: u64) -> CommitteeValidator {
         CommitteeValidator { id: self.validator_id.clone(), public_key: self.public_key(), weight }
@@ -401,6 +462,43 @@ pub struct WeightedPrecommitConfig {
     pub validators: Vec<CommitteeValidator>,
     /// Voting power required for a block precommit certificate.
     pub quorum_power: u64,
+}
+
+fn validator_config_commitment<'a>(
+    kind: ConsensusKind,
+    quorum: u64,
+    validators: impl Iterator<Item = &'a CommitteeValidator>,
+) -> Hash32 {
+    let mut validators = validators.collect::<Vec<_>>();
+    validators.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(CONSENSUS_CONFIG_DOMAIN);
+    put_config_bytes(&mut hasher, kind.as_str().as_bytes());
+    hasher.update(&quorum.to_le_bytes());
+    hasher.update(&(validators.len() as u64).to_le_bytes());
+    for validator in validators {
+        put_config_bytes(&mut hasher, validator.id.as_bytes());
+        hasher.update(&validator.public_key);
+        hasher.update(&validator.weight.to_le_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+pub(crate) fn poa_config_commitment(authorities: &[Authority]) -> Hash32 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(CONSENSUS_CONFIG_DOMAIN);
+    put_config_bytes(&mut hasher, ConsensusKind::ProofOfAuthority.as_str().as_bytes());
+    hasher.update(&(authorities.len() as u64).to_le_bytes());
+    for authority in authorities {
+        put_config_bytes(&mut hasher, authority.id.as_bytes());
+        hasher.update(&authority.public_key);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn put_config_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
 }
 
 /// One validator's block signature in a committee certificate.
@@ -464,6 +562,21 @@ impl FinalityProof {
             Self::ProofOfAuthority(_) => ConsensusKind::ProofOfAuthority,
             Self::Tendermint(_) => ConsensusKind::Tendermint,
         }
+    }
+
+    /// Canonically encode this proof in its owner-defined, versioned envelope.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        proof_codec::encode(self)
+    }
+
+    /// Strictly decode and canonicalise an owner-defined proof envelope.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        proof_codec::decode(bytes)
+    }
+
+    /// Schema commitment required for this typed proof shape.
+    pub fn schema_hash(&self) -> Hash32 {
+        proof_codec::schema_hash(self.kind())
     }
 }
 
@@ -530,6 +643,25 @@ impl SelectedConsensus {
                 Ok(Self::Tendermint(Tendermint::new(tendermint)?))
             }
         }
+    }
+
+    /// Canonical immutable validator/quorum configuration commitment.
+    pub fn config_commitment(&self) -> Hash32 {
+        match self {
+            Self::StaticClosedCommittee(engine) => engine.config_commitment(),
+            Self::ProofOfAuthority(engine) => engine.config_commitment(),
+            Self::Tendermint(engine) => engine.config_commitment(),
+        }
+    }
+
+    /// Descriptor of this compiled-in module and its exact configuration.
+    pub fn module_descriptor(&self) -> ConsensusModuleDescriptor {
+        ConsensusCatalog::descriptor(self.kind(), self.config_commitment())
+    }
+
+    /// Canonical commitment to the compiled-in module and exact config.
+    pub fn module_commitment(&self) -> Hash32 {
+        self.module_descriptor().commitment()
     }
 
     /// Verify an engine-specific proof through one selected dispatch surface.
@@ -616,6 +748,11 @@ impl StaticClosedCommittee {
         }
 
         Ok(Self { validators, quorum_weight: config.quorum_weight })
+    }
+
+    /// Canonical commitment independent of input map/vector ordering.
+    pub fn config_commitment(&self) -> Hash32 {
+        validator_config_commitment(ConsensusKind::StaticClosedCommittee, self.quorum_weight, self.validators.values())
     }
 
     /// Build a certificate from externally held signing capabilities.
@@ -728,6 +865,11 @@ impl WeightedPrecommit {
         }
 
         Ok(Self { validators, quorum_power: config.quorum_power })
+    }
+
+    /// Canonical commitment independent of input map/vector ordering.
+    pub fn config_commitment(&self) -> Hash32 {
+        validator_config_commitment(ConsensusKind::Tendermint, self.quorum_power, self.validators.values())
     }
 
     /// Build a weighted precommit certificate from externally held signers.
@@ -869,6 +1011,12 @@ pub enum ConsensusError {
     /// Config is malformed.
     #[error("invalid consensus config: {0}")]
     InvalidConfig(String),
+    /// A finality proof failed its strict owner-defined codec.
+    #[error("finality proof codec failed: {0}")]
+    ProofCodec(String),
+    /// A consensus driver message failed its owner-defined codec.
+    #[error("consensus message codec failed: {0}")]
+    MessageCodec(String),
     /// The selected engine name is unknown.
     #[error("unknown consensus engine: {0}")]
     UnknownEngine(String),
@@ -1029,6 +1177,72 @@ mod tests {
     }
 
     #[test]
+    fn protocol_fixed_vectors_are_stable() {
+        let alice = signer("alice", 1);
+        let configs = [
+            ConsensusConfig::static_closed_committee(StaticCommitteeConfig { validators: vec![alice.validator(1)], quorum_weight: 1 }),
+            ConsensusConfig::proof_of_authority(ProofOfAuthorityConfig {
+                authorities: vec![Authority { id: "alice".to_owned(), public_key: alice.ckb_public_key() }],
+            }),
+            ConsensusConfig::tendermint(TendermintConfig { validators: vec![alice.validator(1)], quorum_power: 1 }),
+        ];
+        let proofs = [
+            FinalityProof::StaticClosedCommittee(CommitteeCertificate {
+                block_hash: [3; 32],
+                signatures: vec![CommitteeSignature { validator_id: "alice".to_owned(), signature: [4; 64] }],
+            }),
+            FinalityProof::ProofOfAuthority(ProofOfAuthoritySeal {
+                block_hash: [3; 32],
+                height: 7,
+                authority_id: "alice".to_owned(),
+                signature: [5; 65],
+            }),
+            FinalityProof::Tendermint(TendermintDecision {
+                height: 7,
+                round: 2,
+                block_hash: [3; 32],
+                precommits: vec![TendermintVote {
+                    height: 7,
+                    round: 2,
+                    step: TendermintStep::Precommit,
+                    block_hash: Some([3; 32]),
+                    validator_id: "alice".to_owned(),
+                    signature: vec![6; 64],
+                }],
+            }),
+        ];
+        let config_commitments = configs.iter().map(|config| hex::encode(config.commitment().unwrap())).collect::<Vec<_>>();
+        let module_commitments = configs.iter().map(|config| hex::encode(config.module_commitment().unwrap())).collect::<Vec<_>>();
+        let proof_hashes =
+            proofs.iter().map(|proof| hex::encode(blake3::hash(&proof.encode().unwrap()).as_bytes())).collect::<Vec<_>>();
+        assert_eq!(hex::encode(block().hash()), "c65df8da679969b2ba85629deda0a1ae93f2b05787a0bfd8d703a752a2ce19da");
+        assert_eq!(
+            config_commitments,
+            [
+                "2c0b164039538b0e5e70beadd1280181adf472287d5f91dacad483009138e215",
+                "3ef59f59e9ca4c5d5c9f0a5d24c449193818547ac7830a1681c9ec4bebbeff26",
+                "26cb0663ef37e1b11313f48f30b713de5d10f8c797f4628734e9948911c93bfc",
+            ]
+        );
+        assert_eq!(
+            module_commitments,
+            [
+                "74b2329ddbf44a010f4ebc0e26eb77e20402671917cdedbf14b7d0dd68e88af4",
+                "255b0854c2bcfa0866d7199368107b1421946ec8e70bb396a7980f5efa02ff5c",
+                "aefc2973fc6a322cb4c5f2490ae622b682eadb4559df4829cb795839e51b6a41",
+            ]
+        );
+        assert_eq!(
+            proof_hashes,
+            [
+                "d9facff41d731f5727b616744e89ae25a177a98af7d4a21dff6f400d36f13a73",
+                "d90ec5f8c33761b3ae5598cdccfe015a5b2ced653b4a6fc727dc383a1900e4e1",
+                "a906f7c024759be6003f577a1319c423ab25e71da6223a40028445d61e9396f4",
+            ]
+        );
+    }
+
+    #[test]
     fn static_committee_finalises_with_quorum() {
         let engine = committee();
         let block = block();
@@ -1072,6 +1286,38 @@ weight = 1
     }
 
     #[test]
+    fn consensus_config_commitment_is_canonical_and_mutation_sensitive() {
+        let left = ConsensusConfig::static_closed_committee(StaticCommitteeConfig {
+            validators: vec![validator("alice", 1, 1), validator("bob", 2, 2)],
+            quorum_weight: 2,
+        });
+        let reordered = ConsensusConfig::static_closed_committee(StaticCommitteeConfig {
+            validators: vec![validator("bob", 2, 2), validator("alice", 1, 1)],
+            quorum_weight: 2,
+        });
+        let changed = ConsensusConfig::static_closed_committee(StaticCommitteeConfig {
+            validators: vec![validator("alice", 1, 1), validator("bob", 2, 2)],
+            quorum_weight: 3,
+        });
+        assert_eq!(left.commitment().unwrap(), reordered.commitment().unwrap());
+        assert_ne!(left.commitment().unwrap(), changed.commitment().unwrap());
+
+        let poa_left = ConsensusConfig::proof_of_authority(ProofOfAuthorityConfig {
+            authorities: vec![
+                Authority { id: "alice".to_owned(), public_key: signer("alice", 1).ckb_public_key() },
+                Authority { id: "bob".to_owned(), public_key: signer("bob", 2).ckb_public_key() },
+            ],
+        });
+        let poa_reordered = ConsensusConfig::proof_of_authority(ProofOfAuthorityConfig {
+            authorities: vec![
+                Authority { id: "bob".to_owned(), public_key: signer("bob", 2).ckb_public_key() },
+                Authority { id: "alice".to_owned(), public_key: signer("alice", 1).ckb_public_key() },
+            ],
+        });
+        assert_ne!(poa_left.commitment().unwrap(), poa_reordered.commitment().unwrap());
+    }
+
+    #[test]
     fn selected_proof_of_authority_loads_and_dispatches_typed_seal() {
         let toml = format!(
             r#"
@@ -1091,9 +1337,9 @@ public_key = "{}"
 id = "carol"
 public_key = "{}"
 "#,
-            hex::encode(signer("alice", 1).public_key()),
-            hex::encode(signer("bob", 2).public_key()),
-            hex::encode(signer("carol", 3).public_key())
+            hex::encode(signer("alice", 1).ckb_public_key()),
+            hex::encode(signer("bob", 2).ckb_public_key()),
+            hex::encode(signer("carol", 3).ckb_public_key())
         );
         let config = ConsensusConfig::from_toml_str(&toml).unwrap();
         let engine = ProofOfAuthority::new(config.proof_of_authority.clone().unwrap()).unwrap();

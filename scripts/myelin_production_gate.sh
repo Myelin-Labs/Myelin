@@ -71,6 +71,12 @@ run_step "Run focused Myelin protocol tests" \
     -p myelin-consensus \
     -p myelin-state \
     -p myelin-mempool \
+    -p myelin-session \
+    -p myelin-session-network \
+    -p myelin-session-runtime \
+    -p myelin-session-store-rocksdb \
+    -p myelin-session-escrow \
+    -p myelin-wallet-auth \
     -p myelin-cli
 
 # 5b. run full workspace tests for state and mempool
@@ -145,15 +151,15 @@ kind = "proof-of-authority"
 
 [[proof_of_authority.authorities]]
 id = "validator-0"
-public_key = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+public_key = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
 [[proof_of_authority.authorities]]
 id = "validator-1"
-public_key = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+public_key = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
 
 [[proof_of_authority.authorities]]
 id = "validator-2"
-public_key = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+public_key = "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
 EOF
 
 run_step "Smoke: myelin-cli proof-of-authority finalise" \
@@ -271,8 +277,8 @@ def require(condition, message):
 for report, kind in ((static_report, "static-closed-committee"),
                      (poa_report, "proof-of-authority"),
                      (weighted_precommit_report, "tendermint")):
-    require(report["schema"] == "myelin-runtime-smoke-v2",
-            f"{kind} schema must be myelin-runtime-smoke-v2")
+    require(report["schema"] == "myelin-runtime-smoke",
+            f"{kind} schema must be myelin-runtime-smoke")
     require(report["consensus_kind"] == kind, f"{kind} consensus_kind")
     require(report["vm_profile"] == "no-vm-runtime-smoke", f"{kind} vm profile")
     require(isinstance(report["ckb_spawn_ipc_enabled"], bool), f"{kind} spawn/IPC flag")
@@ -714,7 +720,7 @@ try:
             check=True,
         )
         report = json.loads(out_path.read_text())
-        if report["schema"] != "myelin-session-submission-inclusion-v2":
+        if report["schema"] != "myelin-session-submission-inclusion":
             raise SystemExit("production gate failed: inclusion schema")
         if report["request_method"] != "get_transaction":
             raise SystemExit("production gate failed: inclusion method")
@@ -808,7 +814,7 @@ try:
             check=True,
         )
         report = json.loads(out_path.read_text())
-        if report["schema"] != "myelin-session-submission-stability-v2":
+        if report["schema"] != "myelin-session-submission-stability":
             raise SystemExit("production gate failed: stability schema")
         if report["request_method"] != "get_transaction":
             raise SystemExit("production gate failed: stability method")
@@ -892,7 +898,7 @@ try:
             check=True,
         )
         report = json.loads(out_path.read_text())
-        if report["schema"] != "myelin-session-submission-finality-v2":
+        if report["schema"] != "myelin-session-submission-finality":
             raise SystemExit("production gate failed: finality schema")
         if report["request_method"] != "get_tip_header":
             raise SystemExit("production gate failed: finality method")
@@ -1011,7 +1017,7 @@ try:
             check=True,
         )
         report = json.loads(out_path.read_text())
-        if report["schema"] != "myelin-session-submission-context-v2":
+        if report["schema"] != "myelin-session-submission-context":
             raise SystemExit("production gate failed: context schema")
         if report["request_method"] != "get_live_cell":
             raise SystemExit("production gate failed: context method")
@@ -1153,7 +1159,7 @@ try:
             check=True,
         )
         report = json.loads(out_path.read_text())
-        if report["schema"] != "myelin-session-submission-economics-v2":
+        if report["schema"] != "myelin-session-submission-economics":
             raise SystemExit("production gate failed: economics schema")
         if report["request_method"] != "get_live_cell":
             raise SystemExit("production gate failed: economics method")
@@ -1218,7 +1224,7 @@ for context_path, economics_path, inclusion_path, stability_path, finality_path,
         check=True,
     )
     report = json.loads(out_path.read_text())
-    if report["schema"] != "myelin-session-submission-readiness-v2":
+    if report["schema"] != "myelin-session-submission-readiness":
         raise SystemExit("production gate failed: readiness schema")
     if report["report_hashes_match"] is not True:
         raise SystemExit("production gate failed: readiness hash binding")
@@ -1253,7 +1259,7 @@ for context_path, economics_path, inclusion_path, stability_path, finality_path,
     if report.get("final_l1_script_submission_ready") is not False:
         raise SystemExit("production gate failed: readiness final L1 marker")
     policy = report["operational_policy"]
-    if policy["schema"] != "myelin-public-chain-operational-policy-v1":
+    if policy["schema"] != "myelin-public-chain-operational-policy":
         raise SystemExit("production gate failed: operational policy schema")
     if policy["mode"] != "ckb-public-chain-testnet-beta":
         raise SystemExit("production gate failed: operational policy mode")
@@ -1298,7 +1304,7 @@ def require(condition, message):
         raise SystemExit(f"production gate failed: {message}")
 
 for report, kind in ((open_static, "static-closed-committee"), (open_tm, "tendermint")):
-    require(report["schema"] == "myelin-session-open-v2", f"{kind} session open schema")
+    require(report["schema"] == "myelin-session-open", f"{kind} session open schema")
     require(report["consensus_kind"] == kind, f"{kind} session open consensus")
     require(report["vm_profile"] == "ckb-strict-basic", f"{kind} session open vm profile")
     require(report["ckb_spawn_ipc_required"] is False, f"{kind} session open spawn/IPC")
@@ -1306,7 +1312,7 @@ for report, kind in ((open_static, "static-closed-committee"), (open_tm, "tender
     require(len(report["escrow_input_cells"]) >= 1, f"{kind} escrow cells")
 
 for report, kind in ((commit_static, "static-closed-committee"), (commit_tm, "tendermint")):
-    require(report["schema"] == "myelin-session-commit-v2", f"{kind} session commit schema")
+    require(report["schema"] == "myelin-session-commit", f"{kind} session commit schema")
     require(report["consensus_kind"] == kind, f"{kind} session commit consensus")
     require(report["vm_profile"] == "ckb-strict-basic", f"{kind} session commit vm profile")
     require(report["ckb_spawn_ipc_required"] is False, f"{kind} session commit spawn/IPC")
@@ -1320,7 +1326,7 @@ for report, kind in ((commit_static, "static-closed-committee"), (commit_tm, "te
 
 for report, verify, kind in ((court_static, verify_static, "static-closed-committee"),
                              (court_tm, verify_tm, "tendermint")):
-    require(report["schema"] == "myelin-session-court-bundle-v2", f"{kind} court schema")
+    require(report["schema"] == "myelin-session-court-bundle", f"{kind} court schema")
     require(report["vm_profile"] == "ckb-strict-basic", f"{kind} court vm profile")
     require(report["ckb_spawn_ipc_required"] is False, f"{kind} court spawn/IPC")
     require(report["court_verifiable"] is False, f"{kind} court remains unverified until contextual CKB consensus evidence exists")
@@ -1332,8 +1338,8 @@ for report, verify, kind in ((court_static, verify_static, "static-closed-commit
 
 for da, verify, court, kind in ((da_static, da_verify_static, court_static, "static-closed-committee"),
                                 (da_tm, da_verify_tm, court_tm, "tendermint")):
-    require(da["schema"] == "myelin-session-da-manifest-v2", f"{kind} DA schema")
-    require(da["da_profile"] == "single-segment-merkle-v1", f"{kind} DA profile")
+    require(da["schema"] == "myelin-session-da-manifest", f"{kind} DA schema")
+    require(da["da_profile"] == "single-segment-merkle", f"{kind} DA profile")
     require(da["payload_kind"] == "session-court-molecule-transaction", f"{kind} DA payload kind")
     require(da["session_id"] == court["session_id"], f"{kind} DA session binding")
     require(da["chunk_index"] == court["chunk_index"], f"{kind} DA chunk binding")
@@ -1343,7 +1349,7 @@ for da, verify, court, kind in ((da_static, da_verify_static, court_static, "sta
     require(da["challenge_payload_hash"] == court["challenge_payload_hash"], f"{kind} DA challenge binding")
     require(da["proof_valid"] is True, f"{kind} DA proof valid")
     availability = da["availability"]
-    require(availability["schema"] == "myelin-da-availability-v1", f"{kind} DA availability schema")
+    require(availability["schema"] == "myelin-da-availability", f"{kind} DA availability schema")
     require(availability["mode"] == "fixture-replicated-committee", f"{kind} DA availability mode")
     require(availability["signature_scheme"] == "secp256k1-recoverable-blake3-pubkey-hash20", f"{kind} DA availability signature scheme")
     require(availability["required_attestations"] == 2, f"{kind} DA availability threshold")
@@ -1373,7 +1379,7 @@ for da, verify, court, kind in ((da_static, da_verify_static, court_static, "sta
 
 for anchor, verify, da, kind in ((da_anchor_static, da_anchor_verify_static, da_static, "static-closed-committee"),
                                  (da_anchor_tm, da_anchor_verify_tm, da_tm, "tendermint")):
-    require(anchor["schema"] == "myelin-session-da-anchor-package-v2", f"{kind} DA anchor schema")
+    require(anchor["schema"] == "myelin-session-da-anchor-package", f"{kind} DA anchor schema")
     require(anchor["session_id"] == da["session_id"], f"{kind} DA anchor session binding")
     require(anchor["chunk_index"] == da["chunk_index"], f"{kind} DA anchor chunk binding")
     require(anchor["consensus_kind"] == kind, f"{kind} DA anchor consensus")
@@ -1395,7 +1401,7 @@ for anchor, verify, da, kind in ((da_anchor_static, da_anchor_verify_static, da_
 
 for submit, anchor, kind in ((da_anchor_submit_static, da_anchor_static, "static-closed-committee"),
                              (da_anchor_submit_tm, da_anchor_tm, "tendermint")):
-    require(submit["schema"] == "myelin-session-da-anchor-submission-v2", f"{kind} DA anchor submit schema")
+    require(submit["schema"] == "myelin-session-da-anchor-submission", f"{kind} DA anchor submit schema")
     require(submit["dry_run"] is True, f"{kind} DA anchor submit dry-run")
     require(submit["request_method"] == "send_transaction", f"{kind} DA anchor submit method")
     require(submit["outputs_validator"] == "passthrough", f"{kind} DA anchor submit outputs validator")
@@ -1412,7 +1418,7 @@ for submit, anchor, kind in ((da_anchor_submit_static, da_anchor_static, "static
 
 for settlement, verify, court, da, kind in ((settlement_static, settlement_verify_static, court_static, da_static, "static-closed-committee"),
                                             (settlement_tm, settlement_verify_tm, court_tm, da_tm, "tendermint")):
-    require(settlement["schema"] == "myelin-session-settlement-intent-v2", f"{kind} settlement schema")
+    require(settlement["schema"] == "myelin-session-settlement-intent", f"{kind} settlement schema")
     require(settlement["kind"] == "disputed-close", f"{kind} settlement kind")
     require(settlement["session_id"] == court["session_id"], f"{kind} settlement session binding")
     require(settlement["chunk_index"] == court["chunk_index"], f"{kind} settlement chunk binding")
@@ -1427,8 +1433,8 @@ for settlement, verify, court, da, kind in ((settlement_static, settlement_verif
     require(settlement["challenge_deadline_ms"] == 60000, f"{kind} settlement challenge deadline")
     require(settlement["settlement_permitted"] is True, f"{kind} settlement permitted")
     economics = settlement["court_economics"]
-    require(economics["schema"] == "myelin-session-court-economics-v2", f"{kind} court economics schema")
-    require(economics["mode"] == "disputed-close-explicit-policy-v1", f"{kind} court economics mode")
+    require(economics["schema"] == "myelin-session-court-economics", f"{kind} court economics schema")
+    require(economics["mode"] == "disputed-close-explicit-policy", f"{kind} court economics mode")
     require(economics["escrow_binding_mode"] == "session-escrow-input-cells-hash", f"{kind} court economics escrow binding mode")
     require(economics["minimum_dispute_bond_shannons"] == 100000000, f"{kind} court economics minimum bond")
     require(economics["challenger_reward_bps"] == 5000, f"{kind} court economics challenger reward")
@@ -1459,7 +1465,7 @@ for settlement, verify, court, da, kind in ((settlement_static, settlement_verif
 
 for package, verify, settlement, court, da, kind in ((package_static, package_verify_static, settlement_static, court_static, da_static, "static-closed-committee"),
                                                      (package_tm, package_verify_tm, settlement_tm, court_tm, da_tm, "tendermint")):
-    require(package["schema"] == "myelin-session-settlement-package-v2", f"{kind} settlement package schema")
+    require(package["schema"] == "myelin-session-settlement-package", f"{kind} settlement package schema")
     require(package["session_id"] == settlement["session_id"], f"{kind} package session binding")
     require(package["chunk_index"] == settlement["chunk_index"], f"{kind} package chunk binding")
     require(package["consensus_kind"] == kind, f"{kind} package consensus")
@@ -1472,15 +1478,15 @@ for package, verify, settlement, court, da, kind in ((package_static, package_ve
     require(package["final_state_root"] == settlement["final_state_root"], f"{kind} package final root")
     authority = package["settlement_authority"]
     auth = authority["authority_authentication"]
-    require(authority["schema"] == "myelin-session-settlement-authority-v2", f"{kind} authority schema")
+    require(authority["schema"] == "myelin-session-settlement-authority", f"{kind} authority schema")
     require(len(authority["data"]) == 386, f"{kind} authority data length")
     require(len(authority["data_hash"]) == 66, f"{kind} authority data hash")
-    require(authority["data_semantics"] == "settlement-authority-lineage-v1", f"{kind} authority data semantics")
+    require(authority["data_semantics"] == "settlement-authority-lineage", f"{kind} authority data semantics")
     require(authority["session_id"] == package["session_id"], f"{kind} authority session binding")
     require(authority["participant_set_hash"] == package["participant_set_hash"], f"{kind} authority participant binding")
     require(authority["escrow_input_cells_hash"] == package["escrow_input_cells_hash"], f"{kind} authority escrow binding")
     require(authority["session_lineage_commitment"] == package["session_lineage_commitment"], f"{kind} authority lineage binding")
-    require(auth["schema"] == "myelin-session-settlement-authority-auth-v2", f"{kind} authority authentication schema")
+    require(auth["schema"] == "myelin-session-settlement-authority-auth", f"{kind} authority authentication schema")
     require(auth["mode"] == "ckb-secp256k1-blake160-multisig-all", f"{kind} authority authentication mode")
     require(auth["signature_scheme"] == "secp256k1-recoverable-blake3-message-ckb-blake160-pubkey-hash", f"{kind} authority authentication signature scheme")
     require(auth["threshold"] == 2, f"{kind} authority authentication threshold")
@@ -1521,7 +1527,7 @@ for package, verify, settlement, court, da, kind in ((package_static, package_ve
 
 for submit, package, kind in ((package_submit_static, package_static, "static-closed-committee"),
                               (package_submit_tm, package_tm, "tendermint")):
-    require(submit["schema"] == "myelin-session-settlement-submission-v2", f"{kind} settlement submit schema")
+    require(submit["schema"] == "myelin-session-settlement-submission", f"{kind} settlement submit schema")
     require(submit["dry_run"] is True, f"{kind} settlement submit dry-run")
     require(submit["request_method"] == "send_transaction", f"{kind} settlement submit method")
     require(submit["outputs_validator"] == "passthrough", f"{kind} settlement submit outputs validator")
@@ -1580,8 +1586,17 @@ import subprocess
 import sys
 
 paths = [
-    "README.md", "docs", "scripts", "cli", "consensus", "exec", "state", "mempool",
-    "crypto", "math", "core-utils",
+    "README.md", "CHANGELOG.md", "docs", "scripts", "cli", "consensus", "exec", "state", "mempool",
+    "crypto", "math", "core-utils", "ckb-adapter", "cellscript-adapter", "fixtures",
+    "session", "session-network", "session-runtime", "session-store-rocksdb", "session-escrow", "wallet-auth",
+    "website",
+]
+version_paths = [
+    *paths,
+    "MYELIN_CKB_PROJECTION_AUDIT.md",
+    "MYELIN_CKB_SEMANTIC_DEVIATIONS.md",
+    "MYELIN_PRODUCTION_REHEARSAL_REPORT.md",
+    "MYELIN_SESSION_L2_PLAN.md",
 ]
 # The production gate is allowed to name the patterns it scans for; the scan
 # itself is not subject to the scan. We exclude the gate and the audit doc
@@ -1591,6 +1606,14 @@ exclude = ("scripts/myelin_production_gate.sh", "scripts/myelin_teeworlds_accept
            "MYELIN_CKB_SEMANTIC_DEVIATIONS.md")
 
 # Forbidden vocabulary for the active Myelin tree.
+version_patterns = [
+    r"myelin[a-z0-9:+._-]*[-:]v[0-9]+([^-a-z0-9]|$)",
+    r"(single-segment-merkle|disputed-close-explicit-policy|settlement-authority-lineage|mainnet-production-court-dispute-economics|testnet-beta-court-dispute-economics)-v[0-9]+([^a-z0-9-]|$)",
+    r"ignored-v[0-9]+-binding-hash",
+    r"Script::hash_v[0-9]+",
+    r"SCRIPT_HASH_V[0-9]+",
+    r"place-entry-witness-v[0-9]+",
+]
 patterns = [
     "Spora", "spora",
     "NovaSeal", "novaseal",
@@ -1600,14 +1623,21 @@ patterns = [
     "cellscript_gate.sh",
     "novaseal_",
     "release[-_ ]note",
+    *version_patterns,
 ]
 
 failed = False
 for pattern in patterns:
-    command = ["rg", "-n", "-S", "-i", pattern, *paths]
+    # Myelin is pre-release and has one current protocol surface. The broader
+    # version scan includes authoritative root documents and rejects owned
+    # generation labels without banning upstream names such as CKB multisig-v2
+    # or the pinned CellScript witness ABI.
+    scan_paths = version_paths if pattern in version_patterns else paths
+    pattern_exclude = ("scripts/myelin_production_gate.sh",) if pattern in version_patterns else exclude
+    command = ["rg", "-n", "-S", "-i", pattern, *scan_paths]
     result = subprocess.run(command, cwd=".", text=True, capture_output=True)
     if result.returncode == 0:
-        lines = [line for line in result.stdout.splitlines() if not any(line.startswith(ex) for ex in exclude)]
+        lines = [line for line in result.stdout.splitlines() if not any(line.startswith(ex) for ex in pattern_exclude)]
         if lines:
             print(f"stale surface match for {pattern!r}:", file=sys.stderr)
             for line in lines:
@@ -1629,7 +1659,7 @@ import sys
 
 paths = [
     "README.md", "docs", "scripts", "cli", "consensus", "exec", "state", "mempool",
-    "crypto", "math", "core-utils", "Cargo.toml", "Cargo.lock",
+    "crypto", "math", "core-utils", "wallet-auth", "Cargo.toml", "Cargo.lock",
 ]
 exclude = ("scripts/myelin_production_gate.sh", "MYELIN_CKB_SEMANTIC_DEVIATIONS.md")
 patterns = [

@@ -147,9 +147,9 @@ pub struct ResolvedHeader {
 }
 
 impl VmSerializable for ResolvedHeader {
-    /// Public trait ABI version: Molecule v1.
+    /// Public trait ABI version: Molecule.
     fn abi_version() -> u16 {
-        VmAbiNegotiator::ABI_VERSION_MOLECULE_V1
+        VmAbiNegotiator::ABI_VERSION_MOLECULE
     }
 
     /// Serialize to public VM-visible bytes using Molecule.
@@ -164,9 +164,9 @@ impl VmSerializable for ResolvedHeader {
 }
 
 impl VmSerializable for ResolvedCell {
-    /// Public trait ABI version: Molecule v1.
+    /// Public trait ABI version: Molecule.
     fn abi_version() -> u16 {
-        VmAbiNegotiator::ABI_VERSION_MOLECULE_V1
+        VmAbiNegotiator::ABI_VERSION_MOLECULE
     }
 
     /// Serialize to public VM-visible bytes using Molecule.
@@ -1097,7 +1097,7 @@ mod tests {
         let provider = Arc::new(SimpleDataProvider::new());
 
         let verifier = TransactionScriptVerifier::new(tx, provider)
-            .with_abi_version(VmAbiNegotiator::ABI_VERSION_MOLECULE_V1)
+            .with_abi_version(VmAbiNegotiator::ABI_VERSION_MOLECULE)
             .expect("molecule ABI should be supported");
 
         assert_eq!(verifier.abi_format, VmAbiFormat::Molecule);
@@ -1144,7 +1144,7 @@ mod tests {
             epoch: 0x99AA_BBCC_DDEE_FF00,
             uncles_hash: [0x88; 32],
         };
-        assert_eq!(ResolvedHeader::abi_version(), VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
+        assert_eq!(ResolvedHeader::abi_version(), VmAbiNegotiator::ABI_VERSION_MOLECULE);
         let header_bytes = header.to_vm_bytes();
         assert_eq!(header_bytes, serialize_resolved_header_molecule(&header).expect("header molecule bytes"));
         assert_eq!(ResolvedHeader::from_vm_bytes(&header_bytes).expect("header roundtrip"), header);
@@ -1157,7 +1157,7 @@ mod tests {
             },
             data: Some(vec![9, 8, 7]),
         };
-        assert_eq!(ResolvedCell::abi_version(), VmAbiNegotiator::ABI_VERSION_MOLECULE_V1);
+        assert_eq!(ResolvedCell::abi_version(), VmAbiNegotiator::ABI_VERSION_MOLECULE);
         let cell_bytes = cell.to_vm_bytes();
         assert_eq!(cell_bytes, serialize_resolved_cell_molecule(&cell).expect("cell molecule bytes"));
         assert_eq!(ResolvedCell::from_vm_bytes(&cell_bytes).expect("cell roundtrip"), cell);

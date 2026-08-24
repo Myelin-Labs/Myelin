@@ -1,0 +1,21 @@
+[package]
+name = "myelin-session-store-rocksdb"
+version = "0.10.0"
+edition = "2021"
+license = "MIT"
+description = "Transactional RocksDB persistence for Myelin session chains"
+
+[dependencies]
+blake3.workspace = true
+myelin-session.workspace = true
+myelin-session-network.workspace = true
+rocksdb.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+myelin-consensus.workspace = true
+myelin-session-runtime.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

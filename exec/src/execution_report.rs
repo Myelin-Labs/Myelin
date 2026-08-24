@@ -17,7 +17,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-const EXECUTION_COMMITMENT_DOMAIN: &[u8] = b"myelin:celltx-execution-report:commitment:v2";
+const EXECUTION_COMMITMENT_DOMAIN: &[u8] = b"myelin:celltx-execution-report:commitment";
 
 /// Non-contextual execution status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,7 +120,7 @@ fn blake3_hash(bytes: &[u8]) -> [u8; 32] {
 
 fn scheduler_report_hash(txid: [u8; 32], conflict_hashes: &[[u8; 32]]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"myelin:celltx-execution-report:scheduler:v1");
+    hasher.update(b"myelin:celltx-execution-report:scheduler");
     hasher.update(&txid);
     hasher.update(&(conflict_hashes.len() as u32).to_le_bytes());
     for conflict_hash in conflict_hashes {

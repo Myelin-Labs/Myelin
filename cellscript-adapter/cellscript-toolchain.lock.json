@@ -1,5 +1,5 @@
 {
-  "schema": "myelin-cellscript-toolchain-lock-v3",
+  "schema": "myelin-cellscript-toolchain-lock",
   "repository": "https://github.com/CellScript-Labs/CellScript",
   "release_base_tag": "v0.22.0",
   "release_base_revision": "830b5971237401a74dd7848b200f48b4d2ed79f4",

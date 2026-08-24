@@ -240,29 +240,30 @@ projection.
 
 ---
 
-## ADR-007: No P2P, no daemon, no RPC server
+## ADR-007: No mandatory daemon or RPC server
 
-**Status.** Accepted.
+**Status.** Accepted; networking portion amended by ADR-009.
 
 **Context.** Most L2 designs assume P2P networking, a daemon
 process, and an RPC server.
 
-**Decision.** Myelin is a kernel + CLI. There is no daemon, no
-P2P layer, no RPC server. The committee is a configured set; the
-CLI drives the runtime.
+**Decision.** Myelin remains an embeddable kernel + CLI, without an official
+mandatory daemon or RPC server. Deployments may compose the optional
+authenticated durable session transport and runtime host from ADR-009. The
+committee remains a configured closed set.
 
 **Consequence.**
 
 - **The kernel is auditable.** One process, one input, one
   output per subcommand.
-- **Testing is straightforward.** No network state, no async
-  runtime in the spine.
+- **Testing stays bounded.** Network state and async lifecycle code remain in
+  optional edge crates rather than the deterministic execution spine.
 - **Production deployment is your choice.** Wrap Myelin in a
   daemon, run it as a serverless function, or just call the CLI
   from a script.
 
-The cost: every deployment needs to add its own networking and
-process management.
+The cost: every deployment still owns process packaging, peer discovery,
+operational policy, and any public API surface.
 
 **Alternatives considered.**
 
@@ -301,6 +302,64 @@ to Molecule.
 - **Keep legacy ABI alongside Molecule.** Compatibility, but
   invites silent drift between the two formats.
 - **Drop Molecule.** Loses the CKB compatibility story.
+
+---
+
+## ADR-009: Static consensus registration with genesis-locked selection
+
+**Status.** Accepted.
+
+**Context.** Myelin needs multiple closed-validator finality mechanisms without
+letting concrete engines leak into session execution, durable transport, or
+storage. Rust dynamic libraries would add ABI and supply-chain risk without a
+current third-party distribution requirement.
+
+**Decision.** Consensus modules are audited and statically linked into a closed
+catalog. A session selects one at runtime, then persists an immutable module
+descriptor commitment in genesis. The descriptor commits the canonical module
+name, module protocol version, finality proof schema, driver-message schema,
+WAL schema, capabilities, and exact validator/quorum configuration.
+
+The session domain owns the deterministic `FinalityVerifier` port. Concrete
+selection and adaptation belong to `myelin-session-runtime`. Proof and driver
+message codecs belong to the consensus module; transport and RocksDB treat
+their payloads as bounded opaque bytes while enforcing session/module identity.
+An embeddable supervisor provides explicit dependencies, readiness, criticality,
+panic/timeout containment, writer gating, and reverse-order shutdown. It is not
+an official full-node daemon.
+
+A session cannot hot-swap its engine, config, proof schema, message schema, or
+WAL schema. Recovery under a different descriptor fails before writable state
+is exposed. External modules and Rust dynamic-library loading are not supported.
+
+**Change boundary for a new built-in engine.** It may change:
+
+- `myelin-consensus` engine implementation, typed proof/codec, catalog entry,
+  and protocol fixtures;
+- `myelin-session-runtime` composition adapters and driver service wiring;
+- engine-specific tests and documentation.
+
+It must not require engine-specific changes in `myelin-exec`, `myelin-state`,
+`myelin-mempool`, `myelin-session`, `myelin-session-network` transport,
+`myelin-session-store-rocksdb`, or `myelin-ckb-adapter`.
+
+**Consequence.** Runtime choice remains explicit and testable, while persisted
+proofs, messages, WAL, outbox entries, and finalised records can be traced to
+one genesis-bound module. The closed enum/catalog still requires a coordinated
+Myelin release when adding an engine; this is deliberate before a stable
+external module protocol exists.
+
+**Alternatives considered.**
+
+- **Rust dynamic libraries.** Rejected for unstable ABI, allocator/runtime
+  coupling, weak crash isolation, and supply-chain complexity.
+- **Hot-swappable session engines.** Rejected because one history could acquire
+  two interpretations and unsafe recovery paths.
+- **Concrete consensus inside `myelin-session`.** Rejected because every new
+  engine would expand the session persistence and recovery blast radius.
+- **External process modules now.** Deferred until an independently released
+  module exists; any future design must pin and attest binaries and locally
+  reverify all candidate proofs.
 
 ---
 

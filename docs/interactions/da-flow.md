@@ -158,7 +158,7 @@ cargo run -p myelin-cli -- session da-manifest \
   --out reports/session-da-manifest.json
 ```
 
-The receipt must use the schema `myelin-external-da-receipt-v2`,
+The receipt must use the schema `myelin-external-da-receipt`,
 bind to the same `payload_hash` and `segment_root`, and carry a
 provider-recoverable secp256k1 signature over the receipt fields.
 

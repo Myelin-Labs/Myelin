@@ -1,0 +1,18 @@
+[package]
+name = "myelin-session-runtime"
+version = "0.10.0"
+edition = "2021"
+license = "MIT"
+description = "Embeddable composition root and lifecycle supervisor for Myelin sessions"
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+myelin-consensus.workspace = true
+myelin-session.workspace = true
+myelin-session-network.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[lints]
+workspace = true

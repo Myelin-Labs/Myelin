@@ -66,7 +66,7 @@ def main():
     chunks = fixture["chunks"]
 
     report = {
-        "schema": "myelin-teeworlds-repro-v2",
+        "schema": "myelin-teeworlds-repro",
         "teeworlds_root": TEEWORLDS_ROOT,
         "static_committee": {
             "fixture": {

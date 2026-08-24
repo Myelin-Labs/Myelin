@@ -12,8 +12,10 @@ REPORT="${REPORT:-"$WORKDIR/myelin-ckb-devnet-smoke.json"}"
 CELLSCRIPT_BIN="${CELLSCRIPT_BIN:?set CELLSCRIPT_BIN to the attested parent CellScript cellc binary}"
 CELLSCRIPT_ATTESTATION="${CELLSCRIPT_ATTESTATION:?set CELLSCRIPT_ATTESTATION to its Myelin attestation JSON}"
 ALWAYS_SUCCESS_CODE_HASH="0x28e83a1277d48add8e72fadaa9248559e1b632bab2bd60b27955ebc4c03800a5"
+MULTISIG_V2_CODE_HASH="0x36c971b8d41fbd94aabca77dc75e826729ac98447b46f91e00796155dddb0d29"
+SECP256K1_DATA_HASH="0x9799bee251b975b82c45a02154ce28cec89c5853ecc14d12b7b8cccfc19e0af4"
 GENESIS_ALWAYS_SUCCESS_DEP_INDEX="${GENESIS_ALWAYS_SUCCESS_DEP_INDEX:-0x5}"
-GENESIS_MULTISIG_DEP_GROUP_INDEX="${GENESIS_MULTISIG_DEP_GROUP_INDEX:-0x1}"
+GENESIS_MULTISIG_V2_DEP_GROUP_INDEX="${GENESIS_MULTISIG_V2_DEP_GROUP_INDEX:-0x2}"
 INITIAL_MINING_BLOCKS="${INITIAL_MINING_BLOCKS:-96}"
 COMMIT_MINING_BLOCKS="${COMMIT_MINING_BLOCKS:-8}"
 FEE_SHANNONS="${FEE_SHANNONS:-10000}"
@@ -79,6 +81,22 @@ fi
 
 mkdir -p "$WORKDIR/myelin" "$WORKDIR/specs/cells"
 
+if [[ -z "${CKB_MULTISIG_V2_BIN:-}" ]]; then
+  cellscript_root="$(cd -- "$(dirname -- "$CELLSCRIPT_BIN")/../.." && pwd)"
+  CKB_MULTISIG_V2_BIN="$(
+    cargo metadata --locked --format-version 1 --manifest-path "$cellscript_root/Cargo.toml" \
+      | jq -r '.packages[] | select(.name == "ckb-system-scripts" and .version == "0.6.0") | .manifest_path' \
+      | head -n 1
+  )"
+  if [[ -n "$CKB_MULTISIG_V2_BIN" ]]; then
+    CKB_MULTISIG_V2_BIN="$(dirname -- "$CKB_MULTISIG_V2_BIN")/specs/cells/secp256k1_blake160_multisig_all"
+  fi
+fi
+if [[ -z "${CKB_MULTISIG_V2_BIN:-}" || ! -f "$CKB_MULTISIG_V2_BIN" ]]; then
+  echo "could not locate ckb-system-scripts 0.6.0 multisig-v2 binary from the locked CellScript toolchain" >&2
+  exit 1
+fi
+
 file_hex() {
   od -An -tx1 -v "$1" | tr -d ' \n'
 }
@@ -87,6 +105,12 @@ ckb_hash_hex() {
   local hex_value="${1#0x}"
   echo "0x$("$CELLSCRIPT_BIN" ckb-hash --hex "$hex_value" --json | jq -r '.hash')"
 }
+
+multisig_v2_binary_hash="0x$("$CELLSCRIPT_BIN" ckb-hash --file "$CKB_MULTISIG_V2_BIN" --json | jq -r '.hash')"
+if [[ "$multisig_v2_binary_hash" != "$MULTISIG_V2_CODE_HASH" ]]; then
+  echo "locked multisig-v2 binary hash mismatch: expected $MULTISIG_V2_CODE_HASH, got $multisig_v2_binary_hash" >&2
+  exit 1
+fi
 
 carrier_identity_hex() {
   local payload="${1#0x}"
@@ -134,7 +158,7 @@ place_entry_witness_payload_hex() {
   local witness_json
   witness_json="$(
     cargo run --locked -q -p myelin-cellscript-adapter -- \
-      place-entry-witness-v2 "$payload_hex"
+      place-entry-witness "$payload_hex"
   )"
   if ! jq -e '
     .placement_abi == "cellscript-witnessargs-input-type-v2"
@@ -266,7 +290,7 @@ court_economics_invariant_checked="$(jq -r '.court_economics.economics_invariant
 court_economics_checked="$(jq -r '.court_economics.court_economics_checked' "$WORKDIR/myelin/session-settlement.json")"
 court_economics_testnet_ready="$(jq -r '.court_economics.testnet_beta_ready' "$WORKDIR/myelin/session-settlement.json")"
 court_economics_production_ready="$(jq -r '.court_economics.production_ready' "$WORKDIR/myelin/session-settlement.json")"
-if [[ "$court_economics_mode" != "disputed-close-explicit-policy-v1" ]]; then
+if [[ "$court_economics_mode" != "disputed-close-explicit-policy" ]]; then
   echo "court economics must expose the explicit disputed-close policy" >&2
   exit 1
 fi
@@ -304,7 +328,7 @@ da_availability_external_receipt_checked="$(jq -r '.availability.external_receip
 da_availability_external_receipt="$(jq -r '.availability.external_receipt' "$WORKDIR/myelin/session-da.json")"
 da_manifest_molecule_hash="$(jq -r '.molecule_transaction_hash' "$WORKDIR/myelin/session-da.json")"
 da_manifest_segment_root="$(jq -r '.segment_root' "$WORKDIR/myelin/session-da.json")"
-if [[ "$da_availability_schema" != "myelin-da-availability-v1" || "$da_availability_mode" != "fixture-replicated-committee" ]]; then
+if [[ "$da_availability_schema" != "myelin-da-availability" || "$da_availability_mode" != "fixture-replicated-committee" ]]; then
   echo "DA manifest did not expose fixture-replicated DA availability evidence" >&2
   exit 1
 fi
@@ -412,7 +436,7 @@ if [[ "$settlement_authority_lock_binding" != "final-da-publication-lock-hash" ]
   echo "settlement package authority lock binding must target the final DA publication lock" >&2
   exit 1
 fi
-if [[ "$settlement_authority_authentication_schema" != "myelin-session-settlement-authority-auth-v2" || "$settlement_authority_authentication_mode" != "ckb-secp256k1-blake160-multisig-all" ]]; then
+if [[ "$settlement_authority_authentication_schema" != "myelin-session-settlement-authority-auth" || "$settlement_authority_authentication_mode" != "ckb-secp256k1-blake160-multisig-all" ]]; then
   echo "settlement authority must expose canonical CKB multisig authentication evidence" >&2
   exit 1
 fi
@@ -459,6 +483,21 @@ sed \
   -e "s|file = { file = \"cells/always_success\" }|file = { file = \"$CKB_ROOT/test/template/specs/cells/always_success\" }|" \
   -e "s|file = { file = \"cells/always_failure\" }|file = { file = \"$CKB_ROOT/test/template/specs/cells/always_failure\" }|" \
   "$CKB_ROOT/test/template/specs/integration.toml" >"$WORKDIR/import-spec.toml"
+
+cp "$CKB_MULTISIG_V2_BIN" "$WORKDIR/specs/cells/secp256k1_blake160_multisig_all_v2"
+cat >>"$WORKDIR/import-spec.toml" <<EOF
+
+[[genesis.system_cells]]
+file = { file = "$WORKDIR/specs/cells/secp256k1_blake160_multisig_all_v2" }
+create_type_id = false
+
+[[genesis.dep_groups]]
+name = "secp256k1_blake160_multisig_all_v2"
+files = [
+  { bundled = "specs/cells/secp256k1_data" },
+  { file = "$WORKDIR/specs/cells/secp256k1_blake160_multisig_all_v2" }
+]
+EOF
 
 "$CKB_BIN" -C "$WORKDIR" init \
   --chain dev \
@@ -524,12 +563,50 @@ fi
 genesis_block_json="$(rpc '{"id":1,"jsonrpc":"2.0","method":"get_block_by_number","params":["0x0"]}')"
 genesis_tx_hash="$(jq -r '.result.transactions[0].hash' <<<"$genesis_block_json")"
 genesis_dep_group_tx_hash="$(jq -r '.result.transactions[1].hash' <<<"$genesis_block_json")"
-canonical_multisig_code_hash="$(
-  rpc '{"id":1,"jsonrpc":"2.0","method":"get_consensus","params":[]}' \
-    | jq -r '.result.secp256k1_blake160_multisig_all_type_hash'
-)"
-if [[ -z "$genesis_dep_group_tx_hash" || "$genesis_dep_group_tx_hash" == "null" || -z "$canonical_multisig_code_hash" || "$canonical_multisig_code_hash" == "null" ]]; then
-  echo "parent CKB genesis did not expose the canonical multisig DepGroup and consensus type hash" >&2
+canonical_multisig_code_hash="$MULTISIG_V2_CODE_HASH"
+if [[ -z "$genesis_dep_group_tx_hash" || "$genesis_dep_group_tx_hash" == "null" ]]; then
+  echo "parent CKB genesis did not expose the multisig-v2 DepGroup transaction" >&2
+  exit 1
+fi
+
+cargo run --locked -q -p myelin-cli -- session threshold-lock-deployment-evidence \
+  --package "$WORKDIR/myelin/session-settlement-package.json" \
+  --network ckb-dev \
+  --code-hash "$canonical_multisig_code_hash" \
+  --hash-type data1 \
+  --code-dep-tx-hash "$genesis_dep_group_tx_hash" \
+  --code-dep-index "$GENESIS_MULTISIG_V2_DEP_GROUP_INDEX" \
+  --code-dep-type dep_group \
+  --rpc-url "$RPC_URL" \
+  --ckb-enforceable-checked \
+  --out "$WORKDIR/myelin/threshold-lock-deployment.json"
+cp "$WORKDIR/myelin/session-settlement-package.json" "$WORKDIR/myelin/session-settlement-package.base.json"
+cargo run --locked -q -p myelin-cli -- session settlement-package \
+  --intent "$WORKDIR/myelin/session-settlement.json" \
+  --bundle "$WORKDIR/myelin/session-court.json" \
+  --da-manifest "$WORKDIR/myelin/session-da.json" \
+  --threshold-lock-deployment-evidence "$WORKDIR/myelin/threshold-lock-deployment.json" \
+  --out "$WORKDIR/myelin/session-settlement-package.json"
+cargo run --locked -q -p myelin-cli -- session verify-settlement-package \
+  --package "$WORKDIR/myelin/session-settlement-package.json" \
+  --intent "$WORKDIR/myelin/session-settlement.json" \
+  --bundle "$WORKDIR/myelin/session-court.json" \
+  --da-manifest "$WORKDIR/myelin/session-da.json" \
+  --out "$WORKDIR/myelin/session-settlement-package-verify.json"
+if [[ "$(jq -r '.valid' "$WORKDIR/myelin/session-settlement-package-verify.json")" != "true" ]]; then
+  echo "multisig-v2-bound settlement package did not verify" >&2
+  exit 1
+fi
+if [[ "$(jq -r '.settlement_authority.data' "$WORKDIR/myelin/session-settlement-package.json")" != "$settlement_authority_data" ]]; then
+  echo "binding multisig-v2 deployment evidence changed the settlement authority lineage data" >&2
+  exit 1
+fi
+settlement_authority_authentication="$(jq -c '.settlement_authority.authority_authentication' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_authentication_enforceable="$(jq -r '.settlement_authority.authority_authentication.ckb_enforceable' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_authentication_testnet_ready="$(jq -r '.settlement_authority.authority_authentication.testnet_beta_ready' "$WORKDIR/myelin/session-settlement-package.json")"
+settlement_authority_authentication_production_ready="$(jq -r '.settlement_authority.authority_authentication.production_ready' "$WORKDIR/myelin/session-settlement-package.json")"
+if [[ "$settlement_authority_authentication_enforceable" != "true" || "$settlement_authority_authentication_testnet_ready" != "false" || "$settlement_authority_authentication_production_ready" != "false" ]]; then
+  echo "devnet settlement package must bind checked multisig-v2 evidence without claiming public-testnet or production readiness" >&2
   exit 1
 fi
 
@@ -620,7 +697,7 @@ jq -n \
           },
           {
             capacity: $settlement_authority_capacity,
-            lock: { code_hash: $canonical_multisig_code_hash, hash_type: "type", args: $settlement_authority_lock_args },
+            lock: { code_hash: $canonical_multisig_code_hash, hash_type: "data1", args: $settlement_authority_lock_args },
             type: null
           },
           {
@@ -694,8 +771,8 @@ fi
 committed_canonical_settlement_authority_data="$(jq -r '.result.transaction.outputs_data[6]' "$deploy_get_tx_path")"
 committed_canonical_settlement_authority_lock_code_hash="$(jq -r '.result.transaction.outputs[6].lock.code_hash' "$deploy_get_tx_path")"
 committed_canonical_settlement_authority_lock_hash_type="$(jq -r '.result.transaction.outputs[6].lock.hash_type' "$deploy_get_tx_path")"
-if [[ "$committed_canonical_settlement_authority_data" != "$settlement_authority_data" || "$committed_canonical_settlement_authority_lock_code_hash" != "$canonical_multisig_code_hash" || "$committed_canonical_settlement_authority_lock_hash_type" != "type" ]]; then
-  echo "committed canonical settlement authority Cell does not match the parent CKB multisig system script" >&2
+if [[ "$committed_canonical_settlement_authority_data" != "$settlement_authority_data" || "$committed_canonical_settlement_authority_lock_code_hash" != "$canonical_multisig_code_hash" || "$committed_canonical_settlement_authority_lock_hash_type" != "data1" ]]; then
+  echo "committed canonical settlement authority Cell does not match the parent CKB multisig-v2 system script" >&2
   exit 1
 fi
 
@@ -732,25 +809,25 @@ submit_and_verify_carrier() {
 
   local verifier_source verifier_action verifier_code_hash_for_carrier verifier_code_dep_index_for_carrier
   case "$verifier_role:$package_kind" in
-    carrier:myelin-session-da-anchor-package-v2)
+    carrier:myelin-session-da-anchor-package)
       verifier_source="da-anchor-carrier.cell"
       verifier_action="verify_da_anchor_carrier"
       verifier_code_hash_for_carrier="$da_verifier_code_hash"
       verifier_code_dep_index_for_carrier="$da_verifier_code_dep_index"
       ;;
-    carrier:myelin-session-settlement-package-v2)
+    carrier:myelin-session-settlement-package)
       verifier_source="settlement-carrier.cell"
       verifier_action="verify_settlement_carrier"
       verifier_code_hash_for_carrier="$settlement_verifier_code_hash"
       verifier_code_dep_index_for_carrier="$settlement_verifier_code_dep_index"
       ;;
-    final-l1-script:myelin-session-da-anchor-package-v2)
+    final-l1-script:myelin-session-da-anchor-package)
       verifier_source="da-anchor-final.cell"
       verifier_action="verify_final_da_publication"
       verifier_code_hash_for_carrier="$da_final_verifier_code_hash"
       verifier_code_dep_index_for_carrier="$da_final_verifier_code_dep_index"
       ;;
-    final-l1-script:myelin-session-settlement-package-v2)
+    final-l1-script:myelin-session-settlement-package)
       verifier_source="settlement-final.cell"
       verifier_action="verify_final_settlement"
       verifier_code_hash_for_carrier="$settlement_final_verifier_code_hash"
@@ -767,11 +844,11 @@ submit_and_verify_carrier() {
   local lock_code_dep_index="$GENESIS_ALWAYS_SUCCESS_DEP_INDEX"
   local lock_code_dep_type="code"
   local multisig_signer_args=()
-  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v2" ]]; then
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package" ]]; then
     lock_code_hash="$canonical_multisig_code_hash"
-    lock_hash_type="type"
+    lock_hash_type="data1"
     lock_code_dep_tx_hash="$genesis_dep_group_tx_hash"
-    lock_code_dep_index="$GENESIS_MULTISIG_DEP_GROUP_INDEX"
+    lock_code_dep_index="$GENESIS_MULTISIG_V2_DEP_GROUP_INDEX"
     lock_code_dep_type="dep_group"
     multisig_signer_args+=(
       --multisig-signer-secret-key "$SETTLEMENT_MULTISIG_SIGNER_0_SECRET_KEY"
@@ -780,9 +857,9 @@ submit_and_verify_carrier() {
   fi
   local output_lock_code_hash="$lock_code_hash"
   local output_lock_hash_type="$lock_hash_type"
-  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-da-anchor-package-v2" ]]; then
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-da-anchor-package" ]]; then
     output_lock_code_hash="$canonical_multisig_code_hash"
-    output_lock_hash_type="type"
+    output_lock_hash_type="data1"
   fi
   local summary_suffix expected_readiness_mode expected_live_carrier_ready expected_final_l1_ready
   if [[ "$verifier_role" == "final-l1-script" ]]; then
@@ -885,7 +962,7 @@ submit_and_verify_carrier() {
   carrier_type_args="$(jq -r '.carrier_type_args' "$dry_run_submission_path")"
 
   local witness_args=("$carrier_type_args")
-  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v2" ]]; then
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package" ]]; then
     if [[ -z "${da_anchor_final_type_args:-}" ]]; then
       echo "$label final settlement witness requires da_anchor_final_type_args" >&2
       exit 1
@@ -894,13 +971,13 @@ submit_and_verify_carrier() {
   fi
   local witness_payload_hex witness_hex
   witness_payload_hex="$(entry_witness_payload_hex "$verifier_source_path" "$verifier_action" "${witness_args[@]}")"
-  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v2" ]]; then
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package" ]]; then
     witness_hex="$witness_payload_hex"
   else
     witness_hex="$(place_entry_witness_payload_hex "$witness_payload_hex")"
   fi
 
-  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v2" ]]; then
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package" ]]; then
     local session_id_hash settlement_identity_hash competing_payload competing_identity_hash competing_type_args
     local competing_output_capacity competing_change_capacity competing_change_capacity_hex
     session_id_hash="$(jq -r '.session_id_hash' "$dry_run_submission_path")"
@@ -1015,7 +1092,7 @@ PY
       --arg error_code "$(jq -r '.error.code' "$competing_response_path")" \
       --arg error_message "$(jq -r '.error.message' "$competing_response_path")" \
       '{
-        schema: "myelin-ckb-devnet-settlement-replay-rejection-v1",
+        schema: "myelin-ckb-devnet-settlement-replay-rejection",
         label: $label,
         replay_probe: "competing-final-settlement-output-same-transaction",
         session_id_hash: $session_id_hash,
@@ -1090,7 +1167,7 @@ PY
   session_id_hash="$(jq -r '.session_id_hash // empty' "$submission_path")"
   duplicate_settlement_detected="$(jq -r '.duplicate_settlement_detected' "$submission_path")"
   replay_protection_mode="$(jq -r '.replay_protection_mode // empty' "$submission_path")"
-  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package-v2" ]]; then
+  if [[ "$verifier_role:$package_kind" == "final-l1-script:myelin-session-settlement-package" ]]; then
     if [[ "$pre_submit_evidence_cell_dep_lock_matches" != "true" ]] \
       || [[ "$pre_submit_authority_input_data_hash_matches" != "true" ]] \
       || [[ "$pre_submit_authority_input_lock_matches" != "true" ]] \
@@ -1213,7 +1290,7 @@ PY
     jq . "$readiness_path" >&2
     exit 1
   fi
-  if [[ "$operational_policy_schema" != "myelin-public-chain-operational-policy-v1" ]] \
+  if [[ "$operational_policy_schema" != "myelin-public-chain-operational-policy" ]] \
     || [[ "$operational_public_chain_ready" != "true" ]] \
     || [[ "$operational_operator_custody_checked" != "false" ]] \
     || [[ "$operational_operator_runbook_checked" != "false" ]] \
@@ -1237,12 +1314,12 @@ PY
       echo "final L1 readiness must not carry the final-l1-script-not-ready blocker" >&2
       exit 1
     fi
-    if [[ "$package_kind" == "myelin-session-da-anchor-package-v2" ]] \
+    if [[ "$package_kind" == "myelin-session-da-anchor-package" ]] \
       && ! jq -e 'index("real-da-availability-guarantee-missing")' <<<"$end_to_end_production_blockers" >/dev/null; then
       echo "final DA readiness must expose the real DA availability production blocker" >&2
       exit 1
     fi
-    if [[ "$package_kind" == "myelin-session-settlement-package-v2" ]] \
+    if [[ "$package_kind" == "myelin-session-settlement-package" ]] \
       && ! jq -e 'index("real-da-availability-guarantee-missing") and index("canonical-threshold-lock-enforcement-missing") and index("ckb-court-dispute-economics-missing")' <<<"$end_to_end_production_blockers" >/dev/null; then
       echo "final settlement readiness must expose DA, threshold-lock, and court-economics production blockers" >&2
       exit 1
@@ -1402,13 +1479,13 @@ assert_tampered_carrier_rejected() {
 
   local verifier_source verifier_action verifier_code_hash_for_carrier verifier_code_dep_index_for_carrier
   case "$package_kind" in
-    myelin-session-da-anchor-package-v2)
+    myelin-session-da-anchor-package)
       verifier_source="da-anchor-carrier.cell"
       verifier_action="verify_da_anchor_carrier"
       verifier_code_hash_for_carrier="$da_verifier_code_hash"
       verifier_code_dep_index_for_carrier="$da_verifier_code_dep_index"
       ;;
-    myelin-session-settlement-package-v2)
+    myelin-session-settlement-package)
       verifier_source="settlement-carrier.cell"
       verifier_action="verify_settlement_carrier"
       verifier_code_hash_for_carrier="$settlement_verifier_code_hash"
@@ -1549,7 +1626,7 @@ PY
     --arg error_code "$(jq -r '.error.code' "$response_path")" \
     --arg error_message "$(jq -r '.error.message' "$response_path")" \
     '{
-      schema: "myelin-ckb-devnet-tamper-rejection-v1",
+      schema: "myelin-ckb-devnet-tamper-rejection",
       label: $label,
       input_tx_hash: $input_tx_hash,
       input_index: $input_index,
@@ -1577,7 +1654,7 @@ PY
 
 submit_and_verify_carrier \
   "da-anchor" \
-  "myelin-session-da-anchor-package-v2" \
+  "myelin-session-da-anchor-package" \
   "$WORKDIR/myelin/session-da-anchor.json" \
   "$funding_tx_hash" \
   "0x0" \
@@ -1593,7 +1670,7 @@ da_anchor_carrier_payload="$(jq -r '.carrier_payload' "$WORKDIR/da-anchor-carrie
 
 assert_tampered_carrier_rejected \
   "da-anchor" \
-  "myelin-session-da-anchor-package-v2" \
+  "myelin-session-da-anchor-package" \
   "$da_anchor_tx_hash" \
   "$da_anchor_output_index" \
   "$da_anchor_output_capacity" \
@@ -1601,7 +1678,7 @@ assert_tampered_carrier_rejected \
 
 submit_and_verify_carrier \
   "settlement" \
-  "myelin-session-settlement-package-v2" \
+  "myelin-session-settlement-package" \
   "$WORKDIR/myelin/session-settlement-package.json" \
   "$da_anchor_change_tx_hash" \
   "$da_anchor_change_index" \
@@ -1617,7 +1694,7 @@ settlement_carrier_payload="$(jq -r '.carrier_payload' "$WORKDIR/settlement-carr
 
 assert_tampered_carrier_rejected \
   "settlement" \
-  "myelin-session-settlement-package-v2" \
+  "myelin-session-settlement-package" \
   "$settlement_tx_hash" \
   "$settlement_output_index" \
   "$settlement_output_capacity" \
@@ -1625,7 +1702,7 @@ assert_tampered_carrier_rejected \
 
 submit_and_verify_carrier \
   "da-anchor-final" \
-  "myelin-session-da-anchor-package-v2" \
+  "myelin-session-da-anchor-package" \
   "$WORKDIR/myelin/session-da-anchor.json" \
   "$settlement_change_tx_hash" \
   "$settlement_change_index" \
@@ -1650,7 +1727,7 @@ da_anchor_final_type_args="$(jq -r '.carrier_verifier.output_type_script_args' "
 
 submit_and_verify_carrier \
   "settlement-final" \
-  "myelin-session-settlement-package-v2" \
+  "myelin-session-settlement-package" \
   "$WORKDIR/myelin/session-settlement-package.json" \
   "$da_anchor_final_change_tx_hash" \
   "$da_anchor_final_change_index" \
@@ -1666,7 +1743,7 @@ submit_and_verify_carrier \
   "$settlement_authority_lock_args"
 
 jq -n \
-  --arg schema "myelin-ckb-devnet-smoke-v2" \
+  --arg schema "myelin-ckb-devnet-smoke" \
   --arg ckb_root "$CKB_ROOT" \
   --arg ckb_version "$("$CKB_BIN" --version)" \
   --arg rpc_url "$RPC_URL" \
@@ -1780,7 +1857,7 @@ jq -n \
         capacity: $settlement_authority_capacity,
         data: $settlement_authority_data,
         data_hash: $settlement_authority_data_hash,
-        data_semantics: "settlement-authority-lineage-v1",
+        data_semantics: "settlement-authority-lineage",
         session_id: $settlement_authority_session_id,
         participant_set_hash: $settlement_authority_participant_set_hash,
         escrow_input_cells_hash: $settlement_authority_escrow_input_cells_hash,

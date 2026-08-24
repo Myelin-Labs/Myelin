@@ -202,7 +202,7 @@ pub fn compute_merkle_root_from_leaves(leaves: &[[u8; 32]]) -> [u8; 32] {
         // Domain-separated empty root so a size-0 segment cannot be
         // confused with the all-zero "unwritten" sentinel used elsewhere.
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"myelin-empty-merkle-root/v1");
+        hasher.update(b"myelin-empty-merkle-root");
         return *hasher.finalize().as_bytes();
     }
 

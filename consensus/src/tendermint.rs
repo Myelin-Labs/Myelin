@@ -8,15 +8,19 @@
 //! scheduling stay outside this deterministic state machine.
 
 use super::{
-    verify_schnorr, CommitteeSigner, ConsensusError, FinalisedWeightedPrecommitBlock, Hash32, MyelinBlock, Result, Signature64,
-    WeightedPrecommit, WeightedPrecommitCertificate,
+    verify_schnorr, CommitteeSigner, ConsensusError, EncodedConsensusMessage, FinalisedWeightedPrecommitBlock, Hash32, MyelinBlock,
+    Result, Signature64, WeightedPrecommit, WeightedPrecommitCertificate, CONSENSUS_MESSAGE_FORMAT_VERSION,
 };
 use secp256k1::{Keypair, Message, Secp256k1};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-const PROPOSAL_DOMAIN: &[u8] = b"myelin:tendermint-proposal:v1";
-const VOTE_DOMAIN: &[u8] = b"myelin:tendermint-vote:v1";
+const PROPOSAL_DOMAIN: &[u8] = b"myelin:tendermint-proposal";
+const VOTE_DOMAIN: &[u8] = b"myelin:tendermint-vote";
+const MAX_DRIVER_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+const PROPOSAL_MESSAGE_TAG: u32 = 1;
+const PREVOTE_MESSAGE_TAG: u32 = 2;
+const PRECOMMIT_MESSAGE_TAG: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -60,6 +64,83 @@ pub struct TendermintDecision {
     pub round: u32,
     pub block_hash: Hash32,
     pub precommits: Vec<TendermintVote>,
+}
+
+/// Tendermint-owned message variants. The network transport sees only the
+/// encoded version, tag, and bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TendermintDriverMessage {
+    Proposal(TendermintProposal),
+    Prevote(TendermintVote),
+    Precommit(TendermintVote),
+}
+
+impl TendermintDriverMessage {
+    /// Encode one message for a module-neutral authenticated transport.
+    pub fn encode(&self) -> Result<EncodedConsensusMessage> {
+        let (type_tag, payload) = match self {
+            Self::Proposal(proposal) => (PROPOSAL_MESSAGE_TAG, serde_json::to_vec(proposal).map_err(message_codec)?),
+            Self::Prevote(vote) => {
+                ensure_vote_step(vote, TendermintStep::Prevote)?;
+                (PREVOTE_MESSAGE_TAG, serde_json::to_vec(vote).map_err(message_codec)?)
+            }
+            Self::Precommit(vote) => {
+                ensure_vote_step(vote, TendermintStep::Precommit)?;
+                (PRECOMMIT_MESSAGE_TAG, serde_json::to_vec(vote).map_err(message_codec)?)
+            }
+        };
+        if payload.len() > MAX_DRIVER_MESSAGE_BYTES {
+            return Err(ConsensusError::MessageCodec(format!("Tendermint driver message exceeds {MAX_DRIVER_MESSAGE_BYTES} bytes")));
+        }
+        Ok(EncodedConsensusMessage { format_version: CONSENSUS_MESSAGE_FORMAT_VERSION, type_tag, payload })
+    }
+
+    /// Strictly decode a module-neutral transport frame.
+    pub fn decode(encoded: &EncodedConsensusMessage) -> Result<Self> {
+        if encoded.format_version != CONSENSUS_MESSAGE_FORMAT_VERSION {
+            return Err(ConsensusError::MessageCodec(format!(
+                "unsupported Tendermint message format version {}",
+                encoded.format_version
+            )));
+        }
+        if encoded.payload.is_empty() || encoded.payload.len() > MAX_DRIVER_MESSAGE_BYTES {
+            return Err(ConsensusError::MessageCodec(format!(
+                "Tendermint driver payload size must be 1..={MAX_DRIVER_MESSAGE_BYTES} bytes"
+            )));
+        }
+        let message = match encoded.type_tag {
+            PROPOSAL_MESSAGE_TAG => Self::Proposal(serde_json::from_slice(&encoded.payload).map_err(message_codec)?),
+            PREVOTE_MESSAGE_TAG => {
+                let vote: TendermintVote = serde_json::from_slice(&encoded.payload).map_err(message_codec)?;
+                ensure_vote_step(&vote, TendermintStep::Prevote)?;
+                Self::Prevote(vote)
+            }
+            PRECOMMIT_MESSAGE_TAG => {
+                let vote: TendermintVote = serde_json::from_slice(&encoded.payload).map_err(message_codec)?;
+                ensure_vote_step(&vote, TendermintStep::Precommit)?;
+                Self::Precommit(vote)
+            }
+            other => return Err(ConsensusError::MessageCodec(format!("unknown Tendermint message type tag {other}"))),
+        };
+        if message.encode()? != *encoded {
+            return Err(ConsensusError::MessageCodec("Tendermint message encoding is not canonical".to_owned()));
+        }
+        Ok(message)
+    }
+}
+
+fn ensure_vote_step(vote: &TendermintVote, expected: TendermintStep) -> Result<()> {
+    if vote.step != expected {
+        return Err(ConsensusError::MessageCodec(format!("Tendermint message tag requires {expected:?}, got {:?}", vote.step)));
+    }
+    if vote.signature.len() != 64 {
+        return Err(ConsensusError::MessageCodec("Tendermint vote signature must be exactly 64 bytes".to_owned()));
+    }
+    Ok(())
+}
+
+fn message_codec(error: impl std::fmt::Display) -> ConsensusError {
+    ConsensusError::MessageCodec(error.to_string())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -634,5 +715,22 @@ mod tests {
 
         let _ = SecretKey::from_slice(&[1; 32]).unwrap();
         let _ = XOnlyPublicKey::from_slice(&signer("alice", 1).public_key()).unwrap();
+    }
+
+    #[test]
+    fn driver_message_codec_is_module_owned_canonical_and_tag_strict() {
+        let engine = engine();
+        let vote = engine.vote_from_signer(8, 2, TendermintStep::Prevote, Some([7; 32]), &signer("alice", 1)).unwrap();
+        let message = TendermintDriverMessage::Prevote(vote);
+        let encoded = message.encode().unwrap();
+        assert_eq!(TendermintDriverMessage::decode(&encoded).unwrap(), message);
+
+        let mut wrong_tag = encoded.clone();
+        wrong_tag.type_tag = 999;
+        assert!(matches!(TendermintDriverMessage::decode(&wrong_tag), Err(ConsensusError::MessageCodec(_))));
+
+        let mut noncanonical = encoded;
+        noncanonical.payload.push(b'\n');
+        assert!(matches!(TendermintDriverMessage::decode(&noncanonical), Err(ConsensusError::MessageCodec(_))));
     }
 }

@@ -220,10 +220,10 @@ verdict is "accept." This is the shape Myelin is building toward.
 The state crate also produces operational artefacts that the
 submission readiness step aggregates:
 
-- `--operator-custody-policy` (`myelin-operator-custody-policy-v1`):
+- `--operator-custody-policy` (`myelin-operator-custody-policy`):
   hardware-backed keys, dual-control signing, rotation drills,
   signing threshold.
-- `--operator-runbook` (`myelin-operator-runbook-v1`): confirmation
+- `--operator-runbook` (`myelin-operator-runbook`): confirmation
   depth, stability requery, bounded retries, monitoring cadence,
   escalation contact.
 

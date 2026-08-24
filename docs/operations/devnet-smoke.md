@@ -46,7 +46,7 @@ flowchart TB
     J["Submit tampered carrier<br/>(must be REJECTED)"]:::sm
     K["Deploy final DA +<br/>final settlement verifiers"]:::dev
     L["Submit final-script<br/>transactions"]:::sm
-    M["Emit<br/>myelin-ckb-devnet-smoke-v2<br/>report"]:::out
+    M["Emit<br/>myelin-ckb-devnet-smoke<br/>report"]:::out
 
     A --> B --> C --> D
     C --> E
@@ -167,17 +167,19 @@ The transaction-local singleton creation + cross-transaction
 replay protection (through the consumed authority Cell) is the
 **current CKB-compatible anti-replay model**.
 
-The script constructs and verifies secp256k1 participant signatures and
-deterministic threshold-lock args. Final-script submission requires
-the consumed authority Cell to use those declared lock args and
-exposes an `authority_threshold_lock_deployment_checked` readiness
-marker when the live lock code dep plus final DA and authority
-cells all match.
+The script resolves the exact `ckb-system-scripts` 0.6.0 multisig-v2 binary
+from the locked CellScript toolchain, verifies its data hash, and injects that
+binary plus an ordered secp-data/multisig-v2 DepGroup into the parent CKB
+integration genesis. Session final DA and final settlement locks use
+`hash_type=data1`.
 
-The smoke does not deploy a canonical threshold-enforcing lock; its
-devnet funding lock remains an integration fixture. Consequently the
-package-level authority stays `ckb_enforceable = false`, and the report
-retains `canonical-threshold-lock-enforcement-missing`.
+After the node starts, the smoke derives checked deployment evidence from the
+live genesis Cells, binds it into the Session package, and requires
+`ckb_enforceable = true` for the devnet authority without claiming public
+testnet or production readiness. The final settlement consumes the canonical
+multisig-v2 authority Cell, verifies the 2-of-3 witness, and exposes an
+`authority_threshold_lock_deployment_checked` marker only after the live lock
+DepGroup, final DA Cell, and authority Cell all match.
 
 ## Court economics deployment
 
@@ -205,7 +207,7 @@ Without it, the intent stays at the testnet-beta level.
 
 ## The report
 
-The script emits `myelin-ckb-devnet-smoke-v2`, which proves:
+The script emits `myelin-ckb-devnet-smoke`, which proves:
 
 ```text
 devnet CKB acceptance            -> true

@@ -87,11 +87,11 @@ flowchart LR
         I5["AI agent service receipts"]:::ok
     end
     subgraph VIA["Viable (Tier 2 — needs more)"]
-        V1["Cross-org IoT"]:::warn
-        V2["Batch auctions"]:::warn
-        V3["Supply-chain receipts"]:::warn
-        V4["Usage-based billing"]:::warn
-        V5["Small MP tournament economy"]:::warn
+        W1["Cross-org IoT"]:::warn
+        W2["Batch auctions"]:::warn
+        W3["Supply-chain receipts"]:::warn
+        W4["Usage-based billing"]:::warn
+        W5["Small MP tournament economy"]:::warn
     end
     subgraph OUT["Out of scope (Tier 3)"]
         O1["HFT matching engine"]:::no

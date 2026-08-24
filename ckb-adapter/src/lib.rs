@@ -19,13 +19,13 @@ use std::{
     time::Duration,
 };
 
-const CONTEXT_SCHEMA: &str = "myelin-ckb-context-resolved-v1";
-const CONSENSUS_SCHEMA: &str = "myelin-ckb-consensus-validated-v1";
-const SCRIPTS_SCHEMA: &str = "myelin-ckb-scripts-verified-v1";
-const NODE_SCHEMA: &str = "myelin-ckb-node-accepted-v1";
-const COMMITTED_SCHEMA: &str = "myelin-ckb-committed-v1";
-const FINALITY_SCHEMA: &str = "myelin-ckb-finalized-v1";
-const PROJECTION_SCHEMA: &str = "myelin-ckb-evidence-projection-v1";
+const CONTEXT_SCHEMA: &str = "myelin-ckb-context-resolved";
+const CONSENSUS_SCHEMA: &str = "myelin-ckb-consensus-validated";
+const SCRIPTS_SCHEMA: &str = "myelin-ckb-scripts-verified";
+const NODE_SCHEMA: &str = "myelin-ckb-node-accepted";
+const COMMITTED_SCHEMA: &str = "myelin-ckb-committed";
+const FINALITY_SCHEMA: &str = "myelin-ckb-finalized";
+const PROJECTION_SCHEMA: &str = "myelin-ckb-evidence-projection";
 
 struct CkbMerkleMerge;
 
@@ -1324,7 +1324,7 @@ fn hash_hex(hash: &[u8; 32]) -> String {
 
 fn canonical_json_hash(value: &Value) -> [u8; 32] {
     let canonical = canonicalize_json(value);
-    domain_hash(b"myelin:ckb-canonical-json:v1", &serde_json::to_vec(&canonical).expect("JSON value serialization cannot fail"))
+    domain_hash(b"myelin:ckb-canonical-json", &serde_json::to_vec(&canonical).expect("JSON value serialization cannot fail"))
 }
 
 fn canonicalize_json(value: &Value) -> Value {
@@ -1340,7 +1340,7 @@ fn canonicalize_json(value: &Value) -> Value {
 
 fn context_commitment(receipt: &ContextResolvedReceipt) -> [u8; 32] {
     hash_serializable(
-        b"myelin:ckb-context-resolved-receipt:v1",
+        b"myelin:ckb-context-resolved-receipt",
         &(
             &receipt.schema,
             &receipt.chain,
@@ -1358,7 +1358,7 @@ fn context_commitment(receipt: &ContextResolvedReceipt) -> [u8; 32] {
 
 fn consensus_commitment(receipt: &ConsensusValidatedReceipt) -> [u8; 32] {
     hash_serializable(
-        b"myelin:ckb-consensus-validated-receipt:v1",
+        b"myelin:ckb-consensus-validated-receipt",
         &(
             &receipt.schema,
             receipt.context_commitment,
@@ -1373,7 +1373,7 @@ fn consensus_commitment(receipt: &ConsensusValidatedReceipt) -> [u8; 32] {
 
 fn scripts_commitment(receipt: &ScriptsVerifiedReceipt) -> [u8; 32] {
     hash_serializable(
-        b"myelin:ckb-scripts-verified-receipt:v1",
+        b"myelin:ckb-scripts-verified-receipt",
         &(
             &receipt.schema,
             receipt.consensus_receipt_commitment,
@@ -1388,7 +1388,7 @@ fn scripts_commitment(receipt: &ScriptsVerifiedReceipt) -> [u8; 32] {
 
 fn node_commitment(receipt: &NodeAcceptedReceipt) -> [u8; 32] {
     hash_serializable(
-        b"myelin:ckb-node-accepted-receipt:v1",
+        b"myelin:ckb-node-accepted-receipt",
         &(
             &receipt.schema,
             receipt.scripts_receipt_commitment,
@@ -1404,7 +1404,7 @@ fn node_commitment(receipt: &NodeAcceptedReceipt) -> [u8; 32] {
 
 fn committed_commitment(receipt: &CommittedReceipt) -> [u8; 32] {
     hash_serializable(
-        b"myelin:ckb-committed-receipt:v1",
+        b"myelin:ckb-committed-receipt",
         &(
             &receipt.schema,
             receipt.node_receipt_commitment,
@@ -1419,7 +1419,7 @@ fn committed_commitment(receipt: &CommittedReceipt) -> [u8; 32] {
 
 fn finalized_commitment(receipt: &FinalizedReceipt) -> [u8; 32] {
     hash_serializable(
-        b"myelin:ckb-finalized-receipt:v1",
+        b"myelin:ckb-finalized-receipt",
         &(
             &receipt.schema,
             receipt.committed_receipt_commitment,

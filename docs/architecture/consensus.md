@@ -9,8 +9,11 @@ Myelin finalises finite-session `MyelinBlock`s with one of three configured engi
   prevote, precommit, locking, nil votes, round changes, and a final
   precommit decision certificate.
 
-All use secp256k1 Schnorr signatures with distinct domains. They are
-closed-validator mechanisms, not permissionless consensus protocols.
+Static committee and Tendermint use secp256k1 Schnorr signatures with distinct
+domains. PoA deliberately uses the standard CKB identity shape: compressed
+secp256k1 public keys, CKB-personalized Blake2b-256, Blake160 lock args, and a
+65-byte compact recoverable ECDSA seal. These are closed-validator mechanisms,
+not permissionless consensus protocols.
 
 | Engine | Finality proof | Safety assumption | Typical use |
 | --- | --- | --- | --- |
@@ -22,13 +25,34 @@ The public dispatch type is `FinalityProof`. Its three variants are structurally
 different, so a PoA seal cannot be silently interpreted as a committee
 certificate or Tendermint decision.
 
+## Registration and durable identity
+
+The three engines are compiled into a closed `ConsensusCatalog` and selected at
+session creation. This is runtime selection, not dynamic code loading. Each
+validated config produces a `ConsensusModuleDescriptor` that commits the module
+protocol version, proof/message/WAL schemas, capabilities, consensus kind, and
+exact validator or authority configuration. Session genesis locks that module
+commitment and its WAL schema for the lifetime of the chain.
+
+`myelin-session` depends only on its own `FinalityVerifier` port. The concrete
+`SelectedConsensus` adapter lives in `myelin-session-runtime`; both live commit
+and recovery audit verify the exact canonical block hash and module commitment.
+Finality proofs use a consensus-owned versioned canonical envelope, and the
+session persistence layer no longer maintains one wire struct per engine.
+
+Tendermint proposal/prevote/precommit encoding is likewise owned by the
+Tendermint module. The network envelope carries only a module commitment,
+message format version, opaque type tag, payload hash, and authenticated routing
+fields. RocksDB rejects cross-module network replay and WAL whose
+module/config/schema differs from genesis.
+
 ## Proof-of-authority configuration
 
 Authority order is consensus-critical. For `N` configured authorities:
 
 ```text
 scheduled_authority(height) = authorities[height mod N]
-seal_digest = BLAKE3(domain || height || authority_id || block_hash)
+seal_digest = CKB_BLAKE2B_256(canonical(domain, height, authority_id, block_hash))
 ```
 
 ```toml
@@ -38,11 +62,11 @@ kind = "proof-of-authority"
 
 [[proof_of_authority.authorities]]
 id = "validator-0"
-public_key = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+public_key = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
 [[proof_of_authority.authorities]]
 id = "validator-1"
-public_key = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+public_key = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
 ```
 
 The engine rejects empty sets, duplicate ids or keys, invalid keys, the wrong
@@ -99,8 +123,9 @@ stateDiagram-v2
     NextRound --> Propose: retain lock and valid value
 ```
 
-`TendermintRoundState` is serializable and is the WAL boundary before signing
-the next message. It retains `locked_value/locked_round` and
+`TendermintRoundState` is serializable and is the module-owned WAL payload
+before signing the next message. The surrounding WAL record binds its module,
+validator config, schema, revision, and payload hash. The state retains `locked_value/locked_round` and
 `valid_value/valid_round`, rejects proposal/vote equivocation, and verifies a
 proposal's `valid_round` against retained prevote quorum evidence. Networking,
 peer discovery, timeout scheduling, validator-set changes, and durable WAL I/O

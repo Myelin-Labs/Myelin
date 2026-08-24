@@ -48,7 +48,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             })?;
             println!("{}", serde_json::to_string(&result)?);
         }
-        Some("place-entry-witness-v2") => {
+        Some("place-entry-witness") => {
             let payload_hex = args.next().ok_or("missing payload-hex")?;
             reject_extra(args)?;
             let payload = hex::decode(payload_hex.strip_prefix("0x").unwrap_or(&payload_hex))?;
@@ -56,7 +56,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "{}",
                 serde_json::json!({
-                    "schema": "myelin-cellscript-entry-witness-placement-v1",
+                    "schema": "myelin-cellscript-entry-witness-placement",
                     "placement_abi": ENTRY_WITNESS_PLACEMENT_ABI,
                     "witness_args_field": "input_type",
                     "lock_field": "empty",
@@ -64,7 +64,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 })
             );
         }
-        _ => return Err("usage: myelin-cellscript-adapter build-attest <source-root> <output> | verify <binary> <attestation> | compile <binary> <attestation> <source> <artifact> [entry-action] | place-entry-witness-v2 <payload-hex>".into()),
+        _ => return Err("usage: myelin-cellscript-adapter build-attest <source-root> <output> | verify <binary> <attestation> | compile <binary> <attestation> <source> <artifact> [entry-action] | place-entry-witness <payload-hex>".into()),
     }
     Ok(())
 }

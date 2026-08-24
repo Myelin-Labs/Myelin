@@ -7,19 +7,26 @@
 //! eligible to seal each height. Authority ordering is part of configuration,
 //! and the scheduled authority is `height % authorities.len()`.
 
-use super::{verify_schnorr, CommitteeSigner, ConsensusError, ConsensusKind, Hash32, MyelinBlock, Result, Signature64};
-use secp256k1::XOnlyPublicKey;
+use super::{
+    poa_config_commitment, CkbPublicKey33, CkbSignature65, CommitteeSigner, ConsensusError, ConsensusKind, Hash32, MyelinBlock, Result,
+};
+use myelin_wallet_auth::{lock_arg_from_public_key, poa_seal_digest, recover_public_key, CkbLockArg};
 use std::collections::HashSet;
-
-const POA_SEAL_DOMAIN: &[u8] = b"myelin:proof-of-authority-seal:v1";
 
 /// One public signing authority in schedule order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authority {
     /// Stable authority identifier carried by seals.
     pub id: String,
-    /// X-only secp256k1 Schnorr public key.
-    pub public_key: Hash32,
+    /// Compressed secp256k1 key hashed by the standard CKB Blake160 rule.
+    pub public_key: CkbPublicKey33,
+}
+
+impl Authority {
+    /// Standard CKB secp256k1 lock args for this authority.
+    pub fn ckb_lock_arg(&self) -> CkbLockArg {
+        lock_arg_from_public_key(self.public_key).expect("PoA configuration validates every compressed public key")
+    }
 }
 
 /// Ordered authority-set configuration.
@@ -38,8 +45,8 @@ pub struct ProofOfAuthoritySeal {
     pub height: u64,
     /// Scheduled authority that produced the seal.
     pub authority_id: String,
-    /// Domain-separated Schnorr signature.
-    pub signature: Signature64,
+    /// CKB-compatible compact recoverable ECDSA signature.
+    pub signature: CkbSignature65,
 }
 
 /// A block finalised by its scheduled PoA authority.
@@ -67,7 +74,7 @@ impl ProofOfAuthority {
         }
 
         let mut ids = HashSet::with_capacity(config.authorities.len());
-        let mut public_keys = HashSet::with_capacity(config.authorities.len());
+        let mut lock_args = HashSet::with_capacity(config.authorities.len());
         for authority in &config.authorities {
             if authority.id.is_empty() {
                 return Err(ConsensusError::InvalidConfig("authority id must not be empty".to_owned()));
@@ -75,15 +82,20 @@ impl ProofOfAuthority {
             if !ids.insert(authority.id.as_str()) {
                 return Err(ConsensusError::DuplicateAuthority(authority.id.clone()));
             }
-            if !public_keys.insert(authority.public_key) {
+            let lock_arg = lock_arg_from_public_key(authority.public_key).map_err(|error| {
+                ConsensusError::InvalidConfig(format!("authority {} has invalid compressed public key: {error}", authority.id))
+            })?;
+            if !lock_args.insert(lock_arg) {
                 return Err(ConsensusError::DuplicateAuthorityKey);
             }
-            XOnlyPublicKey::from_slice(&authority.public_key).map_err(|error| {
-                ConsensusError::InvalidConfig(format!("authority {} has invalid x-only public key: {error}", authority.id))
-            })?;
         }
 
         Ok(Self { authorities: config.authorities })
+    }
+
+    /// Canonical commitment preserving deterministic authority rotation order.
+    pub fn config_commitment(&self) -> Hash32 {
+        poa_config_commitment(&self.authorities)
     }
 
     /// Return the authority scheduled for a session-local height.
@@ -100,11 +112,11 @@ impl ProofOfAuthority {
                 actual: signer.validator_id().to_owned(),
             });
         }
-        if signer.public_key() != expected.public_key {
+        if signer.ckb_public_key() != expected.public_key {
             return Err(ConsensusError::SignerKeyMismatch(expected.id.clone()));
         }
         let authority_id = expected.id.clone();
-        let signature = signer.sign_poa_digest(poa_seal_digest(&authority_id, block_hash, height));
+        let signature = signer.sign_ckb_recoverable(poa_seal_digest(&authority_id, block_hash, height));
         Ok(ProofOfAuthoritySeal { block_hash, height, authority_id, signature })
     }
 
@@ -121,7 +133,7 @@ impl ProofOfAuthority {
             return Err(ConsensusError::UnexpectedAuthority { expected: expected.id.clone(), actual: seal.authority_id.clone() });
         }
         let digest = poa_seal_digest(&seal.authority_id, block_hash, height);
-        if !verify_schnorr(expected.public_key, digest, seal.signature) {
+        if recover_public_key(digest, seal.signature).ok() != Some(expected.public_key) {
             return Err(ConsensusError::InvalidSignature(seal.authority_id.clone()));
         }
         Ok(())
@@ -141,26 +153,6 @@ impl ProofOfAuthority {
     }
 }
 
-impl CommitteeSigner {
-    fn sign_poa_digest(&self, digest: Hash32) -> Signature64 {
-        use secp256k1::{Keypair, Message, Secp256k1};
-
-        let secp = Secp256k1::new();
-        let keypair = Keypair::from_secret_key(&secp, &self.secret_key);
-        secp.sign_schnorr_no_aux_rand(&Message::from_digest(digest), &keypair).serialize()
-    }
-}
-
-fn poa_seal_digest(authority_id: &str, block_hash: Hash32, height: u64) -> Hash32 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(POA_SEAL_DOMAIN);
-    hasher.update(&height.to_le_bytes());
-    hasher.update(&(authority_id.len() as u32).to_le_bytes());
-    hasher.update(authority_id.as_bytes());
-    hasher.update(&block_hash);
-    *hasher.finalize().as_bytes()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,7 +166,7 @@ mod tests {
         ProofOfAuthority::new(ProofOfAuthorityConfig {
             authorities: signers
                 .iter()
-                .map(|signer| Authority { id: signer.validator_id().to_owned(), public_key: signer.public_key() })
+                .map(|signer| Authority { id: signer.validator_id().to_owned(), public_key: signer.ckb_public_key() })
                 .collect(),
         })
         .unwrap()
@@ -222,7 +214,7 @@ mod tests {
         assert!(matches!(engine.verify_seal([9; 32], block.number, &seal), Err(ConsensusError::WrongBlockHash)));
         assert!(matches!(engine.verify_seal(block.hash(), block.number + 1, &seal), Err(ConsensusError::WrongHeight { .. })));
         let mut invalid = seal;
-        invalid.signature = [0; 64];
+        invalid.signature = [0; 65];
         assert!(matches!(engine.verify_seal(block.hash(), block.number, &invalid), Err(ConsensusError::InvalidSignature(_))));
     }
 
@@ -236,8 +228,8 @@ mod tests {
         let alice = signer("alice", 1);
         let duplicate_id = ProofOfAuthorityConfig {
             authorities: vec![
-                Authority { id: "alice".to_owned(), public_key: alice.public_key() },
-                Authority { id: "alice".to_owned(), public_key: signer("bob", 2).public_key() },
+                Authority { id: "alice".to_owned(), public_key: alice.ckb_public_key() },
+                Authority { id: "alice".to_owned(), public_key: signer("bob", 2).ckb_public_key() },
             ],
         };
         assert!(matches!(
@@ -247,8 +239,8 @@ mod tests {
 
         let duplicate_key = ProofOfAuthorityConfig {
             authorities: vec![
-                Authority { id: "alice".to_owned(), public_key: alice.public_key() },
-                Authority { id: "alias".to_owned(), public_key: alice.public_key() },
+                Authority { id: "alice".to_owned(), public_key: alice.ckb_public_key() },
+                Authority { id: "alias".to_owned(), public_key: alice.ckb_public_key() },
             ],
         };
         assert_eq!(ProofOfAuthority::new(duplicate_key).unwrap_err(), ConsensusError::DuplicateAuthorityKey);

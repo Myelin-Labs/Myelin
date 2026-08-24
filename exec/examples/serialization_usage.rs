@@ -57,7 +57,7 @@ fn abi_negotiation_example() {
     let vm_capabilities = VmAbiNegotiator::default_capabilities();
     println!("VM supports ABI versions: {:?}", vm_capabilities);
 
-    let script_version = VmAbiNegotiator::ABI_VERSION_MOLECULE_V1;
+    let script_version = VmAbiNegotiator::ABI_VERSION_MOLECULE;
     match VmAbiNegotiator::negotiate(script_version, &vm_capabilities) {
         Ok(agreed_version) => {
             println!("ABI negotiation successful: 0x{:04X}", agreed_version);

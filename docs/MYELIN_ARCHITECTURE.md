@@ -6,6 +6,26 @@ Myelin is an off-chain finite-Cell ledger runtime. It reuses CKB-shaped transact
 
 It is not a CKB full node, a source-chain fork, a permissionless consensus system, or a deployed L1 court.
 
+## Continuous chain and application modules
+
+`myelin-session` advances a durable session head only after deterministic execution and verification through its session-owned `FinalityVerifier` port. Session genesis commits the consensus kind, canonical validator/quorum configuration, compiled-in module descriptor, and WAL schema, so an empty or populated store cannot be reopened under a substituted authority set or codec. Each finalized record contains the canonical block, module commitment, consensus-owned canonical proof, transaction bytes, full post-state snapshot, and transactional outbox. Live commit and recovery both recheck that the verifier returned the exact canonical block hash.
+
+`myelin-session-store-rocksdb` is the production persistence implementation for this boundary. It uses a versioned database schema, synchronous RocksDB WAL, optimistic head CAS, atomic block/snapshot/outbox commits, module/config/schema-bound consensus-round WAL, and durable network queues. It rejects persisted blocks, outbox entries, WAL, and network envelopes whose module identity differs from session genesis. Recovery replays and verifies the entire finalized chain before the writer becomes available.
+
+`myelin-session-network` provides a module-neutral transport primitive rather than consensus logic. Every protobuf envelope commits to protocol version, session, consensus module commitment, sender, recipient, per-pair sequence, timestamp, message class, owner-defined format version/type tag, payload hash, payload, and Schnorr signature. The mTLS receiver checks a closed peer set and acknowledges only after durable enqueue. Durable receive receipts keep an old exact retry idempotent after application acknowledgement and process restart; different content at one accepted sequence is equivocation. Outbound messages are retained per recipient until the exact remote message id is acknowledged.
+
+`myelin-session-runtime` is the optional embeddable composition root. It adapts the closed `ConsensusCatalog` to the session verifier port and supervises explicitly dependent services with readiness, criticality, bounded lifecycle calls, panic containment, reverse shutdown, and a writer gate. It does not turn Myelin into a CKB full node or an official daemon, and it does not provide dynamic consensus loading.
+
+`myelin-session-escrow` is optional. Funding can attach only when participant authorizations and a finalized `myelin-ckb-adapter` receipt chain verify for the exact CKB open transaction, at the required depth and before the configured start deadline. The off-chain ledger conserves the funded asset and enforces participant debit caps. Native-capacity states reject nonzero participant balances below the exact payout Cell occupied-capacity floor; zero balances produce no payout output, and fee change must also meet its floor. Exit builders recover the latest finalized snapshot and bind it to the engine proof; witness collection, node submission, commitment, and configured-depth finality remain explicit later stages. A prepared exit is not a CKB acceptance or finality claim.
+
+Application integrations remain external modules. The Veloren adapter in the sibling checkout journals authoritative game events before mutation, commits strict-VM Cell transitions under PoA/committee/Tendermint, reconciles an optional receipt inventory from the conserved ledger, and exposes the exit builders. Its embedded local signer driver is a controlled session deployment, not a distributed or permissionless L2.
+
+## Naming contract
+
+Myelin is pre-release and exposes one current protocol surface. Myelin-owned JSON schemas, payload kinds, hash domains, report kinds, policies, and adapter commands use stable semantic names without generation suffixes. A protocol change replaces the current contract, its fixtures, and its fixed vectors atomically; the tree does not retain numbered compatibility aliases.
+
+Names owned by an upstream compatibility boundary remain exact. In particular, CKB multisig-v2, CKB VM script versions, CKB `data1`/`data2`, and the pinned CellScript witness ABI are external identities rather than Myelin protocol generations.
+
 ## End-to-end model
 
 ```mermaid
@@ -20,7 +40,7 @@ flowchart TD
     DAG --> VM["Strict CKB-VM script groups"]
     VM --> ST["Atomic Cell state transition"]
     ST --> BL["Canonical MyelinBlock"]
-    BL --> FN["Static committee or weighted precommit"]
+    BL --> FN["PoA, static committee, or Tendermint"]
     FN --> EV["Wire / DA / court / settlement evidence"]
 ```
 
@@ -159,12 +179,14 @@ Three selectable closed-validator/authority engines exist:
   lock/valid-round rules, nil votes, round changes, equivocation rejection, and
   a strictly-greater-than-two-thirds decision certificate.
 
-All use real secp256k1 Schnorr signatures and separate signature domains. A
-typed `FinalityProof` enum prevents committee certificates, PoA seals, and
-Tendermint decisions from being dispatched to the wrong engine. For the same
-workload, transaction identities, scheduler commitments, and state roots must
-be identical; consensus-bound block hashes and finality material differ. None
-is a permissionless-security claim.
+Static committee and Tendermint use secp256k1 Schnorr signatures. PoA uses
+CKB-compatible compressed secp256k1 identities, CKB-personalized Blake2b-256,
+and compact recoverable ECDSA seals. Every engine has a separate signature
+domain. A typed `FinalityProof` enum prevents committee certificates, PoA
+seals, and Tendermint decisions from being dispatched to the wrong engine. For
+the same workload, transaction identities, scheduler commitments, and state
+roots must be identical; consensus-bound block hashes and finality material
+differ. None is a permissionless-security claim.
 
 Tendermint round state is serializable for caller-managed WAL persistence.
 Networking, timeout scheduling, validator-set changes, and permissionless
@@ -206,8 +228,8 @@ The critical model flaws found in the 2026-07 audit were removed: witness-derive
 
 The remaining work is ordered by security dependency:
 
-1. Migrate the Session final-settlement authority surface from the legacy genesis multisig `type` script to the recommended multisig-v2 `data1` deployment, then repeat the archived public-testnet create/spend proof for a real Session package.
-2. Fund and deploy the 38,628-byte settlement verifier; the 2026-07-29 capacity plan records a 29,422.005 CKB shortfall for the exercised input.
+1. Repeat the parent-CKB-accepted Session multisig-v2 `data1` final-settlement path on public CKB testnet and preserve the create/spend receipt chain for the real Session package. The local parent CKB devnet gate already injects the exact v2 system binary and DepGroup, binds node-checked deployment evidence into the package, and exercises the signed final settlement.
+2. Fund and deploy the current 38,940-byte settlement verifier. With the same 9,399.996 CKB input used by the historical plan, the current build requires 39,134.001 CKB and is short by 29,734.005 CKB; the archived 38,628-byte plan remains historical evidence for its exact older artifact.
 3. Exercise the exact adapter and all four deployed verifier programs on public CKB testnet, pin deployment OutPoints/code hashes, and preserve committed/finalized evidence artifacts.
 4. Replace fixture keys and local DA attestations with signer isolation, threshold-lock enforcement, rotation/recovery policy, and durable externally retrievable DA.
 5. Implement and exercise complete court economics and disputed-chunk adjudication, not only compact-payload/finality verifiers.

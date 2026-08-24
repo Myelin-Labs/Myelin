@@ -11,7 +11,13 @@ members = [
     "math",
     "mempool",
     "crypto/muhash",
+    "session",
+    "session-escrow",
+    "session-network",
+    "session-runtime",
+    "session-store-rocksdb",
     "state",
+    "wallet-auth",
 ]
 
 [workspace.package]
@@ -45,7 +51,13 @@ myelin-hashes = { version = "0.10.0", path = "crypto/hashes" }
 myelin-math = { version = "0.10.0", path = "math" }
 myelin-mempool = { version = "0.10.0", path = "mempool" }
 myelin-muhash = { version = "0.10.0", path = "crypto/muhash" }
+myelin-session = { version = "0.10.0", path = "session" }
+myelin-session-escrow = { version = "0.10.0", path = "session-escrow" }
+myelin-session-network = { version = "0.10.0", path = "session-network" }
+myelin-session-runtime = { version = "0.10.0", path = "session-runtime" }
+myelin-session-store-rocksdb = { version = "0.10.0", path = "session-store-rocksdb" }
 myelin-state = { version = "0.10.0", path = "state" }
+myelin-wallet-auth = { version = "0.10.0", path = "wallet-auth" }
 
 # external
 aes = "0.8.3"
@@ -57,6 +69,9 @@ async-std = { version = "1.12.0", features = ['attributes'] }
 async-stream = "0.3.5"
 async-trait = "0.1.74"
 base64 = "0.22.1"
+## CKB local-wallet recovery phrases. Entropy is supplied by the caller so the
+## crate does not need bip39's second rand dependency.
+bip39 = "2.2.2"
 bech32 = { version = "0.11.0" }
 blake2b_simd = "=1.0.3"
 bitcoin = "0.32.6"
@@ -132,9 +147,10 @@ rand_distr = "0.4.3"
 rayon = "1.8.0"
 regex = "1.10.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls", "socks"] }
+ring = "0.17.14"
 ripemd = { version = "0.1.3", default-features = false }
 rlimit = "0.10.1"
-rocksdb = "0.24.0"
+rocksdb = { version = "0.24.0", default-features = false, features = ["snappy"] }
 rv = "0.16.4"
 secp256k1 = { version = "0.29.0", features = [
     "global-context",

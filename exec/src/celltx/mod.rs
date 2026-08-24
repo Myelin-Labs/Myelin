@@ -16,8 +16,8 @@ pub use types::{
     cell_tx_estimated_serialized_size, compute_conflict_hash, compute_typed_data_hash, encode_ckb_dep_group_data,
     encode_conflict_key_value_composite, parse_ckb_dep_group_data, validate_typed_cell_decl, CapacityError, CellAccounting, CellDep,
     CellIdentity, CellInput, CellMutability, CellOutput, CellOwnership, CellSettlement, CellTx, ConflictKeySpec, DepType,
-    InMemoryTypedCellStore, OutPoint, ResolvedCellMeta, ResolvedCellTx, RuntimeCellSemantics, Script, ScriptHashVersion, ScriptId,
-    TransactionInfo, TypedCellDecl, TypedCellDeclError, TypedCellSemanticMetadata, TypedCellStore, CELLTX_SCHEMA_VERSION,
+    InMemoryTypedCellStore, OutPoint, ResolvedCellMeta, ResolvedCellTx, RuntimeCellSemantics, Script, ScriptId, TransactionInfo,
+    TypedCellDecl, TypedCellDeclError, TypedCellSemanticMetadata, TypedCellStore, CELLTX_SCHEMA_VERSION,
 };
 // Re-export VersionedSerializable implementations for storage layer types
 pub use types::{

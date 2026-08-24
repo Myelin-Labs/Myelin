@@ -1,5 +1,5 @@
 {
-  "schema": "myelin-session-court-economics-deployment-v2",
+  "schema": "myelin-session-court-economics-deployment",
   "network": "ckb-testnet",
   "verifier_code_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "verifier_hash_type": "data2",
@@ -7,7 +7,7 @@
   "verifier_code_dep_index": "0x0",
   "audited_source_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "audit_report_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
-  "deployment_policy": "testnet-beta-court-dispute-economics-v1",
+  "deployment_policy": "testnet-beta-court-dispute-economics",
   "economics_commitment": "0000000000000000000000000000000000000000000000000000000000000000",
   "challenge_payload_hash": "0000000000000000000000000000000000000000000000000000000000000000",
   "da_availability_commitment": "0000000000000000000000000000000000000000000000000000000000000000",

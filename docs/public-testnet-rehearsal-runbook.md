@@ -8,7 +8,9 @@ provenance.
 The 2026-07-29 checkpoint completed standard and multisig-v2 lock rehearsal,
 including finalized generic evidence. It did not deploy the CellScript
 verifier/court/DA path because the available funding Cell was 29,422.005 CKB
-short of the conservative settlement-verifier deployment requirement. See the
+short of that historical artifact's conservative deployment requirement. The
+current 38,940-byte build is short by 29,734.005 CKB under the same funding,
+change, and fee assumptions. See the
 [archived checkpoint](../evidence/ckb-testnet/2026-07-29-multisig/README.md).
 
 ## Goal
@@ -363,12 +365,10 @@ cargo run -p myelin-cli -- session threshold-lock-deployment-evidence \
   --package "$MYELIN_REHEARSAL_DIR/session-settlement-package.base.json" \
   --network ckb-testnet \
   --code-hash "$MYELIN_THRESHOLD_LOCK_CODE_HASH" \
-  --hash-type type \
+  --hash-type data1 \
   --code-dep-tx-hash "$MYELIN_THRESHOLD_LOCK_CODE_DEP_TX_HASH" \
   --code-dep-index "$MYELIN_THRESHOLD_LOCK_CODE_DEP_INDEX" \
   --code-dep-type dep_group \
-  --audited-source-hash "$MYELIN_THRESHOLD_LOCK_SOURCE_HASH" \
-  --audit-report-hash "$MYELIN_THRESHOLD_LOCK_AUDIT_HASH" \
   --ckb-enforceable-checked \
   --rpc-url "$CKB_TESTNET_RPC" \
   --testnet-beta-ready \
@@ -441,30 +441,36 @@ MYELIN_REHEARSAL_ROLES="da-anchor" \
 scripts/myelin_public_testnet_rehearsal_live.sh
 ```
 
+For the final settlement path, populate the `CKB_TESTNET_SETTLEMENT_FINAL_*`
+funding, evidence CellDep, verifier, witness, and capacity variables; populate
+the `CKB_TESTNET_SETTLEMENT_AUTHORITY_INPUT_*` variables; provide the ordered
+65-byte signatures as whitespace-separated values in
+`CKB_TESTNET_SETTLEMENT_MULTISIG_SIGNATURES`; set the global lock identity to
+the package-bound multisig-v2 `data1` deployment; then run:
+
+```bash
+MYELIN_REHEARSAL_LIVE_SUBMIT=1 \
+MYELIN_REHEARSAL_ROLES="settlement-final" \
+scripts/myelin_public_testnet_rehearsal_live.sh
+```
+
 This helper refuses to broadcast unless `MYELIN_REHEARSAL_LIVE_SUBMIT=1` is
 set. It writes submission, context, economics, inclusion, stability, finality,
 and readiness reports for each selected role. It is an execution helper, not a
 new gate.
 
-For the settlement carrier or final-script path, use the same command with the
-settlement package and settlement verifier. When rehearsing final-script
-settlement evidence, also provide the evidence cell dep and authority input
-arguments. Generic lock rehearsal should use the current CKB
-`secp256k1_blake160_multisig_all` v2 script (`hash_type=data1`, deployed
-`dep_type=dep_group`, 20-byte config-hash args). The Session final-script
-surface still accepts only the genesis `hash_type=type` variant, which is
-legacy; migrate and re-test that surface before using it for the next public
-rehearsal. There is also an unresolved witness-composition boundary: canonical
-multisig owns `WitnessArgs.lock`, while the pinned CellScript v0.22.0
-parameterized entry wrapper reads the raw entry payload from witness 0. The
-current attempt to place that payload in `WitnessArgs.input_type` verifies in
-Myelin's builder but is rejected by the real CKB entry wrapper with error 25.
-Before another final-settlement rehearsal, separate the authority lock group
-from the raw CellScript entry witness or upgrade the entry wrapper to read the
-selected `WitnessArgs` field, then make the parent-CKB devnet path mandatory.
+The Session final-script surface accepts only the current CKB
+`secp256k1_blake160_multisig_all` v2 identity (`hash_type=data1`,
+`dep_type=dep_group`, 20-byte config-hash args). It requires checked deployment
+evidence in the package and rejects any transaction whose lock code hash, hash
+type, or DepGroup differs from that evidence. The parent CKB devnet gate
+exercises this exact path: canonical multisig owns `WitnessArgs.lock`, the
+CellScript entry payload is placed in `WitnessArgs.input_type`, and the final
+signed transaction is accepted by the parent full node. Tamper and competing
+settlement probes must be rejected.
 
-After that boundary is fixed, first build the transaction
-without `--submit`, sign the reported `canonical_ckb_multisig.signing_message`
+For public testnet, first build the transaction without `--submit`, sign the
+reported `canonical_ckb_multisig.signing_message`
 externally with the threshold participants, then repeat
 `--multisig-signature 0x...` for each 65-byte recoverable signature. Live
 submission is rejected until the exact witness verifies locally. Also set:

@@ -15,11 +15,11 @@ use std::collections::{HashMap, HashSet};
 pub type Hash32 = [u8; 32];
 pub type Signature64 = Vec<u8>;
 
-const BLOB_ID_DOMAIN: &[u8] = b"myelin:da-blob:v1";
-const RECEIPT_DOMAIN: &[u8] = b"myelin:da-provider-receipt:v1";
-const RECEIPT_HASH_DOMAIN: &[u8] = b"myelin:da-provider-receipt-hash:v1";
-const PROBE_DOMAIN: &[u8] = b"myelin:da-retrieval-probe:v1";
-const CERTIFICATE_DOMAIN: &[u8] = b"myelin:da-certificate:v1";
+const BLOB_ID_DOMAIN: &[u8] = b"myelin:da-blob";
+const RECEIPT_DOMAIN: &[u8] = b"myelin:da-provider-receipt";
+const RECEIPT_HASH_DOMAIN: &[u8] = b"myelin:da-provider-receipt-hash";
+const PROBE_DOMAIN: &[u8] = b"myelin:da-retrieval-probe";
+const CERTIFICATE_DOMAIN: &[u8] = b"myelin:da-certificate";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaErasureProfile {

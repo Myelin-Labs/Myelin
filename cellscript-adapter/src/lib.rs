@@ -63,7 +63,7 @@ impl ToolchainLock {
     /// Load the lock committed with this adapter.
     pub fn embedded() -> Result<Self, AdapterError> {
         let lock: Self = serde_json::from_str(include_str!("../cellscript-toolchain.lock.json")).map_err(AdapterError::Json)?;
-        if lock.schema != "myelin-cellscript-toolchain-lock-v3" {
+        if lock.schema != "myelin-cellscript-toolchain-lock" {
             return Err(AdapterError::Attestation("unsupported toolchain lock schema".to_owned()));
         }
         if lock.repository != "https://github.com/CellScript-Labs/CellScript" {
@@ -352,7 +352,7 @@ impl CompilerSchedulerTemplate {
         // Every compiler-backed plan participates in this barrier. Read/Read
         // remains parallel; any action not explicitly marked parallelizable
         // conflicts with every other compiler-backed action.
-        let barrier = *blake3::hash(b"myelin:cellscript-scheduler-global-barrier:v1").as_bytes();
+        let barrier = *blake3::hash(b"myelin:cellscript-scheduler-global-barrier").as_bytes();
         resolved.push((barrier, if self.parallelizable { AccessMode::Read } else { AccessMode::Write }));
         SchedulerPlan::new(tx, resolved).map_err(|error| AdapterError::SchedulerBinding(error.to_string()))
     }
@@ -400,7 +400,7 @@ impl CellScriptInstallation {
         let lock = ToolchainLock::embedded()?;
         let attestation: CompilerAttestation =
             serde_json::from_slice(&fs::read(attestation_path).map_err(AdapterError::Io)?).map_err(AdapterError::Json)?;
-        if attestation.schema != "myelin-cellscript-compiler-attestation-v3" {
+        if attestation.schema != "myelin-cellscript-compiler-attestation" {
             return Err(AdapterError::Attestation("unsupported attestation schema".to_owned()));
         }
         if attestation.repository != lock.repository
@@ -735,7 +735,7 @@ pub fn build_and_attest(source_root: &Path) -> Result<(PathBuf, CompilerAttestat
     verify_version(&binary, &lock.package_version)?;
     let host_target = rustc_host_target(&lock.rust_toolchain)?;
     let attestation = CompilerAttestation {
-        schema: "myelin-cellscript-compiler-attestation-v3".to_owned(),
+        schema: "myelin-cellscript-compiler-attestation".to_owned(),
         repository: lock.repository,
         release_base_tag: lock.release_base_tag,
         release_base_revision: lock.release_base_revision,
@@ -905,7 +905,7 @@ mod tests {
                     "effect_class": "ReadOnly",
                     "parallelizable": true,
                     "estimated_cycles": 10,
-                    "scheduler_witness_hex": "ignored-v1-binding-hash",
+                    "scheduler_witness_hex": "ignored-binding-hash",
                     "ckb_runtime_accesses": [{
                         "operation": "read_ref",
                         "syscall": "LOAD_CELL",
@@ -985,7 +985,7 @@ mod tests {
     #[test]
     fn embedded_lock_pins_release_base_patch_revision_and_witness_abi() {
         let lock = ToolchainLock::embedded().unwrap();
-        assert_eq!(lock.schema, "myelin-cellscript-toolchain-lock-v3");
+        assert_eq!(lock.schema, "myelin-cellscript-toolchain-lock");
         assert_eq!(lock.release_base_tag, "v0.22.0");
         assert_ne!(lock.release_base_revision, lock.source_revision);
         assert_eq!(lock.target_profile_witness_abi, TARGET_PROFILE_WITNESS_ABI);

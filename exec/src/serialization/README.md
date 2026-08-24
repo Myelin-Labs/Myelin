@@ -6,7 +6,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Layer 3: VM/Script ABI 层 (Molecule v1 public)                 │
+│  Layer 3: VM/Script ABI 层 (Molecule public)                 │
 │  - ResolvedHeader, ResolvedCell, Witness Payload                │
 │  - 脚本可见的所有数据结构                                        │
 │  - 需要: canonical, partial read, version兼容                  │
@@ -101,7 +101,7 @@ let header = ResolvedHeader::from_vm_bytes(&bytes)?;
 
 ### ABI 版本 (VmSerializable)
 
-- `0x8001`: Molecule-based ABI v1 (launch/public VM ABI)
+- `0x8001`: Molecule-based launch/public VM ABI
 - 使用 `VmAbiNegotiator` 协商版本
 - VM runtime/syscall 边界使用 Molecule wire format
 

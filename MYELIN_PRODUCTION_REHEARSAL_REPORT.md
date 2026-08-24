@@ -34,7 +34,7 @@ deployment artefacts.
 | Consensus evidence | Static committee, rotating PoA, and Tendermint fixture proofs | Fixture | All three engines finalise the same state transition with separated proof domains. | Production validator set, key management, and sustained validator operation. |
 | Teeworlds workload | Generated `reports/myelin-teeworlds-repro.json` plus Teeworlds acceptance output | Fixture / local external checkout | Teeworlds replay can produce a CKB-compatible court bundle under deterministic replay evidence. | Public reproducibility package and long-running workload coverage. |
 | DA manifest | `session da-manifest --storage-dir` and `verify-da-manifest` | Fixture + local sealed storage | Court replay payload is bound to a sealed local Merkle segment and recomputable DA availability evidence. | Real external DA publication and retrieval over production infrastructure. |
-| External DA receipt | `myelin-external-da-receipt-v2` test fixture in unit tests | Fixture | Provider-signed receipt format, signature binding, SLA fields, and production-ready recomputation are enforced. | A real provider receipt, real HTTPS retrieval endpoint, audit log commitment, and retention verification. |
+| External DA receipt | `myelin-external-da-receipt` test fixture in unit tests | Fixture | Provider-signed receipt format, signature binding, SLA fields, and production-ready recomputation are enforced. | A real provider receipt, real HTTPS retrieval endpoint, audit log commitment, and retention verification. |
 | DA production-readiness blocker | Final readiness now requires a recomputed production DA manifest for final-L1 DA/settlement evidence | Fixture-backed proof path | A naked `production_ready` boolean cannot clear the real DA blocker. | Same proof path must be fed by real public-testnet DA artefacts. |
 | DA anchor package | `session da-anchor-package` and `verify-da-anchor-package` | Fixture | DA anchor CellTx package binds manifest, court bundle hash, segment root, and projection. | Real final L1 DA publication script and public-chain transaction. |
 | Settlement intent | `session settlement-intent` and `verify-settlement-intent` | Fixture | Disputed-close settlement binds verified court bundle, DA manifest, challenge window, and court economics. | Real dispute instance, real bond/slash economics, and public-chain court verifier deployment. |
@@ -42,10 +42,10 @@ deployment artefacts.
 | Settlement package | `session settlement-package` and `verify-settlement-package` | Fixture | Package binds exact intent JSON, court bundle, DA manifest, final state root, and authority requirement. | Real settlement authority cell and public-chain final settlement transaction. |
 | Authority signature evidence | `--authority-signature-evidence` path and regressions | Fixture | Participant authority signatures are required before production threshold-lock readiness can be claimed. | Real participant keys, signing ceremony, threshold policy, and custody process. |
 | Threshold-lock deployment evidence | `--threshold-lock-deployment-evidence` path and regressions | Fixture | Deployment evidence is bound into settlement authority attestation and checked before final readiness. | Real canonical threshold-lock script deployment and audited public-chain code dep. |
-| Public-testnet standard and multisig locks | `evidence/ckb-testnet/2026-07-29-multisig/` | Public testnet | Standard sighash, legacy multisig, and recommended multisig-v2 2-of-3 create/spend transactions were accepted and committed; the v2 spend has a verified transaction proof and configured-depth finality receipt. | Bind multisig-v2 identity into the Session final-settlement surface and replace disposable rehearsal keys with an approved custody ceremony. |
+| Public-testnet standard and multisig locks | `evidence/ckb-testnet/2026-07-29-multisig/` | Public testnet | Standard sighash, legacy multisig, and recommended multisig-v2 2-of-3 create/spend transactions were accepted and committed; the multisig-v2 spend has a verified transaction proof and configured-depth finality receipt. | Repeat the now parent-devnet-accepted Session multisig-v2 final-settlement path on public testnet and replace disposable rehearsal keys with an approved custody ceremony. |
 | Carrier submission path | Optional `scripts/myelin_ckb_devnet_smoke.sh` | Local devnet | Compact carrier path can be deployed and submitted to a live local CKB node with negative tamper checks. | Public CKB testnet rehearsal with archived tx hashes and block evidence. |
 | Final-script submission path | Unit fixtures and final-script readiness checks | Fixture / mock RPC | Final-script readiness requires live pre-submit markers, authority input checks, evidence cell deps, and production evidence preflights. Parameterized CellScript entry bytes and a canonical multisig `WitnessArgs.lock` have not yet been jointly accepted by parent CKB. | Resolve the entry-witness/multisig-lock composition boundary, require the parent-CKB devnet gate, then archive public-testnet final DA and settlement artefacts. |
-| CKB inclusion / stability / finality | Production gate mock reports plus archived v2 multisig receipts | Mock + public testnet | The real v2 spend binds resolved context, node acceptance, canonical inclusion proof, and six-confirmation observation. | Apply the same generic evidence object to final DA/court/settlement transactions. |
+| CKB inclusion / stability / finality | Production gate mock reports plus archived multisig-v2 receipts | Mock + public testnet | The real multisig-v2 spend binds resolved context, node acceptance, canonical inclusion proof, and six-confirmation observation. | Apply the same generic evidence object to final DA/court/settlement transactions. |
 | Context / economics preflight | Production gate mocks, devnet smoke, and public-testnet `create-cell` reports | Mock + devnet + public testnet | Real funding, standard/multisig signing, explicit change, exact fee, live dependencies, and capacity shortfall reporting were exercised. | Fund verifier deployment and establish fee-bump/retry policy for Session transactions. |
 | Operator custody policy | `--operator-custody-policy` typed JSON path and regression | Fixture document | Readiness can hash and validate custody controls, but the default gate does not provide real operator custody. | Approved custody procedure, HSM or multisig setup, rotation drill, and emergency drill. |
 | Operator runbook | `--operator-runbook` typed JSON path and regression | Fixture document | Readiness can hash and validate runbook controls, but the default gate does not provide a real production runbook. | Exercised runbook with monitoring, retry, reorg response, escalation, and incident logs. |
@@ -97,10 +97,13 @@ It did not achieve:
 - production custody or an external audit.
 ```
 
-The 38,628-byte settlement verifier needs 38,822.001 CKB including
-conservative change and fee. The exercised 9,399.996 CKB input is short by
-29,422.005 CKB. The exact plan and public transaction evidence are archived in
-`evidence/ckb-testnet/2026-07-29-multisig/`.
+The archived 38,628-byte settlement verifier needed 38,822.001 CKB including
+conservative change and fee, leaving the exercised 9,399.996 CKB input short by
+29,422.005 CKB. The current locked compiler produces a 38,940-byte verifier;
+under the same assumptions it needs 39,134.001 CKB and is short by 29,734.005
+CKB. The exact older plan and public transaction evidence remain archived in
+`evidence/ckb-testnet/2026-07-29-multisig/` and are not evidence for the current
+artifact.
 
 ## Public-Testnet Rehearsal Entry Criteria
 
