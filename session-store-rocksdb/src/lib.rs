@@ -4,7 +4,8 @@
 //! Transactional RocksDB implementation of the Myelin session store.
 
 use myelin_session::{
-    ConsensusWal, FinalisedBlockRecord, Hash32, OutboxMessage, PendingDelivery, SessionGenesis, SessionHead, SessionStore, StoreError,
+    ConsensusWal, FinalisedBlockRecord, Hash32, OutboxMessage, PendingDelivery, SessionGenesis, SessionHead, SessionStore,
+    StateCheckpoint, StoreError,
 };
 use myelin_session_network::{DurableEnvelope, EnqueueStatus, NetworkStore, NetworkStoreError};
 use rocksdb::{
@@ -14,7 +15,8 @@ use rocksdb::{
 use std::{collections::HashSet, path::Path};
 
 const SCHEMA_KEY: &[u8] = b"\0myelin-session-store-schema";
-const SCHEMA_VERSION: &[u8] = b"4";
+const SCHEMA_VERSION: &[u8] = b"5";
+const LEGACY_SCHEMA_VERSION: &[u8] = b"4";
 const KEY_GENESIS: u8 = b'g';
 const KEY_HEAD: u8 = b'h';
 const KEY_BLOCK: u8 = b'b';
@@ -28,6 +30,27 @@ const KEY_INBOUND_SEQUENCE: u8 = b'r';
 const KEY_INBOUND: u8 = b'n';
 const KEY_INBOUND_INDEX: u8 = b'm';
 const KEY_INBOUND_RECEIPT: u8 = b'R';
+const KEY_CHECKPOINT: u8 = b'c';
+const KEY_NETWORK_USAGE: u8 = b'u';
+
+/// Local storage policy. It does not alter session consensus or bounded
+/// execution semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RocksSessionStoreOptions {
+    /// Keep an archival snapshot in every Nth historical block. The latest
+    /// full checkpoint is always atomically replaced on every commit.
+    pub archival_checkpoint_interval: u64,
+    /// Maximum queued envelopes in each direction per session.
+    pub max_network_queue_messages: u64,
+    /// Maximum encoded envelope bytes in each direction per session.
+    pub max_network_queue_bytes: u64,
+}
+
+impl Default for RocksSessionStoreOptions {
+    fn default() -> Self {
+        Self { archival_checkpoint_interval: 256, max_network_queue_messages: 65_536, max_network_queue_bytes: 512 * 1024 * 1024 }
+    }
+}
 
 /// Durable, optimistic-transaction-backed session store.
 ///
@@ -36,11 +59,25 @@ const KEY_INBOUND_RECEIPT: u8 = b'R';
 /// finalising different blocks at the same height.
 pub struct RocksSessionStore {
     db: OptimisticTransactionDB,
+    archival_checkpoint_interval: u64,
+    max_network_queue_messages: u64,
+    max_network_queue_bytes: u64,
 }
 
 impl RocksSessionStore {
     /// Open or create a store at an explicit, narrow path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with_options(path, RocksSessionStoreOptions::default())
+    }
+
+    /// Open with an explicit local snapshot-retention policy.
+    pub fn open_with_options(path: impl AsRef<Path>, store_options: RocksSessionStoreOptions) -> Result<Self, StoreError> {
+        if store_options.archival_checkpoint_interval == 0
+            || store_options.max_network_queue_messages == 0
+            || store_options.max_network_queue_bytes == 0
+        {
+            return Err(StoreError::Corrupt("checkpoint interval and network queue quotas must be non-zero".to_owned()));
+        }
         let mut options = Options::default();
         options.create_if_missing(true);
         options.set_paranoid_checks(true);
@@ -48,6 +85,14 @@ impl RocksSessionStore {
         let db = OptimisticTransactionDB::open(&options, path).map_err(backend)?;
         match db.get(SCHEMA_KEY).map_err(backend)? {
             Some(version) if version == SCHEMA_VERSION => {}
+            Some(version) if version == LEGACY_SCHEMA_VERSION => {
+                // Record v5 can read the existing JSON-v4 records lazily. Bump
+                // the store marker before any v5 record is written so an old
+                // binary fails closed instead of opening a mixed-codec store.
+                let mut writes = WriteOptions::default();
+                writes.set_sync(true);
+                db.put_opt(SCHEMA_KEY, SCHEMA_VERSION, &writes).map_err(backend)?;
+            }
             Some(version) => {
                 return Err(StoreError::Corrupt(format!(
                     "unsupported RocksDB session-store schema {:?}",
@@ -66,7 +111,12 @@ impl RocksSessionStore {
                 db.put_opt(SCHEMA_KEY, SCHEMA_VERSION, &writes).map_err(backend)?;
             }
         }
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            archival_checkpoint_interval: store_options.archival_checkpoint_interval,
+            max_network_queue_messages: store_options.max_network_queue_messages,
+            max_network_queue_bytes: store_options.max_network_queue_bytes,
+        })
     }
 
     fn sync_transaction(&self) -> rocksdb::Transaction<'_, OptimisticTransactionDB> {
@@ -85,14 +135,25 @@ impl SessionStore for RocksSessionStore {
         let head_key = session_key(KEY_HEAD, genesis.config.session_id);
         let genesis_bytes = genesis.encode().map_err(corrupt)?;
         let head_bytes = head.encode().map_err(corrupt)?;
+        let checkpoint_key = session_key(KEY_CHECKPOINT, genesis.config.session_id);
+        let checkpoint_bytes = StateCheckpoint {
+            session_id: genesis.config.session_id,
+            finalised_height: None,
+            state_root: genesis.config.initial_state_root,
+            state_snapshot: genesis.state_snapshot.clone(),
+        }
+        .encode()
+        .map_err(corrupt)?;
         let transaction = self.sync_transaction();
         if transaction.get_for_update(&genesis_key, true).map_err(backend)?.is_some()
             || transaction.get_for_update(&head_key, true).map_err(backend)?.is_some()
+            || transaction.get_for_update(&checkpoint_key, true).map_err(backend)?.is_some()
         {
             return Err(StoreError::Conflict("session id already exists".to_owned()));
         }
         transaction.put(&genesis_key, genesis_bytes).map_err(backend)?;
         transaction.put(&head_key, head_bytes).map_err(backend)?;
+        transaction.put(&checkpoint_key, checkpoint_bytes).map_err(backend)?;
         transaction.commit().map_err(commit_error)
     }
 
@@ -142,7 +203,90 @@ impl SessionStore for RocksSessionStore {
             }
             records.push(record);
         }
+        if let Some(last) = records.last_mut() {
+            if last.state_snapshot.is_empty() {
+                let checkpoint = self.load_checkpoint(session_id)?;
+                if checkpoint.finalised_height != Some(last.block.number) || checkpoint.state_root != last.block.state_root_after {
+                    return Err(StoreError::Corrupt("latest checkpoint does not match the last block".to_owned()));
+                }
+                last.state_snapshot = checkpoint.state_snapshot;
+            }
+        }
         Ok(records)
+    }
+
+    fn load_chain_page(&self, session_id: Hash32, start_height: u64, limit: usize) -> Result<Vec<FinalisedBlockRecord>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let genesis = self.load_genesis(session_id)?;
+        let prefix = session_key(KEY_BLOCK, session_id);
+        let start = block_key(session_id, start_height);
+        let mut records = Vec::with_capacity(limit.min(1_024));
+        for item in self.db.iterator(IteratorMode::From(&start, Direction::Forward)) {
+            let (key, value) = item.map_err(backend)?;
+            if !key.starts_with(&prefix) || records.len() == limit {
+                break;
+            }
+            if key.len() != prefix.len() + 8 {
+                return Err(StoreError::Corrupt("malformed block key".to_owned()));
+            }
+            let height = u64::from_be_bytes(key[prefix.len()..].try_into().expect("checked block key length"));
+            let record = FinalisedBlockRecord::decode(&value).map_err(corrupt)?;
+            if record.block.number != height
+                || record.block.consensus_kind != genesis.config.consensus_kind
+                || record.consensus_module_commitment != genesis.config.consensus_module_commitment
+            {
+                return Err(StoreError::Corrupt(format!("block key/module mismatch at height {height}")));
+            }
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    fn load_checkpoint(&self, session_id: Hash32) -> Result<StateCheckpoint, StoreError> {
+        let head = self.load_head(session_id)?;
+        let checkpoint = match self.db.get(session_key(KEY_CHECKPOINT, session_id)).map_err(backend)? {
+            Some(bytes) => StateCheckpoint::decode(&bytes).map_err(corrupt)?,
+            None => match head.finalised_height {
+                Some(height) => {
+                    let bytes = self
+                        .db
+                        .get(block_key(session_id, height))
+                        .map_err(backend)?
+                        .ok_or_else(|| StoreError::NotFound("head block".to_owned()))?;
+                    let record = FinalisedBlockRecord::decode(&bytes).map_err(corrupt)?;
+                    if record.state_snapshot.is_empty() {
+                        return Err(StoreError::Corrupt(
+                            "latest checkpoint key is missing and head block has no legacy snapshot".to_owned(),
+                        ));
+                    }
+                    StateCheckpoint {
+                        session_id,
+                        finalised_height: Some(height),
+                        state_root: record.block.state_root_after,
+                        state_snapshot: record.state_snapshot,
+                    }
+                }
+                None => {
+                    let genesis = self.load_genesis(session_id)?;
+                    StateCheckpoint {
+                        session_id,
+                        finalised_height: None,
+                        state_root: genesis.config.initial_state_root,
+                        state_snapshot: genesis.state_snapshot,
+                    }
+                }
+            },
+        };
+        if checkpoint.session_id != session_id
+            || checkpoint.finalised_height != head.finalised_height
+            || checkpoint.state_root != head.state_root
+            || checkpoint.state_snapshot.is_empty()
+        {
+            return Err(StoreError::Corrupt("checkpoint key does not match session head".to_owned()));
+        }
+        Ok(checkpoint)
     }
 
     fn commit_block(
@@ -157,7 +301,20 @@ impl SessionStore for RocksSessionStore {
         let block_key = block_key(session_id, record.block.number);
         let expected_bytes = expected_head.encode().map_err(corrupt)?;
         let new_head_bytes = new_head.encode().map_err(corrupt)?;
-        let record_bytes = record.encode().map_err(corrupt)?;
+        let checkpoint_key = session_key(KEY_CHECKPOINT, session_id);
+        let checkpoint_bytes = StateCheckpoint {
+            session_id,
+            finalised_height: Some(record.block.number),
+            state_root: record.block.state_root_after,
+            state_snapshot: record.state_snapshot.clone(),
+        }
+        .encode()
+        .map_err(corrupt)?;
+        let mut stored_record = record.clone();
+        if record.block.number % self.archival_checkpoint_interval != 0 {
+            stored_record.state_snapshot.clear();
+        }
+        let record_bytes = stored_record.encode().map_err(corrupt)?;
 
         let transaction = self.sync_transaction();
         let genesis = load_genesis_transaction(&transaction, session_id)?;
@@ -179,6 +336,7 @@ impl SessionStore for RocksSessionStore {
 
         transaction.put(&block_key, record_bytes).map_err(backend)?;
         transaction.put(&head_key, new_head_bytes).map_err(backend)?;
+        transaction.put(&checkpoint_key, checkpoint_bytes).map_err(backend)?;
         for message in &record.outbox {
             let message_key = outbox_key(session_id, record.block.number, message.id);
             let index_key = outbox_index_key(session_id, message.id);
@@ -346,9 +504,20 @@ impl NetworkStore for RocksSessionStore {
         if transaction.get_for_update(&index_key, true).map_err(network_backend)?.is_some() {
             return Err(NetworkStoreError::Conflict("outbound message id already exists".to_owned()));
         }
-        transaction.put(&queue_key, message.encode()).map_err(network_backend)?;
+        let message_bytes = message.encode();
+        let usage = grow_network_queue(
+            &self.db,
+            &transaction,
+            session_id,
+            KEY_OUTBOUND,
+            message_bytes.len(),
+            self.max_network_queue_messages,
+            self.max_network_queue_bytes,
+        )?;
+        transaction.put(&queue_key, message_bytes).map_err(network_backend)?;
         transaction.put(&index_key, &queue_key).map_err(network_backend)?;
         transaction.put(&sequence_key, message.envelope.sequence.to_be_bytes()).map_err(network_backend)?;
+        transaction.put(network_usage_key(session_id, KEY_OUTBOUND), encode_network_usage(usage)).map_err(network_backend)?;
         transaction.commit().map_err(network_commit_error)
     }
 
@@ -362,7 +531,22 @@ impl NetworkStore for RocksSessionStore {
     }
 
     fn acknowledge_outbound(&self, session_id: Hash32, message_id: Hash32) -> Result<(), NetworkStoreError> {
-        acknowledge_network_message(&self.db, self.sync_transaction(), KEY_OUTBOUND, KEY_OUTBOUND_INDEX, session_id, message_id)
+        self.acknowledge_outbound_batch(session_id, &[message_id])
+    }
+
+    fn acknowledge_outbound_batch(&self, session_id: Hash32, message_ids: &[Hash32]) -> Result<(), NetworkStoreError> {
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+        acknowledge_network_messages(
+            &self.db,
+            self.sync_transaction(),
+            KEY_OUTBOUND,
+            KEY_OUTBOUND_INDEX,
+            session_id,
+            message_ids,
+            false,
+        )
     }
 
     fn enqueue_inbound(&self, message: &DurableEnvelope) -> Result<EnqueueStatus, NetworkStoreError> {
@@ -370,31 +554,23 @@ impl NetworkStore for RocksSessionStore {
         validate_envelope_routing(message)?;
         let sequence_key =
             peer_pair_key(KEY_INBOUND_SEQUENCE, session_id, &message.envelope.sender_id, &message.envelope.recipient_id);
-        let receipt_key =
-            inbound_receipt_key(session_id, &message.envelope.sender_id, &message.envelope.recipient_id, message.envelope.sequence);
         let queue_key = network_queue_key(KEY_INBOUND, session_id, message.envelope.sequence, message.message_id);
         let index_key = network_index_key(KEY_INBOUND_INDEX, session_id, message.message_id);
         let transaction = self.sync_transaction();
         let genesis = ensure_network_session_transaction(&transaction, session_id)?;
         ensure_network_module_binding(message, &genesis)?;
-        if let Some(receipt) = transaction.get_for_update(&receipt_key, true).map_err(network_backend)? {
-            let received_message_id: Hash32 = receipt
-                .as_slice()
-                .try_into()
-                .map_err(|_| NetworkStoreError::Corrupt("inbound receipt must contain one message id".to_owned()))?;
-            if received_message_id == message.message_id {
-                return Ok(EnqueueStatus::Duplicate);
-            }
-            return Err(NetworkStoreError::Conflict(format!("inbound sender equivocated at sequence {}", message.envelope.sequence)));
-        }
         let current = transaction.get_for_update(&sequence_key, true).map_err(network_backend)?;
         if let Some(bytes) = current.as_deref() {
-            let (current, _) = decode_inbound_cursor(bytes)?;
-            if message.envelope.sequence <= current {
-                return Err(NetworkStoreError::Corrupt(format!(
-                    "inbound receipt for accepted sequence {} is missing",
-                    message.envelope.sequence
-                )));
+            let (current, current_message_id) = decode_inbound_cursor(bytes)?;
+            if message.envelope.sequence < current {
+                return Ok(EnqueueStatus::Duplicate);
+            }
+            if message.envelope.sequence == current {
+                return if message.message_id == current_message_id {
+                    Ok(EnqueueStatus::Duplicate)
+                } else {
+                    Err(NetworkStoreError::Conflict(format!("inbound sender equivocated at sequence {}", message.envelope.sequence)))
+                };
             }
             let expected =
                 current.checked_add(1).ok_or_else(|| NetworkStoreError::Conflict("inbound sequence overflow".to_owned()))?;
@@ -404,18 +580,34 @@ impl NetworkStore for RocksSessionStore {
                     message.envelope.sequence
                 )));
             }
+            // Schema-v4 stores may have a receipt for the immediately prior
+            // cursor. The cursor itself is sufficient for duplicate rejection,
+            // so remove that legacy row as progress advances.
+            transaction
+                .delete(inbound_receipt_key(session_id, &message.envelope.sender_id, &message.envelope.recipient_id, current))
+                .map_err(network_backend)?;
         } else if message.envelope.sequence != 0 {
             return Err(NetworkStoreError::Conflict(format!("first inbound sequence must be 0, got {}", message.envelope.sequence)));
         }
         if transaction.get_for_update(&index_key, true).map_err(network_backend)?.is_some() {
             return Err(NetworkStoreError::Conflict("inbound message id already exists outside the replay cursor".to_owned()));
         }
-        transaction.put(&queue_key, message.encode()).map_err(network_backend)?;
+        let message_bytes = message.encode();
+        let usage = grow_network_queue(
+            &self.db,
+            &transaction,
+            session_id,
+            KEY_INBOUND,
+            message_bytes.len(),
+            self.max_network_queue_messages,
+            self.max_network_queue_bytes,
+        )?;
+        transaction.put(&queue_key, message_bytes).map_err(network_backend)?;
         transaction.put(&index_key, &queue_key).map_err(network_backend)?;
-        transaction.put(&receipt_key, message.message_id).map_err(network_backend)?;
         transaction
             .put(&sequence_key, encode_inbound_cursor(message.envelope.sequence, message.message_id))
             .map_err(network_backend)?;
+        transaction.put(network_usage_key(session_id, KEY_INBOUND), encode_network_usage(usage)).map_err(network_backend)?;
         transaction.commit().map_err(network_commit_error)?;
         Ok(EnqueueStatus::Enqueued)
     }
@@ -425,7 +617,14 @@ impl NetworkStore for RocksSessionStore {
     }
 
     fn acknowledge_inbound(&self, session_id: Hash32, message_id: Hash32) -> Result<(), NetworkStoreError> {
-        acknowledge_network_message(&self.db, self.sync_transaction(), KEY_INBOUND, KEY_INBOUND_INDEX, session_id, message_id)
+        self.acknowledge_inbound_batch(session_id, &[message_id])
+    }
+
+    fn acknowledge_inbound_batch(&self, session_id: Hash32, message_ids: &[Hash32]) -> Result<(), NetworkStoreError> {
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+        acknowledge_network_messages(&self.db, self.sync_transaction(), KEY_INBOUND, KEY_INBOUND_INDEX, session_id, message_ids, true)
     }
 }
 
@@ -544,6 +743,80 @@ fn network_index_key(prefix: u8, session_id: Hash32, message_id: Hash32) -> Vec<
     key
 }
 
+fn network_usage_key(session_id: Hash32, queue_prefix: u8) -> Vec<u8> {
+    let mut key = session_key(KEY_NETWORK_USAGE, session_id);
+    key.push(queue_prefix);
+    key
+}
+
+fn encode_network_usage(usage: (u64, u64)) -> [u8; 16] {
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&usage.0.to_be_bytes());
+    bytes[8..].copy_from_slice(&usage.1.to_be_bytes());
+    bytes
+}
+
+fn decode_network_usage(bytes: &[u8]) -> Result<(u64, u64), NetworkStoreError> {
+    if bytes.len() != 16 {
+        return Err(NetworkStoreError::Corrupt("network queue usage must be exactly 16 bytes".to_owned()));
+    }
+    Ok((
+        u64::from_be_bytes(bytes[..8].try_into().expect("checked usage length")),
+        u64::from_be_bytes(bytes[8..].try_into().expect("checked usage length")),
+    ))
+}
+
+fn load_network_usage(
+    db: &OptimisticTransactionDB,
+    transaction: &rocksdb::Transaction<'_, OptimisticTransactionDB>,
+    session_id: Hash32,
+    queue_prefix: u8,
+) -> Result<(u64, u64), NetworkStoreError> {
+    let usage_key = network_usage_key(session_id, queue_prefix);
+    if let Some(bytes) = transaction.get_for_update(&usage_key, true).map_err(network_backend)? {
+        return decode_network_usage(&bytes);
+    }
+    // One-time schema-v4 compatibility path. The newly locked usage key makes
+    // concurrent lazy initialization conflict safely.
+    let prefix = session_key(queue_prefix, session_id);
+    let mut messages = 0u64;
+    let mut bytes = 0u64;
+    for item in db.iterator(IteratorMode::From(&prefix, Direction::Forward)) {
+        let (key, value) = item.map_err(network_backend)?;
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        messages = messages.checked_add(1).ok_or_else(|| NetworkStoreError::Corrupt("network queue count overflow".to_owned()))?;
+        bytes = bytes
+            .checked_add(value.len() as u64)
+            .ok_or_else(|| NetworkStoreError::Corrupt("network queue byte count overflow".to_owned()))?;
+    }
+    Ok((messages, bytes))
+}
+
+fn grow_network_queue(
+    db: &OptimisticTransactionDB,
+    transaction: &rocksdb::Transaction<'_, OptimisticTransactionDB>,
+    session_id: Hash32,
+    queue_prefix: u8,
+    encoded_bytes: usize,
+    max_messages: u64,
+    max_bytes: u64,
+) -> Result<(u64, u64), NetworkStoreError> {
+    let (messages, bytes) = load_network_usage(db, transaction, session_id, queue_prefix)?;
+    let messages =
+        messages.checked_add(1).ok_or_else(|| NetworkStoreError::ResourceLimit("network queue count overflow".to_owned()))?;
+    let bytes = bytes
+        .checked_add(encoded_bytes as u64)
+        .ok_or_else(|| NetworkStoreError::ResourceLimit("network queue bytes overflow".to_owned()))?;
+    if messages > max_messages || bytes > max_bytes {
+        return Err(NetworkStoreError::ResourceLimit(format!(
+            "durable queue would reach {messages} messages/{bytes} bytes; limits are {max_messages}/{max_bytes}"
+        )));
+    }
+    Ok((messages, bytes))
+}
+
 fn envelope_session_id(message: &DurableEnvelope) -> Result<Hash32, NetworkStoreError> {
     message
         .envelope
@@ -647,24 +920,59 @@ fn load_network_queue(
     Ok(messages)
 }
 
-fn acknowledge_network_message(
-    _db: &OptimisticTransactionDB,
+fn acknowledge_network_messages(
+    db: &OptimisticTransactionDB,
     transaction: rocksdb::Transaction<'_, OptimisticTransactionDB>,
     queue_prefix: u8,
     index_prefix: u8,
     session_id: Hash32,
-    message_id: Hash32,
+    message_ids: &[Hash32],
+    delete_legacy_inbound_receipt: bool,
 ) -> Result<(), NetworkStoreError> {
-    let index_key = network_index_key(index_prefix, session_id, message_id);
-    let queue_key = transaction
-        .get_for_update(&index_key, true)
-        .map_err(network_backend)?
-        .ok_or_else(|| NetworkStoreError::NotFound("durable network message".to_owned()))?;
-    if !queue_key.starts_with(&session_key(queue_prefix, session_id)) {
-        return Err(NetworkStoreError::Corrupt("network index points outside its queue".to_owned()));
+    let mut removed_messages = 0u64;
+    let mut removed_bytes = 0u64;
+    for message_id in message_ids {
+        let index_key = network_index_key(index_prefix, session_id, *message_id);
+        let queue_key = transaction
+            .get_for_update(&index_key, true)
+            .map_err(network_backend)?
+            .ok_or_else(|| NetworkStoreError::NotFound("durable network message".to_owned()))?;
+        if !queue_key.starts_with(&session_key(queue_prefix, session_id)) {
+            return Err(NetworkStoreError::Corrupt("network index points outside its queue".to_owned()));
+        }
+        let bytes = transaction
+            .get_for_update(&queue_key, true)
+            .map_err(network_backend)?
+            .ok_or_else(|| NetworkStoreError::NotFound("durable network message".to_owned()))?;
+        removed_messages =
+            removed_messages.checked_add(1).ok_or_else(|| NetworkStoreError::Corrupt("network queue count overflow".to_owned()))?;
+        removed_bytes = removed_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| NetworkStoreError::Corrupt("network queue bytes overflow".to_owned()))?;
+        if delete_legacy_inbound_receipt {
+            let message = DurableEnvelope::decode(&bytes).map_err(|error| NetworkStoreError::Corrupt(error.to_string()))?;
+            transaction
+                .delete(inbound_receipt_key(
+                    session_id,
+                    &message.envelope.sender_id,
+                    &message.envelope.recipient_id,
+                    message.envelope.sequence,
+                ))
+                .map_err(network_backend)?;
+        }
+        transaction.delete(&queue_key).map_err(network_backend)?;
+        transaction.delete(&index_key).map_err(network_backend)?;
     }
-    transaction.delete(&queue_key).map_err(network_backend)?;
-    transaction.delete(&index_key).map_err(network_backend)?;
+    let (messages, bytes) = load_network_usage(db, &transaction, session_id, queue_prefix)?;
+    let usage = (
+        messages
+            .checked_sub(removed_messages)
+            .ok_or_else(|| NetworkStoreError::Corrupt("network queue usage count underflow".to_owned()))?,
+        bytes
+            .checked_sub(removed_bytes)
+            .ok_or_else(|| NetworkStoreError::Corrupt("network queue usage bytes underflow".to_owned()))?,
+    );
+    transaction.put(network_usage_key(session_id, queue_prefix), encode_network_usage(usage)).map_err(network_backend)?;
     transaction.commit().map_err(network_commit_error)
 }
 

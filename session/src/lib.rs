@@ -5,9 +5,10 @@
 //!
 //! This crate deliberately separates deterministic execution, finality,
 //! persistence, networking, and settlement. A [`SessionChain`] only advances
-//! after an engine-specific proof has been verified and the new head, state
-//! snapshot, block record, and outbox have been atomically committed by a
-//! [`SessionStore`]. It is a closed-session runtime, not an independent L1.
+//! after an engine-specific proof has been verified and the new head, latest
+//! state checkpoint, block record, and outbox have been atomically committed
+//! by a [`SessionStore`]. It is a closed-session runtime, not an independent
+//! L1.
 
 use myelin_consensus::{ConsensusKind, ConsensusModuleDescriptor, FinalityProof, MyelinBlock};
 use myelin_exec::{
@@ -21,7 +22,10 @@ use std::{collections::HashSet, fmt, sync::Arc};
 /// Fixed-width identifier used for sessions, blocks, roots, and commitments.
 pub type Hash32 = [u8; 32];
 
-const RECORD_FORMAT_VERSION: u16 = 4;
+const RECORD_MAGIC: &[u8; 4] = b"MREC";
+const RECORD_FORMAT_VERSION: u16 = 5;
+const LEGACY_JSON_RECORD_FORMAT_VERSION: u16 = 4;
+const RECORD_HEADER_BYTES: usize = 4 + 2 + 8 + 32;
 const SNAPSHOT_MAGIC: &[u8; 4] = b"MSNP";
 const SNAPSHOT_VERSION: u16 = 1;
 const MAX_SNAPSHOT_ITEMS: usize = 16_777_216;
@@ -30,6 +34,7 @@ const OUTBOX_DOMAIN: &[u8] = b"myelin:session-outbox";
 const MAX_CONSENSUS_WAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_OUTBOX_TOPIC_BYTES: usize = 256;
 const MAX_OUTBOX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const RECOVERY_PAGE_SIZE: usize = 1_024;
 
 /// Immutable limits and genesis commitment for one continuous session chain.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -296,7 +301,10 @@ pub struct FinalisedBlockRecord {
     pub proof: FinalityProof,
     /// Canonical transaction payloads used to reproduce execution.
     pub transactions: Vec<Vec<u8>>,
-    /// Complete post-state snapshot.
+    /// Complete post-state snapshot supplied at commit time.
+    ///
+    /// Stores may elide this payload from historical non-checkpoint records
+    /// when they atomically retain the latest full checkpoint.
     pub state_snapshot: Vec<u8>,
     /// External effects committed in the same storage transaction.
     pub outbox: Vec<OutboxMessage>,
@@ -321,6 +329,39 @@ pub struct SessionGenesis {
     pub config: SessionConfig,
     /// Initial full execution snapshot.
     pub state_snapshot: Vec<u8>,
+}
+
+/// Atomically replaceable full state used to restart a session without
+/// retaining a duplicate snapshot in every historical block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StateCheckpoint {
+    /// Session owning the snapshot.
+    pub session_id: Hash32,
+    /// Height represented by the snapshot, or `None` for genesis.
+    pub finalised_height: Option<u64>,
+    /// State root reconstructed from the snapshot.
+    pub state_root: Hash32,
+    /// Complete executor-specific restart snapshot.
+    pub state_snapshot: Vec<u8>,
+}
+
+impl StateCheckpoint {
+    /// Encode a checksummed checkpoint record.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        if self.session_id == [0; 32] || self.state_snapshot.is_empty() {
+            return Err(SessionError::Codec("checkpoint session id and snapshot must be non-empty".to_owned()));
+        }
+        encode_record(&StateCheckpointWire::from(self))
+    }
+
+    /// Decode a checksummed checkpoint record.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let checkpoint = Self::from(decode_record::<StateCheckpointWire>(bytes)?);
+        if checkpoint.session_id == [0; 32] || checkpoint.state_snapshot.is_empty() {
+            return Err(SessionError::Codec("checkpoint session id and snapshot must be non-empty".to_owned()));
+        }
+        Ok(checkpoint)
+    }
 }
 
 impl SessionGenesis {
@@ -457,6 +498,41 @@ pub trait SessionStore: Send + Sync + 'static {
     fn load_head(&self, session_id: Hash32) -> std::result::Result<SessionHead, StoreError>;
     /// Load all finalised blocks in ascending height order.
     fn load_chain(&self, session_id: Hash32) -> std::result::Result<Vec<FinalisedBlockRecord>, StoreError>;
+    /// Load a bounded page beginning at `start_height`.
+    ///
+    /// Backends should override this to stream directly from durable keys.
+    /// The default preserves compatibility for small/bounded in-memory stores.
+    fn load_chain_page(
+        &self,
+        session_id: Hash32,
+        start_height: u64,
+        limit: usize,
+    ) -> std::result::Result<Vec<FinalisedBlockRecord>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self.load_chain(session_id)?.into_iter().filter(|record| record.block.number >= start_height).take(limit).collect())
+    }
+    /// Load the latest full restart checkpoint.
+    ///
+    /// The default supports stores that retain a full snapshot in each block.
+    fn load_checkpoint(&self, session_id: Hash32) -> std::result::Result<StateCheckpoint, StoreError> {
+        let genesis = self.load_genesis(session_id)?;
+        if let Some(record) = self.load_chain(session_id)?.into_iter().rev().find(|record| !record.state_snapshot.is_empty()) {
+            return Ok(StateCheckpoint {
+                session_id,
+                finalised_height: Some(record.block.number),
+                state_root: record.block.state_root_after,
+                state_snapshot: record.state_snapshot,
+            });
+        }
+        Ok(StateCheckpoint {
+            session_id,
+            finalised_height: None,
+            state_root: genesis.config.initial_state_root,
+            state_snapshot: genesis.state_snapshot,
+        })
+    }
     /// Atomically CAS the head and write block, snapshot, proof, and outbox.
     fn commit_block(
         &self,
@@ -473,6 +549,31 @@ pub trait SessionStore: Send + Sync + 'static {
     fn pending_outbox(&self, session_id: Hash32, limit: usize) -> std::result::Result<Vec<PendingDelivery>, StoreError>;
     /// Acknowledge one idempotently delivered effect.
     fn acknowledge_outbox(&self, session_id: Hash32, message_id: Hash32) -> std::result::Result<(), StoreError>;
+}
+
+/// Fully verified recovery material. Fields are private so callers cannot
+/// bypass chain/finality audit before constructing a writable session.
+pub struct AuditedRecovery {
+    config: SessionConfig,
+    head: SessionHead,
+    checkpoint: StateCheckpoint,
+}
+
+impl AuditedRecovery {
+    /// Snapshot bytes an executor plugin must restore.
+    pub fn state_snapshot(&self) -> &[u8] {
+        &self.checkpoint.state_snapshot
+    }
+
+    /// Root the restored executor must produce.
+    pub fn state_root(&self) -> Hash32 {
+        self.checkpoint.state_root
+    }
+
+    /// Audited durable head.
+    pub fn head(&self) -> &SessionHead {
+        &self.head
+    }
 }
 
 /// A recovered, continuously advancing session chain.
@@ -506,33 +607,76 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
 
     /// Recover a chain after the caller reconstructs an executor from the most
     /// recent snapshot returned by [`Self::recovery_snapshot`]. Every block and
-    /// finality proof is revalidated before the service becomes writable.
+    /// finality proof is streamed and revalidated before the service becomes
+    /// writable.
     pub fn recover(session_id: Hash32, finality_verifier: Arc<dyn FinalityVerifier>, executor: E, store: Arc<S>) -> Result<Self> {
+        let audited = Self::audit_recovery(session_id, finality_verifier.as_ref(), store.as_ref())?;
+        Self::recover_audited(audited, finality_verifier, executor, store)
+    }
+
+    /// Stream and verify a complete durable history exactly once, then return
+    /// its atomically stored restart checkpoint.
+    pub fn audit_recovery(session_id: Hash32, finality_verifier: &dyn FinalityVerifier, store: &S) -> Result<AuditedRecovery> {
         let genesis = store.load_genesis(session_id)?;
         genesis.config.validate()?;
-        ensure_consensus_config(finality_verifier.as_ref(), &genesis.config)?;
+        ensure_consensus_config(finality_verifier, &genesis.config)?;
         let persisted_head = store.load_head(session_id)?;
-        let chain = store.load_chain(session_id)?;
-        let audited_head = audit_chain(&genesis, finality_verifier.as_ref(), &chain)?;
+        let mut audited_head = genesis_head(&genesis);
+        let mut next_height = 0u64;
+        loop {
+            let page = store.load_chain_page(session_id, next_height, RECOVERY_PAGE_SIZE)?;
+            if page.is_empty() {
+                break;
+            }
+            for record in &page {
+                audit_record(&genesis, finality_verifier, &mut audited_head, record)?;
+                next_height = record.block.number.checked_add(1).ok_or(SessionError::HeightOverflow)?;
+            }
+            if page.len() < RECOVERY_PAGE_SIZE {
+                break;
+            }
+        }
         if audited_head != persisted_head {
             return Err(SessionError::Recovery("persisted head does not match audited chain".to_owned()));
         }
-        if executor.state_root() != persisted_head.state_root {
-            return Err(SessionError::StateRootMismatch { expected: persisted_head.state_root, actual: executor.state_root() });
+        let checkpoint = store.load_checkpoint(session_id)?;
+        if checkpoint.session_id != session_id
+            || checkpoint.finalised_height != persisted_head.finalised_height
+            || checkpoint.state_root != persisted_head.state_root
+            || checkpoint.state_snapshot.is_empty()
+        {
+            return Err(SessionError::Recovery("restart checkpoint does not match the audited head".to_owned()));
         }
-        Ok(Self { config: genesis.config, head: persisted_head, finality_verifier, executor, store })
+        Ok(AuditedRecovery { config: genesis.config, head: persisted_head, checkpoint })
+    }
+
+    /// Attach an executor restored from [`AuditedRecovery::state_snapshot`]
+    /// without reading or auditing the chain a second time.
+    pub fn recover_audited(
+        audited: AuditedRecovery,
+        finality_verifier: Arc<dyn FinalityVerifier>,
+        executor: E,
+        store: Arc<S>,
+    ) -> Result<Self> {
+        ensure_consensus_config(finality_verifier.as_ref(), &audited.config)?;
+        if executor.state_root() != audited.checkpoint.state_root {
+            return Err(SessionError::StateRootMismatch { expected: audited.checkpoint.state_root, actual: executor.state_root() });
+        }
+        Ok(Self { config: audited.config, head: audited.head, finality_verifier, executor, store })
     }
 
     /// Obtain the snapshot that an executor plugin must restore before calling
     /// [`Self::recover`]. The returned head is informational and is audited by recovery.
     pub fn recovery_snapshot(store: &S, session_id: Hash32) -> Result<(SessionHead, Vec<u8>)> {
         let head = store.load_head(session_id)?;
-        let chain = store.load_chain(session_id)?;
-        let snapshot = match chain.last() {
-            Some(record) => record.state_snapshot.clone(),
-            None => store.load_genesis(session_id)?.state_snapshot,
-        };
-        Ok((head, snapshot))
+        let checkpoint = store.load_checkpoint(session_id)?;
+        if checkpoint.session_id != session_id
+            || checkpoint.finalised_height != head.finalised_height
+            || checkpoint.state_root != head.state_root
+        {
+            return Err(SessionError::Recovery("restart checkpoint does not match the durable head".to_owned()));
+        }
+        Ok((head, checkpoint.state_snapshot))
     }
 
     /// Current durable head.
@@ -678,40 +822,46 @@ fn ensure_consensus_config(verifier: &dyn FinalityVerifier, config: &SessionConf
     Ok(())
 }
 
-fn audit_chain(genesis: &SessionGenesis, verifier: &dyn FinalityVerifier, chain: &[FinalisedBlockRecord]) -> Result<SessionHead> {
-    let mut head = SessionHead {
+fn genesis_head(genesis: &SessionGenesis) -> SessionHead {
+    SessionHead {
         session_id: genesis.config.session_id,
         finalised_height: None,
         block_hash: [0; 32],
         state_root: genesis.config.initial_state_root,
         timestamp_ms: 0,
-    };
-    for record in chain {
-        if record.block.parent_hash != head.block_hash
-            || record.block.number != head.next_height()?
-            || record.block.state_root_before != head.state_root
-            || record.block.timestamp_ms < head.timestamp_ms
-            || record.block.consensus_kind != genesis.config.consensus_kind
-            || record.consensus_module_commitment != genesis.config.consensus_module_commitment
-        {
-            return Err(SessionError::Recovery(format!("invalid chain linkage at height {}", record.block.number)));
-        }
-        if record.transactions.len() != record.block.ordered_cell_tx_commitments.len() {
-            return Err(SessionError::Recovery(format!("payload count mismatch at height {}", record.block.number)));
-        }
-        let verified = verifier.verify(&record.block, &record.proof)?;
-        if verified.block_hash != record.block.hash() || verified.consensus_module_commitment != record.consensus_module_commitment {
-            return Err(SessionError::Recovery(format!("finality verifier result mismatch at height {}", record.block.number)));
-        }
-        head = SessionHead {
-            session_id: genesis.config.session_id,
-            finalised_height: Some(record.block.number),
-            block_hash: record.block.hash(),
-            state_root: record.block.state_root_after,
-            timestamp_ms: record.block.timestamp_ms,
-        };
     }
-    Ok(head)
+}
+
+fn audit_record(
+    genesis: &SessionGenesis,
+    verifier: &dyn FinalityVerifier,
+    head: &mut SessionHead,
+    record: &FinalisedBlockRecord,
+) -> Result<()> {
+    if record.block.parent_hash != head.block_hash
+        || record.block.number != head.next_height()?
+        || record.block.state_root_before != head.state_root
+        || record.block.timestamp_ms < head.timestamp_ms
+        || record.block.consensus_kind != genesis.config.consensus_kind
+        || record.consensus_module_commitment != genesis.config.consensus_module_commitment
+    {
+        return Err(SessionError::Recovery(format!("invalid chain linkage at height {}", record.block.number)));
+    }
+    if record.transactions.len() != record.block.ordered_cell_tx_commitments.len() {
+        return Err(SessionError::Recovery(format!("payload count mismatch at height {}", record.block.number)));
+    }
+    let verified = verifier.verify(&record.block, &record.proof)?;
+    if verified.block_hash != record.block.hash() || verified.consensus_module_commitment != record.consensus_module_commitment {
+        return Err(SessionError::Recovery(format!("finality verifier result mismatch at height {}", record.block.number)));
+    }
+    *head = SessionHead {
+        session_id: genesis.config.session_id,
+        finalised_height: Some(record.block.number),
+        block_hash: record.block.hash(),
+        state_root: record.block.state_root_after,
+        timestamp_ms: record.block.timestamp_ms,
+    };
+    Ok(())
 }
 
 fn make_outbox_message(
@@ -1042,22 +1192,48 @@ struct RecordEnvelope<T> {
 }
 
 fn encode_record<T: Serialize>(body: &T) -> Result<Vec<u8>> {
-    let body_bytes = serde_json::to_vec(body).map_err(|error| SessionError::Codec(error.to_string()))?;
+    let body_bytes = postcard::to_allocvec(body).map_err(|error| SessionError::Codec(error.to_string()))?;
     let checksum = *blake3::hash(&body_bytes).as_bytes();
-    serde_json::to_vec(&RecordEnvelope { format_version: RECORD_FORMAT_VERSION, body, checksum })
-        .map_err(|error| SessionError::Codec(error.to_string()))
+    let body_len = u64::try_from(body_bytes.len()).map_err(|_| SessionError::Codec("record body length overflow".to_owned()))?;
+    let mut encoded = Vec::with_capacity(RECORD_HEADER_BYTES + body_bytes.len());
+    encoded.extend_from_slice(RECORD_MAGIC);
+    encoded.extend_from_slice(&RECORD_FORMAT_VERSION.to_le_bytes());
+    encoded.extend_from_slice(&body_len.to_le_bytes());
+    encoded.extend_from_slice(&checksum);
+    encoded.extend_from_slice(&body_bytes);
+    Ok(encoded)
 }
 
 fn decode_record<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T> {
-    let envelope: RecordEnvelope<T> = serde_json::from_slice(bytes).map_err(|error| SessionError::Codec(error.to_string()))?;
-    if envelope.format_version != RECORD_FORMAT_VERSION {
-        return Err(SessionError::Codec(format!("unsupported record version {}", envelope.format_version)));
+    if !bytes.starts_with(RECORD_MAGIC) {
+        let envelope: RecordEnvelope<T> = serde_json::from_slice(bytes).map_err(|error| SessionError::Codec(error.to_string()))?;
+        if envelope.format_version != LEGACY_JSON_RECORD_FORMAT_VERSION {
+            return Err(SessionError::Codec(format!("unsupported legacy record version {}", envelope.format_version)));
+        }
+        let body_bytes = serde_json::to_vec(&envelope.body).map_err(|error| SessionError::Codec(error.to_string()))?;
+        if *blake3::hash(&body_bytes).as_bytes() != envelope.checksum {
+            return Err(SessionError::Codec("record checksum mismatch".to_owned()));
+        }
+        return Ok(envelope.body);
     }
-    let body_bytes = serde_json::to_vec(&envelope.body).map_err(|error| SessionError::Codec(error.to_string()))?;
-    if *blake3::hash(&body_bytes).as_bytes() != envelope.checksum {
+    if bytes.len() < RECORD_HEADER_BYTES {
+        return Err(SessionError::Codec("truncated binary record header".to_owned()));
+    }
+    let version = u16::from_le_bytes(bytes[4..6].try_into().expect("checked header"));
+    if version != RECORD_FORMAT_VERSION {
+        return Err(SessionError::Codec(format!("unsupported record version {version}")));
+    }
+    let body_len = u64::from_le_bytes(bytes[6..14].try_into().expect("checked header"));
+    let body_len = usize::try_from(body_len).map_err(|_| SessionError::Codec("record body length overflow".to_owned()))?;
+    if bytes.len() != RECORD_HEADER_BYTES.saturating_add(body_len) {
+        return Err(SessionError::Codec("binary record length mismatch".to_owned()));
+    }
+    let expected_checksum: Hash32 = bytes[14..46].try_into().expect("checked header");
+    let body_bytes = &bytes[RECORD_HEADER_BYTES..];
+    if *blake3::hash(body_bytes).as_bytes() != expected_checksum {
         return Err(SessionError::Codec("record checksum mismatch".to_owned()));
     }
-    Ok(envelope.body)
+    postcard::from_bytes(body_bytes).map_err(|error| SessionError::Codec(error.to_string()))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1079,6 +1255,37 @@ struct SessionConfigWire {
 struct SessionGenesisWire {
     config: SessionConfigWire,
     state_snapshot: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StateCheckpointWire {
+    session_id: Hash32,
+    finalised_height: Option<u64>,
+    state_root: Hash32,
+    state_snapshot: Vec<u8>,
+}
+
+impl From<&StateCheckpoint> for StateCheckpointWire {
+    fn from(value: &StateCheckpoint) -> Self {
+        Self {
+            session_id: value.session_id,
+            finalised_height: value.finalised_height,
+            state_root: value.state_root,
+            state_snapshot: value.state_snapshot.clone(),
+        }
+    }
+}
+
+impl From<StateCheckpointWire> for StateCheckpoint {
+    fn from(value: StateCheckpointWire) -> Self {
+        Self {
+            session_id: value.session_id,
+            finalised_height: value.finalised_height,
+            state_root: value.state_root,
+            state_snapshot: value.state_snapshot,
+        }
+    }
 }
 
 impl From<&SessionConfig> for SessionConfigWire {
@@ -1450,6 +1657,27 @@ mod tests {
         let last = encoded.len() - 2;
         encoded[last] ^= 1;
         assert!(SessionConfig::decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn binary_record_codec_reads_legacy_json_v4() {
+        let config = SessionConfig {
+            session_id: [1; 32],
+            consensus_kind: ConsensusKind::ProofOfAuthority,
+            consensus_config_commitment: [3; 32],
+            consensus_module_commitment: [4; 32],
+            consensus_wal_schema_hash: [5; 32],
+            initial_state_root: [2; 32],
+            max_block_transactions: 10,
+            max_block_bytes: 100,
+            max_future_drift_ms: 1,
+        };
+        let body = SessionConfigWire::from(&config);
+        let checksum = *blake3::hash(&serde_json::to_vec(&body).unwrap()).as_bytes();
+        let legacy =
+            serde_json::to_vec(&RecordEnvelope { format_version: LEGACY_JSON_RECORD_FORMAT_VERSION, body, checksum }).unwrap();
+        assert_eq!(SessionConfig::decode(&legacy).unwrap(), config);
+        assert!(config.encode().unwrap().starts_with(RECORD_MAGIC));
     }
 
     #[derive(Clone)]

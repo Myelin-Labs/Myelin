@@ -7,7 +7,7 @@ use myelin_session_network::{
     queue_outbound, Clock, EnqueueStatus, MessageClass, MessageType, NetworkBinding, NetworkSigner, NetworkStore,
 };
 use myelin_session_runtime::RegisteredFinalityVerifier;
-use myelin_session_store_rocksdb::RocksSessionStore;
+use myelin_session_store_rocksdb::{RocksSessionStore, RocksSessionStoreOptions};
 use rocksdb::{OptimisticTransactionDB, Options};
 use std::sync::Arc;
 
@@ -100,6 +100,21 @@ fn store_rejects_unversioned_data_and_unknown_schema() {
     db.put(b"\0myelin-session-store-schema", b"1").unwrap();
     drop(db);
     assert!(matches!(RocksSessionStore::open(&unknown_path), Err(StoreError::Corrupt(_))));
+}
+
+#[test]
+fn store_migrates_schema_four_marker_before_writing_binary_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = Options::default();
+    options.create_if_missing(true);
+    let db: OptimisticTransactionDB = OptimisticTransactionDB::open(&options, directory.path()).unwrap();
+    db.put(b"\0myelin-session-store-schema", b"4").unwrap();
+    drop(db);
+
+    drop(RocksSessionStore::open(directory.path()).unwrap());
+
+    let db: OptimisticTransactionDB = OptimisticTransactionDB::open(&options, directory.path()).unwrap();
+    assert_eq!(db.get(b"\0myelin-session-store-schema").unwrap().as_deref(), Some(b"5".as_slice()));
 }
 
 #[test]
@@ -245,4 +260,76 @@ fn network_sequences_and_queues_are_durable_and_gap_free() {
     drop(store);
     let reopened = RocksSessionStore::open(directory.path()).unwrap();
     assert_eq!(reopened.enqueue_inbound(&first).unwrap(), EnqueueStatus::Duplicate);
+}
+
+#[test]
+fn rolling_checkpoint_avoids_full_snapshot_in_every_historical_block() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        RocksSessionStore::open_with_options(
+            directory.path(),
+            RocksSessionStoreOptions { archival_checkpoint_interval: 2, ..RocksSessionStoreOptions::default() },
+        )
+        .unwrap(),
+    );
+    let (consensus, signer) = consensus();
+    let mut chain =
+        SessionChain::create(config(&consensus), consensus.clone(), TestExecutor { root: [1; 32] }, Arc::clone(&store)).unwrap();
+    let engine = match consensus.selected_consensus() {
+        myelin_consensus::SelectedConsensus::ProofOfAuthority(engine) => engine,
+        _ => unreachable!(),
+    };
+    for height in 0..3 {
+        let prepared = chain
+            .prepare_block(BlockRequest {
+                transactions: vec![vec![height as u8]],
+                scheduler_commitment: [5; 32],
+                data_commitments: vec![],
+                timestamp_ms: height + 1,
+                local_now_ms: height + 1,
+            })
+            .unwrap();
+        let proof = FinalityProof::ProofOfAuthority(engine.seal_from_signer(prepared.block().hash(), height, &signer).unwrap());
+        chain.commit_finalised(prepared, proof).unwrap();
+    }
+
+    let page = store.load_chain_page([3; 32], 0, 10).unwrap();
+    assert!(!page[0].state_snapshot.is_empty());
+    assert!(page[1].state_snapshot.is_empty());
+    assert!(!page[2].state_snapshot.is_empty());
+    let checkpoint = store.load_checkpoint([3; 32]).unwrap();
+    assert_eq!(checkpoint.finalised_height, Some(2));
+    assert_eq!(checkpoint.state_root, chain.head().state_root);
+}
+
+#[test]
+fn durable_network_queue_quota_is_released_by_batch_acknowledgement() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        RocksSessionStore::open_with_options(
+            directory.path(),
+            RocksSessionStoreOptions {
+                max_network_queue_messages: 2,
+                max_network_queue_bytes: 1_000_000,
+                ..RocksSessionStoreOptions::default()
+            },
+        )
+        .unwrap(),
+    );
+    let (consensus, _) = consensus();
+    let binding = NetworkBinding {
+        session_id: [3; 32],
+        consensus_module_commitment: myelin_session::FinalityVerifier::descriptor(consensus.as_ref()).commitment(),
+    };
+    let _chain = SessionChain::create(config(&consensus), consensus, TestExecutor { root: [1; 32] }, Arc::clone(&store)).unwrap();
+    let signer = NetworkSigner::new("authority", [7; 32]).unwrap();
+    let message_type = MessageType::new(MessageClass::Consensus, 1, 0);
+    let first = queue_outbound(&*store, &FixedClock(10), &signer, binding, "peer-b", message_type, vec![1]).unwrap();
+    let second = queue_outbound(&*store, &FixedClock(11), &signer, binding, "peer-b", message_type, vec![2]).unwrap();
+    assert!(matches!(
+        queue_outbound(&*store, &FixedClock(12), &signer, binding, "peer-b", message_type, vec![3]),
+        Err(myelin_session_network::NetworkError::Store(myelin_session_network::NetworkStoreError::ResourceLimit(_)))
+    ));
+    store.acknowledge_outbound_batch([3; 32], &[first.message_id, second.message_id]).unwrap();
+    queue_outbound(&*store, &FixedClock(13), &signer, binding, "peer-b", message_type, vec![3]).unwrap();
 }

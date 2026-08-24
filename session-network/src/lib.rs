@@ -137,7 +137,11 @@ pub struct NetworkConfig {
     pub peers: Vec<NetworkPeer>,
     /// Maximum application payload size.
     pub max_payload_bytes: usize,
-    /// Maximum accepted age for a newly observed message.
+    /// Module-facing freshness hint retained in the immutable config.
+    ///
+    /// The transport does not expire a durably queued envelope solely from
+    /// this value; replay is bounded by sequence and modules validate their
+    /// own height/round lifetime.
     pub max_message_age_ms: u64,
     /// Maximum future clock drift accepted from a peer.
     pub max_future_drift_ms: u64,
@@ -316,12 +320,26 @@ pub trait NetworkStore: Send + Sync + 'static {
     ) -> Result<Vec<DurableEnvelope>, NetworkStoreError>;
     /// Remove an outbound item after an authenticated receiver acknowledges it.
     fn acknowledge_outbound(&self, session_id: [u8; 32], message_id: [u8; 32]) -> Result<(), NetworkStoreError>;
+    /// Remove a bounded group after authenticated acknowledgements.
+    fn acknowledge_outbound_batch(&self, session_id: [u8; 32], message_ids: &[[u8; 32]]) -> Result<(), NetworkStoreError> {
+        for message_id in message_ids {
+            self.acknowledge_outbound(session_id, *message_id)?;
+        }
+        Ok(())
+    }
     /// Atomically reject replays and enqueue a fresh authenticated message.
     fn enqueue_inbound(&self, message: &DurableEnvelope) -> Result<EnqueueStatus, NetworkStoreError>;
     /// Load a bounded deterministic processing batch.
     fn pending_inbound(&self, session_id: [u8; 32], limit: usize) -> Result<Vec<DurableEnvelope>, NetworkStoreError>;
     /// Remove an inbound message after idempotent application handling.
     fn acknowledge_inbound(&self, session_id: [u8; 32], message_id: [u8; 32]) -> Result<(), NetworkStoreError>;
+    /// Remove a bounded group after idempotent application handling.
+    fn acknowledge_inbound_batch(&self, session_id: [u8; 32], message_ids: &[[u8; 32]]) -> Result<(), NetworkStoreError> {
+        for message_id in message_ids {
+            self.acknowledge_inbound(session_id, *message_id)?;
+        }
+        Ok(())
+    }
 }
 
 /// Storage failures surfaced by network queues.
@@ -330,6 +348,9 @@ pub enum NetworkStoreError {
     /// Sequence or queue CAS conflict.
     #[error("network store conflict: {0}")]
     Conflict(String),
+    /// Configured durable queue quota was reached.
+    #[error("network store resource limit: {0}")]
+    ResourceLimit(String),
     /// Requested queued message does not exist.
     #[error("network record not found: {0}")]
     NotFound(String),
@@ -411,9 +432,11 @@ impl<C: Clock> NetworkAuthenticator<C> {
         if envelope.timestamp_ms > now.saturating_add(self.config.max_future_drift_ms) {
             return Err(NetworkError::InvalidEnvelope("message timestamp is too far in the future".to_owned()));
         }
-        if now.saturating_sub(envelope.timestamp_ms) > self.config.max_message_age_ms {
-            return Err(NetworkError::InvalidEnvelope("message timestamp is too old".to_owned()));
-        }
+        // Durable envelopes may legitimately spend longer than the configured
+        // freshness window in an offline sender's queue. Replay safety comes
+        // from the per-peer durable sequence cursor; module payloads own their
+        // height/round validity. Rejecting an old transport timestamp here
+        // would permanently poison the head of a durable queue.
         let signature = Signature::from_slice(&envelope.signature)
             .map_err(|_| NetworkError::InvalidEnvelope("signature must be exactly 64 bytes".to_owned()))?;
         let public_key = XOnlyPublicKey::from_slice(public_key)
@@ -529,27 +552,72 @@ pub struct MutualTlsClientConfig {
     pub domain_name: String,
 }
 
+/// Reusable mutually authenticated validator client.
+pub struct MutualTlsClient {
+    client: proto::session_network_client::SessionNetworkClient<tonic::transport::Channel>,
+}
+
+impl MutualTlsClient {
+    /// Establish one TLS/HTTP2 connection that can deliver many retry batches.
+    pub async fn connect(endpoint: String, tls: MutualTlsClientConfig) -> Result<Self, NetworkError> {
+        use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+        let tls = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(tls.server_ca_pem))
+            .identity(Identity::from_pem(tls.certificate_pem, tls.private_key_pem))
+            .domain_name(tls.domain_name);
+        let channel = Endpoint::from_shared(endpoint)
+            .map_err(|error| NetworkError::Transport(error.to_string()))?
+            .tls_config(tls)
+            .map_err(|error| NetworkError::Transport(error.to_string()))?
+            .connect()
+            .await
+            .map_err(|error| NetworkError::Transport(error.to_string()))?;
+        Ok(Self { client: proto::session_network_client::SessionNetworkClient::new(channel) })
+    }
+
+    /// Push one durable envelope and verify the exact acknowledgement id.
+    pub async fn push(&mut self, message: &DurableEnvelope) -> Result<PushResponse, NetworkError> {
+        let response =
+            self.client.push(message.envelope.clone()).await.map_err(|error| NetworkError::Transport(error.to_string()))?.into_inner();
+        if response.message_id.as_slice() != message.message_id {
+            return Err(NetworkError::Transport("receiver acknowledged a different message id".to_owned()));
+        }
+        Ok(response)
+    }
+
+    /// Deliver one bounded durable batch and acknowledge it with one store
+    /// transaction. The client remains connected for subsequent calls.
+    pub async fn deliver_pending<S: NetworkStore>(
+        &mut self,
+        store: &S,
+        session_id: [u8; 32],
+        recipient_id: &str,
+        limit: usize,
+    ) -> Result<usize, NetworkError> {
+        let pending = store.pending_outbound(session_id, recipient_id, limit)?;
+        let mut acknowledged = Vec::with_capacity(pending.len());
+        for message in pending {
+            if message.envelope.recipient_id != recipient_id {
+                return Err(NetworkError::Store(NetworkStoreError::Corrupt(
+                    "recipient-specific outbound queue returned a different recipient".to_owned(),
+                )));
+            }
+            if let Err(error) = self.push(&message).await {
+                if !acknowledged.is_empty() {
+                    store.acknowledge_outbound_batch(session_id, &acknowledged)?;
+                }
+                return Err(error);
+            }
+            acknowledged.push(message.message_id);
+        }
+        store.acknowledge_outbound_batch(session_id, &acknowledged)?;
+        Ok(acknowledged.len())
+    }
+}
+
 /// Deliver one previously persisted envelope through mutual TLS.
 pub async fn push_mtls(endpoint: String, tls: MutualTlsClientConfig, message: &DurableEnvelope) -> Result<PushResponse, NetworkError> {
-    use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
-    let tls = ClientTlsConfig::new()
-        .ca_certificate(Certificate::from_pem(tls.server_ca_pem))
-        .identity(Identity::from_pem(tls.certificate_pem, tls.private_key_pem))
-        .domain_name(tls.domain_name);
-    let channel = Endpoint::from_shared(endpoint)
-        .map_err(|error| NetworkError::Transport(error.to_string()))?
-        .tls_config(tls)
-        .map_err(|error| NetworkError::Transport(error.to_string()))?
-        .connect()
-        .await
-        .map_err(|error| NetworkError::Transport(error.to_string()))?;
-    let mut client = proto::session_network_client::SessionNetworkClient::new(channel);
-    let response =
-        client.push(message.envelope.clone()).await.map_err(|error| NetworkError::Transport(error.to_string()))?.into_inner();
-    if response.message_id.as_slice() != message.message_id {
-        return Err(NetworkError::Transport("receiver acknowledged a different message id".to_owned()));
-    }
-    Ok(response)
+    MutualTlsClient::connect(endpoint, tls).await?.push(message).await
 }
 
 /// Deliver a bounded recipient-specific retry batch over one mTLS connection.
@@ -565,40 +633,7 @@ pub async fn deliver_pending_mtls<S: NetworkStore>(
     tls: MutualTlsClientConfig,
     limit: usize,
 ) -> Result<usize, NetworkError> {
-    use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
-
-    let pending = store.pending_outbound(session_id, recipient_id, limit)?;
-    if pending.is_empty() {
-        return Ok(0);
-    }
-    let tls = ClientTlsConfig::new()
-        .ca_certificate(Certificate::from_pem(tls.server_ca_pem))
-        .identity(Identity::from_pem(tls.certificate_pem, tls.private_key_pem))
-        .domain_name(tls.domain_name);
-    let channel = Endpoint::from_shared(endpoint)
-        .map_err(|error| NetworkError::Transport(error.to_string()))?
-        .tls_config(tls)
-        .map_err(|error| NetworkError::Transport(error.to_string()))?
-        .connect()
-        .await
-        .map_err(|error| NetworkError::Transport(error.to_string()))?;
-    let mut client = proto::session_network_client::SessionNetworkClient::new(channel);
-    let mut delivered = 0;
-    for message in pending {
-        if message.envelope.recipient_id != recipient_id {
-            return Err(NetworkError::Store(NetworkStoreError::Corrupt(
-                "recipient-specific outbound queue returned a different recipient".to_owned(),
-            )));
-        }
-        let response =
-            client.push(message.envelope.clone()).await.map_err(|error| NetworkError::Transport(error.to_string()))?.into_inner();
-        if response.message_id.as_slice() != message.message_id {
-            return Err(NetworkError::Transport("receiver acknowledged a different message id".to_owned()));
-        }
-        store.acknowledge_outbound(session_id, message.message_id)?;
-        delivered += 1;
-    }
-    Ok(delivered)
+    MutualTlsClient::connect(endpoint, tls).await?.deliver_pending(store, session_id, recipient_id, limit).await
 }
 
 /// Apply a bounded durable inbound batch and acknowledge only after the
@@ -609,13 +644,18 @@ where
     F: FnMut(&DurableEnvelope) -> Result<(), NetworkError>,
 {
     let pending = store.pending_inbound(session_id, limit)?;
-    let mut applied = 0;
+    let mut acknowledged = Vec::with_capacity(pending.len());
     for message in pending {
-        apply(&message)?;
-        store.acknowledge_inbound(session_id, message.message_id)?;
-        applied += 1;
+        if let Err(error) = apply(&message) {
+            if !acknowledged.is_empty() {
+                store.acknowledge_inbound_batch(session_id, &acknowledged)?;
+            }
+            return Err(error);
+        }
+        acknowledged.push(message.message_id);
     }
-    Ok(applied)
+    store.acknowledge_inbound_batch(session_id, &acknowledged)?;
+    Ok(acknowledged.len())
 }
 
 fn signature_digest(envelope: &Envelope) -> [u8; 32] {
@@ -682,6 +722,7 @@ fn network_status(error: NetworkError) -> Status {
 fn store_status(error: NetworkStoreError) -> Status {
     match error {
         NetworkStoreError::Conflict(message) => Status::already_exists(message),
+        NetworkStoreError::ResourceLimit(message) => Status::resource_exhausted(message),
         NetworkStoreError::NotFound(message) => Status::not_found(message),
         NetworkStoreError::Corrupt(message) => Status::data_loss(message),
         NetworkStoreError::Backend(message) => Status::unavailable(message),
@@ -754,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_sender_old_message_and_oversized_payload() {
+    fn rejects_unknown_sender_future_message_and_oversized_payload_but_allows_durable_delay() {
         let signer = NetworkSigner::new("alice", [1; 32]).unwrap();
         let outsider = NetworkSigner::new("mallory", [3; 32]).unwrap();
         let config = NetworkConfig {
@@ -773,8 +814,9 @@ mod tests {
             auth.verify(outsider.sign(binding, "bob", 0, 100, MessageType::new(MessageClass::Transaction, 1, 0), vec![]).unwrap()),
             Err(NetworkError::Unauthorized(_))
         ));
+        auth.verify(signer.sign(binding, "bob", 0, 80, MessageType::new(MessageClass::Transaction, 1, 0), vec![]).unwrap()).unwrap();
         assert!(matches!(
-            auth.verify(signer.sign(binding, "bob", 0, 80, MessageType::new(MessageClass::Transaction, 1, 0), vec![]).unwrap()),
+            auth.verify(signer.sign(binding, "bob", 0, 102, MessageType::new(MessageClass::Transaction, 1, 0), vec![]).unwrap()),
             Err(NetworkError::InvalidEnvelope(_))
         ));
         assert!(matches!(
