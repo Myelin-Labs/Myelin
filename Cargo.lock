@@ -1785,6 +1785,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "myelin-session-producer"
+version = "0.10.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "myelin-session-runtime"
 version = "0.10.0"
 dependencies = [

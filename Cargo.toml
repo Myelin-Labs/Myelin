@@ -14,6 +14,7 @@ members = [
     "session",
     "session-escrow",
     "session-network",
+    "session-producer",
     "session-runtime",
     "session-store-rocksdb",
     "state",
@@ -54,6 +55,7 @@ myelin-muhash = { version = "0.10.0", path = "crypto/muhash" }
 myelin-session = { version = "0.10.0", path = "session" }
 myelin-session-escrow = { version = "0.10.0", path = "session-escrow" }
 myelin-session-network = { version = "0.10.0", path = "session-network" }
+myelin-session-producer = { version = "0.10.0", path = "session-producer" }
 myelin-session-runtime = { version = "0.10.0", path = "session-runtime" }
 myelin-session-store-rocksdb = { version = "0.10.0", path = "session-store-rocksdb" }
 myelin-state = { version = "0.10.0", path = "state" }
