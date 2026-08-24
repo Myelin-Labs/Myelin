@@ -42,11 +42,13 @@ consume a disputed-chunk bundle; no such court is deployed today.
 
     Found a bug or a docs error? [Open an issue](https://github.com/Myelin-Labs/Myelin/issues/new) — please include the page URL and the exact command / code that misbehaved.
 
--   :material-rocket-launch-outline:{ .lg .middle } **Deploy this site**
+-   :material-hammer-wrench:{ .lg .middle } **Build this site**
 
     ---
 
-    This site auto-deploys to GitHub Pages from `main` via `.github/workflows/pages.yml`. Configure in **Settings → Pages → Source: GitHub Actions**.
+    Install [`docs/requirements.txt`](https://github.com/Myelin-Labs/Myelin/blob/main/docs/requirements.txt)
+    and run `mkdocs build`. Repository source does not currently contain a
+    GitHub Pages deployment workflow.
 
 </div>
 
