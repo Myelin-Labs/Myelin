@@ -7,10 +7,10 @@ topic; click a question to jump to the answer.
 
 ### What is Myelin in one sentence?
 
-Myelin is a CKB-isomorphic session runtime for finite Cell
-execution: it runs high-throughput Cell transitions off-chain,
-keeps them finite and typed, and emits evidence that can be
-projected toward CKB-style transaction contexts.
+Myelin is a CKB-aligned runtime for finite off-chain Cell sessions:
+it verifies ordered transitions in CKB-VM, advances a durable
+session head under closed validators, and emits staged evidence for
+the exact CKB transaction.
 
 See [What is Myelin?](../concepts/what-is-myelin.md) for the
 long version.
@@ -48,10 +48,10 @@ it.
 
 ### What's the difference between Myelin and a sidechain?
 
-A sidechain has its own consensus on a separate chain. Myelin
-doesn't — its finality is a configured committee or finite-session Tendermint
-inside a single process, with the L1 (CKB) as the custody and
-court layer.
+A sidechain has its own open-ended chain and consensus. Myelin uses
+a configured static committee, PoA authority set, or Tendermint validator set
+for a finite session. CKB can provide asset custody and may host a future court;
+the repository does not ship a deployed court today.
 
 The terminology is fuzzy in the L2 literature; we use "session
 runtime" to make the distinction explicit.

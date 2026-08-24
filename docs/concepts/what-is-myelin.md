@@ -1,163 +1,109 @@
 # What is Myelin?
 
-Myelin is an experimental **CKB-isomorphic session runtime** for
-finite Cell execution. It runs high-throughput Cell transitions
-off-chain, keeps them finite and typed, and emits evidence that can
-be projected toward CKB-style transaction contexts — with a future
-court path that lets a single disputed chunk be adjudicated by a
-CKB-VM-style verifier on the L1.
+Myelin is an experimental, CKB-aligned runtime for finite off-chain Cell
+sessions. It executes version-0 Cell transactions, resolves conflicts from
+authenticated Cell state, verifies script groups in CKB-VM, and commits an
+ordered session history under a configured closed-validator module.
 
-This page explains the positioning, what Myelin deliberately is not,
-and the claim ladder that any Myelin evidence has to climb.
+It is not a CKB full node, a new L1, or a finished permissionless L2.
+Myelin-finalised means that the operators fixed in session genesis accepted and
+durably stored one exact block. It does not mean finalised on CKB.
 
 ## The short version
 
 ```text
-Myelin is a CKB-style isomorphic session runtime: a finite off-chain
-Cell ledger with typed conflict scheduling, deterministic VM
-verification, and a future CKB-style court path for disputed chunks.
+application transactions
+  -> one bounded candidate
+  -> CKB-VM verification and atomic state transition
+  -> genesis-bound closed-validator finality
+  -> durable block, latest checkpoint, head, and outbox
+  -> optional CKB evidence stages for the exact transaction
 ```
 
-A more careful wording for public demos:
+## What the runtime provides
 
-```text
-Myelin currently uses selectable closed-validator finality for session
-benchmarking and pressure testing. The CKB-style projection and future
-court path is what keeps it aligned with CKB semantics.
-```
-
-Both phrasings matter. The first is what Myelin **aims** to be; the
-second is what it **is** today.
-
-## What Myelin is
-
-| Property | What it means in Myelin |
+| Property | What it means |
 | --- | --- |
-| **CKB-isomorphic** | Same Cell mental model, same Molecule encoding, same syscall surface. |
-| **Finite Cell session** | State is a finite set of Cells inside one session; no unbounded global state. |
-| **Typed conflict scheduling** | CellDAG scheduler uses typed conflict hashes + read/write domains, not fee markets. |
-| **Deterministic CKB-VM verification** | Scripts run in a RISC-V-based VM with the same determinism contract as CKB. |
-| **Selectable finality** | Static closed committee, rotating PoA, or finite-session Tendermint, chosen per session. |
-| **CKB-style projection** | Every chunk ships a `CkbProjectionReport` showing whether it's projectable. |
-| **Single-chunk court path** | One disputed chunk is CKB-VM-verifiable on the L1; interactive bisection is a fallback. |
-| **Reference workload** | The Teeworlds-on-CKB replayer is the canonical pressure test. |
+| Finite Cell state | Each transition consumes and creates concrete Cells under an exact pre-state root. |
+| Raw and witness identity | Producer OutPoints and block ordering use raw txid; witnesses affect wtxid. |
+| State-resolved conflicts | The scheduler derives logical conflict hashes from authenticated Cells and validated type-script declarations. |
+| CKB-VM verification | Session and court paths use `CkbStrict`; script groups have separate VM instances and one shared transaction cycle budget. |
+| Atomic state change | A stale pre-root, failed script, double spend, or failed descendant leaves the state unchanged. |
+| Closed-validator finality | Genesis selects static committee, rotating PoA, or Tendermint from a compiled catalogue. |
+| Continuous production | `Instant`, `Interval`, lazy `Open`, and `Never` close bounded batches; one candidate runs at a time. |
+| Durable recovery | RocksDB restores the latest checkpoint and audits the finalised block-and-proof chain before reopening writes. |
+| Staged CKB evidence | Canonical wire encoding is the first stage; higher claims require linked adapter receipts. |
 
-## What Myelin is *not*
+## Finite work, continuous service
 
-These are claims about the design, not missing benchmarks — the
-protocol surface makes them structurally out of scope:
-
-- **Not a CKB full-node fork.** Myelin does not import or sync the
-  CKB client. It re-implements the parts of CKB it needs (Cell,
-  CellTx, VM, syscalls) in its own workspace.
-- **Not a new L1.** Myelin does not run its own consensus on a
-  independent network. Finality is a static committee, rotating PoA, or Tendermint
-  BFT — explicitly not Nakamoto PoW.
-- **Not a permissionless L2 today.** The static-committee, PoA, and
-  Tendermint engines all assume a known validator or authority set. Until the
-  L1 court path is implemented *and* exercised, Myelin should not be
-  marketed as permissionless L2 security.
-- **Not a general smart-contract platform.** Myelin optimises for
-  bounded sessions that produce challengeable settlement artefacts,
-  not for arbitrary on-chain dApps.
-- **Not a microsecond matching engine.** Sub-millisecond matching,
-  FPGA paths, and global public order books are outside the design.
-
-The full positioning case (with use-case tiers) lives in the upstream
-`MYELIN_USE_CASE_POSITIONING.md`. The TL;DR:
+An application can run for years without creating one endless execution. It
+journals work in finite epochs and lets the producer reserve one bounded batch
+from the current durable head.
 
 ```mermaid
-%%{init: {
-  "theme": "base",
-  "themeVariables": {
-    "primaryColor": "#A5B4FC",
-    "primaryTextColor": "#1E293B",
-    "primaryBorderColor": "#4F46E5",
-    "lineColor": "#6366F1",
-    "secondaryColor": "#C7D2FE",
-    "tertiaryColor": "#C7D2FE"
-  }
-}}%%
 flowchart LR
-    subgraph IN["In scope (Tier 1)"]
-        I1["Game sessions<br/>(Teeworlds)"]:::ok
-        I2["Industrial IoT metering"]:::ok
-        I3["RFQ / market-maker<br/>settlement sessions"]:::ok
-        I4["Streaming payments"]:::ok
-        I5["AI agent service receipts"]:::ok
-    end
-    subgraph VIA["Viable (Tier 2 — needs more)"]
-        W1["Cross-org IoT"]:::warn
-        W2["Batch auctions"]:::warn
-        W3["Supply-chain receipts"]:::warn
-        W4["Usage-based billing"]:::warn
-        W5["Small MP tournament economy"]:::warn
-    end
-    subgraph OUT["Out of scope (Tier 3)"]
-        O1["HFT matching engine"]:::no
-        O2["Global public order book"]:::no
-        O3["Unbounded MMO world state"]:::no
-        O4["Raw sensor firehose as Cells"]:::no
-        O5["Day-1 permissionless validator network"]:::no
-    end
-    classDef ok  fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-    classDef warn fill:#A5B4FC,stroke:#D97706,color:#1E293B;
-    classDef no  fill:#C7D2FE,stroke:#DC2626,color:#1E293B;
+    J["Application journal"] --> P["Reserve one candidate"]
+    P --> V["Execute + verify"]
+    V --> F["Genesis-bound finality"]
+    F --> C["Atomic block · latest checkpoint<br/>· head · outbox"]
+    C --> A["Acknowledge reservation"]
 ```
 
-## The claim ladder
+The next candidate waits for the previous commit. Myelin does not build
+speculative descendants or rebase a candidate chain. A failed commit or orderly
+shutdown releases the reservation. Source acknowledgement follows the durable
+head advance and has its own reconciliation path.
 
-Every Myelin artefact has to climb a four-tier claim ladder. The
-ladder is deliberate: each tier requires a specific report to exist
-and to verify.
+On restart, Myelin streams and audits parent hashes, heights, state roots,
+timestamps, module commitments, and finality proofs. It restores the latest
+checkpoint, checks the restored root against the durable head, and then opens
+the writer. Ordinary recovery does not re-execute every historical transaction;
+full replay is a future deep-audit mode.
+
+## What “CKB-aligned” permits Myelin to claim
+
+The pure projector produces canonical CKB Molecule bytes and the CKB raw
+transaction hash. That earns the `wire-encoded` stage only.
 
 ```text
-CKB-shaped runtime -> wire-encoded (current)
-  -> context-resolved -> consensus-validated -> scripts-verified
-  -> node-accepted -> committed -> finalized -> future exercised public-testnet court
+wire-encoded
+  -> context-resolved
+  -> consensus-validated
+  -> scripts-verified
+  -> node-accepted
+  -> committed
+  -> configured-depth finality
 ```
 
-Read [Claim ladder](../security/claim-ladder.md) for the exact
-artifacts that establish each tier and what would have to be true
-for Myelin to advertise a higher one.
+Each arrow requires a linked `myelin-ckb-adapter` receipt for the exact
+transaction. Node acceptance is not commitment. A configured confirmation
+depth is operational evidence, not irreversible finality. A devnet exercise is
+not a public-testnet court verdict.
 
-## How Myelin compares to other L2 patterns
+## What Myelin does not provide
 
-| Dimension | Optimistic rollup | ZK rollup | Sidechain | **Myelin (today)** | **Myelin (target)** |
-| --- | --- | --- | --- | --- | --- |
-| Validity model | Fraud proof | Validity proof | Independent consensus | Closed committee | Single-chunk CKB court |
-| Dispute granularity | Instruction-level bisection | Per-tx validity | N/A | Whole chunk | Whole chunk |
-| Asset custody | L1 bridge | L1 bridge | L1 bridge | L1 Cell lock + commit | Same |
-| Finality | L1 finality + challenge period | L1 finality + proof time | Sidechain finality | Committee certificate | Court-verified |
-| CKB-style projection | N/A (EVM-shaped) | N/A (EVM-shaped) | Optional | Yes, every chunk | Yes |
-| Open permissionless | Yes | Yes | Yes | No | Planned |
+- No CKB node sync, mempool, mining, or Nakamoto consensus.
+- No open validator admission or permissionless finality.
+- No hot-swapping the finality module inside a session.
+- No deployed L1 court or finished dispute economics.
+- No guarantee that every application event belongs in a Cell transaction.
+- No application-specific game, market, IoT, or asset vocabulary in the core.
 
-Myelin optimises for *bounded, challengeable* settlement artifacts,
-not for global public ordering. If your problem is "I need to settle
-10k game sessions per second and challenge a disputed frame on CKB
-later," Myelin is structurally appropriate. If your problem is "I
-need a global order book with permissionless validators," it isn't.
+Application adapters decide which events to journal and how to interpret them.
+The Myelin core receives ordered Cell transactions and enforces execution,
+state, finality, storage, and evidence rules.
 
-## A note on maturity
+## Current evidence boundary
 
-Myelin's current evidence boundary is honest about what is and isn't
-proven:
+The workspace tests typed Cell execution, physical and logical conflict rules,
+atomic state roots, all three closed-validator modules, producer policies,
+checkpoint recovery, outbox handling, and the staged CKB receipt chain. Parent
+CKB devnet and public-testnet rehearsals support only the exact transactions and
+receipt stages recorded in their evidence bundles.
 
-- ✅ A simple CellTx runs through Myelin's CKB-strict VM path and
-  produces a CKB projection report with no deviation flags.
-- ✅ The Teeworlds replayer binary runs end-to-end through the VM
-  probe.
-- ✅ Both finality engines (static committee, Tendermint) produce the
-  same session ID, CellTx commitments, scheduler commitment, and
-  state roots on a single-validator or quorum-validator fixture.
-- ✅ The CKB devnet smoke test deploys DA-anchor and settlement
-  CellScript carrier verifiers and proves live type-script execution
-  on the parent CKB devnet.
-- ⚠ The single-chunk CKB court verifier is *not yet implemented* on
-  mainnet — the bundle is a self-contained, deterministic input
-  ready for one.
-- ⚠ Permissionless validator entry is not part of the current
-  design.
+Read next:
 
-That boundary is explicit on purpose. See
-[Evidence paths](../security/evidence-paths.md) for the full inventory.
+- [Session lifecycle](../interactions/session-flow.md)
+- [Closed-validator finality](../architecture/consensus.md)
+- [Claim ladder](../security/claim-ladder.md)
+- [CKB evidence paths](../security/evidence-paths.md)

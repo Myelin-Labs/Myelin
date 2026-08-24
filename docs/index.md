@@ -1,6 +1,6 @@
 ---
 title: Myelin
-description: A CKB-isomorphic off-chain session runtime for finite Cell execution
+description: A CKB-aligned off-chain session runtime for finite Cell execution
 hide:
   - navigation
 ---
@@ -9,12 +9,12 @@ hide:
 
 # Myelin
 
-**A CKB-isomorphic session runtime for finite Cell execution.**
+**A CKB-aligned session runtime for finite Cell execution.**
 
 Myelin runs high-throughput Cell transitions off-chain, keeps them finite and
-typed, and emits evidence that can be projected toward CKB-style transaction
-contexts — with a future court path that lets a single disputed chunk be
-adjudicated by a CKB-VM-style verifier on the L1.
+typed, and emits canonical CKB wire data plus staged evidence for context,
+script, node, commitment, and configured-depth checks. A future CKB court may
+consume a disputed-chunk bundle; no such court is deployed today.
 
 [Get started :material-rocket-launch:](getting-started/index.md){ .md-button .md-button--primary }
 [Read the architecture :material-graph-outline:](architecture/overview.md){ .md-button }
@@ -53,9 +53,9 @@ adjudicated by a CKB-VM-style verifier on the L1.
 ## What Myelin actually is
 
 Myelin is **not** a CKB full-node fork, **not** a new L1, and **not yet** a
-finished permissionless L2. It is a *protocol seed* that keeps the execution,
-state, evidence, and session-finality pieces needed to test the shape of an
-off-chain Cell ledger that still respects CKB's mental model.
+finished permissionless L2. It is an off-chain finite-Cell runtime for testing
+deterministic execution, durable session history, closed-validator finality,
+and evidence paths that can be checked against CKB.
 
 <div class="grid cards" markdown>
 
@@ -71,9 +71,9 @@ off-chain Cell ledger that still respects CKB's mental model.
 
     ---
 
-    Scripts run in a RISC-V based VM (CKB-VM plus a small Myelin-only
-    syscall extension), so the same binary produces the same state root on
-    every validator.
+    Session and court paths run script groups under `CkbStrict`. Each group
+    gets its own CKB-VM instance, while the transaction shares one cycle
+    budget.
 
 -   :material-graph:{ .lg .middle } **Typed conflict scheduling**
 
@@ -87,25 +87,24 @@ off-chain Cell ledger that still respects CKB's mental model.
 
     ---
 
-    Every CellTx or chunk produces a projection report — either
-    `wire_encoded = true`, or an explicit list of unsupported
-    features and semantic deviation flags.
+    The pure projector stops at canonical Molecule bytes and the CKB raw
+    transaction hash. Higher stages require linked adapter receipts for the
+    exact transaction.
 
 -   :material-scale-balance:{ .lg .middle } **Single-chunk court path**
 
     ---
 
-    One disputed chunk is CKB-VM-verifiable on the L1; interactive
-    bisection is a fallback design, not the bootstrap assumption.
+    Myelin packages one disputed chunk for verification. The on-chain court
+    verifier and its economics are future work.
 
--   :material-gamepad-variant-outline:{ .lg .middle } **Reference workload**
+-   :material-timeline-clock-outline:{ .lg .middle } **Continuous operation**
 
     ---
 
-    The first pressure workload is xxuejie's
-    [Teeworlds-on-CKB](https://github.com/xxuejie/ckb-teeworlds-demo)
-    replayer, which gives Myelin a real, deterministic, CKB-style game
-    session to drive.
+    `Instant`, `Interval`, lazy `Open`, and `Never` close bounded batches.
+    One candidate advances from the durable head at a time, with checkpoint
+    recovery and a transactional outbox.
 
 </div>
 
@@ -121,9 +120,9 @@ about **where** work happens, not **what** work means:
 | Where state lives | Every full node | Finite session set |
 | Block finality | Nakamoto PoW consensus | Selectable: static committee, rotating PoA, or finite-session Tendermint |
 | Throughput target | ~1 block / tens of seconds | Many chunks / second inside one session |
-| Execution | CKB-VM, fully on-chain | CKB-VM-style, deterministic, off-chain |
-| Dispute path | Replay on chain | Single-chunk court bundle → CKB-VM verifier on L1 |
-| Asset custody | CKB Cells natively | Locked Cells at session open, settled on close |
+| Execution | CKB-VM, fully on-chain | CKB-VM under `CkbStrict` for session/court paths, off-chain |
+| Dispute path | Replay on chain | Single-chunk court bundle; L1 court deployment is future work |
+| Asset custody | CKB Cells natively | Optional funding attachment after exact finalised-CKB receipt verification |
 
 ## A first look at the runtime spine
 
@@ -146,13 +145,14 @@ flowchart LR
     A["CellScript source"]:::source
     B["typed-cell metadata<br/>+ VM artefact"]:::artefact
     C["CellTx<br/>(Myelin)"]:::tx
-    D["CellDAG<br/>scheduler"]:::sched
-    E["Deterministic<br/>VM verification"]:::vm
-    F["Session Cell<br/>state root"]:::state
-    G["Evidence bundle<br/>(projection, DA,<br/>court, settle)"]:::evidence
+    D["Producer<br/>one reserved candidate"]:::sched
+    E["CellDAG + CKB-VM<br/>verification"]:::vm
+    F["Genesis-bound<br/>finality"]:::state
+    G["Atomic block · latest checkpoint<br/>· head · outbox"]:::state
+    H["Evidence bundle<br/>(projection, DA,<br/>court, settle)"]:::evidence
 
-    A --> B --> C --> D --> E --> F --> G
-    F --> C
+    A --> B --> C --> D --> E --> F --> G --> H
+    G --> C
 
     classDef source   fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
     classDef artefact fill:#C7D2FE,stroke:#6366F1,color:#1E293B;
@@ -163,9 +163,11 @@ flowchart LR
     classDef evidence fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
-Every box on this spine is a real crate in the workspace — `cellscript`,
-`myelin-exec`, `myelin-mempool`, `myelin-state`, `myelin-consensus`,
-`myelin-cli`. The next pages break it apart.
+The spine is implemented by the external CellScript adapter plus
+`myelin-exec`, `myelin-state`, `myelin-mempool`, `myelin-consensus`,
+`myelin-session`, `myelin-session-producer`, `myelin-session-runtime`, the
+RocksDB store, and the evidence adapters. The next pages break those parts
+apart.
 
 ## Where to go next
 
@@ -193,12 +195,20 @@ Every box on this spine is a real crate in the workspace — `cellscript`,
     truth of the project. Pair it with the [L1 / L2 / off-chain
     interactions](interactions/l1-l2-offchain.md) diagram.
 
+-   :material-timeline-check-outline: **Building a continuous service?**
+
+    ---
+
+    Start with the [session lifecycle](interactions/session-flow.md), then see
+    how the [independent Veloren research fork](integrations/veloren-research-fork.md)
+    journals and recovers application events.
+
 -   :material-shield-alert-outline: **Skeptical about the security claim?**
 
     ---
 
-    Read the [Claim ladder](security/claim-ladder.md) first. It is
-    deliberately explicit about what is and isn't a permissionless
-    guarantee today.
+    Read the [Claim ladder](security/claim-ladder.md) first. It lists the
+    receipt required for every evidence stage and the claims that stage does
+    not support.
 
 </div>

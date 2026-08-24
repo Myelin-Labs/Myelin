@@ -1,318 +1,185 @@
 # Session lifecycle
 
-A Myelin **session** is the bounded context in which off-chain Cell
-execution happens. Every session has an open, a sequence of finalised
-blocks, an optional dispute, and a close. This page walks the full
-lifecycle once.
+A Myelin session turns a sequence of finite Cell transitions into one durable
+history. The application can stay online for a long time; Myelin still handles
+one bounded candidate from the current durable head at a time.
 
-## The five phases
+*Myelin-finalised* means accepted by the closed-validator module fixed in
+session genesis and committed to the session store. It does not mean finalised
+on CKB.
 
-```text
-asset custody     -> canonical CKB-style Cells
-session entry     -> lock or commit Cells into a session
-fast path         -> static-committee Myelin session runtime
-DA path           -> publish chunk commitments
-court path        -> one disputed chunk is CKB-VM-style verifiable
-exit path         -> final state unlocks or materialises Cells
-```
-
-These phases correspond to the CLI commands listed in
-[CLI reference](../operations/cli.md). This page is the conceptual
-view; the CLI reference is the operational view.
-
-## Phase 1 — Asset custody
-
-The session's participants bring CKB Cells into the session. The
-cells are *not* consumed; they're **locked** under a session lock
-script whose args commit to the session ID and the committee.
+## Lifecycle at a glance
 
 ```mermaid
-%%{init: {
-  "theme": "base",
-  "themeVariables": {
-    "primaryColor": "#A5B4FC",
-    "primaryTextColor": "#1E293B",
-    "primaryBorderColor": "#4F46E5",
-    "lineColor": "#6366F1",
-    "secondaryColor": "#C7D2FE",
-    "tertiaryColor": "#C7D2FE"
-  }
-}}%%
 flowchart LR
-    P1["Participant A<br/>Cells"]:::l1
-    P2["Participant B<br/>Cells"]:::l1
-    P3["Participant C<br/>Cells"]:::l1
-
-    LOCK["Session lock<br/>(CKB type script)"]:::lock
-
-    L["Locked Cells<br/>(committed to session)"]:::locked
-
-    P1 --> LOCK
-    P2 --> LOCK
-    P3 --> LOCK
-    LOCK --> L
-
-    classDef l1     fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-    classDef lock   fill:#C7D2FE,stroke:#D97706,color:#1E293B;
-    classDef locked fill:#A5B4FC,stroke:#7C3AED,color:#1E293B;
+    O["Open<br/>bind genesis"] --> Q["Queue<br/>application work"]
+    Q --> P["Produce<br/>reserve one candidate"]
+    P --> V["Execute<br/>CKB-VM + state"]
+    V --> F["Finalise<br/>verify exact proof"]
+    F --> C["Commit<br/>block · checkpoint · head · outbox"]
+    C --> Q
+    C --> E["Evidence / DA / settlement"]
 ```
 
-The lock script is the CKB-side anchor of the session. Its args
-bind it to the session ID; its type script (if any) enforces
-participant-set rules.
+## 1. Open the session
 
-## Phase 2 — Session entry
-
-A session is opened with a config that fixes:
+Session genesis fixes the values needed to interpret every later block:
 
 ```text
-session_id           -> [u8; 32], deterministic from config
-participants        -> participant set + weights
-committee            -> validator set + weights
-max_chunk_bytes      -> chunk size limit
-max_cycles           -> per-chunk cycle budget
+session identity
+initial Cell state root
+consensus kind and canonical validator/authority configuration
+compiled module descriptor and commitment
+proof, message, and WAL schema versions
+session limits
 ```
 
-The CLI's `session open-fixture` produces a JSON report with the
-initial state root (`state_root_before = empty-set commit`) and a
-`MyelinBlock` candidate.
+The consensus module comes from a closed compiled catalogue: static committee,
+proof of authority, or Tendermint. A restart with another module, validator
+configuration, or WAL schema is rejected.
 
-## Phase 3 — Fast path (off-chain execution)
+Funding is optional. `myelin-session-escrow` may attach funds only after a
+linked `myelin-ckb-adapter` receipt chain verifies the exact CKB opening
+transaction at the configured depth and before the start deadline. An opened
+off-chain session alone is not proof that CKB funds were locked.
 
-Inside the session, the runtime runs chunks in the order the
-scheduler decides. Each chunk:
+## 2. Queue work and close a candidate
 
-1. Is admitted by the mempool (typed-cell metadata verified, RBF
-   rules applied).
-2. Is scheduled into a parallel batch by the CellDAG.
-3. Is verified by the CKB-VM-style verifier.
-4. Updates the live Cell set and recomputes the state root.
-5. Is sealed into the local DA store with a `SegmentProof`.
-6. Is wrapped into a `MyelinBlock` candidate.
-7. Is finalised by the committee certificate.
+Applications own their event journals and decide which events become Cell
+transactions. Completed epochs may wait in that journal up to an
+application-defined backlog cap. Myelin does not treat queued epochs as a chain
+of speculative blocks.
+
+`myelin-session-producer` supports four automatic policies plus manual
+production:
+
+| Policy | When it closes a batch |
+| --- | --- |
+| `Instant` | work becomes available; reserve one capped selection immediately |
+| `Interval` | inspect the source on a fixed cadence; empty blocks require operator opt-in |
+| `Open` | first work opens a collection window; deadline or count/byte cap closes it |
+| `Never` | automatic production is off; a caller requests source-selected or exact work |
+
+Automatic and manual requests share one writer. One session has at most one
+candidate in flight. The producer waits for the commit result before selecting
+the next batch from the durable head.
+
+The transaction source reserves selected work while finality runs. A failed
+commit or orderly shutdown releases the reservation. After the durable head
+advances, the producer asks the source to acknowledge it; acknowledgement and
+the session-store commit are separate durability domains, so a failed
+acknowledgement requires source reconciliation before retry.
+
+## 3. Execute, finalise, and commit
 
 ```mermaid
-%%{init: {
-  "theme": "base",
-  "themeVariables": {
-    "primaryColor": "#A5B4FC",
-    "primaryTextColor": "#1E293B",
-    "primaryBorderColor": "#4F46E5",
-    "lineColor": "#6366F1",
-    "secondaryColor": "#C7D2FE",
-    "tertiaryColor": "#C7D2FE"
-  }
-}}%%
 sequenceDiagram
     participant P as Producer
-    participant M as Mempool
-    participant S as Scheduler
-    participant V as Verifier
-    participant St as State
-    participant Co as Committee
-    participant DA as DA store
+    participant S as Session
+    participant X as Exec + State
+    participant D as Finality driver
+    participant V as Local verifier
+    participant R as RocksDB store
+    participant Q as Transaction source
 
-    P->>M: submit CellTx + metadata
-    M->>M: admission checks
-    M->>S: ordered batch
-    S->>V: parallel batches
-    V->>St: apply delta
-    St-->>V: state_root_after
-    V->>DA: seal chunk payload
-    V-->>S: MyelinExecutionReport
-    S-->>Co: MyelinBlock candidate
-    Co-->>S: FinalisedBlock + cert
+    P->>S: fixed ordered batch + timestamp
+    S->>X: prepare from exact durable pre-root
+    X-->>S: canonical block + post-state checkpoint
+    S->>D: request proof for exact block
+    D-->>S: typed finality proof
+    S->>V: verify block, genesis module, config, proof
+    V-->>S: verified exact block hash
+    S->>R: atomic block + latest checkpoint + head + outbox
+    R-->>S: durable height and block hash
+    S-->>P: commit succeeded
+    P->>Q: acknowledge reservation
 ```
 
-The fast path runs entirely off-chain. The L1 sees nothing — no
-CellTx, no state-root, no committee certificate. The only thing
-the L1 will eventually see is the asset custody lock and the
-settlement package.
+Execution resolves concrete Cells, rejects physical double spends, derives
+logical conflict hashes from authenticated state, orders READ/WRITE conflicts,
+and runs every script group in `CkbStrict`. All groups share one transaction
+cycle budget. Any script failure, stale pre-root, or failed dependency aborts
+the transition.
 
-## Phase 4 — DA path
+The finality driver may choose a signer or gather votes, but its success report
+does not advance the session. The local verifier checks the proof against the
+exact canonical block and the module configuration fixed by genesis.
 
-After each chunk is finalised, the DA manifest records:
+RocksDB commits the block, latest checkpoint, durable head, and outbox in one
+transaction. Rolling checkpoints avoid copying a full state snapshot into every
+historical block record.
+
+## 4. Restart and recover
+
+On restart, Myelin:
+
+1. loads genesis and checks the module/configuration/schema commitments;
+2. streams and audits the finalised block-and-proof chain;
+3. verifies height, parent, state-root, timestamp, module, and proof links;
+4. restores the latest state checkpoint;
+5. compares the restored executor root with the durable head;
+6. reopens the writer only after every check succeeds.
+
+Ordinary recovery does not re-execute the full transaction history. A future
+deep-audit mode may add full replay.
+
+The outbox delivers to application and settlement adapters at least once.
+Consumers deduplicate with deterministic message IDs. If delivery succeeds and
+the process crashes before local acknowledgement, recovery may send the same
+message again.
+
+Application journals have their own recovery protocol. The
+[Veloren research fork](../integrations/veloren-research-fork.md), for example,
+tracks journaled, game-applied, and Myelin-finalised positions separately and
+reconciles them with stable event and range IDs.
+
+## 5. Produce DA and CKB evidence
+
+A finalised session block can feed DA, court-bundle, settlement, and CKB
+submission workflows. Each workflow earns only the claim supported by its
+receipts.
 
 ```text
-payload_hash         -> hash of the chunk payload bytes
-segment_root         -> Merkle root of the segment tree
-segment_proof        -> proof of inclusion in the segment tree
-external_da_receipt  -> optional, signed by the external DA provider
-da_availability      -> local_only | testnet_beta_ready | production_ready
-l1_da_published      -> false (default)
+wire-encoded
+  -> context-resolved
+  -> consensus-validated
+  -> scripts-verified
+  -> node-accepted
+  -> committed
+  -> configured-depth finality
 ```
 
-The DA manifest is the *input* to the future anchor package. With
-an external DA provider's signed receipt, it can climb to
-`production_ready`. Without it, it stays `local_only`.
+The pure projector stops at canonical CKB Molecule bytes and the raw CKB
+transaction hash. Context, scripts, node acceptance, commitment, and depth need
+a linked `myelin-ckb-adapter` receipt chain for the exact transaction. Node
+acceptance is not commitment, and configured depth is not irreversible
+finality.
 
-```mermaid
-%%{init: {
-  "theme": "base",
-  "themeVariables": {
-    "primaryColor": "#A5B4FC",
-    "primaryTextColor": "#1E293B",
-    "primaryBorderColor": "#4F46E5",
-    "lineColor": "#6366F1",
-    "secondaryColor": "#C7D2FE",
-    "tertiaryColor": "#C7D2FE"
-  }
-}}%%
-flowchart LR
-    A["Chunk payload"]:::l2
-    B["DA manifest<br/>(payload_hash, segment_root,<br/>segment_proof)"]:::l2
-    C["DA store<br/>(local)"]:::off
-    D["External DA<br/>provider"]:::off
-    E["Anchor package<br/>(CKB CellTx)"]:::l2
-    F["L1 anchor CellTx<br/>(published)"]:::l1
+DA manifests bind sealed segment roots and availability evidence. A local
+segment is local evidence. Production availability claims need the configured
+provider and probe receipts.
 
-    A --> C
-    A --> B
-    D -.->|signed receipt| B
-    B --> E --> F
+## 6. Close or dispute
 
-    classDef l2  fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
-    classDef off fill:#CBD5E1,stroke:#334155,color:#1E293B;
-    classDef l1  fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-```
+`myelin-session-escrow` can construct cooperative, timeout, or evidence-bound
+exit packages from the latest finalised checkpoint. Construction does not prove
+that CKB accepted or committed the exit. Witness collection, submission,
+inclusion, commitment, and configured-depth checks are later stages.
 
-For the deepest dive on DA, see [Data availability
-flow](da-flow.md).
-
-## Phase 5 — Court path (only if disputed)
-
-If no participant disputes a finalised chunk, this phase is empty.
-If a participant disputes, they construct a **court bundle**:
-
-```text
-chunk_payload_bytes        -> the actual chunk bytes
-chunk_payload_hash         -> hash(payload)
-ckb_molecule_tx_bytes      -> Molecule-encoded CKB tx
-ckb_molecule_tx_hash       -> hash(molecule_tx)
-projection_report          -> CkbProjectionReport for the chunk
-challenge_payload_hash     -> hash(chunk_payload || molecule_tx || projection)
-committee_evidence         -> signatures over challenge_payload_hash
-```
-
-The court bundle is self-contained: anyone holding it can replay
-the chunk in a CKB-VM-style verifier and verify the committee's
-verdict.
-
-> [!NOTE]
-> The CKB court verifier (the type script that would actually
-> adjudicate disputes on L1) is **not yet implemented**. The court
-> bundle is the deterministic input shape *for* that verifier — so
-> when one is implemented and deployed, no back-compat changes are
-> needed for existing bundles.
-
-## Phase 6 — Exit path
-
-When the session closes, the participants settle the locked Cells.
-There are two paths:
-
-```mermaid
-%%{init: {
-  "theme": "base",
-  "themeVariables": {
-    "primaryColor": "#A5B4FC",
-    "primaryTextColor": "#1E293B",
-    "primaryBorderColor": "#4F46E5",
-    "lineColor": "#6366F1",
-    "secondaryColor": "#C7D2FE",
-    "tertiaryColor": "#C7D2FE"
-  }
-}}%%
-flowchart TB
-    A["Final MyelinBlock"]:::l2
-    A --> Q{"Any dispute<br/>pending?"}:::q
-    Q -- no  --> X["Happy close:<br/>release locked Cells<br/>per final state"]:::good
-    Q -- yes --> Y["Disputed close:<br/>settlement package<br/>+ L1 court verdict"]:::warn
-    Y --> Z["Release / slash<br/>per verdict"]:::verdict
-
-    classDef l2     fill:#C7D2FE,stroke:#4F46E5,color:#1E293B;
-    classDef q      fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
-    classDef good   fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-    classDef warn   fill:#C7D2FE,stroke:#D97706,color:#1E293B;
-    classDef verdict fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
-```
-
-For the deepest dive on submission, see [L1 submission
-flow](submission-flow.md).
-
-## A full lifecycle, in one timeline
-
-```mermaid
-%%{init: {
-  "theme": "base",
-  "themeVariables": {
-    "primaryColor": "#A5B4FC",
-    "primaryTextColor": "#1E293B",
-    "primaryBorderColor": "#4F46E5",
-    "lineColor": "#6366F1",
-    "secondaryColor": "#C7D2FE",
-    "tertiaryColor": "#C7D2FE"
-  }
-}}%%
-gantt
-    title Session lifecycle
-    dateFormat X
-    axisFormat %s
-
-    section L1 (CKB)
-    Asset custody lock    :l1a, 0, 1
-    Final settlement      :l1b, 14, 1
-
-    section L2 (Myelin)
-    Session open          :l2a, 1, 1
-    Chunk 0 (fast path)   :l2b, 2, 3
-    Chunk 1 (fast path)   :l2c, 5, 3
-    Chunk 2 (fast path)   :l2d, 8, 3
-    DA anchor package     :l2e, 11, 1
-    Settlement intent     :l2f, 12, 1
-    Settlement package    :l2g, 13, 1
-
-    section Off-chain
-    Witnesses (tape / quote / batch) :offa, 0, 14
-    DA store sealing                  :offb, 2, 9
-```
+A court bundle packages the exact disputed chunk and verification inputs. The
+repository does not ship a deployed L1 court or finished dispute economics, so
+a verified local bundle is not an on-chain verdict.
 
 ## CLI mapping
 
-Each phase has a CLI command. The full list is in
-[CLI reference](../operations/cli.md); the short version:
-
-| Phase | Command |
+| Stage | Command family |
 | --- | --- |
-| Asset custody | (off-chain CKB tx, not a Myelin command) |
-| Session open | `myelin-cli session open-fixture` |
-| Fast path chunks | `myelin-cli runtime smoke` (or per-chunk CLI) |
-| DA manifest | `myelin-cli session da-manifest` |
-| Anchor package | `myelin-cli session da-anchor-package` |
-| Court bundle | `myelin-cli session court-bundle` |
-| Settlement intent | `myelin-cli session settlement-intent` |
-| Settlement package | `myelin-cli session settlement-package` |
-| L1 submission | `myelin-cli session submit-settlement-package` |
+| Open and commit a fixture | `myelin-cli session open-fixture`, `commit-fixture` |
+| Exercise runtime wiring | `myelin-cli runtime smoke` |
+| Build and verify court evidence | `myelin-cli session court-bundle`, `verify-court-bundle` |
+| Build DA evidence | `myelin-cli session da-manifest`, `da-anchor-package` |
+| Build settlement evidence | `myelin-cli session settlement-intent`, `settlement-package` |
+| Submit to a CKB RPC endpoint | `myelin-cli session submit-*` |
 
-> [!TIP]
-> For the shortest end-to-end demo, see
-> [First run](../getting-started/first-run.md). That page walks
-> the whole lifecycle in five commands.
-
-## What's deliberately simple in the demo
-
-The session lifecycle above is the *full* shape. The CLI's first-run
-demo runs a **two-validator static committee** with **no
-permissionless validator entry**, **no live external DA provider**,
-and **no L1 court verifier**. Those pieces are intentionally left
-for the production gate (which exercises them with mock CKB RPC
-servers) and the future CKB court implementation.
-
-The boundary is honest on purpose: see
-[Claim ladder](../security/claim-ladder.md).
-
-## Where to go next
-
-- [Court path](court-path.md) — the dispute deep dive.
-- [Data availability flow](da-flow.md) — the DA ladder.
-- [L1 submission flow](submission-flow.md) — from packages to
-  on-chain inclusion.
+For exact flags and report schemas, see the [CLI reference](../operations/cli.md).
+For the shortest local exercise, see [First run](../getting-started/first-run.md).

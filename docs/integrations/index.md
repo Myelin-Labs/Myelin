@@ -16,6 +16,14 @@ designed for but not yet wired.
     payment-channel network: external funding, payment-hash
     bridges, compact commitment metadata.
 
+-   [Veloren research fork](veloren-research-fork.md)
+
+    ---
+
+    An independent, non-endorsed game integration that journals authoritative
+    events, reserves stable sequence ranges, and reconciles game-applied and
+    Myelin-finalised positions after a crash.
+
 </div>
 
 ## What "integration" means here
@@ -34,6 +42,10 @@ For Fiber specifically, the integration is:
 - Maintains an explicit mapping between Myelin session IDs and
   Fiber channel IDs.
 - Carries only compact commitments through Fiber payment metadata.
+
+For Veloren, the integration lives in the external fork. Myelin receives
+ordered Cell transactions from the adapter; game events, inventories, wallet
+UX, and any Spore/DOB asset rules stay outside the core workspace.
 
 ## What isn't here
 

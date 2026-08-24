@@ -33,27 +33,33 @@ flowchart TB
         CS["CellScript source"] --> CA["Pinned compiler adapter"] --> TX["CellTx + access template"]
     end
 
-    subgraph EXECUTE["2. Resolve and execute"]
+    subgraph PRODUCE["2. Reserve one candidate"]
+        direction LR
+        P["Instant / Interval / Open / Never"] --> B["Bounded ordered batch"]
+    end
+
+    subgraph EXECUTE["3. Resolve and execute"]
         direction LR
         R["Resolve live Cells + conflict keys"] --> D["CellDAG + mempool"] --> VM["CKB-VM script groups"]
     end
 
-    subgraph COMMIT["3. Commit the session"]
+    subgraph COMMIT["4. Finalise and commit"]
         direction LR
-        ST["Atomic state transition"] --> CO["Closed-validator finality"] --> EV["Projection + DA + court + settlement evidence"]
+        ST["Atomic state transition"] --> CO["Genesis-bound finality"] --> AC["Block + latest checkpoint<br/>+ head + outbox"]
     end
 
-    subgraph PROVE["4. Prove against CKB"]
+    subgraph PROVE["5. Prove against CKB"]
         direction LR
-        AD["CKB evidence adapter"] --> CKB["Authoritative CKB node"]
+        EV["Projection + DA + court<br/>+ settlement evidence"] --> AD["CKB evidence adapter"] --> CKB["Authoritative CKB node"]
     end
 
-    TX --> R
+    TX --> P
+    B --> R
     VM --> ST
-    EV --> AD
+    AC --> EV
 ```
 
-The boundaries are intentional:
+Four rules keep the modules from trusting data outside their remit:
 
 - **CellScript describes access; Myelin resolves identity.** Compiler metadata is an access template, never a trusted final conflict key.
 - **CellDAG schedules transactions; CKB-VM verifies scripts.** Scheduling is outside the VM and does not change script semantics.
@@ -68,13 +74,38 @@ The reusable continuous-session path is split into seven optional workspace crat
 | --- | --- |
 | `myelin-session` | Continuous heads, deterministic block preparation, exact consensus-config binding, audited recovery, consensus WAL, and transactional outbox |
 | `myelin-session-producer` | Strictly configurable `Instant`, `Interval`, lazy `Open`, `Never`, and manual production; bounded reserving batches; reusable host scheduling; and a single-writer hand-off to finality and atomic commit |
-| `myelin-session-store-rocksdb` | Versioned RocksDB schema, synchronous WAL, atomic head/block/snapshot/outbox CAS, and durable per-peer network queues |
+| `myelin-session-store-rocksdb` | Versioned RocksDB schema, synchronous WAL, atomic block/latest-checkpoint/head/outbox CAS, and durable per-peer network queues |
 | `myelin-session-network` | Recipient-bound Schnorr envelopes, closed-peer authorization, replay/equivocation checks, mTLS gRPC transport, and ACK-after-durability delivery |
 | `myelin-session-runtime` | Embeddable composition root, dependency-ordered lifecycle supervision, health enforcement, and the session writer gate |
 | `myelin-session-escrow` | Optional finalized-CKB funding attachment, conserved balances, expiry/debit constraints, pluggable typed assets, evidence-bound exit construction, and finalized-settlement verification |
 | `myelin-wallet-auth` | Standard CKB Blake160 identity derivation, CKB-personalized login/PoA digests, and compact recoverable secp256k1 signatures |
 
 These crates are adapters, not a daemon that silently changes Myelin's scope. An application may embed a one-process PoA driver or connect an external coordinator through the finality and network interfaces. PoA, static committee, and Tendermint here are closed-validator session engines; none makes Myelin a permissionless chain.
+
+### Continuous operation
+
+An application may queue completed epochs in its own journal up to a configured
+backlog cap. `myelin-session-producer` reserves one bounded batch from the
+current durable head and sends one candidate through execution, proof
+verification, and atomic commit. It does not prepare a descendant candidate
+while the first is in flight. After the durable head advances, the producer
+asks the transaction source to acknowledge the reservation; a failed commit or
+orderly shutdown releases it.
+
+```mermaid
+flowchart LR
+    J["Application journal"] --> P["Reserve one bounded batch"]
+    P --> E["Execute + verify exact proof"]
+    E --> C["Atomic block · latest checkpoint<br/>· head · outbox"]
+    C --> A["Acknowledge source reservation"]
+```
+
+`Instant`, `Interval`, lazy `Open`, and `Never` with manual production control
+when a batch closes. They do not decide VM validity or create finality. On
+restart, Myelin audits the finalised block-and-proof chain, restores the latest
+checkpoint, checks its root against the durable head, and opens the writer only
+after those checks pass. Ordinary recovery does not re-execute every historical
+transaction.
 
 ## Quick start
 
@@ -127,7 +158,7 @@ required pre-state root  = root(S(n))
 committed post-state root = root(S(n+1))
 ```
 
-If verification fails, the state remains `S(n)`.
+If verification fails, the state stays at `S(n)`.
 
 ### Transaction identity separates raw data from witnesses
 
@@ -209,7 +240,7 @@ flowchart TB
 | Committed | Canonical block identity and locally verified CKB transaction Merkle proof |
 | Finalized by depth | Canonical re-query, configured confirmations, and reorganization checks |
 
-The pure `project_cell_tx_to_ckb` function intentionally stops at **wire encoded**. Higher claims exist only in `CkbEvidenceProjection` and its linked receipts. Confirmation depth is operational finality evidence, not a claim of absolute CKB irreversibility.
+The pure `project_cell_tx_to_ckb` function is defined to stop at **wire encoded**. Higher claims exist only in `CkbEvidenceProjection` and its linked receipts. Confirmation depth is operational finality evidence, not a claim of absolute CKB irreversibility.
 
 ## CellScript is external and reproducible
 
@@ -261,7 +292,7 @@ Run the comprehensive gate:
 RUN_TEEWORLDS=0 scripts/myelin_production_gate.sh
 ```
 
-The comprehensive path rebuilds the locked CellScript compiler, compiles all four Myelin fixtures, runs all three closed-validator modes, exercises the Session L2 spine, and deploys valid and adversarial DA/settlement transactions to the parent CKB devnet. Set `RUN_CKB_DEVNET=0` only for an explicitly reduced run. The external Teeworlds acceptance requires its separate repository and prebuilt replayer.
+The comprehensive path rebuilds the locked CellScript compiler, compiles all four Myelin fixtures, runs all three closed-validator modes, exercises the Session L2 spine, and deploys valid and adversarial DA/settlement transactions to the parent CKB devnet. Set `RUN_CKB_DEVNET=0` only when the parent devnet is outside the chosen validation scope. The external Teeworlds acceptance requires its separate repository and prebuilt replayer.
 
 ## Repository guide
 
@@ -271,6 +302,13 @@ The comprehensive path rebuilds the locked CellScript compiler, compiles all fou
 | [`state/`](state) | inspect live Cell state, atomic transitions, conflict resolution, or DA primitives |
 | [`mempool/`](mempool) | inspect admission, fee/conflict scoring, or atomic RBF |
 | [`consensus/`](consensus) | inspect closed-validator signatures and finality |
+| [`session/`](session) | inspect canonical session blocks, durable heads, finality verification, and recovery audit |
+| [`session-producer/`](session-producer) | inspect production policies, reservations, batch caps, and the single-writer hand-off |
+| [`session-runtime/`](session-runtime) | inspect component wiring, lifecycle supervision, health checks, and the writer gate |
+| [`session-store-rocksdb/`](session-store-rocksdb) | inspect atomic block/checkpoint/head/outbox persistence, WAL, and durable queues |
+| [`session-network/`](session-network) | inspect authenticated module-neutral envelopes and replay/equivocation checks |
+| [`session-escrow/`](session-escrow) | inspect optional funded-session accounting and evidence-bound exit construction |
+| [`wallet-auth/`](wallet-auth) | inspect CKB wallet identity and login/PoA signature helpers |
 | [`ckb-adapter/`](ckb-adapter) | produce or verify authoritative CKB evidence receipts |
 | [`cellscript-adapter/`](cellscript-adapter) | inspect the pinned compiler process boundary |
 | [`fixtures/cellscript/`](fixtures/cellscript) | inspect Myelin-owned verifier sources |
@@ -282,7 +320,9 @@ The comprehensive path rebuilds the locked CellScript compiler, compiles all fou
 | --- | --- |
 | How do I run the whole local flow? | [First-run walkthrough](docs/getting-started/first-run.md) |
 | What is the complete data and control model? | [Architecture](docs/MYELIN_ARCHITECTURE.md) |
-| Where does Myelin deliberately differ from CKB? | [Semantic deviations](MYELIN_CKB_SEMANTIC_DEVIATIONS.md) |
+| How does continuous production and recovery work? | [Session lifecycle](docs/interactions/session-flow.md) |
+| How does the independent Veloren research fork integrate? | [Veloren integration](docs/integrations/veloren-research-fork.md) |
+| Where does Myelin differ from CKB? | [Semantic deviations](MYELIN_CKB_SEMANTIC_DEVIATIONS.md) |
 | How are evidence stages verified? | [CKB projection audit](MYELIN_CKB_PROJECTION_AUDIT.md) |
 | How does the compiler boundary work? | [CellScript integration](docs/architecture/cellscript.md) |
 | How do I use every CLI command? | [CLI reference](docs/operations/cli.md) |

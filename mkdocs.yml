@@ -1,7 +1,7 @@
 site_name: Myelin
 site_description: >-
-  A CKB-isomorphic off-chain session runtime for finite Cell execution,
-  deterministic CKB-VM verification, and CKB-style court projection.
+  A CKB-aligned off-chain session runtime for finite Cell execution,
+  deterministic CKB-VM verification, durable recovery, and staged CKB evidence.
 site_author: Myelin contributors
 
 docs_dir: docs
@@ -164,6 +164,7 @@ nav:
   - Integrations:
       - integrations/index.md
       - Fiber Network bridge: integrations/fiber.md
+      - Veloren research fork: integrations/veloren-research-fork.md
   - Operations:
       - operations/index.md
       - CLI reference: operations/cli.md
@@ -186,7 +187,7 @@ nav:
   - Releases & positioning:
       - releases/index.md
       - Introducing Myelin (Nervos Talk draft): releases/nervos-talk-introducing-myelin.md
-      - Myelin update — from one verified game chunk to a modular session chain: releases/nervos-talk-pluggable-session-chain.md
+      - From bounded sessions to continuous operation: releases/nervos-talk-pluggable-session-chain.md
 
 validation:
   links:

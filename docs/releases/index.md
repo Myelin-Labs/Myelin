@@ -10,8 +10,10 @@ framing documents, not security claims — for the latter, see the
   above a CKB-VM-verified chunk, the research line it continues (xuejie's
   Teeworlds / fat-thin / OHOL / Archipelago posts), the roadmap those posts
   sharpened, and the hard security boundary.
-- [Myelin update: from one verified game chunk to a modular session chain (Nervos Talk draft)](nervos-talk-pluggable-session-chain.md) —
-  a plain-language continuation explaining static module registration,
-  runtime selection, genesis locking, driver/verifier separation, neutral
-  storage and networking, and the `Instant`, `Interval`, `Open`, `Never`, and
-  manual block-production policies added after studying FuelVM and Fuel Core.
+- [From bounded sessions to continuous operation: pluggable chain modules in Myelin](nervos-talk-pluggable-session-chain.md) —
+  a revised version of the
+  [Nervos Talk post](https://talk.nervos.org/t/from-bounded-sessions-to-continuous-operation-pluggable-chain-modules-in-myelin/10658),
+  covering one-candidate production, genesis-bound finality, checkpoint
+  recovery, and an independent Veloren research fork. Its `Instant`,
+  `Interval`, `Open`, and `Never` vocabulary comes from studying Fuel Core's
+  block-production service; Myelin gives `Open` an availability-started window.

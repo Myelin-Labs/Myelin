@@ -43,9 +43,11 @@ flowchart TB
     end
     subgraph L2["L2 — Myelin session runtime"]
         M["Mempool<br/>admission queue"]:::l2
+        B["Session producer<br/>one reserved candidate"]:::l2
         S["CellDAG<br/>scheduler"]:::l2
         V["CKB-VM-style<br/>verifier"]:::l2
         C["Typed finality proof<br/>(static / PoA / Tendermint)"]:::l2
+        R["Atomic block · checkpoint<br/>· head · outbox"]:::l2
     end
     subgraph L1["L1 — CKB"]
         A["Asset custody<br/>(session lock Cells)"]:::l1
@@ -55,10 +57,11 @@ flowchart TB
     end
 
     P --> W --> M
-    M --> S --> V --> C
+    M --> B --> S --> V --> C --> R
+    R --> B
     V --> D
-    C --> E
-    C --> S2
+    R --> E
+    R --> S2
     A -.->|lock at open| M
     A -.->|settle at close| S2
     E --> CT
@@ -88,8 +91,8 @@ execution, projection, DA, submission).
 
     ---
 
-    Open → commit → DA → court → settle, step by step, with the
-    artefacts at each step.
+    Open → queue → reserve → execute → finalise → commit → recover, followed
+    by DA, court, and settlement evidence.
 
 -   [Court path](court-path.md)
 
