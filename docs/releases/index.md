@@ -5,6 +5,9 @@ research line, and what each release does and does not claim. These are
 framing documents, not security claims — for the latter, see the
 [claim ladder](../security/claim-ladder.md).
 
+- [Myelin 0.20.0 release record](myelin-0.20.0.md) — the reviewed release
+  boundary for the modular continuous-session runtime, including the exact
+  commit range, validation commands, claim limits, and upgrade note.
 - [Introducing Myelin (Nervos Talk draft)](nervos-talk-introducing-myelin.md) —
   the canonical public introduction: what Myelin is, the five things it adds
   above a CKB-VM-verified chunk, the research line it continues (xuejie's
