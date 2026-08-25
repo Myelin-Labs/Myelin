@@ -296,6 +296,8 @@ fn parse_hex_33(value: &str) -> Result<CkbPublicKey33> {
 pub struct MyelinBlock {
     /// Block format version.
     pub version: u32,
+    /// Globally unique session whose history contains this block.
+    pub session_id: Hash32,
     /// Parent session block hash, or zero for a session genesis block.
     pub parent_hash: Hash32,
     /// Session-local block number.
@@ -304,6 +306,10 @@ pub struct MyelinBlock {
     pub timestamp_ms: u64,
     /// Consensus engine expected to finalise this block.
     pub consensus_kind: ConsensusKind,
+    /// Genesis-bound application program/schema/policy commitment.
+    pub application_profile_commitment: Hash32,
+    /// Commitment to the exact application input range and measured execution.
+    pub execution_frame_commitment: Hash32,
     /// Cell state root before executing the ordered transition set.
     pub state_root_before: Hash32,
     /// Cell state root after executing the ordered transition set.
@@ -321,10 +327,13 @@ impl MyelinBlock {
     pub fn to_molecule_bytes(&self) -> Vec<u8> {
         encode_table(&[
             self.version.to_le_bytes().to_vec(),
+            self.session_id.to_vec(),
             self.parent_hash.to_vec(),
             self.number.to_le_bytes().to_vec(),
             self.timestamp_ms.to_le_bytes().to_vec(),
             self.consensus_kind.as_str().as_bytes().to_vec(),
+            self.application_profile_commitment.to_vec(),
+            self.execution_frame_commitment.to_vec(),
             self.state_root_before.to_vec(),
             self.state_root_after.to_vec(),
             encode_hash_vec(&self.ordered_cell_tx_commitments),
@@ -1164,10 +1173,13 @@ mod tests {
     fn block_for(consensus_kind: ConsensusKind) -> MyelinBlock {
         MyelinBlock {
             version: 1,
+            session_id: [12; 32],
             parent_hash: [0; 32],
             number: 7,
             timestamp_ms: 1_780_000_000_000,
             consensus_kind,
+            application_profile_commitment: [10; 32],
+            execution_frame_commitment: [11; 32],
             state_root_before: [4; 32],
             state_root_after: [5; 32],
             ordered_cell_tx_commitments: vec![[6; 32], [7; 32]],
@@ -1215,7 +1227,7 @@ mod tests {
         let module_commitments = configs.iter().map(|config| hex::encode(config.module_commitment().unwrap())).collect::<Vec<_>>();
         let proof_hashes =
             proofs.iter().map(|proof| hex::encode(blake3::hash(&proof.encode().unwrap()).as_bytes())).collect::<Vec<_>>();
-        assert_eq!(hex::encode(block().hash()), "c65df8da679969b2ba85629deda0a1ae93f2b05787a0bfd8d703a752a2ce19da");
+        assert_eq!(hex::encode(block().hash()), "817e7d8645ddda43c9817bccd4d9a55e8847cc84e443556955ba78365515b537");
         assert_eq!(
             config_commitments,
             [
@@ -1607,10 +1619,50 @@ weight = 1
         let b1 = block();
         let b2 = block();
         assert_eq!(b1.hash(), b2.hash());
-        // Mutating a field must change the hash
-        let mut b3 = block();
-        b3.state_root_after = [0xAA; 32];
-        assert_ne!(b1.hash(), b3.hash());
+        let baseline = b1.hash();
+        let mut mutations = Vec::new();
+        let mut changed = block();
+        changed.version += 1;
+        mutations.push(changed);
+        let mut changed = block();
+        changed.session_id = [0xA0; 32];
+        mutations.push(changed);
+        let mut changed = block();
+        changed.parent_hash = [0xA1; 32];
+        mutations.push(changed);
+        let mut changed = block();
+        changed.number += 1;
+        mutations.push(changed);
+        let mut changed = block();
+        changed.timestamp_ms += 1;
+        mutations.push(changed);
+        let mut changed = block();
+        changed.consensus_kind = ConsensusKind::ProofOfAuthority;
+        mutations.push(changed);
+        let mut changed = block();
+        changed.application_profile_commitment = [0xA2; 32];
+        mutations.push(changed);
+        let mut changed = block();
+        changed.execution_frame_commitment = [0xA3; 32];
+        mutations.push(changed);
+        let mut changed = block();
+        changed.state_root_before = [0xA4; 32];
+        mutations.push(changed);
+        let mut changed = block();
+        changed.state_root_after = [0xA5; 32];
+        mutations.push(changed);
+        let mut changed = block();
+        changed.ordered_cell_tx_commitments.push([0xA6; 32]);
+        mutations.push(changed);
+        let mut changed = block();
+        changed.data_commitments.push([0xA7; 32]);
+        mutations.push(changed);
+        let mut changed = block();
+        changed.scheduler_commitment = [0xA8; 32];
+        mutations.push(changed);
+        for changed in mutations {
+            assert_ne!(baseline, changed.hash());
+        }
     }
 
     #[test]

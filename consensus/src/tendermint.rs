@@ -597,10 +597,13 @@ mod tests {
     fn block() -> MyelinBlock {
         MyelinBlock {
             version: 1,
+            session_id: [12; 32],
             parent_hash: [0; 32],
             number: 8,
             timestamp_ms: 0,
             consensus_kind: ConsensusKind::WeightedPrecommit,
+            application_profile_commitment: [10; 32],
+            execution_frame_commitment: [11; 32],
             state_root_before: [1; 32],
             state_root_after: [2; 32],
             ordered_cell_tx_commitments: vec![[3; 32]],

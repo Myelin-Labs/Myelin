@@ -9,6 +9,14 @@ Myelin has two deliberately separate projection surfaces:
 
 There is no caller-controlled boolean override. Deserializing a higher-stage report is not enough: `verify_projection` recomputes transaction identity, context and receipt commitments, header hashes, observation bindings, the CKB transaction Merkle root, confirmation depth, and canonical-block equality.
 
+For continuous operation, `EvidenceRuntime` stores that progression as one
+revisioned receipt ladder per exact outbox message. Its CKB descriptor names
+the seven stages from `wire-encoded` through `configured-depth-finality` and
+commits the local verifier identity assigned to every stage. External
+collection cannot advance the ladder until the adapter re-verifies the returned
+evidence locally. The terminal receipt is persisted before the outbox item is
+acknowledged, so restart resumes without collapsing or skipping claims.
+
 ## Stage model
 
 | Stage | Required evidence | Producer |

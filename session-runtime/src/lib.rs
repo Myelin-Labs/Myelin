@@ -14,7 +14,9 @@ use myelin_consensus::{
     SelectedConsensus,
 };
 use myelin_session::{
-    FinalityVerifier, Hash32, SessionChain, SessionConfig, SessionError, SessionStore, TransitionExecutor, VerifiedFinality,
+    ApplicationProfile, EvidencePipelineDescriptor, EvidenceReceipt, EvidenceRecord, EvidenceStage, FinalityVerifier, Hash32,
+    OutboxMessage, PendingDelivery, SessionChain, SessionConfig, SessionError, SessionStore, StoreError, TransitionExecutor,
+    VerifiedFinality,
 };
 use myelin_session_network::{MessageClass, MessageType, NetworkBinding};
 use std::{
@@ -100,6 +102,160 @@ impl ConsensusBinding {
 /// namespace. The transport never interprets `type_tag` or `payload`.
 pub const fn consensus_message_type(message: &EncodedConsensusMessage) -> MessageType {
     MessageType::new(MessageClass::Consensus, message.format_version, message.type_tag)
+}
+
+/// External evidence producer paired with a local verifier. Collection may
+/// talk to a node or service; acceptance always runs through `verify_evidence`
+/// against the exact message, stage, and previous receipt.
+#[async_trait]
+pub trait EvidenceAdapter: Send + Sync + 'static {
+    fn descriptor(&self) -> EvidencePipelineDescriptor;
+
+    async fn collect_evidence(
+        &self,
+        message: &OutboxMessage,
+        stage: &EvidenceStage,
+        previous: Option<&EvidenceReceipt>,
+    ) -> Result<Vec<u8>, EvidenceAdapterError>;
+
+    fn verify_evidence(
+        &self,
+        message: &OutboxMessage,
+        stage: &EvidenceStage,
+        previous: Option<&EvidenceReceipt>,
+        evidence: &[u8],
+    ) -> Result<(), EvidenceAdapterError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct EvidenceAdapterError {
+    pub message: String,
+}
+
+impl EvidenceAdapterError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self { message: message.into() }
+    }
+}
+
+/// Result of one monotonic receipt-stage transition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvidenceAdvance {
+    pub session_id: Hash32,
+    pub message_id: Hash32,
+    pub pipeline_commitment: Hash32,
+    pub accepted_stage: String,
+    pub revision: u64,
+    pub complete: bool,
+}
+
+/// Crash-resumable evidence worker over the session outbox.
+pub struct EvidenceRuntime<S: SessionStore> {
+    store: Arc<S>,
+    adapters: HashMap<String, Arc<dyn EvidenceAdapter>>,
+}
+
+impl<S: SessionStore> EvidenceRuntime<S> {
+    pub fn new(store: Arc<S>) -> Self {
+        Self { store, adapters: HashMap::new() }
+    }
+
+    pub fn register(&mut self, adapter: Arc<dyn EvidenceAdapter>) -> Result<(), EvidenceRuntimeError> {
+        let descriptor = adapter.descriptor();
+        descriptor.validate()?;
+        if self.adapters.contains_key(&descriptor.topic) {
+            return Err(EvidenceRuntimeError::Registration(format!(
+                "an evidence adapter is already registered for topic {}",
+                descriptor.topic
+            )));
+        }
+        self.adapters.insert(descriptor.topic.clone(), adapter);
+        Ok(())
+    }
+
+    /// Advance at most one stage for each pending message whose topic has a
+    /// registered evidence adapter. Unrelated outbox topics are left alone.
+    pub async fn advance_pending(&self, session_id: Hash32, limit: usize) -> Result<Vec<EvidenceAdvance>, EvidenceRuntimeError> {
+        let pending = self.store.pending_outbox(session_id, limit)?;
+        let mut advances = Vec::new();
+        for delivery in pending {
+            if self.adapters.contains_key(&delivery.message.topic) {
+                advances.push(self.advance_delivery(session_id, delivery).await?);
+            }
+        }
+        Ok(advances)
+    }
+
+    pub async fn advance_delivery(
+        &self,
+        session_id: Hash32,
+        delivery: PendingDelivery,
+    ) -> Result<EvidenceAdvance, EvidenceRuntimeError> {
+        let adapter = self
+            .adapters
+            .get(&delivery.message.topic)
+            .ok_or_else(|| EvidenceRuntimeError::Registration(format!("no evidence adapter for topic {}", delivery.message.topic)))?;
+        let descriptor = adapter.descriptor();
+        descriptor.validate()?;
+        if descriptor.topic != delivery.message.topic {
+            return Err(EvidenceRuntimeError::Registration("adapter descriptor changed its registered topic".to_owned()));
+        }
+        let current = self.store.load_evidence(session_id, delivery.message.id)?;
+        if let Some(record) = &current {
+            record.validate_for(session_id, &delivery.message, &descriptor)?;
+            if record.is_complete() {
+                self.store.acknowledge_outbox(session_id, delivery.message.id)?;
+                let last = record.latest_receipt().expect("complete record has a receipt");
+                return Ok(EvidenceAdvance {
+                    session_id,
+                    message_id: delivery.message.id,
+                    pipeline_commitment: descriptor.commitment(),
+                    accepted_stage: last.stage_name.clone(),
+                    revision: record.revision,
+                    complete: true,
+                });
+            }
+        }
+        let stage_index = current.as_ref().map_or(0, |record| record.receipts.len());
+        let stage = descriptor
+            .stages
+            .get(stage_index)
+            .ok_or_else(|| EvidenceRuntimeError::Registration("pipeline has no next stage".to_owned()))?;
+        let previous = current.as_ref().and_then(EvidenceRecord::latest_receipt);
+        let evidence = adapter.collect_evidence(&delivery.message, stage, previous).await?;
+        adapter.verify_evidence(&delivery.message, stage, previous, &evidence)?;
+        let previous_commitment = current
+            .as_ref()
+            .and_then(EvidenceRecord::latest_receipt)
+            .map_or([0; 32], |receipt| receipt.commitment(descriptor.commitment(), delivery.message.commitment()));
+        let receipt = EvidenceReceipt::new(&descriptor, stage_index, previous_commitment, evidence)?;
+        let record = EvidenceRecord::append(current.as_ref(), session_id, &delivery.message, &descriptor, receipt)?;
+        self.store.compare_and_set_evidence(current.as_ref().map(|value| value.revision), &record)?;
+        if record.is_complete() {
+            self.store.acknowledge_outbox(session_id, delivery.message.id)?;
+        }
+        Ok(EvidenceAdvance {
+            session_id,
+            message_id: delivery.message.id,
+            pipeline_commitment: descriptor.commitment(),
+            accepted_stage: stage.name.clone(),
+            revision: record.revision,
+            complete: record.is_complete(),
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EvidenceRuntimeError {
+    #[error(transparent)]
+    Session(#[from] SessionError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Adapter(#[from] EvidenceAdapterError),
+    #[error("invalid evidence runtime registration: {0}")]
+    Registration(String),
 }
 
 /// Service importance used by health enforcement.
@@ -401,13 +557,14 @@ impl<E: TransitionExecutor, S: SessionStore> RuntimeHost<E, S> {
 
     pub fn recover(
         session_id: Hash32,
+        expected_application_profile: ApplicationProfile,
         consensus_config: ConsensusConfig,
         executor: E,
         store: Arc<S>,
         supervisor: ServiceSupervisor,
     ) -> Result<Self, RuntimeError> {
         let verifier = Arc::new(RegisteredFinalityVerifier::new(consensus_config)?);
-        let chain = SessionChain::recover(session_id, verifier, executor, store)?;
+        let chain = SessionChain::recover(session_id, &expected_application_profile, verifier, executor, store)?;
         Ok(Self { chain, supervisor, writer_enabled: false })
     }
 
@@ -482,7 +639,8 @@ mod tests {
     use super::*;
     use myelin_consensus::{Authority, CommitteeSigner, ProofOfAuthorityConfig};
     use myelin_session::{
-        ConsensusWal, ExecutionOutcome, FinalisedBlockRecord, PendingDelivery, SessionGenesis, SessionHead, StoreError,
+        ApplicationProfile, ApplicationResourceEnvelope, ApplicationVmProfile, ConsensusWal, ExecutionOutcome, FinalisedBlockRecord,
+        PendingDelivery, SessionGenesis, SessionHead, StoreError,
     };
     use std::sync::Mutex;
 
@@ -540,6 +698,112 @@ mod tests {
 
         let message = EncodedConsensusMessage { format_version: 3, type_tag: 9, payload: vec![1] };
         assert_eq!(consensus_message_type(&message), MessageType::new(MessageClass::Consensus, 3, 9));
+    }
+
+    struct TestEvidenceAdapter {
+        descriptor: EvidencePipelineDescriptor,
+        fail_collect: Arc<Mutex<bool>>,
+        forge_evidence: bool,
+    }
+
+    #[async_trait]
+    impl EvidenceAdapter for TestEvidenceAdapter {
+        fn descriptor(&self) -> EvidencePipelineDescriptor {
+            self.descriptor.clone()
+        }
+
+        async fn collect_evidence(
+            &self,
+            message: &OutboxMessage,
+            stage: &EvidenceStage,
+            _previous: Option<&EvidenceReceipt>,
+        ) -> Result<Vec<u8>, EvidenceAdapterError> {
+            if *self.fail_collect.lock().unwrap() {
+                return Err(EvidenceAdapterError::new("temporary node failure"));
+            }
+            if self.forge_evidence {
+                return Ok(vec![0xff]);
+            }
+            let mut evidence = stage.name.as_bytes().to_vec();
+            evidence.extend_from_slice(&message.id);
+            Ok(evidence)
+        }
+
+        fn verify_evidence(
+            &self,
+            message: &OutboxMessage,
+            stage: &EvidenceStage,
+            _previous: Option<&EvidenceReceipt>,
+            evidence: &[u8],
+        ) -> Result<(), EvidenceAdapterError> {
+            let mut expected = stage.name.as_bytes().to_vec();
+            expected.extend_from_slice(&message.id);
+            if evidence != expected {
+                return Err(EvidenceAdapterError::new("locally reverified evidence bytes do not match"));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn evidence_runtime_resumes_by_stage_and_never_persists_unverified_evidence() {
+        let store = Arc::new(MinimalStore::default());
+        let message = OutboxMessage {
+            id: [21; 32],
+            consensus_module_commitment: [22; 32],
+            topic: "da/test".to_owned(),
+            payload: b"segment".to_vec(),
+        };
+        store.pending.lock().unwrap().push(PendingDelivery { height: 4, message: message.clone() });
+        let descriptor = EvidencePipelineDescriptor::data_availability("da/test", [[31; 32], [32; 32]]).unwrap();
+        let transient = Arc::new(Mutex::new(true));
+        let adapter =
+            Arc::new(TestEvidenceAdapter { descriptor: descriptor.clone(), fail_collect: transient.clone(), forge_evidence: false });
+        let mut runtime = EvidenceRuntime::new(Arc::clone(&store));
+        runtime.register(adapter).unwrap();
+        assert!(runtime.advance_pending([7; 32], 10).await.is_err());
+        assert!(store.load_evidence([7; 32], message.id).unwrap().is_none());
+
+        *transient.lock().unwrap() = false;
+        let first = runtime.advance_pending([7; 32], 10).await.unwrap();
+        assert_eq!(first[0].accepted_stage, "payload-committed");
+        assert!(!first[0].complete);
+        assert_eq!(store.load_evidence([7; 32], message.id).unwrap().unwrap().revision, 0);
+
+        let mut resumed = EvidenceRuntime::new(Arc::clone(&store));
+        resumed
+            .register(Arc::new(TestEvidenceAdapter {
+                descriptor: descriptor.clone(),
+                fail_collect: Arc::new(Mutex::new(false)),
+                forge_evidence: false,
+            }))
+            .unwrap();
+        let second = resumed.advance_pending([7; 32], 10).await.unwrap();
+        assert_eq!(second[0].accepted_stage, "availability-verified");
+        assert!(second[0].complete);
+        assert!(store.pending.lock().unwrap().is_empty());
+        let record = store.load_evidence([7; 32], message.id).unwrap().unwrap();
+        assert_eq!(record.receipts.len(), 2);
+        assert_eq!(record.revision, 1);
+
+        let forged_message = OutboxMessage {
+            id: [41; 32],
+            consensus_module_commitment: [42; 32],
+            topic: "court/test".to_owned(),
+            payload: b"case".to_vec(),
+        };
+        store.pending.lock().unwrap().push(PendingDelivery { height: 5, message: forged_message.clone() });
+        let forged_descriptor = EvidencePipelineDescriptor::court("court/test", [[51; 32], [52; 32], [53; 32]]).unwrap();
+        let mut forged_runtime = EvidenceRuntime::new(Arc::clone(&store));
+        forged_runtime
+            .register(Arc::new(TestEvidenceAdapter {
+                descriptor: forged_descriptor,
+                fail_collect: Arc::new(Mutex::new(false)),
+                forge_evidence: true,
+            }))
+            .unwrap();
+        assert!(forged_runtime.advance_pending([7; 32], 10).await.is_err());
+        assert!(store.load_evidence([7; 32], forged_message.id).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -701,8 +965,14 @@ mod tests {
             self.0
         }
 
-        fn execute_block(&mut self, _height: u64, _transactions: &[Vec<u8>]) -> std::result::Result<ExecutionOutcome, String> {
-            Ok(ExecutionOutcome { ordered_cell_tx_commitments: vec![], data_commitments: vec![], outbox: vec![] })
+        fn execute_block(
+            &mut self,
+            _height: u64,
+            _frame_input: &myelin_session::FrameInput,
+            _consumed_handoffs: &[myelin_session::SessionHandoff],
+            _transactions: &[Vec<u8>],
+        ) -> std::result::Result<ExecutionOutcome, String> {
+            Ok(ExecutionOutcome { ordered_cell_tx_commitments: vec![], data_commitments: vec![], outbox: vec![], cycles: 0 })
         }
 
         fn snapshot(&self) -> std::result::Result<Vec<u8>, String> {
@@ -714,6 +984,8 @@ mod tests {
     struct MinimalStore {
         genesis: Mutex<Option<SessionGenesis>>,
         head: Mutex<Option<SessionHead>>,
+        pending: Mutex<Vec<PendingDelivery>>,
+        evidence: Mutex<HashMap<Hash32, EvidenceRecord>>,
     }
 
     impl SessionStore for MinimalStore {
@@ -756,11 +1028,34 @@ mod tests {
             Ok(())
         }
 
-        fn pending_outbox(&self, _session_id: Hash32, _limit: usize) -> std::result::Result<Vec<PendingDelivery>, StoreError> {
-            Ok(vec![])
+        fn pending_outbox(&self, _session_id: Hash32, limit: usize) -> std::result::Result<Vec<PendingDelivery>, StoreError> {
+            Ok(self.pending.lock().unwrap().iter().take(limit).cloned().collect())
         }
 
-        fn acknowledge_outbox(&self, _session_id: Hash32, _message_id: Hash32) -> std::result::Result<(), StoreError> {
+        fn acknowledge_outbox(&self, _session_id: Hash32, message_id: Hash32) -> std::result::Result<(), StoreError> {
+            let mut pending = self.pending.lock().unwrap();
+            let index = pending
+                .iter()
+                .position(|delivery| delivery.message.id == message_id)
+                .ok_or_else(|| StoreError::NotFound("outbox message".to_owned()))?;
+            pending.remove(index);
+            Ok(())
+        }
+
+        fn load_evidence(&self, _session_id: Hash32, message_id: Hash32) -> std::result::Result<Option<EvidenceRecord>, StoreError> {
+            Ok(self.evidence.lock().unwrap().get(&message_id).cloned())
+        }
+
+        fn compare_and_set_evidence(
+            &self,
+            expected_revision: Option<u64>,
+            record: &EvidenceRecord,
+        ) -> std::result::Result<(), StoreError> {
+            let mut evidence = self.evidence.lock().unwrap();
+            if evidence.get(&record.message_id).map(|value| value.revision) != expected_revision {
+                return Err(StoreError::Conflict("evidence revision changed".to_owned()));
+            }
+            evidence.insert(record.message_id, record.clone());
             Ok(())
         }
     }
@@ -775,7 +1070,30 @@ mod tests {
             consensus_config_commitment: binding.consensus_config_commitment,
             consensus_module_commitment: binding.consensus_module_commitment,
             consensus_wal_schema_hash: binding.consensus_wal_schema_hash,
+            application_profile: ApplicationProfile {
+                application_id: "runtime-host-test".to_owned(),
+                program_digest: [11; 32],
+                input_schema_hash: [12; 32],
+                state_codec_hash: [13; 32],
+                logical_time_policy_hash: [14; 32],
+                entropy_policy_hash: [15; 32],
+                vm: ApplicationVmProfile { spawn_ipc_required: false },
+                resources: ApplicationResourceEnvelope {
+                    max_frame_inputs: 1,
+                    max_frame_input_bytes: 1,
+                    max_frame_cycles: 1,
+                    max_logical_time_span: 1,
+                    max_inspect_query_bytes: 1,
+                    max_inspect_result_bytes: 1,
+                },
+                court_profile_hash: [16; 32],
+                handoff_policy_hash: [17; 32],
+            },
             initial_state_root: [1; 32],
+            initial_input_position: 0,
+            initial_logical_time: 0,
+            initial_timestamp_ms: 0,
+            predecessor: None,
             max_block_transactions: 1,
             max_block_bytes: 1,
             max_future_drift_ms: 1,

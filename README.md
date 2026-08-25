@@ -6,7 +6,7 @@
 
 <p>Execute typed Cell transitions off-chain, schedule independent work in parallel, verify every script group in CKB-VM, and produce evidence that can be checked against CKB.</p>
 
-<p><a href="https://github.com/Myelin-Labs/Myelin/releases/tag/v0.10.0">v0.10.0</a> · <a href="#quick-start">Quick start</a> · <a href="docs/MYELIN_ARCHITECTURE.md">Architecture</a> · <a href="CHANGELOG.md">Changelog</a></p>
+<p><a href="#quick-start">Quick start</a> · <a href="docs/MYELIN_ARCHITECTURE.md">Architecture</a> · <a href="CHANGELOG.md">Changelog</a></p>
 
 </div>
 
@@ -72,11 +72,11 @@ The reusable continuous-session path is split into seven optional workspace crat
 
 | Crate | Boundary |
 | --- | --- |
-| `myelin-session` | Continuous heads, deterministic block preparation, exact consensus-config binding, audited recovery, consensus WAL, and transactional outbox |
+| `myelin-session` | Genesis-bound application profiles, execution frames, read-only inspection, bounded range replay, continuous heads, successor sealing, single-use handoffs, exact finality binding, and transactional outbox |
 | `myelin-session-producer` | Strictly configurable `Instant`, `Interval`, lazy `Open`, `Never`, and manual production; bounded reserving batches; reusable host scheduling; and a single-writer hand-off to finality and atomic commit |
-| `myelin-session-store-rocksdb` | Versioned RocksDB schema, synchronous WAL, atomic block/latest-checkpoint/head/outbox CAS, and durable per-peer network queues |
+| `myelin-session-store-rocksdb` | Versioned RocksDB schema, synchronous WAL, atomic block/checkpoint/head/outbox/successor/handoff CAS, receipt-stage persistence, and durable per-peer network queues |
 | `myelin-session-network` | Recipient-bound Schnorr envelopes, closed-peer authorization, replay/equivocation checks, mTLS gRPC transport, and ACK-after-durability delivery |
-| `myelin-session-runtime` | Embeddable composition root, dependency-ordered lifecycle supervision, health enforcement, and the session writer gate |
+| `myelin-session-runtime` | Embeddable composition root, locally verified crash-resumable evidence pipelines, dependency-ordered lifecycle supervision, health enforcement, and the session writer gate |
 | `myelin-session-escrow` | Optional finalized-CKB funding attachment, conserved balances, expiry/debit constraints, pluggable typed assets, evidence-bound exit construction, and finalized-settlement verification |
 | `myelin-wallet-auth` | Standard CKB Blake160 identity derivation, CKB-personalized login/PoA digests, and compact recoverable secp256k1 signatures |
 
@@ -104,8 +104,10 @@ flowchart LR
 when a batch closes. They do not decide VM validity or create finality. On
 restart, Myelin audits the finalised block-and-proof chain, restores the latest
 checkpoint, checks its root against the durable head, and opens the writer only
-after those checks pass. Ordinary recovery does not re-execute every historical
-transaction.
+after those checks pass. A bounded range replay starts from the newest retained
+checkpoint before the requested range, reexecutes every intervening frame, and
+emits a receipt binding the profile, inputs, roots, transaction bytes, and
+resource totals.
 
 ## Quick start
 

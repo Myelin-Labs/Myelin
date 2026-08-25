@@ -4,8 +4,8 @@
 //! Transactional RocksDB implementation of the Myelin session store.
 
 use myelin_session::{
-    ConsensusWal, FinalisedBlockRecord, Hash32, OutboxMessage, PendingDelivery, SessionGenesis, SessionHead, SessionStore,
-    StateCheckpoint, StoreError,
+    ConsensusWal, EvidenceRecord, FinalisedBlockRecord, Hash32, OutboxMessage, PendingDelivery, SessionGenesis, SessionHead,
+    SessionStore, StateCheckpoint, StoreError, StoredHandoff,
 };
 use myelin_session_network::{DurableEnvelope, EnqueueStatus, NetworkStore, NetworkStoreError};
 use rocksdb::{
@@ -15,8 +15,7 @@ use rocksdb::{
 use std::{collections::HashSet, path::Path};
 
 const SCHEMA_KEY: &[u8] = b"\0myelin-session-store-schema";
-const SCHEMA_VERSION: &[u8] = b"5";
-const LEGACY_SCHEMA_VERSION: &[u8] = b"4";
+const SCHEMA_VERSION: &[u8] = b"6";
 const KEY_GENESIS: u8 = b'g';
 const KEY_HEAD: u8 = b'h';
 const KEY_BLOCK: u8 = b'b';
@@ -29,9 +28,10 @@ const KEY_OUTBOUND_INDEX: u8 = b'y';
 const KEY_INBOUND_SEQUENCE: u8 = b'r';
 const KEY_INBOUND: u8 = b'n';
 const KEY_INBOUND_INDEX: u8 = b'm';
-const KEY_INBOUND_RECEIPT: u8 = b'R';
 const KEY_CHECKPOINT: u8 = b'c';
 const KEY_NETWORK_USAGE: u8 = b'u';
+const KEY_EVIDENCE: u8 = b'e';
+const KEY_HANDOFF: u8 = b'j';
 
 /// Local storage policy. It does not alter session consensus or bounded
 /// execution semantics.
@@ -85,14 +85,6 @@ impl RocksSessionStore {
         let db = OptimisticTransactionDB::open(&options, path).map_err(backend)?;
         match db.get(SCHEMA_KEY).map_err(backend)? {
             Some(version) if version == SCHEMA_VERSION => {}
-            Some(version) if version == LEGACY_SCHEMA_VERSION => {
-                // Record v5 can read the existing JSON-v4 records lazily. Bump
-                // the store marker before any v5 record is written so an old
-                // binary fails closed instead of opening a mixed-codec store.
-                let mut writes = WriteOptions::default();
-                writes.set_sync(true);
-                db.put_opt(SCHEMA_KEY, SCHEMA_VERSION, &writes).map_err(backend)?;
-            }
             Some(version) => {
                 return Err(StoreError::Corrupt(format!(
                     "unsupported RocksDB session-store schema {:?}",
@@ -130,6 +122,11 @@ impl RocksSessionStore {
 
 impl SessionStore for RocksSessionStore {
     fn create_session(&self, genesis: &SessionGenesis, head: &SessionHead) -> Result<(), StoreError> {
+        if genesis.config.predecessor.is_some() {
+            return Err(StoreError::Conflict(
+                "a successor genesis can only be created in its predecessor block transaction".to_owned(),
+            ));
+        }
         validate_genesis(genesis, head)?;
         let genesis_key = session_key(KEY_GENESIS, genesis.config.session_id);
         let head_key = session_key(KEY_HEAD, genesis.config.session_id);
@@ -197,6 +194,7 @@ impl SessionStore for RocksSessionStore {
                 return Err(StoreError::Corrupt(format!("block key/record height mismatch at {height}")));
             }
             if record.block.consensus_kind != genesis.config.consensus_kind
+                || record.block.application_profile_commitment != genesis.config.application_profile.commitment()
                 || record.consensus_module_commitment != genesis.config.consensus_module_commitment
             {
                 return Err(StoreError::Corrupt(format!("block consensus module mismatch at height {height}")));
@@ -235,6 +233,7 @@ impl SessionStore for RocksSessionStore {
             let record = FinalisedBlockRecord::decode(&value).map_err(corrupt)?;
             if record.block.number != height
                 || record.block.consensus_kind != genesis.config.consensus_kind
+                || record.block.application_profile_commitment != genesis.config.application_profile.commitment()
                 || record.consensus_module_commitment != genesis.config.consensus_module_commitment
             {
                 return Err(StoreError::Corrupt(format!("block key/module mismatch at height {height}")));
@@ -244,41 +243,32 @@ impl SessionStore for RocksSessionStore {
         Ok(records)
     }
 
+    fn load_block(&self, session_id: Hash32, height: u64) -> Result<FinalisedBlockRecord, StoreError> {
+        let genesis = self.load_genesis(session_id)?;
+        let bytes = self
+            .db
+            .get(block_key(session_id, height))
+            .map_err(backend)?
+            .ok_or_else(|| StoreError::NotFound(format!("session block {height}")))?;
+        let record = FinalisedBlockRecord::decode(&bytes).map_err(corrupt)?;
+        if record.block.number != height
+            || record.block.consensus_kind != genesis.config.consensus_kind
+            || record.block.application_profile_commitment != genesis.config.application_profile.commitment()
+            || record.consensus_module_commitment != genesis.config.consensus_module_commitment
+        {
+            return Err(StoreError::Corrupt(format!("block key/module/profile mismatch at height {height}")));
+        }
+        Ok(record)
+    }
+
     fn load_checkpoint(&self, session_id: Hash32) -> Result<StateCheckpoint, StoreError> {
         let head = self.load_head(session_id)?;
-        let checkpoint = match self.db.get(session_key(KEY_CHECKPOINT, session_id)).map_err(backend)? {
-            Some(bytes) => StateCheckpoint::decode(&bytes).map_err(corrupt)?,
-            None => match head.finalised_height {
-                Some(height) => {
-                    let bytes = self
-                        .db
-                        .get(block_key(session_id, height))
-                        .map_err(backend)?
-                        .ok_or_else(|| StoreError::NotFound("head block".to_owned()))?;
-                    let record = FinalisedBlockRecord::decode(&bytes).map_err(corrupt)?;
-                    if record.state_snapshot.is_empty() {
-                        return Err(StoreError::Corrupt(
-                            "latest checkpoint key is missing and head block has no legacy snapshot".to_owned(),
-                        ));
-                    }
-                    StateCheckpoint {
-                        session_id,
-                        finalised_height: Some(height),
-                        state_root: record.block.state_root_after,
-                        state_snapshot: record.state_snapshot,
-                    }
-                }
-                None => {
-                    let genesis = self.load_genesis(session_id)?;
-                    StateCheckpoint {
-                        session_id,
-                        finalised_height: None,
-                        state_root: genesis.config.initial_state_root,
-                        state_snapshot: genesis.state_snapshot,
-                    }
-                }
-            },
-        };
+        let bytes = self
+            .db
+            .get(session_key(KEY_CHECKPOINT, session_id))
+            .map_err(backend)?
+            .ok_or_else(|| StoreError::NotFound("latest session checkpoint".to_owned()))?;
+        let checkpoint = StateCheckpoint::decode(&bytes).map_err(corrupt)?;
         if checkpoint.session_id != session_id
             || checkpoint.finalised_height != head.finalised_height
             || checkpoint.state_root != head.state_root
@@ -287,6 +277,38 @@ impl SessionStore for RocksSessionStore {
             return Err(StoreError::Corrupt("checkpoint key does not match session head".to_owned()));
         }
         Ok(checkpoint)
+    }
+
+    fn load_checkpoint_before(&self, session_id: Hash32, height: u64) -> Result<StateCheckpoint, StoreError> {
+        let genesis = self.load_genesis(session_id)?;
+        if height != 0 {
+            let prefix = session_key(KEY_BLOCK, session_id);
+            let start = block_key(session_id, height - 1);
+            for item in self.db.iterator(IteratorMode::From(&start, Direction::Reverse)) {
+                let (key, value) = item.map_err(backend)?;
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                if key.len() != prefix.len() + 8 {
+                    return Err(StoreError::Corrupt("malformed block key while locating checkpoint".to_owned()));
+                }
+                let record = FinalisedBlockRecord::decode(&value).map_err(corrupt)?;
+                if !record.state_snapshot.is_empty() {
+                    return Ok(StateCheckpoint {
+                        session_id,
+                        finalised_height: Some(record.block.number),
+                        state_root: record.block.state_root_after,
+                        state_snapshot: record.state_snapshot,
+                    });
+                }
+            }
+        }
+        Ok(StateCheckpoint {
+            session_id,
+            finalised_height: None,
+            state_root: genesis.config.initial_state_root,
+            state_snapshot: genesis.state_snapshot,
+        })
     }
 
     fn commit_block(
@@ -311,14 +333,16 @@ impl SessionStore for RocksSessionStore {
         .encode()
         .map_err(corrupt)?;
         let mut stored_record = record.clone();
-        if record.block.number % self.archival_checkpoint_interval != 0 {
+        if !record.block.number.is_multiple_of(self.archival_checkpoint_interval) {
             stored_record.state_snapshot.clear();
         }
         let record_bytes = stored_record.encode().map_err(corrupt)?;
 
         let transaction = self.sync_transaction();
         let genesis = load_genesis_transaction(&transaction, session_id)?;
+        record.frame.validate(&genesis.config.application_profile, &record.frame_input).map_err(corrupt)?;
         if genesis.config.consensus_kind != record.block.consensus_kind
+            || genesis.config.application_profile.commitment() != record.block.application_profile_commitment
             || genesis.config.consensus_module_commitment != record.consensus_module_commitment
         {
             return Err(StoreError::Corrupt("block record consensus module does not match session genesis".to_owned()));
@@ -332,6 +356,94 @@ impl SessionStore for RocksSessionStore {
         }
         if transaction.get_for_update(&block_key, true).map_err(backend)?.is_some() {
             return Err(StoreError::Conflict(format!("height {} already exists", record.block.number)));
+        }
+
+        if let Some(successor) = &record.successor {
+            successor.validate().map_err(corrupt)?;
+            if successor.source_application_profile_commitment != genesis.config.application_profile.commitment()
+                || successor.target_config.application_profile.state_codec_hash != genesis.config.application_profile.state_codec_hash
+            {
+                return Err(StoreError::Corrupt(
+                    "successor application profile or state codec does not match its predecessor".to_owned(),
+                ));
+            }
+            let target_id = successor.target_config.session_id;
+            let target_genesis_key = session_key(KEY_GENESIS, target_id);
+            let target_head_key = session_key(KEY_HEAD, target_id);
+            let target_checkpoint_key = session_key(KEY_CHECKPOINT, target_id);
+            if transaction.get_for_update(&target_genesis_key, true).map_err(backend)?.is_some()
+                || transaction.get_for_update(&target_head_key, true).map_err(backend)?.is_some()
+                || transaction.get_for_update(&target_checkpoint_key, true).map_err(backend)?.is_some()
+            {
+                return Err(StoreError::Conflict("successor session id already exists".to_owned()));
+            }
+            let target_genesis =
+                SessionGenesis { config: successor.target_config.clone(), state_snapshot: record.state_snapshot.clone() };
+            let target_head = SessionHead {
+                session_id: target_id,
+                finalised_height: None,
+                block_hash: [0; 32],
+                state_root: successor.target_config.initial_state_root,
+                timestamp_ms: successor.target_config.initial_timestamp_ms,
+                input_position: successor.target_config.initial_input_position,
+                logical_time: successor.target_config.initial_logical_time,
+                sealed_by_successor: None,
+            };
+            validate_genesis(&target_genesis, &target_head)?;
+            let target_checkpoint = StateCheckpoint {
+                session_id: target_id,
+                finalised_height: None,
+                state_root: successor.target_config.initial_state_root,
+                state_snapshot: record.state_snapshot.clone(),
+            };
+            transaction.put(&target_genesis_key, target_genesis.encode().map_err(corrupt)?).map_err(backend)?;
+            transaction.put(&target_head_key, target_head.encode().map_err(corrupt)?).map_err(backend)?;
+            transaction.put(&target_checkpoint_key, target_checkpoint.encode().map_err(corrupt)?).map_err(backend)?;
+        }
+
+        for handoff in &record.issued_handoffs {
+            let key = handoff_key(handoff.id());
+            if transaction.get_for_update(&key, true).map_err(backend)?.is_some() {
+                return Err(StoreError::Conflict("handoff id already exists".to_owned()));
+            }
+            let stored = StoredHandoff {
+                handoff: handoff.clone(),
+                consumed_by_session: None,
+                consumed_at_height: None,
+                consumed_by_block_hash: None,
+            };
+            transaction.put(&key, stored.encode().map_err(corrupt)?).map_err(backend)?;
+        }
+
+        for handoff_id in &record.consumed_handoff_ids {
+            let key = handoff_key(*handoff_id);
+            let bytes = transaction
+                .get_for_update(&key, true)
+                .map_err(backend)?
+                .ok_or_else(|| StoreError::NotFound("consumed handoff".to_owned()))?;
+            let mut stored = StoredHandoff::decode(&bytes).map_err(corrupt)?;
+            if stored.handoff.id() != *handoff_id || stored.is_consumed() {
+                return Err(StoreError::Conflict("handoff identity mismatch or already consumed".to_owned()));
+            }
+            if !stored.handoff.accepts_target(&genesis.config) || record.block.timestamp_ms > stored.handoff.expires_at_ms {
+                return Err(StoreError::Conflict("handoff target policy mismatch or handoff expired".to_owned()));
+            }
+            if let Some(requirement) = &stored.handoff.evidence_requirement {
+                let evidence_bytes = transaction
+                    .get_for_update(evidence_key(stored.handoff.source_session_id, requirement.message_id), false)
+                    .map_err(backend)?
+                    .ok_or_else(|| StoreError::Conflict("required handoff evidence is absent".to_owned()))?;
+                let evidence = EvidenceRecord::decode(&evidence_bytes).map_err(corrupt)?;
+                if evidence.descriptor.commitment() != requirement.pipeline_commitment
+                    || evidence.receipts.len() <= requirement.minimum_stage_index as usize
+                {
+                    return Err(StoreError::Conflict("required handoff evidence stage has not been reached".to_owned()));
+                }
+            }
+            stored.consumed_by_session = Some(session_id);
+            stored.consumed_at_height = Some(record.block.number);
+            stored.consumed_by_block_hash = Some(record.block.hash());
+            transaction.put(&key, stored.encode().map_err(corrupt)?).map_err(backend)?;
         }
 
         transaction.put(&block_key, record_bytes).map_err(backend)?;
@@ -464,6 +576,70 @@ impl SessionStore for RocksSessionStore {
         transaction.delete(&index_key).map_err(backend)?;
         transaction.commit().map_err(commit_error)
     }
+
+    fn load_evidence(&self, session_id: Hash32, message_id: Hash32) -> Result<Option<EvidenceRecord>, StoreError> {
+        self.db
+            .get(evidence_key(session_id, message_id))
+            .map_err(backend)?
+            .map(|bytes| {
+                let record = EvidenceRecord::decode(&bytes).map_err(corrupt)?;
+                if record.session_id != session_id || record.message_id != message_id {
+                    return Err(StoreError::Corrupt("evidence key/record identity mismatch".to_owned()));
+                }
+                Ok(record)
+            })
+            .transpose()
+    }
+
+    fn compare_and_set_evidence(&self, expected_revision: Option<u64>, record: &EvidenceRecord) -> Result<(), StoreError> {
+        let evidence_key = evidence_key(record.session_id, record.message_id);
+        let index_key = outbox_index_key(record.session_id, record.message_id);
+        let transaction = self.sync_transaction();
+        let message_key = transaction
+            .get_for_update(&index_key, false)
+            .map_err(backend)?
+            .ok_or_else(|| StoreError::NotFound("outbox message for evidence".to_owned()))?;
+        if !message_key.starts_with(&session_key(KEY_OUTBOX, record.session_id)) {
+            return Err(StoreError::Corrupt("outbox index points outside its session".to_owned()));
+        }
+        let message_bytes = transaction
+            .get_for_update(&message_key, false)
+            .map_err(backend)?
+            .ok_or_else(|| StoreError::NotFound("outbox message for evidence".to_owned()))?;
+        let message = OutboxMessage::decode(&message_bytes).map_err(corrupt)?;
+        record.validate_for(record.session_id, &message, &record.descriptor).map_err(corrupt)?;
+
+        let current = transaction.get_for_update(&evidence_key, true).map_err(backend)?;
+        let current_revision =
+            current.as_deref().map(EvidenceRecord::decode).transpose().map_err(corrupt)?.map(|value| value.revision);
+        if current_revision != expected_revision {
+            return Err(StoreError::Conflict("evidence revision changed".to_owned()));
+        }
+        let required_revision = expected_revision
+            .map_or(Some(0), |revision| revision.checked_add(1))
+            .ok_or_else(|| StoreError::Conflict("evidence revision overflow".to_owned()))?;
+        if record.revision != required_revision {
+            return Err(StoreError::Conflict(format!("next evidence revision must be {required_revision}")));
+        }
+        transaction.put(&evidence_key, record.encode().map_err(corrupt)?).map_err(backend)?;
+        transaction.commit().map_err(commit_error)
+    }
+
+    fn load_handoff(&self, handoff_id: Hash32) -> Result<Option<StoredHandoff>, StoreError> {
+        self.db
+            .get(handoff_key(handoff_id))
+            .map_err(backend)?
+            .map(|bytes| {
+                let stored = StoredHandoff::decode(&bytes).map_err(corrupt)?;
+                if stored.handoff.id() != handoff_id {
+                    return Err(StoreError::Corrupt("handoff key/record identity mismatch".to_owned()));
+                }
+                let source = self.load_block(stored.handoff.source_session_id, stored.handoff.source_height)?;
+                stored.handoff.validate(source.block.timestamp_ms).map_err(corrupt)?;
+                Ok(stored)
+            })
+            .transpose()
+    }
 }
 
 impl NetworkStore for RocksSessionStore {
@@ -506,7 +682,6 @@ impl NetworkStore for RocksSessionStore {
         }
         let message_bytes = message.encode();
         let usage = grow_network_queue(
-            &self.db,
             &transaction,
             session_id,
             KEY_OUTBOUND,
@@ -538,15 +713,7 @@ impl NetworkStore for RocksSessionStore {
         if message_ids.is_empty() {
             return Ok(());
         }
-        acknowledge_network_messages(
-            &self.db,
-            self.sync_transaction(),
-            KEY_OUTBOUND,
-            KEY_OUTBOUND_INDEX,
-            session_id,
-            message_ids,
-            false,
-        )
+        acknowledge_network_messages(self.sync_transaction(), KEY_OUTBOUND, KEY_OUTBOUND_INDEX, session_id, message_ids)
     }
 
     fn enqueue_inbound(&self, message: &DurableEnvelope) -> Result<EnqueueStatus, NetworkStoreError> {
@@ -580,12 +747,6 @@ impl NetworkStore for RocksSessionStore {
                     message.envelope.sequence
                 )));
             }
-            // Schema-v4 stores may have a receipt for the immediately prior
-            // cursor. The cursor itself is sufficient for duplicate rejection,
-            // so remove that legacy row as progress advances.
-            transaction
-                .delete(inbound_receipt_key(session_id, &message.envelope.sender_id, &message.envelope.recipient_id, current))
-                .map_err(network_backend)?;
         } else if message.envelope.sequence != 0 {
             return Err(NetworkStoreError::Conflict(format!("first inbound sequence must be 0, got {}", message.envelope.sequence)));
         }
@@ -594,7 +755,6 @@ impl NetworkStore for RocksSessionStore {
         }
         let message_bytes = message.encode();
         let usage = grow_network_queue(
-            &self.db,
             &transaction,
             session_id,
             KEY_INBOUND,
@@ -624,7 +784,7 @@ impl NetworkStore for RocksSessionStore {
         if message_ids.is_empty() {
             return Ok(());
         }
-        acknowledge_network_messages(&self.db, self.sync_transaction(), KEY_INBOUND, KEY_INBOUND_INDEX, session_id, message_ids, true)
+        acknowledge_network_messages(self.sync_transaction(), KEY_INBOUND, KEY_INBOUND_INDEX, session_id, message_ids)
     }
 }
 
@@ -634,7 +794,10 @@ fn validate_genesis(genesis: &SessionGenesis, head: &SessionHead) -> Result<(), 
         || head.finalised_height.is_some()
         || head.block_hash != [0; 32]
         || head.state_root != genesis.config.initial_state_root
-        || head.timestamp_ms != 0
+        || head.timestamp_ms != genesis.config.initial_timestamp_ms
+        || head.input_position != genesis.config.initial_input_position
+        || head.logical_time != genesis.config.initial_logical_time
+        || head.sealed_by_successor.is_some()
     {
         return Err(StoreError::Corrupt("invalid genesis head".to_owned()));
     }
@@ -647,6 +810,8 @@ fn validate_genesis(genesis: &SessionGenesis, head: &SessionHead) -> Result<(), 
 fn validate_commit(expected: &SessionHead, new: &SessionHead, record: &FinalisedBlockRecord) -> Result<(), StoreError> {
     if expected.session_id != new.session_id
         || record.block.parent_hash != expected.block_hash
+        || expected.sealed_by_successor.is_some()
+        || record.block.session_id != expected.session_id
         || record.block.state_root_before != expected.state_root
         || record.block.number != expected.next_height().map_err(corrupt)?
         || new.finalised_height != Some(record.block.number)
@@ -655,11 +820,25 @@ fn validate_commit(expected: &SessionHead, new: &SessionHead, record: &Finalised
         || new.timestamp_ms != record.block.timestamp_ms
         || record.proof.kind() != record.block.consensus_kind
         || record.consensus_module_commitment == [0; 32]
+        || record.block.execution_frame_commitment != record.frame.commitment()
+        || record.frame.session_id != expected.session_id
+        || record.frame.height != record.block.number
+        || record.frame.state_root_before != record.block.state_root_before
+        || record.frame.state_root_after != record.block.state_root_after
+        || record.frame.ordered_cell_tx_commitments != record.block.ordered_cell_tx_commitments
+        || record.frame.input_start != expected.input_position
+        || record.frame.logical_time_start != expected.logical_time
+        || new.input_position != record.frame.input_end
+        || new.logical_time != record.frame.logical_time_end
+        || new.sealed_by_successor != record.successor.as_ref().map(|value| value.target_config.session_id)
     {
         return Err(StoreError::Corrupt("block/head linkage is inconsistent".to_owned()));
     }
     if record.transactions.len() != record.block.ordered_cell_tx_commitments.len() {
         return Err(StoreError::Corrupt("transaction payload/commitment count mismatch".to_owned()));
+    }
+    if !record.block.data_commitments.starts_with(&record.request_data_commitments) {
+        return Err(StoreError::Corrupt("request data commitments are not the canonical block prefix".to_owned()));
     }
     if record.state_snapshot.is_empty() {
         return Err(StoreError::Corrupt("post-state snapshot must not be empty".to_owned()));
@@ -669,6 +848,41 @@ fn validate_commit(expected: &SessionHead, new: &SessionHead, record: &Finalised
         message.consensus_module_commitment != record.consensus_module_commitment || !commitments.contains(&message.commitment())
     }) {
         return Err(StoreError::Corrupt("outbox message is not committed by the block".to_owned()));
+    }
+    if let Some(successor) = &record.successor {
+        successor.validate().map_err(corrupt)?;
+        if successor.source_session_id != expected.session_id
+            || successor.source_height != record.block.number
+            || successor.source_state_root != record.block.state_root_after
+            || successor.target_config.initial_input_position != record.frame.input_end
+            || successor.target_config.initial_logical_time != record.frame.logical_time_end
+            || successor.target_config.initial_timestamp_ms != record.block.timestamp_ms
+            || !commitments.contains(&successor.commitment())
+        {
+            return Err(StoreError::Corrupt("successor declaration is not committed by its source block".to_owned()));
+        }
+    }
+    let mut issued = HashSet::with_capacity(record.issued_handoffs.len());
+    if record.issued_handoffs.iter().any(|handoff| {
+        handoff.validate(record.block.timestamp_ms).is_err()
+            || handoff.source_session_id != expected.session_id
+            || handoff.source_height != record.block.number
+            || handoff.source_state_root != record.block.state_root_after
+            || !issued.insert(handoff.id())
+            || !commitments.contains(&handoff.id())
+    }) {
+        return Err(StoreError::Corrupt("issued handoff is not committed by its source block".to_owned()));
+    }
+    let mut consumed = HashSet::with_capacity(record.consumed_handoff_ids.len());
+    if record.consumed_handoff_ids.iter().any(|handoff_id| {
+        !consumed.insert(*handoff_id)
+            || !commitments.contains(&myelin_session::SessionHandoff::consumption_commitment(
+                expected.session_id,
+                record.block.number,
+                *handoff_id,
+            ))
+    }) {
+        return Err(StoreError::Corrupt("handoff consumption is not committed by its target block".to_owned()));
     }
     Ok(())
 }
@@ -699,6 +913,19 @@ fn outbox_index_key(session_id: Hash32, message_id: Hash32) -> Vec<u8> {
     key
 }
 
+fn evidence_key(session_id: Hash32, message_id: Hash32) -> Vec<u8> {
+    let mut key = session_key(KEY_EVIDENCE, session_id);
+    key.extend_from_slice(&message_id);
+    key
+}
+
+fn handoff_key(handoff_id: Hash32) -> Vec<u8> {
+    let mut key = Vec::with_capacity(33);
+    key.push(KEY_HANDOFF);
+    key.extend_from_slice(&handoff_id);
+    key
+}
+
 fn peer_pair_key(prefix: u8, session_id: Hash32, sender_id: &str, recipient_id: &str) -> Vec<u8> {
     let mut key = session_key(prefix, session_id);
     let mut hasher = blake3::Hasher::new();
@@ -714,12 +941,6 @@ fn peer_pair_key(prefix: u8, session_id: Hash32, sender_id: &str, recipient_id: 
 fn outbound_route_key(session_id: Hash32, recipient_id: &str) -> Vec<u8> {
     let mut key = session_key(KEY_OUTBOUND, session_id);
     key.extend_from_slice(blake3::hash(recipient_id.as_bytes()).as_bytes());
-    key
-}
-
-fn inbound_receipt_key(session_id: Hash32, sender_id: &str, recipient_id: &str, sequence: u64) -> Vec<u8> {
-    let mut key = peer_pair_key(KEY_INBOUND_RECEIPT, session_id, sender_id, recipient_id);
-    key.extend_from_slice(&sequence.to_be_bytes());
     key
 }
 
@@ -767,7 +988,6 @@ fn decode_network_usage(bytes: &[u8]) -> Result<(u64, u64), NetworkStoreError> {
 }
 
 fn load_network_usage(
-    db: &OptimisticTransactionDB,
     transaction: &rocksdb::Transaction<'_, OptimisticTransactionDB>,
     session_id: Hash32,
     queue_prefix: u8,
@@ -776,26 +996,10 @@ fn load_network_usage(
     if let Some(bytes) = transaction.get_for_update(&usage_key, true).map_err(network_backend)? {
         return decode_network_usage(&bytes);
     }
-    // One-time schema-v4 compatibility path. The newly locked usage key makes
-    // concurrent lazy initialization conflict safely.
-    let prefix = session_key(queue_prefix, session_id);
-    let mut messages = 0u64;
-    let mut bytes = 0u64;
-    for item in db.iterator(IteratorMode::From(&prefix, Direction::Forward)) {
-        let (key, value) = item.map_err(network_backend)?;
-        if !key.starts_with(&prefix) {
-            break;
-        }
-        messages = messages.checked_add(1).ok_or_else(|| NetworkStoreError::Corrupt("network queue count overflow".to_owned()))?;
-        bytes = bytes
-            .checked_add(value.len() as u64)
-            .ok_or_else(|| NetworkStoreError::Corrupt("network queue byte count overflow".to_owned()))?;
-    }
-    Ok((messages, bytes))
+    Ok((0, 0))
 }
 
 fn grow_network_queue(
-    db: &OptimisticTransactionDB,
     transaction: &rocksdb::Transaction<'_, OptimisticTransactionDB>,
     session_id: Hash32,
     queue_prefix: u8,
@@ -803,7 +1007,7 @@ fn grow_network_queue(
     max_messages: u64,
     max_bytes: u64,
 ) -> Result<(u64, u64), NetworkStoreError> {
-    let (messages, bytes) = load_network_usage(db, transaction, session_id, queue_prefix)?;
+    let (messages, bytes) = load_network_usage(transaction, session_id, queue_prefix)?;
     let messages =
         messages.checked_add(1).ok_or_else(|| NetworkStoreError::ResourceLimit("network queue count overflow".to_owned()))?;
     let bytes = bytes
@@ -921,13 +1125,11 @@ fn load_network_queue(
 }
 
 fn acknowledge_network_messages(
-    db: &OptimisticTransactionDB,
     transaction: rocksdb::Transaction<'_, OptimisticTransactionDB>,
     queue_prefix: u8,
     index_prefix: u8,
     session_id: Hash32,
     message_ids: &[Hash32],
-    delete_legacy_inbound_receipt: bool,
 ) -> Result<(), NetworkStoreError> {
     let mut removed_messages = 0u64;
     let mut removed_bytes = 0u64;
@@ -949,21 +1151,10 @@ fn acknowledge_network_messages(
         removed_bytes = removed_bytes
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| NetworkStoreError::Corrupt("network queue bytes overflow".to_owned()))?;
-        if delete_legacy_inbound_receipt {
-            let message = DurableEnvelope::decode(&bytes).map_err(|error| NetworkStoreError::Corrupt(error.to_string()))?;
-            transaction
-                .delete(inbound_receipt_key(
-                    session_id,
-                    &message.envelope.sender_id,
-                    &message.envelope.recipient_id,
-                    message.envelope.sequence,
-                ))
-                .map_err(network_backend)?;
-        }
         transaction.delete(&queue_key).map_err(network_backend)?;
         transaction.delete(&index_key).map_err(network_backend)?;
     }
-    let (messages, bytes) = load_network_usage(db, &transaction, session_id, queue_prefix)?;
+    let (messages, bytes) = load_network_usage(&transaction, session_id, queue_prefix)?;
     let usage = (
         messages
             .checked_sub(removed_messages)

@@ -1,7 +1,8 @@
 use myelin_consensus::{Authority, CommitteeSigner, ConsensusConfig, ConsensusKind, FinalityProof, ProofOfAuthorityConfig};
 use myelin_session::{
-    BlockRequest, ConsensusWal, ExecutionOutcome, PendingOutboxMessage, SessionChain, SessionConfig, SessionStore, StoreError,
-    TransitionExecutor,
+    ApplicationProfile, ApplicationResourceEnvelope, ApplicationVmProfile, BlockRequest, ConsensusWal, EvidenceRequirement,
+    ExecutionOutcome, FrameInput, HandoffIntent, HandoffTarget, PendingOutboxMessage, SessionChain, SessionConfig, SessionStore,
+    StoreError, TransitionExecutor,
 };
 use myelin_session_network::{
     queue_outbound, Clock, EnqueueStatus, MessageClass, MessageType, NetworkBinding, NetworkSigner, NetworkStore,
@@ -36,14 +37,24 @@ impl TransitionExecutor for TestExecutor {
         self.root
     }
 
-    fn execute_block(&mut self, height: u64, transactions: &[Vec<u8>]) -> Result<ExecutionOutcome, String> {
+    fn execute_block(
+        &mut self,
+        height: u64,
+        frame_input: &FrameInput,
+        consumed_handoffs: &[myelin_session::SessionHandoff],
+        transactions: &[Vec<u8>],
+    ) -> Result<ExecutionOutcome, String> {
         let mut txids = Vec::new();
         for transaction in transactions {
-            txids.push(*blake3::hash(transaction).as_bytes());
+            txids.push(myelin_exec::deserialize_transaction_molecule(transaction).map_err(|error| error.to_string())?.id());
         }
         let mut hasher = blake3::Hasher::new();
         hasher.update(&self.root);
         hasher.update(&height.to_le_bytes());
+        hasher.update(&frame_input.root());
+        for handoff in consumed_handoffs {
+            hasher.update(&handoff.id());
+        }
         for txid in &txids {
             hasher.update(txid);
         }
@@ -52,6 +63,7 @@ impl TransitionExecutor for TestExecutor {
             ordered_cell_tx_commitments: txids,
             data_commitments: vec![],
             outbox: vec![PendingOutboxMessage { topic: "asset-exit/test-v1".to_owned(), payload: vec![9, height as u8] }],
+            cycles: transactions.len() as u64 * 10,
         })
     }
 
@@ -77,11 +89,68 @@ fn config(consensus: &RegisteredFinalityVerifier) -> SessionConfig {
         consensus_config_commitment: descriptor.config_commitment,
         consensus_module_commitment: descriptor.commitment(),
         consensus_wal_schema_hash: descriptor.wal_schema_hash,
+        application_profile: application_profile(),
         initial_state_root: [1; 32],
+        initial_input_position: 0,
+        initial_logical_time: 0,
+        initial_timestamp_ms: 0,
+        predecessor: None,
         max_block_transactions: 100,
         max_block_bytes: 1_000_000,
         max_future_drift_ms: 1_000,
     }
+}
+
+fn application_profile() -> ApplicationProfile {
+    ApplicationProfile {
+        application_id: "rocks-store-test".to_owned(),
+        program_digest: [11; 32],
+        input_schema_hash: [12; 32],
+        state_codec_hash: [13; 32],
+        logical_time_policy_hash: [14; 32],
+        entropy_policy_hash: [15; 32],
+        vm: ApplicationVmProfile { spawn_ipc_required: false },
+        resources: ApplicationResourceEnvelope {
+            max_frame_inputs: 10_000,
+            max_frame_input_bytes: 1_000_000,
+            max_frame_cycles: 10_000_000,
+            max_logical_time_span: 10_000,
+            max_inspect_query_bytes: 1_024,
+            max_inspect_result_bytes: 4_096,
+        },
+        court_profile_hash: [16; 32],
+        handoff_policy_hash: [17; 32],
+    }
+}
+
+fn frame_input(position: u64) -> FrameInput {
+    FrameInput {
+        start_position: position,
+        end_position: position + 1,
+        logical_time_start: position,
+        logical_time_end: position + 1,
+        payload: vec![position as u8],
+    }
+}
+
+fn transaction(seed: u8) -> Vec<u8> {
+    let tx = myelin_exec::CellTx::new(vec![], vec![], vec![], vec![], vec![vec![seed]]).unwrap();
+    myelin_exec::serialize_transaction_molecule(&tx).unwrap()
+}
+
+fn expected_root(root: [u8; 32], height: u64, frame_input: &FrameInput, transactions: &[Vec<u8>], handoffs: &[[u8; 32]]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&root);
+    hasher.update(&height.to_le_bytes());
+    hasher.update(&frame_input.root());
+    for handoff in handoffs {
+        hasher.update(handoff);
+    }
+    for transaction in transactions {
+        let tx = myelin_exec::deserialize_transaction_molecule(transaction).unwrap();
+        hasher.update(&tx.id());
+    }
+    *hasher.finalize().as_bytes()
 }
 
 #[test]
@@ -103,7 +172,7 @@ fn store_rejects_unversioned_data_and_unknown_schema() {
 }
 
 #[test]
-fn store_migrates_schema_four_marker_before_writing_binary_records() {
+fn store_rejects_superseded_internal_schema() {
     let directory = tempfile::tempdir().unwrap();
     let mut options = Options::default();
     options.create_if_missing(true);
@@ -111,10 +180,7 @@ fn store_migrates_schema_four_marker_before_writing_binary_records() {
     db.put(b"\0myelin-session-store-schema", b"4").unwrap();
     drop(db);
 
-    drop(RocksSessionStore::open(directory.path()).unwrap());
-
-    let db: OptimisticTransactionDB = OptimisticTransactionDB::open(&options, directory.path()).unwrap();
-    assert_eq!(db.get(b"\0myelin-session-store-schema").unwrap().as_deref(), Some(b"5".as_slice()));
+    assert!(matches!(RocksSessionStore::open(directory.path()), Err(StoreError::Corrupt(_))));
 }
 
 #[test]
@@ -152,11 +218,15 @@ fn atomic_commit_recovery_wal_and_outbox_lifecycle() {
 
     let prepared = chain
         .prepare_block(BlockRequest {
-            transactions: vec![b"transaction-0".to_vec()],
+            transactions: vec![transaction(0)],
+            frame_input: frame_input(0),
             scheduler_commitment: [5; 32],
             data_commitments: vec![],
             timestamp_ms: 10,
             local_now_ms: 10,
+            successor: None,
+            handoffs: vec![],
+            consume_handoffs: vec![],
         })
         .unwrap();
     let engine = match consensus.selected_consensus() {
@@ -178,7 +248,8 @@ fn atomic_commit_recovery_wal_and_outbox_lifecycle() {
     drop(store);
     let reopened = Arc::new(RocksSessionStore::open(directory.path()).unwrap());
     let (_, snapshot) = SessionChain::<TestExecutor, RocksSessionStore>::recovery_snapshot(&reopened, [3; 32]).unwrap();
-    let recovered = SessionChain::recover([3; 32], consensus, TestExecutor::from_snapshot(&snapshot), reopened).unwrap();
+    let recovered =
+        SessionChain::recover([3; 32], &application_profile(), consensus, TestExecutor::from_snapshot(&snapshot), reopened).unwrap();
     assert_eq!(recovered.head(), &head);
 }
 
@@ -190,13 +261,19 @@ fn durable_head_cas_rejects_two_writers_at_one_height() {
     let chain_a =
         SessionChain::create(config(&consensus), consensus.clone(), TestExecutor { root: [1; 32] }, Arc::clone(&store)).unwrap();
     let mut chain_a = chain_a;
-    let mut chain_b = SessionChain::recover([3; 32], consensus.clone(), TestExecutor { root: [1; 32] }, Arc::clone(&store)).unwrap();
+    let mut chain_b =
+        SessionChain::recover([3; 32], &application_profile(), consensus.clone(), TestExecutor { root: [1; 32] }, Arc::clone(&store))
+            .unwrap();
     let request = || BlockRequest {
-        transactions: vec![b"same-height".to_vec()],
+        transactions: vec![transaction(0)],
+        frame_input: frame_input(0),
         scheduler_commitment: [5; 32],
         data_commitments: vec![],
         timestamp_ms: 10,
         local_now_ms: 10,
+        successor: None,
+        handoffs: vec![],
+        consume_handoffs: vec![],
     };
     let prepared_a = chain_a.prepare_block(request()).unwrap();
     let prepared_b = chain_b.prepare_block(request()).unwrap();
@@ -282,11 +359,15 @@ fn rolling_checkpoint_avoids_full_snapshot_in_every_historical_block() {
     for height in 0..3 {
         let prepared = chain
             .prepare_block(BlockRequest {
-                transactions: vec![vec![height as u8]],
+                transactions: vec![transaction(height as u8)],
+                frame_input: frame_input(height),
                 scheduler_commitment: [5; 32],
                 data_commitments: vec![],
                 timestamp_ms: height + 1,
                 local_now_ms: height + 1,
+                successor: None,
+                handoffs: vec![],
+                consume_handoffs: vec![],
             })
             .unwrap();
         let proof = FinalityProof::ProofOfAuthority(engine.seal_from_signer(prepared.block().hash(), height, &signer).unwrap());
@@ -300,6 +381,226 @@ fn rolling_checkpoint_avoids_full_snapshot_in_every_historical_block() {
     let checkpoint = store.load_checkpoint([3; 32]).unwrap();
     assert_eq!(checkpoint.finalised_height, Some(2));
     assert_eq!(checkpoint.state_root, chain.head().state_root);
+}
+
+#[test]
+fn successor_is_created_atomically_and_seals_the_predecessor() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(RocksSessionStore::open(directory.path()).unwrap());
+    let (consensus, signer) = consensus();
+    let source_config = config(&consensus);
+    let mut source =
+        SessionChain::create(source_config.clone(), consensus.clone(), TestExecutor { root: [1; 32] }, Arc::clone(&store)).unwrap();
+    let input = frame_input(0);
+    let transactions = vec![transaction(1)];
+    let post_root = expected_root([1; 32], 0, &input, &transactions, &[]);
+    let mut target_config = source_config.clone();
+    target_config.session_id = [4; 32];
+    target_config.initial_state_root = post_root;
+    target_config.initial_input_position = 1;
+    target_config.initial_logical_time = 1;
+    target_config.initial_timestamp_ms = 10;
+    target_config.predecessor = Some(myelin_session::PredecessorReference {
+        session_id: source_config.session_id,
+        final_height: 0,
+        final_state_root: post_root,
+        application_profile_commitment: source_config.application_profile.commitment(),
+    });
+    let prepared = source
+        .prepare_block(BlockRequest {
+            transactions: transactions.clone(),
+            frame_input: input,
+            scheduler_commitment: [5; 32],
+            data_commitments: vec![],
+            timestamp_ms: 10,
+            local_now_ms: 10,
+            successor: Some(target_config.clone()),
+            handoffs: vec![],
+            consume_handoffs: vec![],
+        })
+        .unwrap();
+    assert_eq!(prepared.successor().unwrap().target_config, target_config);
+    let engine = match consensus.selected_consensus() {
+        myelin_consensus::SelectedConsensus::ProofOfAuthority(engine) => engine,
+        _ => unreachable!(),
+    };
+    let proof = FinalityProof::ProofOfAuthority(engine.seal_from_signer(prepared.block().hash(), 0, &signer).unwrap());
+    let sealed_head = source.commit_finalised(prepared, proof).unwrap();
+    assert_eq!(sealed_head.sealed_by_successor, Some([4; 32]));
+    assert!(source
+        .prepare_block(BlockRequest {
+            transactions: vec![transaction(2)],
+            frame_input: frame_input(1),
+            scheduler_commitment: [5; 32],
+            data_commitments: vec![],
+            timestamp_ms: 11,
+            local_now_ms: 11,
+            successor: None,
+            handoffs: vec![],
+            consume_handoffs: vec![],
+        })
+        .is_err());
+
+    let target_genesis = store.load_genesis([4; 32]).unwrap();
+    assert_eq!(target_genesis.config, target_config);
+    assert_eq!(target_genesis.state_snapshot, post_root);
+    let target = SessionChain::recover(
+        [4; 32],
+        &application_profile(),
+        consensus,
+        TestExecutor::from_snapshot(&target_genesis.state_snapshot),
+        store,
+    )
+    .unwrap();
+    assert_eq!(target.head().state_root, post_root);
+    assert_eq!(target.head().input_position, 1);
+    assert_eq!(target.head().timestamp_ms, 10);
+}
+
+#[test]
+fn handoff_is_source_committed_target_bound_expiring_and_single_use() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(RocksSessionStore::open(directory.path()).unwrap());
+    let (consensus, signer) = consensus();
+    let mut source =
+        SessionChain::create(config(&consensus), consensus.clone(), TestExecutor { root: [1; 32] }, Arc::clone(&store)).unwrap();
+    let mut target_config = config(&consensus);
+    target_config.session_id = [4; 32];
+    let mut target =
+        SessionChain::create(target_config, consensus.clone(), TestExecutor { root: [1; 32] }, Arc::clone(&store)).unwrap();
+    let mut wrong_config = config(&consensus);
+    wrong_config.session_id = [5; 32];
+    let wrong_target =
+        SessionChain::create(wrong_config, consensus.clone(), TestExecutor { root: [1; 32] }, Arc::clone(&store)).unwrap();
+    let prepared = source
+        .prepare_block(BlockRequest {
+            transactions: vec![transaction(1)],
+            frame_input: frame_input(0),
+            scheduler_commitment: [5; 32],
+            data_commitments: vec![],
+            timestamp_ms: 10,
+            local_now_ms: 10,
+            successor: None,
+            handoffs: vec![
+                HandoffIntent {
+                    target: HandoffTarget::Session([4; 32]),
+                    expires_at_ms: 100,
+                    payload: b"player-state".to_vec(),
+                    authorization: b"signed-inventory".to_vec(),
+                    evidence_requirement: None,
+                },
+                HandoffIntent {
+                    target: HandoffTarget::Session([4; 32]),
+                    expires_at_ms: 100,
+                    payload: b"evidence-gated".to_vec(),
+                    authorization: b"signed-gated".to_vec(),
+                    evidence_requirement: Some(EvidenceRequirement {
+                        message_id: [91; 32],
+                        pipeline_commitment: [92; 32],
+                        minimum_stage_index: 1,
+                    }),
+                },
+                HandoffIntent {
+                    target: HandoffTarget::Session([4; 32]),
+                    expires_at_ms: 15,
+                    payload: b"expired".to_vec(),
+                    authorization: b"signed-expired".to_vec(),
+                    evidence_requirement: None,
+                },
+            ],
+            consume_handoffs: vec![],
+        })
+        .unwrap();
+    let valid_id = prepared.issued_handoffs()[0].id();
+    let expired_id = prepared.issued_handoffs()[1].id();
+    let gated_id = prepared.issued_handoffs()[2].id();
+    let proof = FinalityProof::ProofOfAuthority(match consensus.selected_consensus() {
+        myelin_consensus::SelectedConsensus::ProofOfAuthority(engine) => {
+            engine.seal_from_signer(prepared.block().hash(), 0, &signer).unwrap()
+        }
+        _ => unreachable!(),
+    });
+    source.commit_finalised(prepared, proof).unwrap();
+    assert!(!store.load_handoff(valid_id).unwrap().unwrap().is_consumed());
+
+    assert!(wrong_target
+        .prepare_block(BlockRequest {
+            transactions: vec![transaction(2)],
+            frame_input: frame_input(0),
+            scheduler_commitment: [5; 32],
+            data_commitments: vec![],
+            timestamp_ms: 20,
+            local_now_ms: 20,
+            successor: None,
+            handoffs: vec![],
+            consume_handoffs: vec![valid_id],
+        })
+        .is_err());
+    assert!(target
+        .prepare_block(BlockRequest {
+            transactions: vec![transaction(2)],
+            frame_input: frame_input(0),
+            scheduler_commitment: [5; 32],
+            data_commitments: vec![],
+            timestamp_ms: 20,
+            local_now_ms: 20,
+            successor: None,
+            handoffs: vec![],
+            consume_handoffs: vec![expired_id],
+        })
+        .is_err());
+    assert!(target
+        .prepare_block(BlockRequest {
+            transactions: vec![transaction(2)],
+            frame_input: frame_input(0),
+            scheduler_commitment: [5; 32],
+            data_commitments: vec![],
+            timestamp_ms: 20,
+            local_now_ms: 20,
+            successor: None,
+            handoffs: vec![],
+            consume_handoffs: vec![gated_id],
+        })
+        .is_err());
+
+    let prepared = target
+        .prepare_block(BlockRequest {
+            transactions: vec![transaction(3)],
+            frame_input: frame_input(0),
+            scheduler_commitment: [5; 32],
+            data_commitments: vec![],
+            timestamp_ms: 20,
+            local_now_ms: 20,
+            successor: None,
+            handoffs: vec![],
+            consume_handoffs: vec![valid_id],
+        })
+        .unwrap();
+    assert_eq!(prepared.consumed_handoffs()[0].id(), valid_id);
+    let proof = FinalityProof::ProofOfAuthority(match consensus.selected_consensus() {
+        myelin_consensus::SelectedConsensus::ProofOfAuthority(engine) => {
+            engine.seal_from_signer(prepared.block().hash(), 0, &signer).unwrap()
+        }
+        _ => unreachable!(),
+    });
+    let target_head = target.commit_finalised(prepared, proof).unwrap();
+    let stored = store.load_handoff(valid_id).unwrap().unwrap();
+    assert_eq!(stored.consumed_by_session, Some([4; 32]));
+    assert_eq!(stored.consumed_at_height, Some(0));
+    assert_eq!(stored.consumed_by_block_hash, Some(target_head.block_hash));
+    assert!(target
+        .prepare_block(BlockRequest {
+            transactions: vec![transaction(4)],
+            frame_input: frame_input(1),
+            scheduler_commitment: [5; 32],
+            data_commitments: vec![],
+            timestamp_ms: 21,
+            local_now_ms: 21,
+            successor: None,
+            handoffs: vec![],
+            consume_handoffs: vec![valid_id],
+        })
+        .is_err());
 }
 
 #[test]

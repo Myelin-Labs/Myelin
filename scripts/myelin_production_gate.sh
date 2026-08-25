@@ -621,8 +621,8 @@ for report, label in ((commit, "commit"), (court, "court")):
     require(proof is not None, f"PoA {label} seal present")
     require(proof["consensus_kind"] == "proof-of-authority", f"PoA {label} proof kind")
     require(proof["certificate_step"] == "seal", f"PoA {label} proof step")
-    require(proof["height"] == 1, f"PoA {label} height")
-    require(proof["authority_id"] == "validator-1", f"PoA {label} scheduled authority")
+    require(proof["height"] == 0, f"PoA {label} height")
+    require(proof["authority_id"] == "validator-0", f"PoA {label} scheduled authority")
     require(proof["finalised"] is True, f"PoA {label} finalised")
 
 require(commit["block"]["block_hash"] == court["block"]["block_hash"], "PoA court preserves canonical block")

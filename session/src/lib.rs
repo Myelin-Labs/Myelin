@@ -10,6 +10,21 @@
 //! by a [`SessionStore`]. It is a closed-session runtime, not an independent
 //! L1.
 
+mod application;
+mod continuity;
+mod evidence;
+mod replay;
+
+pub use application::{
+    ApplicationProfile, ApplicationResourceEnvelope, ApplicationVmProfile, ExecutionFrame, ExecutionResources, FrameInput,
+    InspectContext, InspectPort, InspectionReceipt,
+};
+pub use continuity::{
+    EvidenceRequirement, HandoffIntent, HandoffTarget, PredecessorReference, SessionHandoff, StoredHandoff, SuccessorDeclaration,
+};
+pub use evidence::{EvidencePipelineDescriptor, EvidenceReceipt, EvidenceRecord, EvidenceStage};
+pub use replay::RangeReplayReceipt;
+
 use myelin_consensus::{ConsensusKind, ConsensusModuleDescriptor, FinalityProof, MyelinBlock};
 use myelin_exec::{
     deserialize_outpoint_molecule, deserialize_script_molecule, deserialize_transaction_molecule, serialize_outpoint_molecule,
@@ -23,14 +38,14 @@ use std::{collections::HashSet, fmt, sync::Arc};
 pub type Hash32 = [u8; 32];
 
 const RECORD_MAGIC: &[u8; 4] = b"MREC";
-const RECORD_FORMAT_VERSION: u16 = 5;
-const LEGACY_JSON_RECORD_FORMAT_VERSION: u16 = 4;
+const RECORD_FORMAT_VERSION: u16 = 6;
 const RECORD_HEADER_BYTES: usize = 4 + 2 + 8 + 32;
 const SNAPSHOT_MAGIC: &[u8; 4] = b"MSNP";
 const SNAPSHOT_VERSION: u16 = 1;
 const MAX_SNAPSHOT_ITEMS: usize = 16_777_216;
 const MAX_SNAPSHOT_FIELD_BYTES: usize = 64 * 1024 * 1024;
 const OUTBOX_DOMAIN: &[u8] = b"myelin:session-outbox";
+const SESSION_CONFIG_DOMAIN: &[u8] = b"myelin:session-config";
 const MAX_CONSENSUS_WAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_OUTBOX_TOPIC_BYTES: usize = 256;
 const MAX_OUTBOX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
@@ -49,8 +64,18 @@ pub struct SessionConfig {
     pub consensus_module_commitment: Hash32,
     /// Owner-defined durable consensus round-state schema commitment.
     pub consensus_wal_schema_hash: Hash32,
+    /// Complete session-wide application semantics and resource identity.
+    pub application_profile: ApplicationProfile,
     /// Exact state root from which height zero executes.
     pub initial_state_root: Hash32,
+    /// First input position accepted by height zero.
+    pub initial_input_position: u64,
+    /// Logical time visible at height zero.
+    pub initial_logical_time: u64,
+    /// Timestamp floor inherited by height zero (zero for an independent genesis).
+    pub initial_timestamp_ms: u64,
+    /// Reverse lineage for an atomically created successor.
+    pub predecessor: Option<PredecessorReference>,
     /// Maximum number of transactions admitted to one block.
     pub max_block_transactions: u32,
     /// Maximum aggregate encoded transaction bytes in one block.
@@ -74,6 +99,16 @@ impl SessionConfig {
         if self.consensus_wal_schema_hash == [0; 32] {
             return Err(SessionError::InvalidConfig("consensus_wal_schema_hash must not be zero".to_owned()));
         }
+        self.application_profile.validate()?;
+        if let Some(predecessor) = &self.predecessor {
+            if predecessor.session_id == [0; 32]
+                || predecessor.session_id == self.session_id
+                || predecessor.final_state_root == [0; 32]
+                || predecessor.application_profile_commitment == [0; 32]
+            {
+                return Err(SessionError::InvalidConfig("invalid predecessor lineage reference".to_owned()));
+            }
+        }
         if self.max_block_transactions == 0 {
             return Err(SessionError::InvalidConfig("max_block_transactions must be non-zero".to_owned()));
         }
@@ -95,6 +130,39 @@ impl SessionConfig {
         config.validate()?;
         Ok(config)
     }
+
+    /// Canonical immutable session configuration commitment used by successor
+    /// declarations and cross-session audit material.
+    pub fn commitment(&self) -> Hash32 {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(SESSION_CONFIG_DOMAIN);
+        hasher.update(&self.session_id);
+        hasher.update(self.consensus_kind.as_str().as_bytes());
+        hasher.update(&self.consensus_config_commitment);
+        hasher.update(&self.consensus_module_commitment);
+        hasher.update(&self.consensus_wal_schema_hash);
+        hasher.update(&self.application_profile.commitment());
+        hasher.update(&self.initial_state_root);
+        hasher.update(&self.initial_input_position.to_le_bytes());
+        hasher.update(&self.initial_logical_time.to_le_bytes());
+        hasher.update(&self.initial_timestamp_ms.to_le_bytes());
+        match &self.predecessor {
+            Some(predecessor) => {
+                hasher.update(&[1]);
+                hasher.update(&predecessor.session_id);
+                hasher.update(&predecessor.final_height.to_le_bytes());
+                hasher.update(&predecessor.final_state_root);
+                hasher.update(&predecessor.application_profile_commitment);
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hasher.update(&self.max_block_transactions.to_le_bytes());
+        hasher.update(&self.max_block_bytes.to_le_bytes());
+        hasher.update(&self.max_future_drift_ms.to_le_bytes());
+        *hasher.finalize().as_bytes()
+    }
 }
 
 /// Last atomically committed point of a session chain.
@@ -110,6 +178,12 @@ pub struct SessionHead {
     pub state_root: Hash32,
     /// Last block timestamp, or zero before height zero.
     pub timestamp_ms: u64,
+    /// Exclusive end of the last finalised application input range.
+    pub input_position: u64,
+    /// Exclusive logical-time end of the last finalised execution frame.
+    pub logical_time: u64,
+    /// Target session id once a final successor declaration seals this chain.
+    pub sealed_by_successor: Option<Hash32>,
 }
 
 impl SessionHead {
@@ -209,6 +283,8 @@ pub struct ExecutionOutcome {
     pub data_commitments: Vec<Hash32>,
     /// External effects to atomically enqueue with the block.
     pub outbox: Vec<PendingOutboxMessage>,
+    /// Aggregate CKB-VM cycles consumed by the ordered transaction batch.
+    pub cycles: u64,
 }
 
 /// Pluggable deterministic state transition implementation.
@@ -220,7 +296,13 @@ pub trait TransitionExecutor: Clone + Send + Sync + 'static {
     fn state_root(&self) -> Hash32;
 
     /// Execute one ordered block against the current root.
-    fn execute_block(&mut self, height: u64, transactions: &[Vec<u8>]) -> std::result::Result<ExecutionOutcome, String>;
+    fn execute_block(
+        &mut self,
+        height: u64,
+        frame_input: &FrameInput,
+        consumed_handoffs: &[SessionHandoff],
+        transactions: &[Vec<u8>],
+    ) -> std::result::Result<ExecutionOutcome, String>;
 
     /// Produce a complete restart snapshot for the post-state.
     fn snapshot(&self) -> std::result::Result<Vec<u8>, String>;
@@ -258,6 +340,8 @@ pub trait FinalityVerifier: Send + Sync + 'static {
 pub struct BlockRequest {
     /// Canonical encoded transactions in execution order.
     pub transactions: Vec<Vec<u8>>,
+    /// Canonical application input range and payload represented by this block.
+    pub frame_input: FrameInput,
     /// Commitment to scheduler sidecar evidence; never placed in witnesses.
     pub scheduler_commitment: Hash32,
     /// Additional DA commitments known before execution.
@@ -266,6 +350,13 @@ pub struct BlockRequest {
     pub timestamp_ms: u64,
     /// Local wall-clock time used only for bounded future-drift validation.
     pub local_now_ms: u64,
+    /// If present, this is the final block and atomically creates the target
+    /// session from its post-state snapshot.
+    pub successor: Option<SessionConfig>,
+    /// New transferable payloads committed by this source block.
+    pub handoffs: Vec<HandoffIntent>,
+    /// Previously finalised handoffs consumed exactly once by this block.
+    pub consume_handoffs: Vec<Hash32>,
 }
 
 /// Candidate block and isolated post-state awaiting an external finality proof.
@@ -276,6 +367,12 @@ pub struct PreparedBlock<E: TransitionExecutor> {
     transactions: Vec<Vec<u8>>,
     snapshot: Vec<u8>,
     outbox: Vec<OutboxMessage>,
+    frame: ExecutionFrame,
+    frame_input: FrameInput,
+    successor: Option<SuccessorDeclaration>,
+    issued_handoffs: Vec<SessionHandoff>,
+    consumed_handoffs: Vec<SessionHandoff>,
+    request_data_commitments: Vec<Hash32>,
 }
 
 impl<E: TransitionExecutor> PreparedBlock<E> {
@@ -287,6 +384,23 @@ impl<E: TransitionExecutor> PreparedBlock<E> {
     /// Deterministic outbox messages committed by the candidate.
     pub fn outbox(&self) -> &[OutboxMessage] {
         &self.outbox
+    }
+
+    /// Exact application execution frame committed by the candidate block.
+    pub fn frame(&self) -> &ExecutionFrame {
+        &self.frame
+    }
+
+    pub fn successor(&self) -> Option<&SuccessorDeclaration> {
+        self.successor.as_ref()
+    }
+
+    pub fn issued_handoffs(&self) -> &[SessionHandoff] {
+        &self.issued_handoffs
+    }
+
+    pub fn consumed_handoffs(&self) -> &[SessionHandoff] {
+        &self.consumed_handoffs
     }
 }
 
@@ -308,6 +422,19 @@ pub struct FinalisedBlockRecord {
     pub state_snapshot: Vec<u8>,
     /// External effects committed in the same storage transaction.
     pub outbox: Vec<OutboxMessage>,
+    /// Application execution frame committed by the block.
+    pub frame: ExecutionFrame,
+    /// Canonical application input retained for bounded replay.
+    pub frame_input: FrameInput,
+    /// Optional declaration that seals this session and creates its successor.
+    pub successor: Option<SuccessorDeclaration>,
+    /// Source-committed handoffs made available by this block.
+    pub issued_handoffs: Vec<SessionHandoff>,
+    /// Handoffs atomically consumed by this block.
+    pub consumed_handoff_ids: Vec<Hash32>,
+    /// Commitments supplied with the request before deterministic execution
+    /// adds application/outbox commitments.
+    pub request_data_commitments: Vec<Hash32>,
 }
 
 impl FinalisedBlockRecord {
@@ -513,6 +640,13 @@ pub trait SessionStore: Send + Sync + 'static {
         }
         Ok(self.load_chain(session_id)?.into_iter().filter(|record| record.block.number >= start_height).take(limit).collect())
     }
+    /// Load one exact finalised block.
+    fn load_block(&self, session_id: Hash32, height: u64) -> std::result::Result<FinalisedBlockRecord, StoreError> {
+        self.load_chain_page(session_id, height, 1)?
+            .into_iter()
+            .find(|record| record.block.number == height)
+            .ok_or_else(|| StoreError::NotFound(format!("session block {height}")))
+    }
     /// Load the latest full restart checkpoint.
     ///
     /// The default supports stores that retain a full snapshot in each block.
@@ -525,6 +659,32 @@ pub trait SessionStore: Send + Sync + 'static {
                 state_root: record.block.state_root_after,
                 state_snapshot: record.state_snapshot,
             });
+        }
+        Ok(StateCheckpoint {
+            session_id,
+            finalised_height: None,
+            state_root: genesis.config.initial_state_root,
+            state_snapshot: genesis.state_snapshot,
+        })
+    }
+    /// Load the newest retained checkpoint strictly before `height`, falling
+    /// back to genesis. This is the bounded range-replay starting point.
+    fn load_checkpoint_before(&self, session_id: Hash32, height: u64) -> std::result::Result<StateCheckpoint, StoreError> {
+        let genesis = self.load_genesis(session_id)?;
+        if height != 0 {
+            if let Some(record) = self
+                .load_chain(session_id)?
+                .into_iter()
+                .rev()
+                .find(|record| record.block.number < height && !record.state_snapshot.is_empty())
+            {
+                return Ok(StateCheckpoint {
+                    session_id,
+                    finalised_height: Some(record.block.number),
+                    state_root: record.block.state_root_after,
+                    state_snapshot: record.state_snapshot,
+                });
+            }
         }
         Ok(StateCheckpoint {
             session_id,
@@ -549,6 +709,25 @@ pub trait SessionStore: Send + Sync + 'static {
     fn pending_outbox(&self, session_id: Hash32, limit: usize) -> std::result::Result<Vec<PendingDelivery>, StoreError>;
     /// Acknowledge one idempotently delivered effect.
     fn acknowledge_outbox(&self, session_id: Hash32, message_id: Hash32) -> std::result::Result<(), StoreError>;
+    /// Load the durable, locally verified receipt chain for one outbox item.
+    fn load_evidence(&self, session_id: Hash32, message_id: Hash32) -> std::result::Result<Option<EvidenceRecord>, StoreError> {
+        let _ = (session_id, message_id);
+        Ok(None)
+    }
+    /// Atomically append one verified receipt using the record revision as a CAS.
+    fn compare_and_set_evidence(
+        &self,
+        expected_revision: Option<u64>,
+        record: &EvidenceRecord,
+    ) -> std::result::Result<(), StoreError> {
+        let _ = (expected_revision, record);
+        Err(StoreError::Backend("evidence persistence is not implemented by this store".to_owned()))
+    }
+    /// Load one source-committed handoff and its one-time consumption state.
+    fn load_handoff(&self, handoff_id: Hash32) -> std::result::Result<Option<StoredHandoff>, StoreError> {
+        let _ = handoff_id;
+        Ok(None)
+    }
 }
 
 /// Fully verified recovery material. Fields are private so callers cannot
@@ -589,6 +768,11 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
     /// Create a new session and durably bind its initial snapshot.
     pub fn create(config: SessionConfig, finality_verifier: Arc<dyn FinalityVerifier>, executor: E, store: Arc<S>) -> Result<Self> {
         config.validate()?;
+        if config.predecessor.is_some() {
+            return Err(SessionError::Continuity(
+                "a successor genesis can only be created atomically by its predecessor's final block".to_owned(),
+            ));
+        }
         ensure_consensus_config(finality_verifier.as_ref(), &config)?;
         if executor.state_root() != config.initial_state_root {
             return Err(SessionError::StateRootMismatch { expected: config.initial_state_root, actual: executor.state_root() });
@@ -599,7 +783,10 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
             finalised_height: None,
             block_hash: [0; 32],
             state_root: config.initial_state_root,
-            timestamp_ms: 0,
+            timestamp_ms: config.initial_timestamp_ms,
+            input_position: config.initial_input_position,
+            logical_time: config.initial_logical_time,
+            sealed_by_successor: None,
         };
         store.create_session(&SessionGenesis { config: config.clone(), state_snapshot }, &head)?;
         Ok(Self { config, head, finality_verifier, executor, store })
@@ -609,16 +796,40 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
     /// recent snapshot returned by [`Self::recovery_snapshot`]. Every block and
     /// finality proof is streamed and revalidated before the service becomes
     /// writable.
-    pub fn recover(session_id: Hash32, finality_verifier: Arc<dyn FinalityVerifier>, executor: E, store: Arc<S>) -> Result<Self> {
-        let audited = Self::audit_recovery(session_id, finality_verifier.as_ref(), store.as_ref())?;
-        Self::recover_audited(audited, finality_verifier, executor, store)
+    pub fn recover(
+        session_id: Hash32,
+        expected_application_profile: &ApplicationProfile,
+        finality_verifier: Arc<dyn FinalityVerifier>,
+        executor: E,
+        store: Arc<S>,
+    ) -> Result<Self> {
+        let audited = Self::audit_recovery(session_id, expected_application_profile, finality_verifier.as_ref(), store.as_ref())?;
+        Self::recover_audited(audited, expected_application_profile, finality_verifier, executor, store)
     }
 
     /// Stream and verify a complete durable history exactly once, then return
     /// its atomically stored restart checkpoint.
-    pub fn audit_recovery(session_id: Hash32, finality_verifier: &dyn FinalityVerifier, store: &S) -> Result<AuditedRecovery> {
+    pub fn audit_recovery(
+        session_id: Hash32,
+        expected_application_profile: &ApplicationProfile,
+        finality_verifier: &dyn FinalityVerifier,
+        store: &S,
+    ) -> Result<AuditedRecovery> {
+        expected_application_profile.validate()?;
         let genesis = store.load_genesis(session_id)?;
         genesis.config.validate()?;
+        if &genesis.config.application_profile != expected_application_profile {
+            return Err(SessionError::Recovery("local application profile does not match the genesis-bound profile".to_owned()));
+        }
+        if let Some(predecessor) = &genesis.config.predecessor {
+            let source = store.load_block(predecessor.session_id, predecessor.final_height)?;
+            if source.block.state_root_after != predecessor.final_state_root
+                || source.block.application_profile_commitment != predecessor.application_profile_commitment
+                || source.successor.as_ref().map(|value| &value.target_config) != Some(&genesis.config)
+            {
+                return Err(SessionError::Recovery("successor reverse lineage does not match the final predecessor block".to_owned()));
+            }
+        }
         ensure_consensus_config(finality_verifier, &genesis.config)?;
         let persisted_head = store.load_head(session_id)?;
         let mut audited_head = genesis_head(&genesis);
@@ -639,6 +850,23 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
         if audited_head != persisted_head {
             return Err(SessionError::Recovery("persisted head does not match audited chain".to_owned()));
         }
+        let successor_snapshot = if let Some(target_id) = persisted_head.sealed_by_successor {
+            let final_height = persisted_head
+                .finalised_height
+                .ok_or_else(|| SessionError::Recovery("a genesis head cannot be successor-sealed".to_owned()))?;
+            let final_record = store.load_block(session_id, final_height)?;
+            let declaration = final_record
+                .successor
+                .as_ref()
+                .ok_or_else(|| SessionError::Recovery("sealed head has no final successor declaration".to_owned()))?;
+            let target_genesis = store.load_genesis(target_id)?;
+            if declaration.target_config != target_genesis.config || target_genesis.state_snapshot.is_empty() {
+                return Err(SessionError::Recovery("successor genesis does not match the final predecessor declaration".to_owned()));
+            }
+            Some(target_genesis.state_snapshot)
+        } else {
+            None
+        };
         let checkpoint = store.load_checkpoint(session_id)?;
         if checkpoint.session_id != session_id
             || checkpoint.finalised_height != persisted_head.finalised_height
@@ -647,6 +875,11 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
         {
             return Err(SessionError::Recovery("restart checkpoint does not match the audited head".to_owned()));
         }
+        if successor_snapshot.as_deref().is_some_and(|snapshot| snapshot != checkpoint.state_snapshot.as_slice()) {
+            return Err(SessionError::Recovery(
+                "successor genesis snapshot does not match the final predecessor checkpoint".to_owned(),
+            ));
+        }
         Ok(AuditedRecovery { config: genesis.config, head: persisted_head, checkpoint })
     }
 
@@ -654,10 +887,15 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
     /// without reading or auditing the chain a second time.
     pub fn recover_audited(
         audited: AuditedRecovery,
+        expected_application_profile: &ApplicationProfile,
         finality_verifier: Arc<dyn FinalityVerifier>,
         executor: E,
         store: Arc<S>,
     ) -> Result<Self> {
+        expected_application_profile.validate()?;
+        if &audited.config.application_profile != expected_application_profile {
+            return Err(SessionError::Recovery("local application profile does not match the audited genesis profile".to_owned()));
+        }
         ensure_consensus_config(finality_verifier.as_ref(), &audited.config)?;
         if executor.state_root() != audited.checkpoint.state_root {
             return Err(SessionError::StateRootMismatch { expected: audited.checkpoint.state_root, actual: executor.state_root() });
@@ -689,9 +927,117 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
         &self.config
     }
 
+    /// Inspect the current head snapshot without entering the write, producer,
+    /// handoff, or outbox paths.
+    pub fn inspect_head(&self, port: &dyn InspectPort, query: &[u8]) -> Result<InspectionReceipt> {
+        let snapshot = self.executor.snapshot().map_err(SessionError::Inspection)?;
+        self.inspect_snapshot(self.head.finalised_height, self.head.state_root, &snapshot, port, query)
+    }
+
+    /// Inspect genesis or a retained archival checkpoint. Historical blocks
+    /// whose snapshot was pruned fail closed instead of silently inspecting a
+    /// different state.
+    pub fn inspect_at(&self, finalised_height: Option<u64>, port: &dyn InspectPort, query: &[u8]) -> Result<InspectionReceipt> {
+        if finalised_height == self.head.finalised_height {
+            return self.inspect_head(port, query);
+        }
+        let (state_root, snapshot) = match finalised_height {
+            None => {
+                let genesis = self.store.load_genesis(self.config.session_id)?;
+                (genesis.config.initial_state_root, genesis.state_snapshot)
+            }
+            Some(height) => {
+                let record = self.store.load_block(self.config.session_id, height)?;
+                if record.state_snapshot.is_empty() {
+                    return Err(SessionError::Inspection(format!("no archival snapshot is retained at height {height}")));
+                }
+                (record.block.state_root_after, record.state_snapshot)
+            }
+        };
+        self.inspect_snapshot(finalised_height, state_root, &snapshot, port, query)
+    }
+
+    /// Reexecute a bounded finalised range from the newest retained checkpoint
+    /// and return a receipt binding every frame and measured resource total.
+    pub fn replay_range<R, F>(&self, start_height: u64, end_height: u64, restore: F) -> Result<RangeReplayReceipt>
+    where
+        R: TransitionExecutor,
+        F: FnOnce(&[u8]) -> Result<R>,
+    {
+        replay::replay_range(
+            self.store.as_ref(),
+            self.finality_verifier.as_ref(),
+            self.config.session_id,
+            &self.config.application_profile,
+            start_height,
+            end_height,
+            restore,
+        )
+    }
+
+    fn inspect_snapshot(
+        &self,
+        finalised_height: Option<u64>,
+        state_root: Hash32,
+        snapshot: &[u8],
+        port: &dyn InspectPort,
+        query: &[u8],
+    ) -> Result<InspectionReceipt> {
+        if query.len() as u64 > self.config.application_profile.resources.max_inspect_query_bytes {
+            return Err(SessionError::Inspection(format!(
+                "inspection query bytes {} exceed {}",
+                query.len(),
+                self.config.application_profile.resources.max_inspect_query_bytes
+            )));
+        }
+        let context = InspectContext {
+            session_id: self.config.session_id,
+            finalised_height,
+            state_root,
+            application_profile: &self.config.application_profile,
+        };
+        let result = port.inspect(&context, snapshot, query).map_err(SessionError::Inspection)?;
+        if result.len() as u64 > self.config.application_profile.resources.max_inspect_result_bytes {
+            return Err(SessionError::Inspection(format!(
+                "inspection result bytes {} exceed {}",
+                result.len(),
+                self.config.application_profile.resources.max_inspect_result_bytes
+            )));
+        }
+        let profile = self.config.application_profile.commitment();
+        let query_hash = application::inspect_query_hash(query);
+        let result_hash =
+            application::inspect_result_hash(self.config.session_id, finalised_height, state_root, profile, query_hash, &result);
+        Ok(InspectionReceipt {
+            session_id: self.config.session_id,
+            finalised_height,
+            state_root,
+            application_profile_commitment: profile,
+            query_hash,
+            result_hash,
+            result,
+        })
+    }
+
     /// Execute a request on an isolated clone and build the exact block that
     /// validators must sign. This function performs no durable mutation.
     pub fn prepare_block(&self, request: BlockRequest) -> Result<PreparedBlock<E>> {
+        if self.head.sealed_by_successor.is_some() {
+            return Err(SessionError::Continuity("session is sealed by its declared successor".to_owned()));
+        }
+        request.frame_input.validate(&self.config.application_profile)?;
+        if request.frame_input.start_position != self.head.input_position {
+            return Err(SessionError::InvalidFrame(format!(
+                "frame input starts at {}, expected {}",
+                request.frame_input.start_position, self.head.input_position
+            )));
+        }
+        if request.frame_input.logical_time_start != self.head.logical_time {
+            return Err(SessionError::InvalidFrame(format!(
+                "frame logical time starts at {}, expected {}",
+                request.frame_input.logical_time_start, self.head.logical_time
+            )));
+        }
         let tx_count = request.transactions.len();
         if tx_count > self.config.max_block_transactions as usize {
             return Err(SessionError::BlockLimit(format!(
@@ -714,17 +1060,81 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
         }
 
         let height = self.head.next_height()?;
+        let mut consumed_handoffs = Vec::with_capacity(request.consume_handoffs.len());
+        let mut consumed_ids = HashSet::with_capacity(request.consume_handoffs.len());
+        for handoff_id in &request.consume_handoffs {
+            if !consumed_ids.insert(*handoff_id) {
+                return Err(SessionError::Continuity("duplicate handoff consumption id".to_owned()));
+            }
+            let stored = self
+                .store
+                .load_handoff(*handoff_id)?
+                .ok_or_else(|| SessionError::Continuity("requested handoff does not exist".to_owned()))?;
+            if stored.handoff.id() != *handoff_id || stored.is_consumed() {
+                return Err(SessionError::Continuity("handoff identity mismatch or already consumed".to_owned()));
+            }
+            if !stored.handoff.accepts_target(&self.config) || request.timestamp_ms > stored.handoff.expires_at_ms {
+                return Err(SessionError::Continuity("handoff target policy mismatch or handoff expired".to_owned()));
+            }
+            let source = self.store.load_block(stored.handoff.source_session_id, stored.handoff.source_height)?;
+            if source.block.state_root_after != stored.handoff.source_state_root
+                || source.block.application_profile_commitment != stored.handoff.source_application_profile_commitment
+                || source.consensus_module_commitment != stored.handoff.source_consensus_module_commitment
+                || !source.block.data_commitments.contains(handoff_id)
+                || !source.issued_handoffs.iter().any(|handoff| handoff.id() == *handoff_id)
+            {
+                return Err(SessionError::Continuity("handoff is not committed by its claimed source block".to_owned()));
+            }
+            if let Some(requirement) = &stored.handoff.evidence_requirement {
+                let evidence = self
+                    .store
+                    .load_evidence(stored.handoff.source_session_id, requirement.message_id)?
+                    .ok_or_else(|| SessionError::Continuity("required handoff evidence is absent".to_owned()))?;
+                if evidence.descriptor.commitment() != requirement.pipeline_commitment
+                    || evidence.receipts.len() <= requirement.minimum_stage_index as usize
+                {
+                    return Err(SessionError::Continuity("required handoff evidence stage has not been reached".to_owned()));
+                }
+            }
+            consumed_handoffs.push(stored.handoff);
+        }
         let mut candidate = self.executor.clone();
         if candidate.state_root() != self.head.state_root {
             return Err(SessionError::StateRootMismatch { expected: self.head.state_root, actual: candidate.state_root() });
         }
-        let outcome = candidate.execute_block(height, &request.transactions).map_err(SessionError::Execution)?;
+        let canonical_txids = request
+            .transactions
+            .iter()
+            .map(|bytes| {
+                let tx = deserialize_transaction_molecule(bytes)
+                    .map_err(|error| SessionError::Execution(format!("invalid canonical CellTx: {error}")))?;
+                if tx.version() != 0 {
+                    return Err(SessionError::Execution(format!(
+                        "CellTx version {} is not supported; new transactions must use version 0",
+                        tx.version()
+                    )));
+                }
+                Ok(tx.id())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let outcome = candidate
+            .execute_block(height, &request.frame_input, &consumed_handoffs, &request.transactions)
+            .map_err(SessionError::Execution)?;
         if outcome.ordered_cell_tx_commitments.len() != request.transactions.len() {
             return Err(SessionError::Execution("executor returned a different transaction count".to_owned()));
+        }
+        if outcome.ordered_cell_tx_commitments != canonical_txids {
+            return Err(SessionError::Execution("executor raw txids do not match the canonical transaction bytes".to_owned()));
         }
         let mut seen = HashSet::with_capacity(outcome.ordered_cell_tx_commitments.len());
         if outcome.ordered_cell_tx_commitments.iter().any(|txid| !seen.insert(*txid)) {
             return Err(SessionError::Execution("executor returned duplicate raw txids".to_owned()));
+        }
+        if outcome.cycles > self.config.application_profile.resources.max_frame_cycles {
+            return Err(SessionError::InvalidFrame(format!(
+                "execution cycles {} exceed {}",
+                outcome.cycles, self.config.application_profile.resources.max_frame_cycles
+            )));
         }
 
         let outbox = outcome
@@ -735,16 +1145,88 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
                 make_outbox_message(self.config.session_id, self.config.consensus_module_commitment, height, index, message)
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut data_commitments = request.data_commitments;
+        let request_data_commitments = request.data_commitments;
+        let mut data_commitments = request_data_commitments.clone();
         data_commitments.extend(outcome.data_commitments);
         data_commitments.extend(outbox.iter().map(OutboxMessage::commitment));
+        let mut issued_handoffs = Vec::with_capacity(request.handoffs.len());
+        let mut issued_ids = HashSet::with_capacity(request.handoffs.len());
+        for intent in request.handoffs {
+            let handoff = SessionHandoff::from_intent(
+                self.config.session_id,
+                height,
+                candidate.state_root(),
+                self.config.application_profile.commitment(),
+                self.config.consensus_module_commitment,
+                request.timestamp_ms,
+                intent,
+            )?;
+            if !issued_ids.insert(handoff.id()) {
+                return Err(SessionError::Continuity("duplicate issued handoff id".to_owned()));
+            }
+            data_commitments.push(handoff.id());
+            issued_handoffs.push(handoff);
+        }
+        for handoff_id in &request.consume_handoffs {
+            data_commitments.push(continuity::handoff_consumption_commitment(self.config.session_id, height, *handoff_id));
+        }
 
+        let frame = ExecutionFrame {
+            session_id: self.config.session_id,
+            height,
+            application_profile_commitment: self.config.application_profile.commitment(),
+            input_start: request.frame_input.start_position,
+            input_end: request.frame_input.end_position,
+            input_root: request.frame_input.root(),
+            logical_time_start: request.frame_input.logical_time_start,
+            logical_time_end: request.frame_input.logical_time_end,
+            state_root_before: self.head.state_root,
+            state_root_after: candidate.state_root(),
+            ordered_cell_tx_commitments: outcome.ordered_cell_tx_commitments.clone(),
+            resources: ExecutionResources {
+                cycles: outcome.cycles,
+                transaction_bytes: total_bytes,
+                input_bytes: request.frame_input.payload.len() as u64,
+            },
+        };
+        frame.validate(&self.config.application_profile, &request.frame_input)?;
+        let successor = request
+            .successor
+            .map(|target_config| {
+                if target_config.initial_state_root != candidate.state_root()
+                    || target_config.initial_input_position != request.frame_input.end_position
+                    || target_config.initial_logical_time != request.frame_input.logical_time_end
+                    || target_config.initial_timestamp_ms != request.timestamp_ms
+                    || target_config.application_profile.state_codec_hash != self.config.application_profile.state_codec_hash
+                {
+                    return Err(SessionError::Continuity(
+                        "successor genesis must use the predecessor post-state, frame cursor, logical time, and state codec"
+                            .to_owned(),
+                    ));
+                }
+                let declaration = SuccessorDeclaration {
+                    source_session_id: self.config.session_id,
+                    source_height: height,
+                    source_state_root: candidate.state_root(),
+                    source_application_profile_commitment: self.config.application_profile.commitment(),
+                    target_config,
+                };
+                declaration.validate()?;
+                Ok(declaration)
+            })
+            .transpose()?;
+        if let Some(declaration) = &successor {
+            data_commitments.push(declaration.commitment());
+        }
         let block = MyelinBlock {
             version: 1,
+            session_id: self.config.session_id,
             parent_hash: self.head.block_hash,
             number: height,
             timestamp_ms: request.timestamp_ms,
             consensus_kind: self.config.consensus_kind,
+            application_profile_commitment: self.config.application_profile.commitment(),
+            execution_frame_commitment: frame.commitment(),
             state_root_before: self.head.state_root,
             state_root_after: candidate.state_root(),
             ordered_cell_tx_commitments: outcome.ordered_cell_tx_commitments,
@@ -759,6 +1241,12 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
             transactions: request.transactions,
             snapshot,
             outbox,
+            frame,
+            frame_input: request.frame_input,
+            successor,
+            issued_handoffs,
+            consumed_handoffs,
+            request_data_commitments,
         })
     }
 
@@ -782,6 +1270,9 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
             block_hash: finalised.block_hash,
             state_root: prepared.block.state_root_after,
             timestamp_ms: prepared.block.timestamp_ms,
+            input_position: prepared.frame.input_end,
+            logical_time: prepared.frame.logical_time_end,
+            sealed_by_successor: prepared.successor.as_ref().map(|declaration| declaration.target_config.session_id),
         };
         let record = FinalisedBlockRecord {
             block: prepared.block,
@@ -790,6 +1281,12 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
             transactions: prepared.transactions,
             state_snapshot: prepared.snapshot,
             outbox: prepared.outbox,
+            frame: prepared.frame,
+            frame_input: prepared.frame_input,
+            successor: prepared.successor,
+            issued_handoffs: prepared.issued_handoffs,
+            consumed_handoff_ids: prepared.consumed_handoffs.iter().map(SessionHandoff::id).collect(),
+            request_data_commitments: prepared.request_data_commitments,
         };
         self.store.commit_block(&self.head, &new_head, &record)?;
         self.executor = prepared.executor;
@@ -828,7 +1325,10 @@ fn genesis_head(genesis: &SessionGenesis) -> SessionHead {
         finalised_height: None,
         block_hash: [0; 32],
         state_root: genesis.config.initial_state_root,
-        timestamp_ms: 0,
+        timestamp_ms: genesis.config.initial_timestamp_ms,
+        input_position: genesis.config.initial_input_position,
+        logical_time: genesis.config.initial_logical_time,
+        sealed_by_successor: None,
     }
 }
 
@@ -838,17 +1338,95 @@ fn audit_record(
     head: &mut SessionHead,
     record: &FinalisedBlockRecord,
 ) -> Result<()> {
+    if head.sealed_by_successor.is_some() {
+        return Err(SessionError::Recovery("a block appears after the session was sealed".to_owned()));
+    }
     if record.block.parent_hash != head.block_hash
         || record.block.number != head.next_height()?
+        || record.block.session_id != genesis.config.session_id
         || record.block.state_root_before != head.state_root
         || record.block.timestamp_ms < head.timestamp_ms
+        || record.frame.input_start != head.input_position
+        || record.frame.logical_time_start != head.logical_time
         || record.block.consensus_kind != genesis.config.consensus_kind
+        || record.block.application_profile_commitment != genesis.config.application_profile.commitment()
+        || record.block.execution_frame_commitment != record.frame.commitment()
         || record.consensus_module_commitment != genesis.config.consensus_module_commitment
     {
         return Err(SessionError::Recovery(format!("invalid chain linkage at height {}", record.block.number)));
     }
     if record.transactions.len() != record.block.ordered_cell_tx_commitments.len() {
         return Err(SessionError::Recovery(format!("payload count mismatch at height {}", record.block.number)));
+    }
+    if !record.block.data_commitments.starts_with(&record.request_data_commitments) {
+        return Err(SessionError::Recovery(format!(
+            "request data commitments are not the canonical prefix at height {}",
+            record.block.number
+        )));
+    }
+    record.frame.validate(&genesis.config.application_profile, &record.frame_input)?;
+    if record.frame.session_id != genesis.config.session_id
+        || record.frame.height != record.block.number
+        || record.frame.state_root_before != record.block.state_root_before
+        || record.frame.state_root_after != record.block.state_root_after
+        || record.frame.ordered_cell_tx_commitments != record.block.ordered_cell_tx_commitments
+    {
+        return Err(SessionError::Recovery(format!("execution frame mismatch at height {}", record.block.number)));
+    }
+    if let Some(successor) = &record.successor {
+        successor.validate()?;
+        if successor.source_session_id != genesis.config.session_id
+            || successor.source_height != record.block.number
+            || successor.source_state_root != record.block.state_root_after
+            || successor.source_application_profile_commitment != genesis.config.application_profile.commitment()
+            || successor.target_config.initial_input_position != record.frame.input_end
+            || successor.target_config.initial_logical_time != record.frame.logical_time_end
+            || successor.target_config.initial_timestamp_ms != record.block.timestamp_ms
+            || successor.target_config.application_profile.state_codec_hash != genesis.config.application_profile.state_codec_hash
+            || !record.block.data_commitments.contains(&successor.commitment())
+        {
+            return Err(SessionError::Recovery(format!("successor declaration mismatch at height {}", record.block.number)));
+        }
+    }
+    let mut handoff_ids = HashSet::with_capacity(record.issued_handoffs.len());
+    for handoff in &record.issued_handoffs {
+        handoff.validate(record.block.timestamp_ms)?;
+        let handoff_id = handoff.id();
+        if handoff.source_session_id != genesis.config.session_id
+            || handoff.source_height != record.block.number
+            || handoff.source_state_root != record.block.state_root_after
+            || handoff.source_application_profile_commitment != genesis.config.application_profile.commitment()
+            || handoff.source_consensus_module_commitment != genesis.config.consensus_module_commitment
+            || !handoff_ids.insert(handoff_id)
+            || !record.block.data_commitments.contains(&handoff_id)
+        {
+            return Err(SessionError::Recovery(format!("issued handoff mismatch at height {}", record.block.number)));
+        }
+    }
+    let mut consumed_ids = HashSet::with_capacity(record.consumed_handoff_ids.len());
+    if record.consumed_handoff_ids.iter().any(|handoff_id| {
+        !consumed_ids.insert(*handoff_id)
+            || !record.block.data_commitments.contains(&continuity::handoff_consumption_commitment(
+                genesis.config.session_id,
+                record.block.number,
+                *handoff_id,
+            ))
+    }) {
+        return Err(SessionError::Recovery(format!("handoff consumption mismatch at height {}", record.block.number)));
+    }
+    let mut transaction_bytes = 0u64;
+    for (bytes, expected_txid) in record.transactions.iter().zip(&record.block.ordered_cell_tx_commitments) {
+        transaction_bytes = transaction_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| SessionError::Recovery("transaction byte total overflow".to_owned()))?;
+        let transaction = deserialize_transaction_molecule(bytes)
+            .map_err(|error| SessionError::Recovery(format!("invalid transaction at height {}: {error}", record.block.number)))?;
+        if transaction.id() != *expected_txid {
+            return Err(SessionError::Recovery(format!("raw txid mismatch at height {}", record.block.number)));
+        }
+    }
+    if record.frame.resources.transaction_bytes != transaction_bytes {
+        return Err(SessionError::Recovery(format!("execution frame transaction byte mismatch at height {}", record.block.number)));
     }
     let verified = verifier.verify(&record.block, &record.proof)?;
     if verified.block_hash != record.block.hash() || verified.consensus_module_commitment != record.consensus_module_commitment {
@@ -860,6 +1438,9 @@ fn audit_record(
         block_hash: record.block.hash(),
         state_root: record.block.state_root_after,
         timestamp_ms: record.block.timestamp_ms,
+        input_position: record.frame.input_end,
+        logical_time: record.frame.logical_time_end,
+        sealed_by_successor: record.successor.as_ref().map(|declaration| declaration.target_config.session_id),
     };
     Ok(())
 }
@@ -952,8 +1533,18 @@ impl TransitionExecutor for CellTransitionExecutor {
         self.state_root
     }
 
-    fn execute_block(&mut self, height: u64, transactions: &[Vec<u8>]) -> std::result::Result<ExecutionOutcome, String> {
+    fn execute_block(
+        &mut self,
+        height: u64,
+        _frame_input: &FrameInput,
+        consumed_handoffs: &[SessionHandoff],
+        transactions: &[Vec<u8>],
+    ) -> std::result::Result<ExecutionOutcome, String> {
+        if !consumed_handoffs.is_empty() {
+            return Err("the built-in Cell transition executor has no application handoff intake policy".to_owned());
+        }
         let mut txids = Vec::with_capacity(transactions.len());
+        let mut cycles = 0u64;
         for bytes in transactions {
             let tx = deserialize_transaction_molecule(bytes).map_err(|error| format!("invalid canonical CellTx: {error}"))?;
             if tx.version() != 0 {
@@ -964,10 +1555,11 @@ impl TransitionExecutor for CellTransitionExecutor {
                 .engine
                 .apply_transaction(&tx, StateTransitionContext::ordinary(height), move |tx, inputs| verifier.verify(tx, inputs))
                 .map_err(|error| error.to_string())?;
+            cycles = cycles.checked_add(receipt.cycles).ok_or_else(|| "execution cycle total overflow".to_owned())?;
             txids.push(receipt.txid);
             self.state_root = receipt.state_root_after.as_bytes();
         }
-        Ok(ExecutionOutcome { ordered_cell_tx_commitments: txids, data_commitments: Vec::new(), outbox: Vec::new() })
+        Ok(ExecutionOutcome { ordered_cell_tx_commitments: txids, data_commitments: Vec::new(), outbox: Vec::new(), cycles })
     }
 
     fn snapshot(&self) -> std::result::Result<Vec<u8>, String> {
@@ -1135,6 +1727,21 @@ pub enum SessionError {
     /// Execution plugin rejected a request.
     #[error("transition execution failed: {0}")]
     Execution(String),
+    /// Application execution frame violated its genesis-bound contract.
+    #[error("invalid execution frame: {0}")]
+    InvalidFrame(String),
+    /// Read-only inspection failed or exceeded its committed bounds.
+    #[error("inspection failed: {0}")]
+    Inspection(String),
+    /// Evidence receipt or pipeline linkage failed validation.
+    #[error("evidence verification failed: {0}")]
+    Evidence(String),
+    /// Deterministic range replay did not reproduce committed history.
+    #[error("range replay failed: {0}")]
+    Replay(String),
+    /// Session succession or cross-session handoff violated its commitment.
+    #[error("session continuity failed: {0}")]
+    Continuity(String),
     /// State root does not match the durable head.
     #[error("state root mismatch: expected {expected:?}, got {actual:?}")]
     StateRootMismatch {
@@ -1183,14 +1790,6 @@ pub enum SessionError {
 /// Session result alias.
 pub type Result<T> = std::result::Result<T, SessionError>;
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecordEnvelope<T> {
-    format_version: u16,
-    body: T,
-    checksum: Hash32,
-}
-
 fn encode_record<T: Serialize>(body: &T) -> Result<Vec<u8>> {
     let body_bytes = postcard::to_allocvec(body).map_err(|error| SessionError::Codec(error.to_string()))?;
     let checksum = *blake3::hash(&body_bytes).as_bytes();
@@ -1206,15 +1805,7 @@ fn encode_record<T: Serialize>(body: &T) -> Result<Vec<u8>> {
 
 fn decode_record<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T> {
     if !bytes.starts_with(RECORD_MAGIC) {
-        let envelope: RecordEnvelope<T> = serde_json::from_slice(bytes).map_err(|error| SessionError::Codec(error.to_string()))?;
-        if envelope.format_version != LEGACY_JSON_RECORD_FORMAT_VERSION {
-            return Err(SessionError::Codec(format!("unsupported legacy record version {}", envelope.format_version)));
-        }
-        let body_bytes = serde_json::to_vec(&envelope.body).map_err(|error| SessionError::Codec(error.to_string()))?;
-        if *blake3::hash(&body_bytes).as_bytes() != envelope.checksum {
-            return Err(SessionError::Codec("record checksum mismatch".to_owned()));
-        }
-        return Ok(envelope.body);
+        return Err(SessionError::Codec("record does not use the canonical binary envelope".to_owned()));
     }
     if bytes.len() < RECORD_HEADER_BYTES {
         return Err(SessionError::Codec("truncated binary record header".to_owned()));
@@ -1244,7 +1835,12 @@ struct SessionConfigWire {
     consensus_config_commitment: Hash32,
     consensus_module_commitment: Hash32,
     consensus_wal_schema_hash: Hash32,
+    application_profile: ApplicationProfile,
     initial_state_root: Hash32,
+    initial_input_position: u64,
+    initial_logical_time: u64,
+    initial_timestamp_ms: u64,
+    predecessor: Option<PredecessorReference>,
     max_block_transactions: u32,
     max_block_bytes: u64,
     max_future_drift_ms: u64,
@@ -1296,7 +1892,12 @@ impl From<&SessionConfig> for SessionConfigWire {
             consensus_config_commitment: value.consensus_config_commitment,
             consensus_module_commitment: value.consensus_module_commitment,
             consensus_wal_schema_hash: value.consensus_wal_schema_hash,
+            application_profile: value.application_profile.clone(),
             initial_state_root: value.initial_state_root,
+            initial_input_position: value.initial_input_position,
+            initial_logical_time: value.initial_logical_time,
+            initial_timestamp_ms: value.initial_timestamp_ms,
+            predecessor: value.predecessor.clone(),
             max_block_transactions: value.max_block_transactions,
             max_block_bytes: value.max_block_bytes,
             max_future_drift_ms: value.max_future_drift_ms,
@@ -1314,7 +1915,12 @@ impl TryFrom<SessionConfigWire> for SessionConfig {
             consensus_config_commitment: value.consensus_config_commitment,
             consensus_module_commitment: value.consensus_module_commitment,
             consensus_wal_schema_hash: value.consensus_wal_schema_hash,
+            application_profile: value.application_profile,
             initial_state_root: value.initial_state_root,
+            initial_input_position: value.initial_input_position,
+            initial_logical_time: value.initial_logical_time,
+            initial_timestamp_ms: value.initial_timestamp_ms,
+            predecessor: value.predecessor,
             max_block_transactions: value.max_block_transactions,
             max_block_bytes: value.max_block_bytes,
             max_future_drift_ms: value.max_future_drift_ms,
@@ -1330,6 +1936,9 @@ struct SessionHeadWire {
     block_hash: Hash32,
     state_root: Hash32,
     timestamp_ms: u64,
+    input_position: u64,
+    logical_time: u64,
+    sealed_by_successor: Option<Hash32>,
 }
 
 impl From<&SessionHead> for SessionHeadWire {
@@ -1340,6 +1949,9 @@ impl From<&SessionHead> for SessionHeadWire {
             block_hash: value.block_hash,
             state_root: value.state_root,
             timestamp_ms: value.timestamp_ms,
+            input_position: value.input_position,
+            logical_time: value.logical_time,
+            sealed_by_successor: value.sealed_by_successor,
         }
     }
 }
@@ -1352,6 +1964,9 @@ impl From<SessionHeadWire> for SessionHead {
             block_hash: value.block_hash,
             state_root: value.state_root,
             timestamp_ms: value.timestamp_ms,
+            input_position: value.input_position,
+            logical_time: value.logical_time,
+            sealed_by_successor: value.sealed_by_successor,
         }
     }
 }
@@ -1360,10 +1975,13 @@ impl From<SessionHeadWire> for SessionHead {
 #[serde(deny_unknown_fields)]
 struct BlockWire {
     version: u32,
+    session_id: Hash32,
     parent_hash: Hash32,
     number: u64,
     timestamp_ms: u64,
     consensus_kind: String,
+    application_profile_commitment: Hash32,
+    execution_frame_commitment: Hash32,
     state_root_before: Hash32,
     state_root_after: Hash32,
     ordered_cell_tx_commitments: Vec<Hash32>,
@@ -1375,10 +1993,13 @@ impl From<&MyelinBlock> for BlockWire {
     fn from(value: &MyelinBlock) -> Self {
         Self {
             version: value.version,
+            session_id: value.session_id,
             parent_hash: value.parent_hash,
             number: value.number,
             timestamp_ms: value.timestamp_ms,
             consensus_kind: value.consensus_kind.as_str().to_owned(),
+            application_profile_commitment: value.application_profile_commitment,
+            execution_frame_commitment: value.execution_frame_commitment,
             state_root_before: value.state_root_before,
             state_root_after: value.state_root_after,
             ordered_cell_tx_commitments: value.ordered_cell_tx_commitments.clone(),
@@ -1394,10 +2015,13 @@ impl TryFrom<BlockWire> for MyelinBlock {
     fn try_from(value: BlockWire) -> Result<Self> {
         Ok(Self {
             version: value.version,
+            session_id: value.session_id,
             parent_hash: value.parent_hash,
             number: value.number,
             timestamp_ms: value.timestamp_ms,
             consensus_kind: parse_kind(&value.consensus_kind)?,
+            application_profile_commitment: value.application_profile_commitment,
+            execution_frame_commitment: value.execution_frame_commitment,
             state_root_before: value.state_root_before,
             state_root_after: value.state_root_after,
             ordered_cell_tx_commitments: value.ordered_cell_tx_commitments,
@@ -1416,6 +2040,50 @@ struct FinalisedBlockWire {
     transactions: Vec<Vec<u8>>,
     state_snapshot: Vec<u8>,
     outbox: Vec<OutboxMessage>,
+    frame: ExecutionFrame,
+    frame_input: FrameInput,
+    successor: Option<SuccessorDeclarationWire>,
+    issued_handoffs: Vec<SessionHandoff>,
+    consumed_handoff_ids: Vec<Hash32>,
+    request_data_commitments: Vec<Hash32>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuccessorDeclarationWire {
+    source_session_id: Hash32,
+    source_height: u64,
+    source_state_root: Hash32,
+    source_application_profile_commitment: Hash32,
+    target_config: SessionConfigWire,
+}
+
+impl From<&SuccessorDeclaration> for SuccessorDeclarationWire {
+    fn from(value: &SuccessorDeclaration) -> Self {
+        Self {
+            source_session_id: value.source_session_id,
+            source_height: value.source_height,
+            source_state_root: value.source_state_root,
+            source_application_profile_commitment: value.source_application_profile_commitment,
+            target_config: SessionConfigWire::from(&value.target_config),
+        }
+    }
+}
+
+impl TryFrom<SuccessorDeclarationWire> for SuccessorDeclaration {
+    type Error = SessionError;
+
+    fn try_from(value: SuccessorDeclarationWire) -> Result<Self> {
+        let declaration = Self {
+            source_session_id: value.source_session_id,
+            source_height: value.source_height,
+            source_state_root: value.source_state_root,
+            source_application_profile_commitment: value.source_application_profile_commitment,
+            target_config: SessionConfig::try_from(value.target_config)?,
+        };
+        declaration.validate()?;
+        Ok(declaration)
+    }
 }
 
 impl TryFrom<&FinalisedBlockRecord> for FinalisedBlockWire {
@@ -1429,6 +2097,12 @@ impl TryFrom<&FinalisedBlockRecord> for FinalisedBlockWire {
             transactions: value.transactions.clone(),
             state_snapshot: value.state_snapshot.clone(),
             outbox: value.outbox.clone(),
+            frame: value.frame.clone(),
+            frame_input: value.frame_input.clone(),
+            successor: value.successor.as_ref().map(SuccessorDeclarationWire::from),
+            issued_handoffs: value.issued_handoffs.clone(),
+            consumed_handoff_ids: value.consumed_handoff_ids.clone(),
+            request_data_commitments: value.request_data_commitments.clone(),
         })
     }
 }
@@ -1444,6 +2118,12 @@ impl TryFrom<FinalisedBlockWire> for FinalisedBlockRecord {
             transactions: value.transactions,
             state_snapshot: value.state_snapshot,
             outbox: value.outbox,
+            frame: value.frame,
+            frame_input: value.frame_input,
+            successor: value.successor.map(SuccessorDeclaration::try_from).transpose()?,
+            issued_handoffs: value.issued_handoffs,
+            consumed_handoff_ids: value.consumed_handoff_ids,
+            request_data_commitments: value.request_data_commitments,
         })
     }
 }
@@ -1575,6 +2255,55 @@ mod tests {
         (Arc::new(TestFinalityVerifier(SelectedConsensus::ProofOfAuthority(ProofOfAuthority::new(config).unwrap()))), signer)
     }
 
+    fn application_profile() -> ApplicationProfile {
+        ApplicationProfile {
+            application_id: "myelin-test-application".to_owned(),
+            program_digest: [11; 32],
+            input_schema_hash: [12; 32],
+            state_codec_hash: [13; 32],
+            logical_time_policy_hash: [14; 32],
+            entropy_policy_hash: [15; 32],
+            vm: ApplicationVmProfile { spawn_ipc_required: false },
+            resources: ApplicationResourceEnvelope {
+                max_frame_inputs: 1_000,
+                max_frame_input_bytes: 1_000_000,
+                max_frame_cycles: 10_000_000,
+                max_logical_time_span: 1_000_000,
+                max_inspect_query_bytes: 1_024,
+                max_inspect_result_bytes: 4_096,
+            },
+            court_profile_hash: [16; 32],
+            handoff_policy_hash: [17; 32],
+        }
+    }
+
+    fn frame_input(input_count: u64) -> FrameInput {
+        FrameInput {
+            start_position: 0,
+            end_position: input_count,
+            logical_time_start: 0,
+            logical_time_end: input_count,
+            payload: if input_count == 0 { Vec::new() } else { b"canonical-test-input".to_vec() },
+        }
+    }
+
+    struct TestInspector {
+        expected_root: Hash32,
+        result_bytes: Option<usize>,
+    }
+
+    impl InspectPort for TestInspector {
+        fn inspect(&self, context: &InspectContext<'_>, snapshot: &[u8], query: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            assert_eq!(context.state_root, self.expected_root);
+            if let Some(result_bytes) = self.result_bytes {
+                return Ok(vec![0; result_bytes]);
+            }
+            let mut result = snapshot.len().to_le_bytes().to_vec();
+            result.extend_from_slice(query);
+            Ok(result)
+        }
+    }
+
     #[test]
     fn continuous_chain_advances_and_recovers() {
         let (executor, input) = seeded_executor();
@@ -1587,7 +2316,12 @@ mod tests {
             consensus_config_commitment: verifier.descriptor().config_commitment,
             consensus_module_commitment: verifier.descriptor().commitment(),
             consensus_wal_schema_hash: verifier.descriptor().wal_schema_hash,
+            application_profile: application_profile(),
             initial_state_root: root,
+            initial_input_position: 0,
+            initial_logical_time: 0,
+            initial_timestamp_ms: 0,
+            predecessor: None,
             max_block_transactions: 100,
             max_block_bytes: 1_000_000,
             max_future_drift_ms: 1_000,
@@ -1597,10 +2331,14 @@ mod tests {
         let prepared = chain
             .prepare_block(BlockRequest {
                 transactions: vec![serialize_transaction_molecule(&tx).unwrap()],
+                frame_input: frame_input(1),
                 scheduler_commitment: [5; 32],
                 data_commitments: vec![],
                 timestamp_ms: 10,
                 local_now_ms: 10,
+                successor: None,
+                handoffs: vec![],
+                consume_handoffs: vec![],
             })
             .unwrap();
         let engine = match &verifier.0 {
@@ -1611,6 +2349,28 @@ mod tests {
         let head = chain.commit_finalised(prepared, FinalityProof::ProofOfAuthority(seal)).unwrap();
         assert_eq!(head.finalised_height, Some(0));
         assert_ne!(head.state_root, root);
+        let inspection_head = chain.head().clone();
+        let stored_blocks = store.inner.lock().unwrap().chain.len();
+        let inspection = chain
+            .inspect_head(&TestInspector { expected_root: inspection_head.state_root, result_bytes: None }, b"live-cells")
+            .unwrap();
+        assert_eq!(inspection.state_root, head.state_root);
+        assert_eq!(chain.head(), &inspection_head);
+        assert_eq!(store.inner.lock().unwrap().chain.len(), stored_blocks);
+        assert!(chain
+            .inspect_head(&TestInspector { expected_root: inspection_head.state_root, result_bytes: Some(5_000) }, b"too-large-result")
+            .is_err());
+        assert!(chain
+            .inspect_head(&TestInspector { expected_root: inspection_head.state_root, result_bytes: Some(0) }, &[0; 2_000])
+            .is_err());
+        let replay = chain
+            .replay_range(0, 0, |snapshot| {
+                CellTransitionExecutor::from_snapshot(snapshot, Arc::new(|_: &CellTx, _: &[ResolvedStateInput]| Ok(10)))
+            })
+            .unwrap();
+        assert_eq!(replay.state_root_before, root);
+        assert_eq!(replay.state_root_after, head.state_root);
+        assert_eq!(replay.total_cycles, 10);
 
         let (_, snapshot) = SessionChain::<CellTransitionExecutor, MemoryStore>::recovery_snapshot(&store, [4; 32]).unwrap();
         let restored =
@@ -1622,12 +2382,24 @@ mod tests {
             })
             .unwrap(),
         )));
+        let mut wrong_profile = application_profile();
+        wrong_profile.program_digest = [99; 32];
         assert!(matches!(
-            SessionChain::recover([4; 32], wrong_verifier, restored.clone(), Arc::clone(&store)),
+            SessionChain::recover([4; 32], &wrong_profile, verifier.clone(), restored.clone(), Arc::clone(&store)),
+            Err(SessionError::Recovery(_))
+        ));
+        assert!(matches!(
+            SessionChain::recover([4; 32], &application_profile(), wrong_verifier, restored.clone(), Arc::clone(&store)),
             Err(SessionError::InvalidConfig(_))
         ));
-        let recovered = SessionChain::recover([4; 32], verifier, restored, store).unwrap();
+        let recovered = SessionChain::recover([4; 32], &application_profile(), verifier, restored, Arc::clone(&store)).unwrap();
         assert_eq!(recovered.head(), &head);
+        store.inner.lock().unwrap().chain[0].frame_input.payload[0] ^= 1;
+        assert!(recovered
+            .replay_range(0, 0, |snapshot| {
+                CellTransitionExecutor::from_snapshot(snapshot, Arc::new(|_: &CellTx, _: &[ResolvedStateInput]| Ok(10)))
+            })
+            .is_err());
     }
 
     #[test]
@@ -1648,7 +2420,12 @@ mod tests {
             consensus_config_commitment: [3; 32],
             consensus_module_commitment: [4; 32],
             consensus_wal_schema_hash: [5; 32],
+            application_profile: application_profile(),
             initial_state_root: [2; 32],
+            initial_input_position: 0,
+            initial_logical_time: 0,
+            initial_timestamp_ms: 0,
+            predecessor: None,
             max_block_transactions: 10,
             max_block_bytes: 100,
             max_future_drift_ms: 1,
@@ -1660,23 +2437,24 @@ mod tests {
     }
 
     #[test]
-    fn binary_record_codec_reads_legacy_json_v4() {
+    fn binary_record_codec_rejects_noncanonical_internal_formats() {
         let config = SessionConfig {
             session_id: [1; 32],
             consensus_kind: ConsensusKind::ProofOfAuthority,
             consensus_config_commitment: [3; 32],
             consensus_module_commitment: [4; 32],
             consensus_wal_schema_hash: [5; 32],
+            application_profile: application_profile(),
             initial_state_root: [2; 32],
+            initial_input_position: 0,
+            initial_logical_time: 0,
+            initial_timestamp_ms: 0,
+            predecessor: None,
             max_block_transactions: 10,
             max_block_bytes: 100,
             max_future_drift_ms: 1,
         };
-        let body = SessionConfigWire::from(&config);
-        let checksum = *blake3::hash(&serde_json::to_vec(&body).unwrap()).as_bytes();
-        let legacy =
-            serde_json::to_vec(&RecordEnvelope { format_version: LEGACY_JSON_RECORD_FORMAT_VERSION, body, checksum }).unwrap();
-        assert_eq!(SessionConfig::decode(&legacy).unwrap(), config);
+        assert!(SessionConfig::decode(br#"{"format_version":4}"#).is_err());
         assert!(config.encode().unwrap().starts_with(RECORD_MAGIC));
     }
 
@@ -1711,7 +2489,12 @@ mod tests {
             consensus_config_commitment: descriptor.config_commitment,
             consensus_module_commitment: descriptor.commitment(),
             consensus_wal_schema_hash: descriptor.wal_schema_hash,
+            application_profile: application_profile(),
             initial_state_root: executor.state_root(),
+            initial_input_position: 0,
+            initial_logical_time: 0,
+            initial_timestamp_ms: 0,
+            predecessor: None,
             max_block_transactions: 1,
             max_block_bytes: 1,
             max_future_drift_ms: 1,
@@ -1720,10 +2503,14 @@ mod tests {
         let prepared = chain
             .prepare_block(BlockRequest {
                 transactions: vec![],
+                frame_input: frame_input(0),
                 scheduler_commitment: [5; 32],
                 data_commitments: vec![],
                 timestamp_ms: 1,
                 local_now_ms: 1,
+                successor: None,
+                handoffs: vec![],
+                consume_handoffs: vec![],
             })
             .unwrap();
         let proof = FinalityProof::ProofOfAuthority(ProofOfAuthoritySeal {
@@ -1751,7 +2538,12 @@ mod tests {
                 consensus_config_commitment: descriptor.config_commitment,
                 consensus_module_commitment: descriptor.commitment(),
                 consensus_wal_schema_hash: descriptor.wal_schema_hash,
+                application_profile: application_profile(),
                 initial_state_root: executor.state_root(),
+                initial_input_position: 0,
+                initial_logical_time: 0,
+                initial_timestamp_ms: 0,
+                predecessor: None,
                 max_block_transactions: 10,
                 max_block_bytes: 1_000_000,
                 max_future_drift_ms: 1,
@@ -1761,10 +2553,14 @@ mod tests {
                 chain
                     .prepare_block(BlockRequest {
                         transactions: vec![transaction.clone()],
+                        frame_input: frame_input(1),
                         scheduler_commitment: [5; 32],
                         data_commitments: vec![[6; 32]],
                         timestamp_ms: 1,
                         local_now_ms: 1,
+                        successor: None,
+                        handoffs: vec![],
+                        consume_handoffs: vec![],
                     })
                     .unwrap()
                     .block()

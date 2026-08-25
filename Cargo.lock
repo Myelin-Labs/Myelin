@@ -1620,6 +1620,8 @@ dependencies = [
  "myelin-exec",
  "myelin-hashes",
  "myelin-mempool",
+ "myelin-session",
+ "myelin-session-store-rocksdb",
  "myelin-state",
  "rand 0.8.7",
  "reqwest",
@@ -1746,7 +1748,6 @@ dependencies = [
  "myelin-state",
  "postcard",
  "serde",
- "serde_json",
  "tempfile",
  "thiserror 1.0.69",
 ]
@@ -1814,6 +1815,7 @@ version = "0.10.0"
 dependencies = [
  "blake3",
  "myelin-consensus",
+ "myelin-exec",
  "myelin-session",
  "myelin-session-network",
  "myelin-session-runtime",

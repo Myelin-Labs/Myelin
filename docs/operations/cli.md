@@ -103,6 +103,9 @@ This is the largest subcommand surface. It maps 1:1 onto the
 | `session verify-submission-stability` | Step 5 (stability) |
 | `session verify-submission-finality` | Step 6 (finality) |
 | `session verify-submission-readiness` | Aggregate readiness |
+| `session lineage-status` | Show application/config commitments, predecessor, head cursor, and successor seal from RocksDB |
+| `session evidence-status` | Show the exact locally verified receipt stages and next stage for one outbox message |
+| `session handoff-status` | Show a source-committed handoff, its gate/expiry, and atomic consumption marker |
 
 ### Common flags
 
@@ -119,9 +122,18 @@ This is the largest subcommand surface. It maps 1:1 onto the
 | `--court-economics-deployment-evidence <path>` | `settlement-package` | Bind checked mainnet court economics. |
 | `--threshold-lock-deployment-evidence <path>` | `settlement-package` | Bind checked mainnet threshold-lock deployment. |
 | `--chunk-index <n>` | `court-bundle` | Which chunk to dispute. |
+| `--store <path>` | `lineage-status`, `evidence-status`, `handoff-status` | RocksDB session-store directory. |
+| `--session-id <hex>` | `lineage-status`, `evidence-status` | Exact 32-byte session id. |
+| `--message-id <hex>` | `evidence-status` | Exact deterministic outbox message id. |
+| `--handoff-id <hex>` | `handoff-status` | Exact source-committed handoff id. |
 | `--min-fee-shannons`, `--min-fee-rate-shannons-per-kb`, `--max-fee-shannons` | `verify-submission-economics` | Fee policy. |
 | `--min-status <s>` | `verify-submission-inclusion` | Required CKB tx status. |
 | `--min-confirmations <n>` | `verify-submission-finality` | Required confirmation depth. |
+
+`session open` requires the exact application artifact and policy digests. Its
+report embeds the full `ApplicationProfile` and commitment. Commit and court
+reports embed the retained `FrameInput` and full `ExecutionFrame`; verification
+recomputes both commitments instead of trusting report labels.
 
 ## `teeworlds` — the reference workload
 

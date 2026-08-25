@@ -25,6 +25,11 @@ use myelin_exec::{
     CKB_SPAWN_IPC_SYSCALLS_ENABLED,
 };
 use myelin_mempool::CellPool;
+use myelin_session::{
+    ApplicationProfile, ApplicationResourceEnvelope, ApplicationVmProfile, ExecutionFrame, ExecutionResources, FrameInput,
+    SessionStore,
+};
+use myelin_session_store_rocksdb::RocksSessionStore;
 use myelin_state::{
     CellEntry, CellStateTree, DaCertificate, DaCertificateVerification, MerkleTreeBuilder, SegmentProof, SegmentReader, SegmentWriter,
     StateTransitionContext, StateTransitionEngine,
@@ -574,6 +579,44 @@ enum SessionCommand {
     VerifySubmissionEconomics(SessionVerifySubmissionEconomicsArgs),
     /// Aggregate submission context, economics, inclusion, stability, and finality into one readiness decision.
     VerifySubmissionReadiness(SessionVerifySubmissionReadinessArgs),
+    /// Inspect genesis, head, and predecessor/successor lineage in a durable session store.
+    LineageStatus(SessionLineageStatusArgs),
+    /// Inspect the locally verified receipt ladder for one outbox message.
+    EvidenceStatus(SessionEvidenceStatusArgs),
+    /// Inspect target, expiry, evidence gate, and one-time consumption of a handoff.
+    HandoffStatus(SessionHandoffStatusArgs),
+}
+
+#[derive(Debug, Args)]
+struct SessionLineageStatusArgs {
+    #[arg(long)]
+    store: PathBuf,
+    #[arg(long)]
+    session_id: String,
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionEvidenceStatusArgs {
+    #[arg(long)]
+    store: PathBuf,
+    #[arg(long)]
+    session_id: String,
+    #[arg(long)]
+    message_id: String,
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionHandoffStatusArgs {
+    #[arg(long)]
+    store: PathBuf,
+    #[arg(long)]
+    handoff_id: String,
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -581,6 +624,8 @@ struct SessionOpenArgs {
     /// Application/session kind identifier.
     #[arg(long, default_value = "myelin-session")]
     app_id: String,
+    #[command(flatten)]
+    application: SessionApplicationProfileArgs,
     /// Participant id. Repeat for multi-party sessions.
     #[arg(long = "participant", required = true)]
     participants: Vec<String>,
@@ -596,6 +641,38 @@ struct SessionOpenArgs {
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SessionApplicationProfileArgs {
+    #[arg(long)]
+    program_digest: String,
+    #[arg(long)]
+    input_schema_hash: String,
+    #[arg(long)]
+    state_codec_hash: String,
+    #[arg(long)]
+    logical_time_policy_hash: String,
+    #[arg(long)]
+    entropy_policy_hash: String,
+    #[arg(long)]
+    court_profile_hash: String,
+    #[arg(long)]
+    handoff_policy_hash: String,
+    #[arg(long)]
+    spawn_ipc_required: bool,
+    #[arg(long, default_value_t = 4_096)]
+    max_frame_inputs: u64,
+    #[arg(long, default_value_t = 16_777_216)]
+    max_frame_input_bytes: u64,
+    #[arg(long, default_value_t = 100_000_000)]
+    max_frame_cycles: u64,
+    #[arg(long, default_value_t = 86_400_000)]
+    max_logical_time_span: u64,
+    #[arg(long, default_value_t = 65_536)]
+    max_inspect_query_bytes: u64,
+    #[arg(long, default_value_t = 16_777_216)]
+    max_inspect_result_bytes: u64,
 }
 
 #[derive(Debug, Args)]
@@ -1544,8 +1621,83 @@ fn run() -> Result<()> {
                 )?;
                 write_json(args.out, &report)
             }
+            SessionCommand::LineageStatus(args) => {
+                let report = session_lineage_status(&args.store, &args.session_id)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::EvidenceStatus(args) => {
+                let report = session_evidence_status(&args.store, &args.session_id, &args.message_id)?;
+                write_json(args.out, &report)
+            }
+            SessionCommand::HandoffStatus(args) => {
+                let report = session_handoff_status(&args.store, &args.handoff_id)?;
+                write_json(args.out, &report)
+            }
         },
     }
+}
+
+fn session_lineage_status(store_path: &Path, session_id: &str) -> Result<Value> {
+    let session_id = parse_hex_32(session_id).ok_or_else(|| CliError::InvalidFixture("session_id must be 32-byte hex".to_owned()))?;
+    let store = RocksSessionStore::open(store_path).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let genesis = store.load_genesis(session_id).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let head = store.load_head(session_id).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    Ok(serde_json::json!({
+        "schema": "myelin-session-lineage-status",
+        "session_id": hex::encode(session_id),
+        "application_id": genesis.config.application_profile.application_id,
+        "application_profile_commitment": hex::encode(genesis.config.application_profile.commitment()),
+        "session_config_commitment": hex::encode(genesis.config.commitment()),
+        "predecessor": genesis.config.predecessor.map(|predecessor| serde_json::json!({
+            "session_id": hex::encode(predecessor.session_id),
+            "final_height": predecessor.final_height,
+            "final_state_root": hex::encode(predecessor.final_state_root),
+            "application_profile_commitment": hex::encode(predecessor.application_profile_commitment),
+        })),
+        "head": {
+            "finalised_height": head.finalised_height,
+            "block_hash": hex::encode(head.block_hash),
+            "state_root": hex::encode(head.state_root),
+            "input_position": head.input_position,
+            "logical_time": head.logical_time,
+            "timestamp_ms": head.timestamp_ms,
+            "sealed_by_successor": head.sealed_by_successor.map(hex::encode),
+        }
+    }))
+}
+
+fn session_evidence_status(store_path: &Path, session_id: &str, message_id: &str) -> Result<Value> {
+    let session_id = parse_hex_32(session_id).ok_or_else(|| CliError::InvalidFixture("session_id must be 32-byte hex".to_owned()))?;
+    let message_id = parse_hex_32(message_id).ok_or_else(|| CliError::InvalidFixture("message_id must be 32-byte hex".to_owned()))?;
+    let store = RocksSessionStore::open(store_path).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let record = store
+        .load_evidence(session_id, message_id)
+        .map_err(|error| CliError::InvalidFixture(error.to_string()))?
+        .ok_or_else(|| CliError::InvalidFixture("evidence record not found".to_owned()))?;
+    Ok(serde_json::json!({
+        "schema": "myelin-session-evidence-status",
+        "session_id": hex::encode(session_id),
+        "message_id": hex::encode(message_id),
+        "pipeline_commitment": hex::encode(record.descriptor.commitment()),
+        "complete": record.is_complete(),
+        "next_stage": record.next_stage().map(|stage| stage.name.clone()),
+        "record": record,
+    }))
+}
+
+fn session_handoff_status(store_path: &Path, handoff_id: &str) -> Result<Value> {
+    let handoff_id = parse_hex_32(handoff_id).ok_or_else(|| CliError::InvalidFixture("handoff_id must be 32-byte hex".to_owned()))?;
+    let store = RocksSessionStore::open(store_path).map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let stored = store
+        .load_handoff(handoff_id)
+        .map_err(|error| CliError::InvalidFixture(error.to_string()))?
+        .ok_or_else(|| CliError::InvalidFixture("handoff not found".to_owned()))?;
+    Ok(serde_json::json!({
+        "schema": "myelin-session-handoff-status",
+        "handoff_id": hex::encode(handoff_id),
+        "consumed": stored.is_consumed(),
+        "handoff": stored,
+    }))
 }
 
 fn ckb_prove(args: CkbProveArgs) -> Result<CkbEvidenceProjection> {
@@ -2312,6 +2464,8 @@ struct TeeworldsVmProbeReport {
 struct TeeworldsBundleBlock {
     /// Block format version.
     version: u32,
+    /// Session identity committed by the block hash.
+    session_id: String,
     /// Parent block hash (zero for the session genesis block).
     parent_hash: String,
     /// Session-local block number.
@@ -2320,6 +2474,10 @@ struct TeeworldsBundleBlock {
     timestamp_ms: u64,
     /// Consensus engine kind: "static-closed-committee" or "tendermint".
     consensus_kind: String,
+    /// Genesis-bound application program/schema/policy commitment.
+    application_profile_commitment: String,
+    /// Commitment to the exact input range and measured execution frame.
+    execution_frame_commitment: String,
     /// State root before the block's transitions.
     state_root_before: String,
     /// State root after the block's transitions.
@@ -2354,10 +2512,13 @@ impl TeeworldsBundleBlock {
             self.data_commitments.iter().map(|h| parse_32(h, "data_commitments")).collect::<std::result::Result<Vec<_>, String>>()?;
         Ok(MyelinBlock {
             version: self.version,
+            session_id: parse_32(&self.session_id, "session_id")?,
             parent_hash: parse_32(&self.parent_hash, "parent_hash")?,
             number: self.number,
             timestamp_ms: self.timestamp_ms,
             consensus_kind,
+            application_profile_commitment: parse_32(&self.application_profile_commitment, "application_profile_commitment")?,
+            execution_frame_commitment: parse_32(&self.execution_frame_commitment, "execution_frame_commitment")?,
             state_root_before: parse_32(&self.state_root_before, "state_root_before")?,
             state_root_after: parse_32(&self.state_root_after, "state_root_after")?,
             ordered_cell_tx_commitments,
@@ -2866,6 +3027,12 @@ fn teeworlds_court_bundle(
     let new_state_root = blake3_chunks(b"myelin:teeworlds-new-state-root", &[&old_state_root, &commitment, &map_hash, &config_hash]);
     let chunk_payload_hash = blake3_32(b"myelin:teeworlds-chunk-payload", chunk);
     let scheduler_report_hash = blake3_chunks(b"myelin:teeworlds-scheduler-report", &[&session_id, &index_bytes, &commitment]);
+    let application_profile_commitment =
+        blake3_chunks(b"myelin:teeworlds-application-profile", &[&fixture_hash, &map_hash, &config_hash]);
+    let execution_frame_commitment = blake3_chunks(
+        b"myelin:teeworlds-execution-frame",
+        &[&session_id, &index_bytes, &chunk_payload_hash, &old_state_root, &new_state_root, &tx.id()],
+    );
 
     // Build the canonical MyelinBlock from the runtime evidence. This is
     // the data-binding anchor: every field below is derived from the
@@ -2874,10 +3041,13 @@ fn teeworlds_court_bundle(
     // these exact fields.
     let canonical_block = MyelinBlock {
         version: 1,
+        session_id,
         parent_hash: [0; 32],
         number: 1,
         timestamp_ms: 0,
         consensus_kind,
+        application_profile_commitment,
+        execution_frame_commitment,
         state_root_before: old_state_root,
         state_root_after: new_state_root,
         ordered_cell_tx_commitments: vec![tx.id()],
@@ -3021,10 +3191,13 @@ fn teeworlds_court_bundle(
 
     let bundle_block = TeeworldsBundleBlock {
         version: canonical_block.version,
+        session_id: hex::encode(canonical_block.session_id),
         parent_hash: hex::encode(canonical_block.parent_hash),
         number: canonical_block.number,
         timestamp_ms: canonical_block.timestamp_ms,
         consensus_kind: canonical_block.consensus_kind.as_str().to_string(),
+        application_profile_commitment: hex::encode(canonical_block.application_profile_commitment),
+        execution_frame_commitment: hex::encode(canonical_block.execution_frame_commitment),
         state_root_before: hex::encode(canonical_block.state_root_before),
         state_root_after: hex::encode(canonical_block.state_root_after),
         ordered_cell_tx_commitments: canonical_block.ordered_cell_tx_commitments.iter().map(hex::encode).collect(),
@@ -3635,10 +3808,13 @@ fn finalise_teeworlds_fixture_block(chunks: &[TeeworldsChunkReport], consensus_k
         ConsensusKind::Tendermint => {
             let weighted_precommit_block = MyelinBlock {
                 version: 1,
+                session_id: [1; 32],
                 parent_hash: [0; 32],
                 number: 1,
                 timestamp_ms: 0,
                 consensus_kind: ConsensusKind::WeightedPrecommit,
+                application_profile_commitment: [10; 32],
+                execution_frame_commitment: [11; 32],
                 state_root_before: [0; 32],
                 state_root_after: [9; 32],
                 ordered_cell_tx_commitments: vec![[7; 32]],
@@ -3764,10 +3940,13 @@ fn static_committee_evidence_for_commitments(data_commitments: Vec<[u8; 32]>) ->
 fn demo_block(data_commitments: Vec<[u8; 32]>, consensus_kind: ConsensusKind) -> MyelinBlock {
     MyelinBlock {
         version: 1,
+        session_id: [1; 32],
         parent_hash: [0; 32],
         number: 1,
         timestamp_ms: 0,
         consensus_kind,
+        application_profile_commitment: [10; 32],
+        execution_frame_commitment: [11; 32],
         state_root_before: [0; 32],
         state_root_after: [9; 32],
         ordered_cell_tx_commitments: vec![[7; 32]],
@@ -6240,6 +6419,8 @@ struct SessionOpenReport {
     session_lineage_commitment: String,
     timeout_ms: u64,
     initial_state_root: String,
+    application_profile: ApplicationProfile,
+    application_profile_commitment: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6257,6 +6438,8 @@ struct SessionOpenInput {
     session_lineage_commitment: String,
     timeout_ms: u64,
     initial_state_root: String,
+    application_profile: ApplicationProfile,
+    application_profile_commitment: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6273,7 +6456,7 @@ struct SessionCommitReport {
     session_id: String,
     chunk_index: u64,
     consensus_kind: &'static str,
-    vm_profile: &'static str,
+    vm_profile: String,
     ckb_spawn_ipc_required: bool,
     participant_set_hash: String,
     escrow_input_cells_hash: String,
@@ -6294,6 +6477,9 @@ struct SessionCommitReport {
     proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceReport>,
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceReport>,
     finalised: bool,
+    application_profile: ApplicationProfile,
+    frame_input: FrameInput,
+    execution_frame: ExecutionFrame,
 }
 
 /// Report emitted by `session commit-multi`.
@@ -6308,7 +6494,7 @@ struct SessionCommitMultiReport {
     session_id: String,
     chunk_index: u64,
     consensus_kind: &'static str,
-    vm_profile: &'static str,
+    vm_profile: String,
     ckb_spawn_ipc_required: bool,
     tx_count: usize,
     /// Per-layer NodeId lists (NodeIds are indices into `ordered_cell_tx_commitments`).
@@ -6333,6 +6519,9 @@ struct SessionCommitMultiReport {
     proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceReport>,
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceReport>,
     finalised: bool,
+    application_profile: ApplicationProfile,
+    frame_input: FrameInput,
+    execution_frame: ExecutionFrame,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6358,6 +6547,9 @@ struct SessionCommitInput {
     proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceInput>,
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceInput>,
     finalised: bool,
+    application_profile: ApplicationProfile,
+    frame_input: FrameInput,
+    execution_frame: ExecutionFrame,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -6366,7 +6558,7 @@ struct SessionCourtBundleReport {
     session_id: String,
     chunk_index: u64,
     consensus_kind: &'static str,
-    vm_profile: &'static str,
+    vm_profile: String,
     ckb_spawn_ipc_required: bool,
     participant_set_hash: String,
     escrow_input_cells_hash: String,
@@ -6387,6 +6579,9 @@ struct SessionCourtBundleReport {
     court_verifiable: bool,
     l1_court_implemented: bool,
     notes: Vec<String>,
+    application_profile: ApplicationProfile,
+    frame_input: FrameInput,
+    execution_frame: ExecutionFrame,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6414,6 +6609,9 @@ struct SessionCourtBundleInput {
     proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceInput>,
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceInput>,
     court_verifiable: bool,
+    application_profile: ApplicationProfile,
+    frame_input: FrameInput,
+    execution_frame: ExecutionFrame,
 }
 
 #[derive(Debug, Serialize)]
@@ -7193,22 +7391,26 @@ fn session_open_fixture(consensus: &str) -> Result<SessionOpenReport> {
             lock_hash: fixture_lock_hash,
         },
     ];
-    session_open_report(consensus, "myelin-session-fixture", participants, escrow_input_cells, 60_000)
+    let application_profile = fixture_application_profile("myelin-session-fixture");
+    session_open_report(consensus, application_profile, participants, escrow_input_cells, 60_000)
 }
 
 fn session_open(args: SessionOpenArgs) -> Result<SessionOpenReport> {
     let escrow_input_cells = args.escrow_cells.iter().map(|value| parse_session_escrow_cell(value)).collect::<Result<Vec<_>>>()?;
-    session_open_report(&args.consensus, &args.app_id, args.participants, escrow_input_cells, args.timeout_ms)
+    let application_profile = session_application_profile_from_args(&args.app_id, args.application)?;
+    session_open_report(&args.consensus, application_profile, args.participants, escrow_input_cells, args.timeout_ms)
 }
 
 fn session_open_report(
     consensus: &str,
-    app_id: &str,
+    application_profile: ApplicationProfile,
     participants: Vec<String>,
     escrow_input_cells: Vec<SessionEscrowCellReport>,
     timeout_ms: u64,
 ) -> Result<SessionOpenReport> {
     let consensus_kind = parse_session_consensus(consensus)?;
+    application_profile.validate().map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    let app_id = application_profile.application_id.as_str();
     if app_id.trim().is_empty() {
         return Err(CliError::InvalidFixture("session app-id must be non-empty".to_owned()));
     }
@@ -7227,16 +7429,17 @@ fn session_open_report(
 
     let mut tree = session_state_from_escrow_reports(&escrow_input_cells)?;
     let initial_state_root = *tree.root().as_ref();
-    let vm_profile = "ckb-strict-basic";
-    let session_id = session_id_from_parts(app_id, vm_profile, &participants, &escrow_input_cells, initial_state_root);
-    let lineage = session_lineage_commitments(app_id, vm_profile, &participants, &escrow_input_cells, initial_state_root);
+    let vm_profile = ckb_vm_profile_label(application_profile.vm.spawn_ipc_required);
+    let profile_commitment = application_profile.commitment();
+    let session_id = session_id_from_parts(app_id, profile_commitment, &participants, &escrow_input_cells, initial_state_root);
+    let lineage = session_lineage_commitments(app_id, profile_commitment, &participants, &escrow_input_cells, initial_state_root);
 
     Ok(SessionOpenReport {
         schema: "myelin-session-open",
         session_id: hex::encode(session_id),
         app_id: app_id.to_owned(),
         vm_profile,
-        ckb_spawn_ipc_required: false,
+        ckb_spawn_ipc_required: application_profile.vm.spawn_ipc_required,
         consensus_kind: consensus_kind.as_str(),
         participants,
         escrow_input_cells,
@@ -7245,7 +7448,58 @@ fn session_open_report(
         session_lineage_commitment: hex::encode(lineage.session_lineage_commitment),
         timeout_ms,
         initial_state_root: hex::encode(initial_state_root),
+        application_profile,
+        application_profile_commitment: hex::encode(profile_commitment),
     })
+}
+
+fn session_application_profile_from_args(app_id: &str, args: SessionApplicationProfileArgs) -> Result<ApplicationProfile> {
+    let parse =
+        |value: &str, name: &str| parse_hex_32(value).ok_or_else(|| CliError::InvalidFixture(format!("{name} must be 32-byte hex")));
+    let profile = ApplicationProfile {
+        application_id: app_id.to_owned(),
+        program_digest: parse(&args.program_digest, "program_digest")?,
+        input_schema_hash: parse(&args.input_schema_hash, "input_schema_hash")?,
+        state_codec_hash: parse(&args.state_codec_hash, "state_codec_hash")?,
+        logical_time_policy_hash: parse(&args.logical_time_policy_hash, "logical_time_policy_hash")?,
+        entropy_policy_hash: parse(&args.entropy_policy_hash, "entropy_policy_hash")?,
+        vm: ApplicationVmProfile { spawn_ipc_required: args.spawn_ipc_required },
+        resources: ApplicationResourceEnvelope {
+            max_frame_inputs: args.max_frame_inputs,
+            max_frame_input_bytes: args.max_frame_input_bytes,
+            max_frame_cycles: args.max_frame_cycles,
+            max_logical_time_span: args.max_logical_time_span,
+            max_inspect_query_bytes: args.max_inspect_query_bytes,
+            max_inspect_result_bytes: args.max_inspect_result_bytes,
+        },
+        court_profile_hash: parse(&args.court_profile_hash, "court_profile_hash")?,
+        handoff_policy_hash: parse(&args.handoff_policy_hash, "handoff_policy_hash")?,
+    };
+    profile.validate().map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    Ok(profile)
+}
+
+fn fixture_application_profile(app_id: &str) -> ApplicationProfile {
+    let hash = |label: &[u8]| blake3_chunks(b"myelin:session-fixture-application-artifact", &[app_id.as_bytes(), label]);
+    ApplicationProfile {
+        application_id: app_id.to_owned(),
+        program_digest: hash(b"program"),
+        input_schema_hash: hash(b"input-schema"),
+        state_codec_hash: hash(b"state-codec"),
+        logical_time_policy_hash: hash(b"logical-time"),
+        entropy_policy_hash: hash(b"entropy"),
+        vm: ApplicationVmProfile { spawn_ipc_required: false },
+        resources: ApplicationResourceEnvelope {
+            max_frame_inputs: 4_096,
+            max_frame_input_bytes: 16_777_216,
+            max_frame_cycles: 100_000_000,
+            max_logical_time_span: 86_400_000,
+            max_inspect_query_bytes: 65_536,
+            max_inspect_result_bytes: 16_777_216,
+        },
+        court_profile_hash: hash(b"court"),
+        handoff_policy_hash: hash(b"handoff"),
+    }
 }
 
 fn session_commit_fixture(path: PathBuf) -> Result<SessionCommitReport> {
@@ -7272,11 +7526,17 @@ fn load_and_validate_session_open(path: PathBuf) -> Result<ValidatedSessionOpen>
     if session.timeout_ms == 0 {
         return Err(CliError::InvalidFixture("session timeout_ms must be non-zero".to_owned()));
     }
-    if session.vm_profile != "ckb-strict-basic" {
-        return Err(CliError::InvalidFixture(format!("session vm_profile must be ckb-strict-basic, got {}", session.vm_profile)));
-    }
-    if session.ckb_spawn_ipc_required {
-        return Err(CliError::InvalidFixture("session fixture must not require spawn/IPC".to_owned()));
+    session.application_profile.validate().map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    if session.application_profile.application_id != session.app_id
+        || session.vm_profile != ckb_vm_profile_label(session.application_profile.vm.spawn_ipc_required)
+        || session.application_profile.vm.spawn_ipc_required != session.ckb_spawn_ipc_required
+        || session.application_profile.commitment()
+            != parse_hex_32(&session.application_profile_commitment)
+                .ok_or_else(|| CliError::InvalidFixture("application_profile_commitment must be 32-byte hex".to_owned()))?
+    {
+        return Err(CliError::InvalidFixture(
+            "session application profile does not match its declared identity or commitment".to_owned(),
+        ));
     }
     let consensus_kind = parse_session_consensus(&session.consensus_kind)?;
     let initial_state_root = parse_hex_32(&session.initial_state_root)
@@ -7295,10 +7555,11 @@ fn load_and_validate_session_open(path: PathBuf) -> Result<ValidatedSessionOpen>
     if state.root().as_bytes() != initial_state_root {
         return Err(CliError::InvalidFixture("initial_state_root does not commit the declared escrow live cells".to_owned()));
     }
+    let profile_commitment = session.application_profile.commitment();
     let expected_session_id =
-        session_id_from_parts(&session.app_id, &session.vm_profile, &session.participants, &escrow_reports, initial_state_root);
+        session_id_from_parts(&session.app_id, profile_commitment, &session.participants, &escrow_reports, initial_state_root);
     let expected_lineage =
-        session_lineage_commitments(&session.app_id, &session.vm_profile, &session.participants, &escrow_reports, initial_state_root);
+        session_lineage_commitments(&session.app_id, profile_commitment, &session.participants, &escrow_reports, initial_state_root);
     let session_id =
         parse_hex_32(&session.session_id).ok_or_else(|| CliError::InvalidFixture("session_id must be 32-byte hex".to_owned()))?;
     if expected_session_id != session_id {
@@ -7430,7 +7691,7 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
         .collect();
 
     let mut state_engine = StateTransitionEngine::new(state);
-    let state_root_before = *state_engine.state_root().as_ref();
+    let state_root_before: [u8; 32] = *state_engine.state_root().as_ref();
     if state_root_before != initial_state_root {
         return Err(CliError::InvalidFixture("session state reconstruction changed before multi-transaction apply".to_owned()));
     }
@@ -7439,13 +7700,63 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
             .apply_transaction(tx, StateTransitionContext::ordinary(1), |_, _| Ok::<_, String>(*cycles))
             .map_err(|error| CliError::InvalidFixture(format!("atomic multi-transaction apply: {error}")))?;
     }
-    let state_root_after = *state_engine.state_root().as_ref();
+    let state_root_after: [u8; 32] = *state_engine.state_root().as_ref();
+    let encoded_transactions = txs
+        .iter()
+        .map(|tx| serialize_transaction_molecule(tx).map_err(|error| CliError::InvalidFixture(error.to_string())))
+        .collect::<Result<Vec<_>>>()?;
+    let mut frame_payload = Vec::new();
+    for transaction in &encoded_transactions {
+        frame_payload.extend_from_slice(&(transaction.len() as u64).to_le_bytes());
+        frame_payload.extend_from_slice(transaction);
+    }
+    let frame_input = FrameInput {
+        start_position: chunk_index,
+        end_position: chunk_index.checked_add(1).ok_or_else(|| CliError::InvalidFixture("chunk index overflow".to_owned()))?,
+        logical_time_start: chunk_index,
+        logical_time_end: chunk_index
+            .checked_add(1)
+            .ok_or_else(|| CliError::InvalidFixture("chunk logical time overflow".to_owned()))?,
+        payload: frame_payload,
+    };
+    let total_cycles = per_tx_cycles
+        .iter()
+        .try_fold(0u64, |total, cycles| total.checked_add(*cycles))
+        .ok_or_else(|| CliError::InvalidFixture("execution cycle total overflow".to_owned()))?;
+    let total_transaction_bytes = encoded_transactions
+        .iter()
+        .try_fold(0u64, |total, transaction| total.checked_add(transaction.len() as u64))
+        .ok_or_else(|| CliError::InvalidFixture("transaction byte total overflow".to_owned()))?;
+    let execution_frame = ExecutionFrame {
+        session_id,
+        height: 0,
+        application_profile_commitment: session.application_profile.commitment(),
+        input_start: frame_input.start_position,
+        input_end: frame_input.end_position,
+        input_root: frame_input.root(),
+        logical_time_start: frame_input.logical_time_start,
+        logical_time_end: frame_input.logical_time_end,
+        state_root_before,
+        state_root_after,
+        ordered_cell_tx_commitments: txids.clone(),
+        resources: ExecutionResources {
+            cycles: total_cycles,
+            transaction_bytes: total_transaction_bytes,
+            input_bytes: frame_input.payload.len() as u64,
+        },
+    };
+    execution_frame
+        .validate(&session.application_profile, &frame_input)
+        .map_err(|error| CliError::InvalidFixture(error.to_string()))?;
     let block = MyelinBlock {
         version: 1,
+        session_id,
         parent_hash: [0; 32],
-        number: 1,
+        number: 0,
         timestamp_ms: 0,
         consensus_kind,
+        application_profile_commitment: session.application_profile.commitment(),
+        execution_frame_commitment: execution_frame.commitment(),
         state_root_before,
         state_root_after,
         ordered_cell_tx_commitments: txids,
@@ -7461,8 +7772,8 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
         session_id: hex::encode(session_id),
         chunk_index,
         consensus_kind: consensus_kind.as_str(),
-        vm_profile: "ckb-strict-basic",
-        ckb_spawn_ipc_required: false,
+        vm_profile: ckb_vm_profile_label(session.application_profile.vm.spawn_ipc_required).to_owned(),
+        ckb_spawn_ipc_required: session.application_profile.vm.spawn_ipc_required,
         tx_count,
         dag_layers,
         dag_layer_count,
@@ -7481,6 +7792,9 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
         proof_of_authority_evidence,
         weighted_precommit_evidence,
         finalised: true,
+        application_profile: session.application_profile,
+        frame_input,
+        execution_frame,
     })
 }
 
@@ -7535,21 +7849,54 @@ fn session_commit_from_open(path: PathBuf, chunk_index: u64) -> Result<SessionCo
     let receipt = state_engine
         .apply_transaction(&tx, StateTransitionContext::ordinary(1), |candidate, _| verify(candidate))
         .map_err(|error| CliError::InvalidFixture(format!("atomic session transition: {error}")))?;
-    let state_root_before = *receipt.state_root_before.as_ref();
+    let state_root_before: [u8; 32] = *receipt.state_root_before.as_ref();
     if state_root_before != initial_state_root {
         return Err(CliError::InvalidFixture("session transition did not start from the escrow-committed state root".to_owned()));
     }
-    let state_root_after = *receipt.state_root_after.as_ref();
+    let state_root_after: [u8; 32] = *receipt.state_root_after.as_ref();
 
     let index_bytes = chunk_index.to_le_bytes();
     let data_commitment = blake3_chunks(b"myelin:session-fixture-data-commitment", &[&session_id, &index_bytes, &wtxid]);
     let scheduler_commitment = blake3_chunks(b"myelin:session-fixture-scheduler", &[&session_id, &index_bytes, &wtxid]);
+    let frame_input = FrameInput {
+        start_position: chunk_index,
+        end_position: chunk_index.checked_add(1).ok_or_else(|| CliError::InvalidFixture("chunk index overflow".to_owned()))?,
+        logical_time_start: chunk_index,
+        logical_time_end: chunk_index
+            .checked_add(1)
+            .ok_or_else(|| CliError::InvalidFixture("chunk logical time overflow".to_owned()))?,
+        payload: molecule_transaction.clone(),
+    };
+    let execution_frame = ExecutionFrame {
+        session_id,
+        height: 0,
+        application_profile_commitment: session.application_profile.commitment(),
+        input_start: frame_input.start_position,
+        input_end: frame_input.end_position,
+        input_root: frame_input.root(),
+        logical_time_start: frame_input.logical_time_start,
+        logical_time_end: frame_input.logical_time_end,
+        state_root_before,
+        state_root_after,
+        ordered_cell_tx_commitments: vec![txid],
+        resources: ExecutionResources {
+            cycles: receipt.cycles,
+            transaction_bytes: molecule_transaction.len() as u64,
+            input_bytes: frame_input.payload.len() as u64,
+        },
+    };
+    execution_frame
+        .validate(&session.application_profile, &frame_input)
+        .map_err(|error| CliError::InvalidFixture(error.to_string()))?;
     let block = MyelinBlock {
         version: 1,
+        session_id,
         parent_hash: [0; 32],
-        number: 1,
+        number: 0,
         timestamp_ms: 0,
         consensus_kind,
+        application_profile_commitment: session.application_profile.commitment(),
+        execution_frame_commitment: execution_frame.commitment(),
         state_root_before,
         state_root_after,
         ordered_cell_tx_commitments: vec![txid],
@@ -7565,8 +7912,8 @@ fn session_commit_from_open(path: PathBuf, chunk_index: u64) -> Result<SessionCo
         session_id: hex::encode(session_id),
         chunk_index,
         consensus_kind: consensus_kind.as_str(),
-        vm_profile: "ckb-strict-basic",
-        ckb_spawn_ipc_required: false,
+        vm_profile: ckb_vm_profile_label(session.application_profile.vm.spawn_ipc_required).to_owned(),
+        ckb_spawn_ipc_required: session.application_profile.vm.spawn_ipc_required,
         participant_set_hash: session.participant_set_hash,
         escrow_input_cells_hash: session.escrow_input_cells_hash,
         session_lineage_commitment: session.session_lineage_commitment,
@@ -7586,6 +7933,9 @@ fn session_commit_from_open(path: PathBuf, chunk_index: u64) -> Result<SessionCo
         proof_of_authority_evidence,
         weighted_precommit_evidence,
         finalised: true,
+        application_profile: session.application_profile,
+        frame_input,
+        execution_frame,
     })
 }
 
@@ -7598,8 +7948,11 @@ fn session_court_bundle(path: PathBuf, chunk_index: u64) -> Result<SessionCourtB
             commit.chunk_index
         )));
     }
-    if commit.vm_profile != "ckb-strict-basic" || commit.ckb_spawn_ipc_required {
-        return Err(CliError::InvalidFixture("session commit is not a minimal CKB-strict court profile".to_owned()));
+    commit.application_profile.validate().map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    if commit.vm_profile != ckb_vm_profile_label(commit.application_profile.vm.spawn_ipc_required)
+        || commit.ckb_spawn_ipc_required != commit.application_profile.vm.spawn_ipc_required
+    {
+        return Err(CliError::InvalidFixture("session commit VM label does not match its application profile".to_owned()));
     }
     if !commit.finalised {
         return Err(CliError::InvalidFixture("session commit must be finalised before court bundling".to_owned()));
@@ -7623,6 +7976,22 @@ fn session_court_bundle(path: PathBuf, chunk_index: u64) -> Result<SessionCourtB
     }
     let ckb_projection = TeeworldsChunkProjectionReport::from(project_cell_tx_to_ckb(&tx));
     let block = commit.block.to_myelin_block().map_err(|error| CliError::InvalidFixture(format!("session commit block: {error}")))?;
+    commit
+        .execution_frame
+        .validate(&commit.application_profile, &commit.frame_input)
+        .map_err(|error| CliError::InvalidFixture(error.to_string()))?;
+    if block.application_profile_commitment != commit.application_profile.commitment()
+        || block.execution_frame_commitment != commit.execution_frame.commitment()
+        || block.session_id != commit.execution_frame.session_id
+        || block.number != commit.execution_frame.height
+        || block.state_root_before != commit.execution_frame.state_root_before
+        || block.state_root_after != commit.execution_frame.state_root_after
+        || block.ordered_cell_tx_commitments != commit.execution_frame.ordered_cell_tx_commitments
+    {
+        return Err(CliError::InvalidFixture(
+            "session commit block does not match its application profile and execution frame".to_owned(),
+        ));
+    }
     let block_hash = block.hash();
     let supplied_block_hash = parse_hex_32(&commit.block.block_hash)
         .ok_or_else(|| CliError::InvalidFixture("commit block_hash must be 32-byte hex".to_owned()))?;
@@ -7670,8 +8039,8 @@ fn session_court_bundle(path: PathBuf, chunk_index: u64) -> Result<SessionCourtB
         session_id: commit.session_id,
         chunk_index,
         consensus_kind: consensus_kind.as_str(),
-        vm_profile: "ckb-strict-basic",
-        ckb_spawn_ipc_required: false,
+        vm_profile: commit.vm_profile,
+        ckb_spawn_ipc_required: commit.ckb_spawn_ipc_required,
         participant_set_hash: commit.participant_set_hash,
         escrow_input_cells_hash: commit.escrow_input_cells_hash,
         session_lineage_commitment: commit.session_lineage_commitment,
@@ -7694,6 +8063,9 @@ fn session_court_bundle(path: PathBuf, chunk_index: u64) -> Result<SessionCourtB
             "This is a deterministic Session L2 disputed-chunk court bundle.".to_owned(),
             "It proves the chunk can be replayed as a CKB-compatible CellTx; it is not yet an on-chain CKB court script.".to_owned(),
         ],
+        application_profile: commit.application_profile,
+        frame_input: commit.frame_input,
+        execution_frame: commit.execution_frame,
     })
 }
 
@@ -7711,19 +8083,28 @@ fn verify_session_court_bundle(path: PathBuf) -> Result<SessionCourtBundleVerifi
         "session court bundle schema is recognised",
     );
     let consensus_kind = parse_session_consensus(&bundle.consensus_kind)?;
+    let profile_valid = bundle.application_profile.validate().is_ok();
+    push_check(
+        &mut checks,
+        "application-profile",
+        profile_valid,
+        Some("valid genesis-bound profile".to_owned()),
+        Some(hex::encode(bundle.application_profile.commitment())),
+        "application profile is complete and internally valid",
+    );
     push_check(
         &mut checks,
         "vm-profile",
-        bundle.vm_profile == "ckb-strict-basic",
-        Some("ckb-strict-basic".to_owned()),
+        bundle.vm_profile == ckb_vm_profile_label(bundle.application_profile.vm.spawn_ipc_required),
+        Some(ckb_vm_profile_label(bundle.application_profile.vm.spawn_ipc_required).to_owned()),
         Some(bundle.vm_profile.clone()),
         "session court bundles use the minimal CKB-strict VM profile",
     );
     push_check(
         &mut checks,
         "ckb-spawn-ipc-not-required",
-        !bundle.ckb_spawn_ipc_required,
-        Some("false".to_owned()),
+        bundle.ckb_spawn_ipc_required == bundle.application_profile.vm.spawn_ipc_required,
+        Some(bundle.application_profile.vm.spawn_ipc_required.to_string()),
         Some(bundle.ckb_spawn_ipc_required.to_string()),
         "session court replay must not require the advanced spawn/IPC profile",
     );
@@ -7767,6 +8148,22 @@ fn verify_session_court_bundle(path: PathBuf) -> Result<SessionCourtBundleVerifi
     );
 
     let block = bundle.block.to_myelin_block().map_err(|error| CliError::InvalidFixture(format!("session block: {error}")))?;
+    let frame_valid = bundle.execution_frame.validate(&bundle.application_profile, &bundle.frame_input).is_ok();
+    push_check(
+        &mut checks,
+        "execution-frame",
+        frame_valid
+            && block.application_profile_commitment == bundle.application_profile.commitment()
+            && block.execution_frame_commitment == bundle.execution_frame.commitment()
+            && block.session_id == bundle.execution_frame.session_id
+            && block.number == bundle.execution_frame.height
+            && block.state_root_before == bundle.execution_frame.state_root_before
+            && block.state_root_after == bundle.execution_frame.state_root_after
+            && block.ordered_cell_tx_commitments == bundle.execution_frame.ordered_cell_tx_commitments,
+        Some(hex::encode(bundle.execution_frame.commitment())),
+        Some(hex::encode(block.execution_frame_commitment)),
+        "block binds the complete application execution frame",
+    );
     let block_hash = block.hash();
     let supplied_block_hash = parse_hex_32(&bundle.block.block_hash)
         .ok_or_else(|| CliError::InvalidFixture("bundle block_hash must be 32-byte hex".to_owned()))?;
@@ -13487,7 +13884,7 @@ fn session_primary_escrow(session: &SessionOpenInput) -> Result<(OutPoint, u64)>
 
 fn session_id_from_parts(
     app_id: &str,
-    vm_profile: &str,
+    application_profile_commitment: [u8; 32],
     participants: &[String],
     escrow_input_cells: &[SessionEscrowCellReport],
     initial_state_root: [u8; 32],
@@ -13496,7 +13893,13 @@ fn session_id_from_parts(
     let escrow_bytes = session_escrow_input_cells_bytes(escrow_input_cells);
     blake3_chunks(
         b"myelin:session-id",
-        &[app_id.as_bytes(), vm_profile.as_bytes(), participant_bytes.as_bytes(), escrow_bytes.as_bytes(), &initial_state_root],
+        &[
+            app_id.as_bytes(),
+            &application_profile_commitment,
+            participant_bytes.as_bytes(),
+            escrow_bytes.as_bytes(),
+            &initial_state_root,
+        ],
     )
 }
 
@@ -13521,7 +13924,7 @@ fn session_escrow_input_cells_bytes(escrow_input_cells: &[SessionEscrowCellRepor
 
 fn session_lineage_commitments(
     app_id: &str,
-    vm_profile: &str,
+    application_profile_commitment: [u8; 32],
     participants: &[String],
     escrow_input_cells: &[SessionEscrowCellReport],
     initial_state_root: [u8; 32],
@@ -13532,7 +13935,7 @@ fn session_lineage_commitments(
     let escrow_input_cells_hash = blake3_32(b"myelin:session-escrow-input-cells", escrow_bytes.as_bytes());
     let session_lineage_commitment = blake3_chunks(
         b"myelin:session-lineage",
-        &[app_id.as_bytes(), vm_profile.as_bytes(), &participant_set_hash, &escrow_input_cells_hash, &initial_state_root],
+        &[app_id.as_bytes(), &application_profile_commitment, &participant_set_hash, &escrow_input_cells_hash, &initial_state_root],
     );
     SessionLineageCommitments { participant_set_hash, escrow_input_cells_hash, session_lineage_commitment }
 }
@@ -13769,10 +14172,13 @@ fn static_signature_report(signature: &CommitteeSignature) -> CommitteeSignature
 fn block_report_from_myelin_block(block: &MyelinBlock, block_hash: [u8; 32]) -> TeeworldsBundleBlock {
     TeeworldsBundleBlock {
         version: block.version,
+        session_id: hex::encode(block.session_id),
         parent_hash: hex::encode(block.parent_hash),
         number: block.number,
         timestamp_ms: block.timestamp_ms,
         consensus_kind: block.consensus_kind.as_str().to_string(),
+        application_profile_commitment: hex::encode(block.application_profile_commitment),
+        execution_frame_commitment: hex::encode(block.execution_frame_commitment),
         state_root_before: hex::encode(block.state_root_before),
         state_root_after: hex::encode(block.state_root_after),
         ordered_cell_tx_commitments: block.ordered_cell_tx_commitments.iter().map(hex::encode).collect(),
@@ -13919,10 +14325,13 @@ fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
     //    run the selected consensus engine to finalise it.
     let block = MyelinBlock {
         version: 1,
+        session_id: [1; 32],
         parent_hash: [0; 32],
         number: 1,
         timestamp_ms: 0,
         consensus_kind,
+        application_profile_commitment: [10; 32],
+        execution_frame_commitment: [11; 32],
         state_root_before: *state_root_before.as_ref(),
         state_root_after: *state_root_after.as_ref(),
         ordered_cell_tx_commitments: vec![txid],
@@ -15815,6 +16224,22 @@ mod tests {
         );
         let open = session_open(SessionOpenArgs {
             app_id: "myelin-custom-game-session".to_owned(),
+            application: SessionApplicationProfileArgs {
+                program_digest: hex::encode([1; 32]),
+                input_schema_hash: hex::encode([2; 32]),
+                state_codec_hash: hex::encode([3; 32]),
+                logical_time_policy_hash: hex::encode([4; 32]),
+                entropy_policy_hash: hex::encode([5; 32]),
+                court_profile_hash: hex::encode([6; 32]),
+                handoff_policy_hash: hex::encode([7; 32]),
+                spawn_ipc_required: false,
+                max_frame_inputs: 4_096,
+                max_frame_input_bytes: 16_777_216,
+                max_frame_cycles: 100_000_000,
+                max_logical_time_span: 86_400_000,
+                max_inspect_query_bytes: 65_536,
+                max_inspect_result_bytes: 16_777_216,
+            },
             participants: vec!["alice".to_owned(), "bob".to_owned(), "carol".to_owned()],
             escrow_cells: vec![format!("{alice_tx}:0:1200:{fixture_lock}"), format!("{bob_tx}:2:2400:{fixture_lock}")],
             timeout_ms: 90_000,
@@ -20322,7 +20747,7 @@ mod tests {
         let poa = commit.proof_of_authority_evidence.as_ref().expect("PoA evidence");
         assert_eq!(poa.consensus_kind, "proof-of-authority");
         assert_eq!(poa.certificate_step, "seal");
-        assert_eq!(poa.authority_id, "validator-1");
+        assert_eq!(poa.authority_id, "validator-0");
         assert!(poa.finalised);
 
         let commit_path = write_temp_json("myelin-session-commit-poa", &commit);
