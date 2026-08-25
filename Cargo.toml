@@ -23,7 +23,7 @@ members = [
 
 [workspace.package]
 rust-version = "1.85.0"
-version = "0.20.0"
+version = "0.21.0"
 authors = ["Myelin Network contributors"]
 license = "MIT"
 repository = "https://github.com/Myelin-Labs/Myelin"
@@ -42,24 +42,24 @@ include = [
 [workspace.dependencies]
 blake3 = { version = "1.8.2"}
 log = "0.4.20"
-myelin-exec = { version = "0.20.0", path = "exec" }
-myelin-cellscript-adapter = { version = "0.20.0", path = "cellscript-adapter" }
-myelin-ckb-adapter = { version = "0.20.0", path = "ckb-adapter" }
-myelin-consensus = { version = "0.20.0", path = "consensus" }
-myelin-cli = { version = "0.20.0", path = "cli" }
-myelin-core-utils = { version = "0.20.0", path = "core-utils" }
-myelin-hashes = { version = "0.20.0", path = "crypto/hashes" }
-myelin-math = { version = "0.20.0", path = "math" }
-myelin-mempool = { version = "0.20.0", path = "mempool" }
-myelin-muhash = { version = "0.20.0", path = "crypto/muhash" }
-myelin-session = { version = "0.20.0", path = "session" }
-myelin-session-escrow = { version = "0.20.0", path = "session-escrow" }
-myelin-session-network = { version = "0.20.0", path = "session-network" }
-myelin-session-producer = { version = "0.20.0", path = "session-producer" }
-myelin-session-runtime = { version = "0.20.0", path = "session-runtime" }
-myelin-session-store-rocksdb = { version = "0.20.0", path = "session-store-rocksdb" }
-myelin-state = { version = "0.20.0", path = "state" }
-myelin-wallet-auth = { version = "0.20.0", path = "wallet-auth" }
+myelin-exec = { version = "0.21.0", path = "exec" }
+myelin-cellscript-adapter = { version = "0.21.0", path = "cellscript-adapter" }
+myelin-ckb-adapter = { version = "0.21.0", path = "ckb-adapter" }
+myelin-consensus = { version = "0.21.0", path = "consensus" }
+myelin-cli = { version = "0.21.0", path = "cli" }
+myelin-core-utils = { version = "0.21.0", path = "core-utils" }
+myelin-hashes = { version = "0.21.0", path = "crypto/hashes" }
+myelin-math = { version = "0.21.0", path = "math" }
+myelin-mempool = { version = "0.21.0", path = "mempool" }
+myelin-muhash = { version = "0.21.0", path = "crypto/muhash" }
+myelin-session = { version = "0.21.0", path = "session" }
+myelin-session-escrow = { version = "0.21.0", path = "session-escrow" }
+myelin-session-network = { version = "0.21.0", path = "session-network" }
+myelin-session-producer = { version = "0.21.0", path = "session-producer" }
+myelin-session-runtime = { version = "0.21.0", path = "session-runtime" }
+myelin-session-store-rocksdb = { version = "0.21.0", path = "session-store-rocksdb" }
+myelin-state = { version = "0.21.0", path = "state" }
+myelin-wallet-auth = { version = "0.21.0", path = "wallet-auth" }
 
 # external
 aes = "0.8.3"

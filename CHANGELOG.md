@@ -4,6 +4,92 @@
 
 No unreleased changes.
 
+## 0.21.0 — 2026-08-25
+
+Myelin 0.21.0 completes the application and continuity layer around the 0.20
+continuous-session runtime. A chain can no longer preserve only transaction
+and state-root continuity while leaving the meaning of its state implicit:
+genesis fixes the application interpretation, and every finalised block fixes
+the exact slice of application history it executed.
+
+This is still a pre-production release for controlled sessions. Successors,
+handoffs, and staged external evidence do not turn Myelin into a CKB full node,
+a new L1, or a finished permissionless L2.
+
+### Application identity and execution frames
+
+- Added a complete genesis-bound `ApplicationProfile`: program artifact, input
+  schema, state codec, logical-time and entropy policies, strict CKB VM
+  capability choice, application resource envelope, court procedure, and
+  handoff policy.
+- Added retained `FrameInput` and committed `ExecutionFrame` records covering
+  contiguous input and logical-time ranges, input root, pre/post state roots,
+  ordered raw transaction ids, cycles, transaction bytes, and input bytes.
+- Bound the session id, application-profile commitment, and execution-frame
+  commitment directly into every canonical `MyelinBlock` and its hash.
+- Made startup, preparation, finality, recovery, and court paths reject a
+  substituted profile, discontinuous cursor or logical time, mismatched frame,
+  resource overrun, or changed session identity.
+
+### Inspection and deterministic replay
+
+- Added a bounded, read-only `InspectPort` that receives an immutable snapshot
+  and returns a receipt binding the query and result to the exact session,
+  height, state root, and application profile. It has no write, reservation,
+  handoff-consumption, or outbox capability.
+- Added bounded range replay from the newest retained checkpoint before the
+  requested range. Replay warms up through any intervening frames, rechecks
+  frame linkage and finality, and returns a `RangeReplayReceipt` with exact
+  roots, input range, transaction count, and measured resources.
+
+### Locally verified evidence progression
+
+- Added committed evidence-pipeline descriptors and revisioned receipt chains
+  for exact outbox messages. Each stage names the local verifier implementation
+  that must accept the collected evidence before persistence.
+- Added a crash-resumable `EvidenceRuntime` with one-stage-at-a-time collection,
+  local verification, compare-and-swap persistence, and acknowledgement only
+  after the terminal receipt is durable.
+- Added the seven-step CKB claim ladder from `wire-encoded` through
+  `configured-depth-finality`, without treating node acceptance as commitment
+  or configured confirmation depth as irreversible finality.
+
+### Successors and cross-session handoffs
+
+- Added final-block `SuccessorDeclaration` records. Declaring a successor seals
+  the predecessor and atomically creates exactly one target genesis bound to
+  the predecessor head, state snapshot, input cursor, logical time, timestamp
+  floor, state codec, and reverse lineage.
+- Added source-committed handoffs addressed to one session or one
+  genesis-bound intake policy, with bounded payload and authorization,
+  expiration, and an optional minimum locally verified evidence stage.
+- Made target consumption part of the target block's atomic store transaction;
+  duplicate or concurrent consumption loses the head/CAS check.
+
+### Persistence and operator visibility
+
+- Extended the RocksDB transaction boundary to include application frames,
+  evidence revisions, successor creation and sealing, issued handoffs, and
+  consumption markers. Recovery revalidates the new lineage and frame links
+  before reopening the writer.
+- Added `session lineage-status`, `session evidence-status`, and
+  `session handoff-status` CLI commands for inspecting the durable state without
+  mutating it.
+- Replaced the unreleased RocksDB/session/report schema directly and removed
+  obsolete internal identity suffixes. Existing 0.20 local stores and reports
+  must be regenerated; there is no compatibility alias or migration reader.
+
+### Known boundaries
+
+- Successor creation preserves one controlled state lineage; it is not a
+  permissionless cross-chain bridge or an in-place live upgrade.
+- Handoff authorization is interpreted by the target application's
+  genesis-bound policy; the application-neutral Cell executor rejects it.
+- Evidence collection may be external, but a claim advances only after the
+  configured local verifier accepts and durably links the exact receipt.
+- Production court deployment, external DA operations, public-testnet verifier
+  deployment, and long-running adversarial recovery tests remain future work.
+
 ## 0.20.0 — 2026-08-25
 
 Myelin 0.20.0 turns the finite-Cell execution kernel into an embeddable,

@@ -5,6 +5,9 @@ research line, and what each release does and does not claim. These are
 framing documents, not security claims — for the latter, see the
 [claim ladder](../security/claim-ladder.md).
 
+- [Myelin 0.21.0 release record](myelin-0.21.0.md) — application identity,
+  execution frames, inspection and replay, crash-resumable evidence ladders,
+  successor sealing, and single-use handoffs.
 - [Myelin 0.20.0 release record](myelin-0.20.0.md) — the reviewed release
   boundary for the modular continuous-session runtime, including the exact
   commit range, validation commands, claim limits, and upgrade note.

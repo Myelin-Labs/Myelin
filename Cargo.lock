@@ -1582,7 +1582,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "myelin-cellscript-adapter"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "hex",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-ckb-adapter"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "hex",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-cli"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "clap",
@@ -1633,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-consensus"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "hex",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-core-utils"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "faster-hex",
  "hex",
@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-exec"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake2b_simd",
  "blake3",
@@ -1678,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-hashes"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "cc",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-math"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "faster-hex",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-mempool"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "indexmap 2.2.6",
@@ -1726,7 +1726,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-muhash"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "criterion",
  "insta",
@@ -1740,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-session"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "myelin-consensus",
@@ -1754,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-session-escrow"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "myelin-ckb-adapter",
@@ -1771,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-session-network"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "prost",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-session-producer"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1798,7 +1798,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-session-runtime"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1811,7 +1811,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-session-store-rocksdb"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "myelin-consensus",
@@ -1826,7 +1826,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-state"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "blake3",
  "lru",
@@ -1845,7 +1845,7 @@ dependencies = [
 
 [[package]]
 name = "myelin-wallet-auth"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "base64",
  "bech32",

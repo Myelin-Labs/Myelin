@@ -1,6 +1,6 @@
 [package]
 name = "myelin-session-escrow"
-version = "0.20.0"
+version = "0.21.0"
 edition = "2021"
 license = "MIT"
 description = "Optional conserved escrow and CKB exit capability for Myelin sessions"
