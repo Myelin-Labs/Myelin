@@ -1,6 +1,6 @@
 [package]
 name = "myelin-session-runtime"
-version = "0.10.0"
+version = "0.20.0"
 edition = "2021"
 license = "MIT"
 description = "Embeddable composition root and lifecycle supervisor for Myelin sessions"

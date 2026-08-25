@@ -2,34 +2,104 @@
 
 ## Unreleased
 
-### Session block-production policy
+No unreleased changes.
 
-- Added `myelin-session-producer` with `Instant`, `Interval`, `Open`, and `Never` automatic policies plus serialised manual production from the source or an explicit ordered batch.
-- Added count and byte limits, availability-started open windows, explicitly configurable fixed-cadence empty blocks, race-free availability notifications, a reusable host schedule, and a single-writer commit hand-off.
-- Added reserving transaction-source semantics so a failed finality/commit attempt or an orderly shutdown releases uncommitted work; source acknowledgement happens only after durable head advancement.
-- Kept production timing outside execution and finality. The commit port must still prepare the exact session block, obtain and verify the genesis-bound proof, and atomically advance the durable head.
+## 0.20.0 — 2026-08-25
 
-### Pluggable closed-validator finality
+Myelin 0.20.0 turns the finite-Cell execution kernel into an embeddable,
+continuously operated session runtime. Consensus, application execution,
+production timing, persistence, transport, funding, and external evidence are
+separate trust boundaries. A session binds its selected closed-validator
+module and exact validator configuration at genesis.
 
-- Added `proof-of-authority` as a third independent `ConsensusKind`, alongside `static-closed-committee` and `tendermint`; `poa` is accepted as a CLI/config alias while reports use the canonical name.
-- Added an ordered authority set with deterministic `height mod authority_count` rotation, an independent `myelin:proof-of-authority-seal` signature domain, and seals bound to the exact height, authority id, and canonical `MyelinBlock` hash.
-- Added a single typed `FinalityProof` dispatch surface so static quorum certificates, PoA seals, and Tendermint decisions cannot be passed to the wrong engine by shape-compatible accident.
-- Added PoA evidence to runtime, Session, and Teeworlds paths. Tests assert identical CellTx ids, witness hashes, scheduler commitments, and pre/post state roots across all three engines; only consensus-bound block/finality material differs.
-- Extended the production gate with PoA config parsing, finality, runtime, and Session court-bundle verification.
+This remains a pre-production release for controlled sessions and research.
+The new modules do not make Myelin a CKB full node, a new L1, or a finished
+permissionless L2.
 
-All three choices use known validator/authority sets. PoA is an operational trust-model option, not a permissionless-security upgrade.
+### Continuous session runtime
 
-### Public CKB testnet exercise
+- Added `myelin-session` with deterministic candidate preparation, exact
+  finality verification, atomic head advancement, consensus WAL records,
+  transactional outbox delivery, and full recovery audit before writes resume.
+- Added `myelin-session-store-rocksdb` with synchronous WAL, optimistic head
+  CAS, atomic block/checkpoint/head/outbox transactions, rolling checkpoints,
+  bounded recovery pages, and durable network queues.
+- Added `myelin-session-runtime` as an optional composition root with declared
+  service dependencies, readiness and criticality, panic containment, bounded
+  lifecycle calls, reverse shutdown, and a writer health gate.
+- Added `myelin-session-network` with recipient-bound signed envelopes,
+  closed-peer authorization, ordered per-peer sequences, replay/equivocation
+  rejection, mTLS transport, ACK-after-durability, and bounded queues.
+- Added `myelin-session-escrow` and `myelin-wallet-auth` for optional finalized
+  CKB funding attachment, conserved off-chain balances, evidence-bound exits,
+  standard CKB identities, and recoverable authorization signatures.
 
-- Funded account `ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsq28mv6vp689txs9pyfyhj89qhavalf6ssq3y3h3m` successfully exercised the standard CKB secp256k1-blake160 sighash lock on public `ckb_testnet`.
-- Transaction `0xbc662a7d0a452a61e50928a0e50b2b6a1c66c942988b4de8ace72c92a46131de` passed `test_tx_pool_accept` with 1,652,597 cycles and a 100,000-shannon (0.001 CKB) fee, was submitted with the same raw hash, and committed at height 21,908,123 in block `0x2c6a9f92c8aff3b4c10d4c073a28f42f6d5b7dc6a48961e61aa2270bc08e1a18`.
-- The self-transfer output was re-read as a live Cell with 9,999.999 CKB capacity, and the block remained canonical through eight observed confirmations. This validates transaction construction, standard-lock signing, public RPC admission, commitment, and Cell recovery; it is not a public-testnet deployment of the full Session/court/DA path.
-- Added `ckb generate-rehearsal-key`, `ckb multisig-config`, and `ckb create-cell` for permission-restricted disposable keys, canonical ordered multisig configuration, capacity planning, external signatures, and evidence-backed Cell creation with explicit change.
-- Exercised both the legacy genesis multisig and the currently recommended CKB `secp256k1_blake160_multisig_all` multisig-v2 script on public testnet. The multisig-v2 2-of-3 funding transaction `0xb6141a89ce9e80edb997c6b6635cee4ac98dfa1b9af91fdeca564a5aa00c55a3` and spend `0xd338df676eb97c917566a7006517f8dd14521979e00c90b0cc47cd3392268242` each reached six observed confirmations; the spend carries a locally verified CKB transaction proof and independently re-verifiable receipt chain.
-- Corrected strict CKB-VM `SOURCE_CELL_DEP` semantics to expose ordered DepGroup members rather than the declared DepGroup root. This was found when the authoritative node accepted a standard system-script transaction while the local verifier failed to load the secp256k1 data Cell.
-- Made context anchors reorganization-safe without requiring the chain tip to stop advancing: the resolution header must remain canonical at its height, while `test_tx_pool_accept` records its own stable validation tip.
-- Enabled exact 128-bit CKB PoW nonce representation in nested JSON evidence and allowed `ckb observe`/`verify` to consume a `create-cell` report directly.
-- Archived the finalized multisig-v2 evidence under `evidence/ckb-testnet/2026-07-29-multisig/`. Full public-testnet CellScript verifier deployment remains blocked by capacity: the 38,628-byte settlement artifact needs 38,822.001 CKB including conservative change and fee, 29,422.005 CKB more than the exercised funding input.
+### Production policy
+
+- Added `myelin-session-producer` with `Instant`, `Interval`, `Open`, `Never`,
+  and serialized manual production policies.
+- Added bounded reserving batches, availability-started open windows,
+  explicitly configured empty interval blocks, and release-on-failure or
+  shutdown. Source acknowledgement occurs only after durable head advancement.
+- Kept production timing outside execution and finality: the commit port must
+  still execute the exact candidate, verify its genesis-bound proof, and commit
+  through the session store.
+
+### Genesis-bound finality modules
+
+- Added a closed `ConsensusCatalog` with immutable module descriptors binding
+  the consensus kind, proof schema, message schema, WAL schema, capabilities,
+  and exact validator or authority configuration.
+- Added typed `FinalityProof` encoding and dispatch so committee certificates,
+  PoA seals, and Tendermint decisions cannot cross engine boundaries.
+- Added complete closed-validator Tendermint rounds with deterministic
+  proposer selection, proposal/prevote/precommit phases, lock and valid-round
+  rules, nil votes, round changes, and equivocation rejection.
+- Added proof-of-authority rotation and height-bound CKB-compatible seals as a
+  third operational trust model beside static committee and Tendermint.
+- Verified that the same workload retains the same CellTx identities,
+  scheduler commitment, and pre/post state roots under all three engines;
+  consensus-bound block hashes and proof material remain distinct.
+
+### CKB and CellScript evidence
+
+- Added provider-neutral DA certificates with provider and fault-domain quorum,
+  retention commitments, and auditor-signed retrieval probes.
+- Added evidence-backed public-testnet CKB key, Cell creation, multisig funding,
+  and multisig-v2 spending workflows. The archived multisig-v2 funding and
+  spending transactions each reached six observed confirmations and include a
+  locally re-verifiable receipt chain.
+- Corrected strict `SOURCE_CELL_DEP` handling to expose the ordered expanded
+  DepGroup member view used by CKB scripts while preserving the declared
+  DepGroup bytes in transaction identity.
+- Made context anchors reorganization-safe at their own height and separated
+  them from the independently sampled transaction-pool validation tip.
+- Updated the attested CellScript process boundary to the pinned 0.22.0 patch
+  revision and its exact witness ABI, metadata schemas, and artifact digests.
+
+### Validation and compatibility
+
+- Expanded the production gate across static committee, PoA, Tendermint,
+  Session court bundles, DA and settlement packages, public-chain evidence
+  checks, CellScript reproduction, and the parent CKB integration devnet.
+- Added negative tests for wrong proof kinds, forged signatures, stale roots,
+  queue replay/equivocation, recovery corruption, outbox retries, reservation
+  races, invalid DA evidence, and CKB receipt mutation.
+- Replaced the prior unreleased internal session and report shapes directly.
+  No compatibility decoder or dual-format migration path is provided.
+- Removed stale pre-release version suffixes from draft OpenStrike identity
+  domains; no released identity or stored session format used those labels.
+
+### Known boundaries
+
+- All bundled finality choices use known validator or authority sets.
+- Application integrations remain external; the runtime is an embeddable
+  composition root rather than a production daemon.
+- The archived public-testnet evidence exercises CKB transaction and multisig
+  paths, not a complete deployed public-testnet Session/court/DA system.
+- The full disputed-chunk court, production external DA, operator key custody,
+  public-testnet verifier deployment, and long-running adversarial soak remain
+  future work.
 
 ## 0.10.0 — 2026-07-29
 

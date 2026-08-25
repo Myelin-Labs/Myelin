@@ -311,7 +311,7 @@ impl SessionStore for RocksSessionStore {
         .encode()
         .map_err(corrupt)?;
         let mut stored_record = record.clone();
-        if record.block.number % self.archival_checkpoint_interval != 0 {
+        if !record.block.number.is_multiple_of(self.archival_checkpoint_interval) {
             stored_record.state_snapshot.clear();
         }
         let record_bytes = stored_record.encode().map_err(corrupt)?;

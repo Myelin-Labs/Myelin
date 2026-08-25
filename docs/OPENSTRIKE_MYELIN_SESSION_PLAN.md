@@ -484,17 +484,17 @@ Core identities are derived without requiring escrow or any particular app:
 
 ```text
 core_terms_hash = HASH(
-  "myelin:session:core-terms:v1",
+  "myelin:session:core-terms",
   canonical(CoreSessionTerms)
 )
 
 session_id = HASH(
-  "myelin:session:id:v1",
+  "myelin:session:id",
   core_terms_hash
 )
 
 openstrike_terms_hash = HASH(
-  "myelin:app:openstrike:terms:v1",
+  "myelin:app:openstrike:terms",
   canonical(OpenStrikeTerms)
 )
 ```
