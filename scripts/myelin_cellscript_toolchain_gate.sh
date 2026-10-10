@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MYELIN_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-TOOLCHAIN_ROOT="${CELLSCRIPT_TOOLCHAIN_ROOT:-/tmp/myelin-cellscript-toolchain-4c02e213}"
+TOOLCHAIN_ROOT="${CELLSCRIPT_TOOLCHAIN_ROOT:-/tmp/myelin-cellscript-toolchain-5fd4c469}"
 SOURCE_ROOT="${TOOLCHAIN_ROOT}/CellScript"
 CKB_SDK_ROOT="${TOOLCHAIN_ROOT}/ckb-sdk-rust"
 EVIDENCE_ROOT="${CELLSCRIPT_EVIDENCE_ROOT:-${TOOLCHAIN_ROOT}/myelin-evidence}"

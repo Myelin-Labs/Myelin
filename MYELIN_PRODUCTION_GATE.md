@@ -303,12 +303,12 @@ transaction it broadcasts, stores that hash in `ckb_raw_tx_hash`, and only marks
 `accepted_by_rpc = true` when a live `--submit` RPC result equals the projected
 raw hash. Operator-supplied `--accepted-tx-hash` evidence is recorded
 separately and cannot satisfy strict live production readiness.
-The smoke copies `cellscript/examples/myelin/da-anchor-carrier.cell`,
-`cellscript/examples/myelin/settlement-carrier.cell`,
-`cellscript/examples/myelin/da-anchor-final.cell`, and
-`cellscript/examples/myelin/settlement-final.cell` into the throw-away workdir,
-compiles all four checked-in CellScript sources under the `typed-cell` profile
-before compiling their CKB-profile ELFs, and records the typed-cell ELF plus
+The smoke copies `fixtures/cellscript/da-anchor-carrier.cell`,
+`fixtures/cellscript/settlement-carrier.cell`,
+`fixtures/cellscript/da-anchor-final.cell`, and
+`fixtures/cellscript/settlement-final.cell` into the throw-away workdir and
+compiles all four checked-in CellScript sources under the `ckb` target profile
+through the attested compiler. It records the resulting ELF plus
 metadata sidecar paths in `carrier_verifiers.*` and `final_script_verifiers.*`.
 Carrier submission reports
 also record a SHA-256 hash of the CellScript verifier source when that source

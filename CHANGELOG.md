@@ -2,7 +2,14 @@
 
 ## Unreleased
 
-No unreleased changes.
+### CellScript toolchain
+
+- Re-pinned the external CellScript compiler from the private `v0.22.0` witness-placement patch to the exact upstream annotated release `v0.31.0` (`5fd4c4690512b3df4cd5a46d64194d7d4d3b9491`). The former patch was absorbed upstream: the `WitnessArgs.input_type` entry placement merged into the 0.23 nightly line and later upstream schemas versioned the bounded witness selectors, so no private patch revision is tracked anymore.
+- Admitted the upstream v0.31 target-profile witness ABI `ckb-molecule-witness-args-input-type-v2+cellscript-entry-witness-v1`. Upstream now rejects legacy raw entry witnesses outright, so the adapter dropped the former `+raw-v1-compat` suffix; Myelin itself never produced or accepted raw entry witnesses.
+- Advanced the locked compiler metadata contract to schema 72 / source 2 / artifact 1 / constraints 4 (formerly 55 / 1 / 1 / 1). All four Myelin-owned fixtures compile unchanged under the new compiler.
+- Re-ran the locked-toolchain gate: compiler reproduction from the canonical upstream tag, adapter attestation verification, the upstream `entry_witness_abi` suite (24 tests), and compilation receipts for all four fixtures at metadata schema 72.
+- Extended adapter regression coverage to reject metadata advertising the former `+raw-v1-compat` witness ABI.
+- Corrected stale gate documentation that described fixture sources under a `cellscript/examples/myelin` path and a `typed-cell` profile; the smoke has always consumed `fixtures/cellscript` under the `ckb` target profile through the attested compiler.
 
 ## 0.21.0 — 2026-08-25
 

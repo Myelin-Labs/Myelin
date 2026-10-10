@@ -94,7 +94,7 @@ The pure wire projection fails closed for a nonzero version, mismatched output/d
 
 ## Exercised evidence
 
-The adapter has been exercised against the parent CKB 0.207.0 integration devnet and against public `ckb_testnet` through `myelin ckb prove`, `observe`, and `verify`. The archived public transaction reached `Finalized` with a locally checked transaction proof and 13 observed confirmations. The full devnet gate also compiles four exact upstream CellScript v0.22.0 programs, deploys their ELF artifacts, commits valid DA and settlement transitions, and requires CKB to reject payload tampering and a competing settlement.
+The adapter has been exercised against the parent CKB 0.207.0 integration devnet and against public `ckb_testnet` through `myelin ckb prove`, `observe`, and `verify`. The archived public transaction reached `Finalized` with a locally checked transaction proof and 13 observed confirmations. The full devnet gate also compiles four exact upstream CellScript v0.31.0 programs, deploys their ELF artifacts, commits valid DA and settlement transitions, and requires CKB to reject payload tampering and a competing settlement.
 
 This does not establish a public-testnet court or permissionless L2 security. Session/court package-local `ckb_projection` fields may still honestly remain `wire-encoded`; a package advances only when it carries or references a separately verified `CkbEvidenceProjection` for its exact transaction.
 

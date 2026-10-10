@@ -6,7 +6,7 @@ CellScript is an independently versioned upstream compiler. Myelin does not vend
 
 ```text
 toolchain lock
-  -> verified release base + exact patch revision + compiler version + Rust toolchain
+  -> verified release tag + exact pinned revision + compiler version + Rust toolchain
 compiler attestation
   -> executable BLAKE3 + release lineage + source revision
 compile request
@@ -33,4 +33,4 @@ Every access is resolved by `myelin-state` from:
 
 Missing or inconsistent data fails admission. Scheduler metadata is not inserted into transaction witnesses, so it cannot change raw transaction identity or pretend to be a CKB witness ABI.
 
-The lock file is `cellscript-adapter/cellscript-toolchain.lock.json`. The current lock schema verifies release base `v0.22.0` at `830b5971237401a74dd7848b200f48b4d2ed79f4`, pins the reviewed witness-placement patch at `4c02e213ff8e50fa4760996dd962db58f6c45226`, and pins the compiler's CKB SDK v5.1.0 path dependency at `1fbf3d4c9b35ef90bdb9e6621a8d26edde6325ce`. The base tag is provenance, not a claim that the unreleased patch itself is tagged. Myelin integration sources are under `fixtures/cellscript/`.
+The lock file is `cellscript-adapter/cellscript-toolchain.lock.json`. The current lock schema pins the annotated upstream release `v0.31.0` at peeled commit `5fd4c4690512b3df4cd5a46d64194d7d4d3b9491` — the former private entry-witness-placement patch was absorbed upstream (it first merged into the 0.23 nightly line and the release now rejects legacy raw entry witnesses outright) — and pins the compiler's CKB SDK v5.1.0 path dependency at `1fbf3d4c9b35ef90bdb9e6621a8d26edde6325ce`. Myelin integration sources are under `fixtures/cellscript/`.

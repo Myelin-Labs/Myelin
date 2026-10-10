@@ -19,7 +19,11 @@ use std::{
 pub const ENTRY_WITNESS_PLACEMENT_ABI: &str = "cellscript-witnessargs-input-type-v2";
 
 /// Exact CKB target-profile witness ABI admitted by this adapter revision.
-pub const TARGET_PROFILE_WITNESS_ABI: &str = "ckb-molecule-witness-args-input-type-v2+cellscript-entry-witness-v1+raw-v1-compat";
+///
+/// Upstream v0.31 keeps the `WitnessArgs.input_type` entry placement that the
+/// former pinned patch introduced and now rejects legacy raw entry witnesses
+/// outright, so the adapter no longer admits the `raw-v1-compat` suffix.
+pub const TARGET_PROFILE_WITNESS_ABI: &str = "ckb-molecule-witness-args-input-type-v2+cellscript-entry-witness-v1";
 
 /// Embedded compiler source and toolchain lock.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -29,7 +33,7 @@ pub struct ToolchainLock {
     pub schema: String,
     /// Canonical upstream repository.
     pub repository: String,
-    /// Annotated upstream release tag on which the pinned patch revision is based.
+    /// Annotated upstream release tag for the pinned source revision.
     pub release_base_tag: String,
     /// Exact peeled commit of `release_base_tag`.
     pub release_base_revision: String,
@@ -868,19 +872,19 @@ mod tests {
         fs::write(&artifact, b"elf").unwrap();
         fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         CompiledArtifact {
-            compiler_version: "0.22.0".to_owned(),
+            compiler_version: "0.31.0".to_owned(),
             compiler_revision: "revision".to_owned(),
-            metadata_schema_version: 55,
-            source_metadata_schema_version: 1,
+            metadata_schema_version: 72,
+            source_metadata_schema_version: 2,
             artifact_metadata_schema_version: 1,
-            constraints_metadata_schema_version: 1,
+            constraints_metadata_schema_version: 4,
             source_blake3: "source".to_owned(),
             artifact_blake3: digest_file(&artifact).unwrap(),
             metadata_blake3: digest_file(&metadata_path).unwrap(),
             artifact,
             metadata: metadata_path,
             target_profile: "ckb".to_owned(),
-            target_profile_witness_abi: "ckb-molecule-witness-args-input-type-v2+cellscript-entry-witness-v1+raw-v1-compat".to_owned(),
+            target_profile_witness_abi: TARGET_PROFILE_WITNESS_ABI.to_owned(),
         }
     }
 
@@ -891,14 +895,14 @@ mod tests {
         let compiled = compiled_artifact(
             dir.path(),
             serde_json::json!({
-                "compiler_version": "0.22.0",
-                "metadata_schema_version": 55,
-                "source_metadata_schema_version": 1,
+                "compiler_version": "0.31.0",
+                "metadata_schema_version": 72,
+                "source_metadata_schema_version": 2,
                 "artifact_metadata_schema_version": 1,
-                "constraints_metadata_schema_version": 1,
+                "constraints_metadata_schema_version": 4,
                 "target_profile": {
                     "name": "ckb",
-                    "witness_abi": "ckb-molecule-witness-args-input-type-v2+cellscript-entry-witness-v1+raw-v1-compat"
+                    "witness_abi": TARGET_PROFILE_WITNESS_ABI
                 },
                 "actions": [{
                     "name": "check",
@@ -933,14 +937,14 @@ mod tests {
         let tx = transaction();
         let dir = tempfile::tempdir().unwrap();
         let metadata = serde_json::json!({
-            "compiler_version": "0.22.0",
-            "metadata_schema_version": 55,
-            "source_metadata_schema_version": 1,
+            "compiler_version": "0.31.0",
+            "metadata_schema_version": 72,
+            "source_metadata_schema_version": 2,
             "artifact_metadata_schema_version": 1,
-            "constraints_metadata_schema_version": 1,
+            "constraints_metadata_schema_version": 4,
             "target_profile": {
                 "name": "ckb",
-                "witness_abi": "ckb-molecule-witness-args-input-type-v2+cellscript-entry-witness-v1+raw-v1-compat"
+                "witness_abi": TARGET_PROFILE_WITNESS_ABI
             },
             "actions": [{
                 "name": "update",
@@ -962,32 +966,36 @@ mod tests {
 
     #[test]
     fn scheduler_template_rejects_wrong_target_witness_abi() {
-        let dir = tempfile::tempdir().unwrap();
-        let compiled = compiled_artifact(
-            dir.path(),
-            serde_json::json!({
-                "compiler_version": "0.22.0",
-                "metadata_schema_version": 55,
-                "source_metadata_schema_version": 1,
-                "artifact_metadata_schema_version": 1,
-                "constraints_metadata_schema_version": 1,
-                "target_profile": {
-                    "name": "ckb",
-                    "witness_abi": "raw-entry-payload-only"
-                },
-                "actions": []
-            }),
-        );
-        let error = compiled.scheduler_template("check").unwrap_err();
-        assert!(error.to_string().contains("target profile"));
+        for witness_abi in ["raw-entry-payload-only".to_owned(), format!("{TARGET_PROFILE_WITNESS_ABI}+raw-v1-compat")] {
+            let dir = tempfile::tempdir().unwrap();
+            let compiled = compiled_artifact(
+                dir.path(),
+                serde_json::json!({
+                    "compiler_version": "0.31.0",
+                    "metadata_schema_version": 72,
+                    "source_metadata_schema_version": 2,
+                    "artifact_metadata_schema_version": 1,
+                    "constraints_metadata_schema_version": 4,
+                    "target_profile": {
+                        "name": "ckb",
+                        "witness_abi": witness_abi
+                    },
+                    "actions": []
+                }),
+            );
+            let error = compiled.scheduler_template("check").unwrap_err();
+            assert!(error.to_string().contains("target profile"));
+        }
     }
 
     #[test]
-    fn embedded_lock_pins_release_base_patch_revision_and_witness_abi() {
+    fn embedded_lock_pins_upstream_release_revision_and_witness_abi() {
         let lock = ToolchainLock::embedded().unwrap();
         assert_eq!(lock.schema, "myelin-cellscript-toolchain-lock");
-        assert_eq!(lock.release_base_tag, "v0.22.0");
-        assert_ne!(lock.release_base_revision, lock.source_revision);
+        assert_eq!(lock.release_base_tag, "v0.31.0");
+        // The former private entry-witness patch was absorbed upstream; the pin
+        // is now exactly the annotated upstream release commit.
+        assert_eq!(lock.release_base_revision, lock.source_revision);
         assert_eq!(lock.target_profile_witness_abi, TARGET_PROFILE_WITNESS_ABI);
     }
 

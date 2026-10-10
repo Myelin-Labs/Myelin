@@ -250,9 +250,8 @@ The compiler is not vendored. Myelin owns its protocol fixtures and connects to 
 
 | Component | Locked version |
 | --- | --- |
-| CellScript release | `v0.22.0` |
-| CellScript release base | `v0.22.0` / `830b5971237401a74dd7848b200f48b4d2ed79f4` |
-| CellScript pinned patch | `4c02e213ff8e50fa4760996dd962db58f6c45226` |
+| CellScript release | `v0.31.0` |
+| CellScript pinned revision | `v0.31.0` / `5fd4c4690512b3df4cd5a46d64194d7d4d3b9491` (exact release tag, no private patch) |
 | Entry witness placement | `WitnessArgs.input_type` via `cellscript-witnessargs-input-type-v2` |
 | Compiler CKB SDK | v5.1.0 at `1fbf3d4c9b35ef90bdb9e6621a8d26edde6325ce` |
 | Lock file | [`cellscript-adapter/cellscript-toolchain.lock.json`](cellscript-adapter/cellscript-toolchain.lock.json) |
@@ -266,7 +265,7 @@ The adapter verifies compiler identity, source revision, target profile, metadat
 | Typed Cell execution, state-resolved conflicts, atomic state roots | Implemented and tested |
 | Strict local CKB-VM verification with a shared transaction cycle budget | Implemented and tested |
 | Static committee, rotating PoA, and full-round Tendermint closed-validator finality | Implemented and tested |
-| Exact CellScript v0.22.0 reproduction | Implemented and gated |
+| Exact CellScript v0.31.0 reproduction | Implemented and gated |
 | Live CKB admission, commitment, transaction proof, depth, and reorg checks | Exercised on parent devnet and public testnet |
 | Standard-lock transaction admission and commitment on public CKB testnet | Exercised with finalized evidence |
 | Canonical CKB `secp256k1_blake160_multisig_all` construction and verification | Public-testnet 2-of-3 create/spend exercised |

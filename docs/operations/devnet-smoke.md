@@ -2,7 +2,7 @@
 
 `scripts/myelin_ckb_devnet_smoke.sh` is the live-chain counterpart
 to the production gate. It starts a parent CKB devnet, deploys
-four exact upstream CellScript v0.22.0 verifier artifacts, submits real transitions, and verifies
+four exact upstream CellScript v0.31.0 verifier artifacts, submits real transitions, and verifies
 that the chain actually accepts (or rejects) the right transactions.
 
 This page walks through what it does and what it proves.
