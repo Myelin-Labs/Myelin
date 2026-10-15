@@ -5,6 +5,8 @@ research line, and what each release does and does not claim. These are
 framing documents, not security claims — for the latter, see the
 [claim ladder](../security/claim-ladder.md).
 
+- [Myelin 0.31.0 release record](myelin-0.31.0.md) — command reconciliation,
+  construction snapshots, batch admission and explicit escrow binding.
 - [Myelin 0.21.0 release record](myelin-0.21.0.md) — application identity,
   execution frames, inspection and replay, crash-resumable evidence ladders,
   successor sealing, and single-use handoffs.

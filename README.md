@@ -82,6 +82,21 @@ The reusable continuous-session path is split into seven optional workspace crat
 
 These crates are adapters, not a daemon that silently changes Myelin's scope. An application may embed a one-process PoA driver or connect an external coordinator through the finality and network interfaces. PoA, static committee, and Tendermint here are closed-validator session engines; none makes Myelin a permissionless chain.
 
+### Session safety in 0.31.0
+
+Applications can require stable command identities in the genesis profile.
+Command receipts are committed atomically with blocks and recoverable through
+`SessionChain::command_status`; reconstructed transactions cannot reuse a
+committed identity. Producer candidates carry their construction head and
+ambiguous commit outcomes retain reservations for reconciliation.
+
+`RuntimeHost` requires an explicit admission policy and exposes guarded prepare
+and commit methods. `RecoverabilityAdmission` bounds advancement beyond a
+canonical independently recoverable checkpoint and re-verifies supplied evidence
+before execution and commit. It is a local operational control, not a deployed
+DA provider or a new consensus proof. Escrow integrations must explicitly supply
+an application binding verifier. See [integration contracts](docs/architecture/session-safety.md).
+
 ### Continuous operation
 
 An application may queue completed epochs in its own journal up to a configured
@@ -258,7 +273,7 @@ The compiler is not vendored. Myelin owns its protocol fixtures and connects to 
 
 The adapter verifies compiler identity, source revision, target profile, metadata schema, and source/artifact/metadata digests. Upgrades are explicit lock changes followed by fixture and devnet gates; Myelin never follows a mutable parent branch at runtime.
 
-## What v0.10.0 proves—and what it does not
+## Current capabilities and limits
 
 | Capability | Current status |
 | --- | --- |
@@ -274,7 +289,7 @@ The adapter verifies compiler identity, source revision, target profile, metadat
 | Public-testnet deployment | Partial: standard/multisig locks only; verifier/court/DA pending |
 | Finished trustless or permissionless L2 | **No** |
 
-The main production blockers are public-testnet verifier/court deployment, full court adjudication and economics, real independent DA provider/auditor adapters, broader differential/fuzz/soak testing, safe multi-parent overlays, and production operator key procedures. The [archived public-testnet evidence](evidence/ckb-testnet/2026-07-29-multisig/README.md) proves only standard and canonical multisig lock paths. The DA certificate model is documented in [the DA design](docs/MYELIN_DA_DESIGN.md). See the complete list in the [v0.10.0 changelog](CHANGELOG.md#known-production-blockers).
+The main production blockers are public-testnet verifier/court deployment, full court adjudication and economics, real independent DA provider/auditor adapters, broader differential/fuzz/soak testing, safe multi-parent overlays, and production operator key procedures. The [archived public-testnet evidence](evidence/ckb-testnet/2026-07-29-multisig/README.md) proves only standard and canonical multisig lock paths. The DA certificate model is documented in [the DA design](docs/MYELIN_DA_DESIGN.md). See the [0.31.0 release record](docs/releases/myelin-0.31.0.md) for changes and compatibility requirements.
 
 ## Validation
 
@@ -328,7 +343,7 @@ The comprehensive path rebuilds the locked CellScript compiler, compiles all fou
 | How does the compiler boundary work? | [CellScript integration](docs/architecture/cellscript.md) |
 | How do I use every CLI command? | [CLI reference](docs/operations/cli.md) |
 | What does the merge-readiness gate run? | [Production gate](docs/operations/production-gate.md) |
-| What changed in v0.10.0? | [Changelog](CHANGELOG.md) |
+| What changed in v0.31.0? | [Release record](docs/releases/myelin-0.31.0.md) |
 
 ## License
 

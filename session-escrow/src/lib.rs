@@ -400,6 +400,15 @@ impl EscrowState {
     }
 }
 
+/// Application-owned binding between economic changes and the canonical
+/// application state. Called for EVERY transaction, even without a ledger Cell.
+/// Verify authorization and the meaning of application_evidence_root; a nonzero
+/// hash alone proves neither. Deployments must enforce equivalent rules in any
+/// court verifier. This port does not merge independent ownership ledgers.
+pub trait EscrowApplicationBinding: Send + Sync {
+    fn verify(&self, terms: &EscrowTerms, tx: &CellTx, inputs: &[ResolvedStateInput]) -> Result<(), String>;
+}
+
 /// Strict-VM verifier decorator that also enforces native escrow invariants.
 ///
 /// The delegate always runs first. For session/court use it must be a CKB
@@ -407,13 +416,18 @@ impl EscrowState {
 pub struct EscrowCellVerifier {
     terms: EscrowTerms,
     delegate: Arc<dyn CellScriptVerifier>,
+    application: Arc<dyn EscrowApplicationBinding>,
 }
 
 impl EscrowCellVerifier {
     /// Bind exact terms to a mandatory base verifier.
-    pub fn new(terms: EscrowTerms, delegate: Arc<dyn CellScriptVerifier>) -> Result<Self, EscrowError> {
+    pub fn new(
+        terms: EscrowTerms,
+        delegate: Arc<dyn CellScriptVerifier>,
+        application: Arc<dyn EscrowApplicationBinding>,
+    ) -> Result<Self, EscrowError> {
         terms.validate()?;
-        Ok(Self { terms, delegate })
+        Ok(Self { terms, delegate, application })
     }
 
     fn verify_escrow_transition(&self, tx: &CellTx, inputs: &[ResolvedStateInput]) -> Result<(), EscrowError> {
@@ -456,6 +470,7 @@ impl CellScriptVerifier for EscrowCellVerifier {
     fn verify(&self, tx: &CellTx, resolved_inputs: &[ResolvedStateInput]) -> std::result::Result<u64, String> {
         let cycles = self.delegate.verify(tx, resolved_inputs)?;
         self.verify_escrow_transition(tx, resolved_inputs).map_err(|error| error.to_string())?;
+        self.application.verify(&self.terms, tx, resolved_inputs)?;
         Ok(cycles)
     }
 }
@@ -1013,6 +1028,24 @@ mod tests {
         assert!(initial.validate_successor(&dust, &terms).is_err());
     }
 
+    struct TestApplicationBinding;
+    impl EscrowApplicationBinding for TestApplicationBinding {
+        fn verify(&self, terms: &EscrowTerms, tx: &CellTx, _: &[ResolvedStateInput]) -> Result<(), String> {
+            let data = tx
+                .outputs
+                .iter()
+                .zip(&tx.outputs_data)
+                .find(|(output, _)| output.type_.as_ref() == Some(&terms.ledger_type_script))
+                .map(|(_, data)| data)
+                .ok_or("application requires a ledger update")?;
+            let state = EscrowState::decode(data).map_err(|e| e.to_string())?;
+            if state.application_evidence_root != [5; 32] {
+                return Err("application evidence does not match authorized update".to_owned());
+            }
+            Ok(())
+        }
+    }
+
     #[test]
     fn verifier_rejects_nonconserving_ledger_cell_transition() {
         let (terms, _) = terms();
@@ -1033,9 +1066,22 @@ mod tests {
         let transaction =
             CellTx::new(vec![CellInput::new(input, 0)], vec![], vec![input_output.clone()], vec![next.encode().unwrap()], vec![])
                 .unwrap();
-        let verifier = EscrowCellVerifier::new(terms.clone(), Arc::new(|_: &CellTx, _: &[ResolvedStateInput]| Ok(42))).unwrap();
+        let verifier = EscrowCellVerifier::new(
+            terms.clone(),
+            Arc::new(|_: &CellTx, _: &[ResolvedStateInput]| Ok(42)),
+            Arc::new(TestApplicationBinding),
+        )
+        .unwrap();
         assert_eq!(verifier.verify(&transaction, &resolved).unwrap(), 42);
 
+        let unrelated = CellTx::new(vec![], vec![], vec![], vec![], vec![]).unwrap();
+        assert!(verifier.verify(&unrelated, &[]).is_err(), "application binding must run even without ledger Cells");
+        next.application_evidence_root = [99; 32];
+        let wrong_evidence =
+            CellTx::new(vec![CellInput::new(input, 0)], vec![], vec![input_output.clone()], vec![next.encode().unwrap()], vec![])
+                .unwrap();
+        assert!(verifier.verify(&wrong_evidence, &resolved).is_err(), "a nonzero but unrelated evidence root must not suffice");
+        next.application_evidence_root = [5; 32];
         next.ledger[0].balance = 8_900_000_000;
         let invalid =
             CellTx::new(vec![CellInput::new(input, 0)], vec![], vec![input_output], vec![next.encode().unwrap()], vec![]).unwrap();

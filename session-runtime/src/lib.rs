@@ -7,6 +7,12 @@
 //! is not a daemon and owns no consensus, execution, storage, or CKB evidence
 //! business rules.
 
+mod admission;
+pub use admission::{
+    AdmissionContext, BatchAdmission, RecoverabilityAdmission, RecoveryAnchor, RecoveryEvidence, RecoveryEvidenceSource,
+    RecoveryEvidenceVerifier, UnrestrictedAdmission,
+};
+
 use async_trait::async_trait;
 use futures::FutureExt;
 use myelin_consensus::{
@@ -14,9 +20,9 @@ use myelin_consensus::{
     SelectedConsensus,
 };
 use myelin_session::{
-    ApplicationProfile, EvidencePipelineDescriptor, EvidenceReceipt, EvidenceRecord, EvidenceStage, FinalityVerifier, Hash32,
-    OutboxMessage, PendingDelivery, SessionChain, SessionConfig, SessionError, SessionStore, StoreError, TransitionExecutor,
-    VerifiedFinality,
+    ApplicationProfile, BlockRequest, EvidencePipelineDescriptor, EvidenceReceipt, EvidenceRecord, EvidenceStage, FinalityVerifier,
+    Hash32, OutboxMessage, PendingDelivery, PreparedBlock, SessionChain, SessionConfig, SessionError, SessionHead, SessionStore,
+    StoreError, TransitionExecutor, VerifiedFinality,
 };
 use myelin_session_network::{MessageClass, MessageType, NetworkBinding};
 use std::{
@@ -532,6 +538,7 @@ pub struct RuntimeHost<E: TransitionExecutor, S: SessionStore> {
     chain: SessionChain<E, S>,
     supervisor: ServiceSupervisor,
     writer_enabled: bool,
+    admission: Arc<dyn BatchAdmission>,
 }
 
 impl<E: TransitionExecutor, S: SessionStore> RuntimeHost<E, S> {
@@ -541,6 +548,7 @@ impl<E: TransitionExecutor, S: SessionStore> RuntimeHost<E, S> {
         executor: E,
         store: Arc<S>,
         supervisor: ServiceSupervisor,
+        admission: Arc<dyn BatchAdmission>,
     ) -> Result<Self, RuntimeError> {
         let verifier = Arc::new(RegisteredFinalityVerifier::new(consensus_config)?);
         let descriptor = verifier.descriptor();
@@ -552,7 +560,7 @@ impl<E: TransitionExecutor, S: SessionStore> RuntimeHost<E, S> {
         }
         .verify_session_config(&session_config)?;
         let chain = SessionChain::create(session_config, verifier, executor, store)?;
-        Ok(Self { chain, supervisor, writer_enabled: false })
+        Ok(Self { chain, supervisor, writer_enabled: false, admission })
     }
 
     pub fn recover(
@@ -562,18 +570,29 @@ impl<E: TransitionExecutor, S: SessionStore> RuntimeHost<E, S> {
         executor: E,
         store: Arc<S>,
         supervisor: ServiceSupervisor,
+        admission: Arc<dyn BatchAdmission>,
     ) -> Result<Self, RuntimeError> {
         let verifier = Arc::new(RegisteredFinalityVerifier::new(consensus_config)?);
         let chain = SessionChain::recover(session_id, &expected_application_profile, verifier, executor, store)?;
-        Ok(Self { chain, supervisor, writer_enabled: false })
+        Ok(Self { chain, supervisor, writer_enabled: false, admission })
     }
 
     pub fn chain(&self) -> &SessionChain<E, S> {
         &self.chain
     }
 
-    /// Mutable access is available only while all critical services are ready.
-    pub fn chain_mut(&mut self) -> Result<&mut SessionChain<E, S>, RuntimeError> {
+    /// Configure an operational policy before starting services. Recovery must
+    /// reinstall the same deployment policy before opening the writer.
+    pub fn set_admission(&mut self, admission: Arc<dyn BatchAdmission>) -> Result<(), RuntimeError> {
+        if self.writer_enabled {
+            return Err(RuntimeError::Admission("stop services before changing admission policy".to_owned()));
+        }
+        self.admission = admission;
+        Ok(())
+    }
+
+    /// No mutable chain escape is exposed: every host write crosses this gate.
+    fn check_writer(&mut self) -> Result<(), RuntimeError> {
         if !self.writer_enabled {
             return Err(RuntimeError::WriterDisabled);
         }
@@ -581,7 +600,38 @@ impl<E: TransitionExecutor, S: SessionStore> RuntimeHost<E, S> {
             self.writer_enabled = false;
             return Err(RuntimeError::CriticalService { name, health });
         }
-        Ok(&mut self.chain)
+        Ok(())
+    }
+
+    pub fn prepare_block(&mut self, request: BlockRequest) -> Result<PreparedBlock<E>, RuntimeError> {
+        self.check_writer()?;
+        self.admission
+            .check(&AdmissionContext { base_head: self.chain.head(), transaction_count: request.transactions.len() })
+            .map_err(RuntimeError::Admission)?;
+        Ok(self.chain.prepare_block(request)?)
+    }
+
+    /// Producer adapters must pass the candidate's construction head here
+    /// while holding their single-writer lock. No silent rebasing is allowed.
+    pub fn prepare_block_at(&mut self, base_head: &SessionHead, request: BlockRequest) -> Result<PreparedBlock<E>, RuntimeError> {
+        if base_head != self.chain.head() {
+            return Err(SessionError::StalePreparedBlock.into());
+        }
+        self.prepare_block(request)
+    }
+
+    pub fn commit_finalised(&mut self, prepared: PreparedBlock<E>, proof: FinalityProof) -> Result<SessionHead, RuntimeError> {
+        self.check_writer()?;
+        if prepared.base_head() != self.chain.head() {
+            return Err(SessionError::StalePreparedBlock.into());
+        }
+        self.admission
+            .check(&AdmissionContext {
+                base_head: self.chain.head(),
+                transaction_count: prepared.block().ordered_cell_tx_commitments.len(),
+            })
+            .map_err(RuntimeError::Admission)?;
+        Ok(self.chain.commit_finalised(prepared, proof)?)
     }
 
     /// Whether session writes are currently admitted by the host lifecycle.
@@ -618,6 +668,8 @@ impl<E: TransitionExecutor, S: SessionStore> RuntimeHost<E, S> {
 /// Composition and lifecycle failures.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("batch admission denied: {0}")]
+    Admission(String),
     #[error(transparent)]
     Consensus(#[from] ConsensusError),
     #[error(transparent)]
@@ -1071,6 +1123,7 @@ mod tests {
             consensus_module_commitment: binding.consensus_module_commitment,
             consensus_wal_schema_hash: binding.consensus_wal_schema_hash,
             application_profile: ApplicationProfile {
+                command_identity_required: false,
                 application_id: "runtime-host-test".to_owned(),
                 program_digest: [11; 32],
                 input_schema_hash: [12; 32],
@@ -1108,19 +1161,20 @@ mod tests {
             RootExecutor([1; 32]),
             Arc::new(MinimalStore::default()),
             supervisor,
+            Arc::new(UnrestrictedAdmission),
         )
         .unwrap();
 
-        assert!(matches!(host.chain_mut(), Err(RuntimeError::WriterDisabled)));
+        assert!(matches!(host.check_writer(), Err(RuntimeError::WriterDisabled)));
         host.start_services().await.unwrap();
         assert!(host.writer_enabled());
-        host.chain_mut().unwrap();
+        host.check_writer().unwrap();
 
         *writer_health.lock().unwrap() = ServiceHealth::Failed("writer stopped".to_owned());
-        assert!(matches!(host.chain_mut(), Err(RuntimeError::CriticalService { .. })));
+        assert!(matches!(host.check_writer(), Err(RuntimeError::CriticalService { .. })));
         assert!(!host.writer_enabled());
         assert!(matches!(host.enforce_health().await, Err(RuntimeError::CriticalService { .. })));
         assert!(!host.writer_enabled());
-        assert!(matches!(host.chain_mut(), Err(RuntimeError::WriterDisabled)));
+        assert!(matches!(host.check_writer(), Err(RuntimeError::WriterDisabled)));
     }
 }

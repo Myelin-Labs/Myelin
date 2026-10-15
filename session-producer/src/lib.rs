@@ -9,6 +9,7 @@
 //! genesis-bound finality proof, and atomically advance the durable head.
 
 use async_trait::async_trait;
+use myelin_session::SessionHead;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -182,12 +183,21 @@ impl ProductionSchedule {
 /// Fixed transaction batch handed to the session-owned commit boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProductionCandidate {
+    pub base_head: SessionHead,
     pub transactions: Vec<Vec<u8>>,
     pub timestamp_ms: u64,
     pub cause: ProductionCause,
 }
 
 impl ProductionCandidate {
+    /// Recheck under the session writer lock immediately before preparation.
+    pub fn validate_base(&self, current: &SessionHead) -> Result<(), CommitError> {
+        if &self.base_head != current {
+            return Err(CommitError::StaleCandidate);
+        }
+        Ok(())
+    }
+
     /// Total encoded transaction bytes, checked for overflow.
     pub fn total_bytes(&self) -> Result<u64, ProducerError> {
         transaction_bytes(&self.transactions)
@@ -219,6 +229,7 @@ impl PortError {
 /// the producer acknowledges a durably committed candidate.
 #[derive(Debug)]
 pub struct TransactionSelection<R> {
+    pub base_head: SessionHead,
     pub transactions: Vec<Vec<u8>>,
     pub reservation: Option<R>,
 }
@@ -232,7 +243,11 @@ pub trait TransactionSource: Send + Sync + 'static {
     fn subscribe(&self) -> watch::Receiver<u64>;
 
     /// Reserve up to the supplied remaining batch capacity.
-    async fn reserve(&self, limits: BatchLimits) -> Result<TransactionSelection<Self::Reservation>, PortError>;
+    async fn reserve(
+        &self,
+        base_head: &SessionHead,
+        limits: BatchLimits,
+    ) -> Result<TransactionSelection<Self::Reservation>, PortError>;
 
     /// Forget reservations after the exact candidate is durably committed.
     async fn acknowledge(&self, reservations: Vec<Self::Reservation>) -> Result<(), PortError>;
@@ -246,7 +261,21 @@ pub trait TransactionSource: Send + Sync + 'static {
 /// head advancement.
 #[async_trait]
 pub trait CandidateCommitter: Send + Sync + 'static {
-    async fn commit_candidate(&self, candidate: ProductionCandidate) -> Result<ProductionReceipt, PortError>;
+    async fn current_head(&self) -> Result<SessionHead, PortError>;
+    /// Must recheck candidate.validate_base under the writer lock. An ambiguous
+    /// outcome must return OutcomeUnknown, never Rejected or StaleCandidate.
+    async fn commit_candidate(&self, candidate: ProductionCandidate) -> Result<ProductionReceipt, CommitError>;
+}
+
+/// Commit failure classification controls whether reservations can be released.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CommitError {
+    #[error("candidate construction snapshot is stale; rebuild from the current head")]
+    StaleCandidate,
+    #[error("{0}")]
+    Rejected(String),
+    #[error("commit outcome unknown; reconcile durable command receipts before retry: {0}")]
+    OutcomeUnknown(String),
 }
 
 /// Wall clock used only for proposed session timestamps.
@@ -286,14 +315,27 @@ pub enum ProducerError {
     AcknowledgeAfterCommit { block_height: u64, block_hash: [u8; 32], message: String },
     #[error("transaction batch exceeds its configured limit: {0}")]
     BatchLimit(String),
+    #[error("candidate construction snapshot changed; rebuild required")]
+    StaleCandidate,
+    #[error("commit outcome unknown; reservations retained: {0}")]
+    OutcomeUnknown(String),
     #[error("block producer command channel is closed")]
     CommandsClosed,
 }
 
 enum ProducerCommand {
-    ProduceFromSource { blocks: u32, reply: oneshot::Sender<Result<Vec<ProductionReceipt>, ProducerError>> },
-    ProduceTransactions { transactions: Vec<Vec<u8>>, reply: oneshot::Sender<Result<ProductionReceipt, ProducerError>> },
-    Shutdown { reply: oneshot::Sender<()> },
+    ProduceFromSource {
+        blocks: u32,
+        reply: oneshot::Sender<Result<Vec<ProductionReceipt>, ProducerError>>,
+    },
+    ProduceTransactions {
+        base_head: SessionHead,
+        transactions: Vec<Vec<u8>>,
+        reply: oneshot::Sender<Result<ProductionReceipt, ProducerError>>,
+    },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// Cloneable operator handle. Commands are serialised with automatic
@@ -317,11 +359,15 @@ impl ProducerHandle {
     }
 
     /// Produce one block from an explicit, already ordered transaction batch.
-    pub async fn produce_block_with_transactions(&self, transactions: Vec<Vec<u8>>) -> Result<ProductionReceipt, ProducerError> {
+    pub async fn produce_block_with_transactions(
+        &self,
+        base_head: SessionHead,
+        transactions: Vec<Vec<u8>>,
+    ) -> Result<ProductionReceipt, ProducerError> {
         self.ensure_manual_available()?;
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(ProducerCommand::ProduceTransactions { transactions, reply })
+            .send(ProducerCommand::ProduceTransactions { base_head, transactions, reply })
             .await
             .map_err(|_| ProducerError::CommandsClosed)?;
         response.await.map_err(|_| ProducerError::CommandsClosed)?
@@ -456,6 +502,7 @@ impl<S: TransactionSource, C: CandidateCommitter, W: WallClock> BlockProducer<S,
                 }
             };
             let deadline = tokio::time::Instant::now() + period;
+            let base_head = first.base_head;
             let mut transactions = first.transactions;
             let mut reservations = first.reservation.into_iter().collect::<Vec<_>>();
             let mut total_bytes = transaction_bytes(&transactions)?;
@@ -472,8 +519,13 @@ impl<S: TransactionSource, C: CandidateCommitter, W: WallClock> BlockProducer<S,
                         return Err(error);
                     }
                 };
+                let stale = selection.base_head != base_head;
                 if let Some(reservation) = selection.reservation {
                     reservations.push(reservation);
+                }
+                if stale {
+                    self.release(reservations).await?;
+                    return Err(ProducerError::StaleCandidate);
                 }
                 if !selection.transactions.is_empty() {
                     total_bytes = total_bytes
@@ -513,7 +565,7 @@ impl<S: TransactionSource, C: CandidateCommitter, W: WallClock> BlockProducer<S,
                 }
             }
 
-            self.commit_reserved(transactions, reservations, ProductionCause::Open).await?;
+            self.commit_reserved(base_head, transactions, reservations, ProductionCause::Open).await?;
         }
     }
 
@@ -540,8 +592,8 @@ impl<S: TransactionSource, C: CandidateCommitter, W: WallClock> BlockProducer<S,
                 }
                 Ok(false)
             }
-            ProducerCommand::ProduceTransactions { transactions, reply } => {
-                let result = self.commit_explicit(transactions).await;
+            ProducerCommand::ProduceTransactions { base_head, transactions, reply } => {
+                let result = self.commit_explicit(base_head, transactions).await;
                 let fatal = result.as_ref().is_err_and(ProducerError::is_fatal);
                 let _ = reply.send(result.clone());
                 if fatal {
@@ -565,14 +617,17 @@ impl<S: TransactionSource, C: CandidateCommitter, W: WallClock> BlockProducer<S,
         Ok(receipts)
     }
 
-    async fn commit_explicit(&self, transactions: Vec<Vec<u8>>) -> Result<ProductionReceipt, ProducerError> {
+    async fn commit_explicit(&self, base_head: SessionHead, transactions: Vec<Vec<u8>>) -> Result<ProductionReceipt, ProducerError> {
         validate_transactions(&transactions, self.config.limits)?;
-        self.commit_reserved(transactions, Vec::new(), ProductionCause::Manual).await
+        self.commit_reserved(base_head, transactions, Vec::new(), ProductionCause::Manual).await
     }
 
     async fn reserve(&self, limits: BatchLimits) -> Result<TransactionSelection<S::Reservation>, ProducerError> {
-        let selection = self.source.reserve(limits).await.map_err(|error| ProducerError::Source(error.to_string()))?;
-        match validate_selection(&selection, limits) {
+        let base_head = self.committer.current_head().await.map_err(|error| ProducerError::Source(error.to_string()))?;
+        let selection = self.source.reserve(&base_head, limits).await.map_err(|error| ProducerError::Source(error.to_string()))?;
+        let validation =
+            if selection.base_head != base_head { Err(ProducerError::StaleCandidate) } else { validate_selection(&selection, limits) };
+        match validation {
             Ok(()) => Ok(selection),
             Err(error) => {
                 let reservations = selection.reservation.into_iter().collect();
@@ -592,17 +647,18 @@ impl<S: TransactionSource, C: CandidateCommitter, W: WallClock> BlockProducer<S,
         cause: ProductionCause,
     ) -> Result<ProductionReceipt, ProducerError> {
         let reservations = selection.reservation.into_iter().collect();
-        self.commit_reserved(selection.transactions, reservations, cause).await
+        self.commit_reserved(selection.base_head, selection.transactions, reservations, cause).await
     }
 
     async fn commit_reserved(
         &self,
+        base_head: SessionHead,
         transactions: Vec<Vec<u8>>,
         reservations: Vec<S::Reservation>,
         cause: ProductionCause,
     ) -> Result<ProductionReceipt, ProducerError> {
         validate_transactions(&transactions, self.config.limits)?;
-        let candidate = ProductionCandidate { transactions, timestamp_ms: self.clock.now_ms(), cause };
+        let candidate = ProductionCandidate { base_head, transactions, timestamp_ms: self.clock.now_ms(), cause };
         match self.committer.commit_candidate(candidate).await {
             Ok(receipt) => {
                 self.source.acknowledge(reservations).await.map_err(|error| ProducerError::AcknowledgeAfterCommit {
@@ -612,8 +668,12 @@ impl<S: TransactionSource, C: CandidateCommitter, W: WallClock> BlockProducer<S,
                 })?;
                 Ok(receipt)
             }
+            Err(CommitError::OutcomeUnknown(message)) => Err(ProducerError::OutcomeUnknown(message)),
             Err(commit) => match self.source.release(reservations).await {
-                Ok(()) => Err(ProducerError::Commit(commit.to_string())),
+                Ok(()) => Err(match commit {
+                    CommitError::StaleCandidate => ProducerError::StaleCandidate,
+                    _ => ProducerError::Commit(commit.to_string()),
+                }),
                 Err(release) => Err(ProducerError::CommitAndRelease { commit: commit.to_string(), release: release.to_string() }),
             },
         }
@@ -677,8 +737,8 @@ fn remaining_limits(limits: BatchLimits, count: usize, bytes: u64) -> Result<Bat
 
 #[derive(Default)]
 struct QueueState {
-    available: VecDeque<Vec<u8>>,
-    reserved: BTreeMap<u64, Vec<Vec<u8>>>,
+    available: VecDeque<(SessionHead, Vec<u8>)>,
+    reserved: BTreeMap<u64, Vec<(SessionHead, Vec<u8>)>>,
     next_reservation: u64,
 }
 
@@ -703,7 +763,7 @@ impl QueuedTransactionSource {
     }
 
     /// Submit canonical encoded transaction bytes and notify every producer subscriber.
-    pub async fn submit(&self, transaction: Vec<u8>) -> Result<(), PortError> {
+    pub async fn submit(&self, base_head: SessionHead, transaction: Vec<u8>) -> Result<(), PortError> {
         if transaction.len() as u64 > self.max_transaction_bytes {
             return Err(PortError::new(format!(
                 "transaction bytes {} exceed queue limit {}",
@@ -716,7 +776,7 @@ impl QueuedTransactionSource {
         if queued >= self.max_transactions {
             return Err(PortError::new(format!("transaction queue is full at {} entries", self.max_transactions)));
         }
-        state.available.push_back(transaction);
+        state.available.push_back((base_head, transaction));
         drop(state);
         let next = self.revision.borrow().wrapping_add(1);
         self.revision.send_replace(next);
@@ -743,15 +803,19 @@ impl TransactionSource for QueuedTransactionSource {
         self.revision.subscribe()
     }
 
-    async fn reserve(&self, limits: BatchLimits) -> Result<TransactionSelection<Self::Reservation>, PortError> {
+    async fn reserve(
+        &self,
+        base_head: &SessionHead,
+        limits: BatchLimits,
+    ) -> Result<TransactionSelection<Self::Reservation>, PortError> {
         let mut state = self.state.lock().await;
         let mut transactions = Vec::new();
         let mut bytes = 0u64;
-        while transactions.len() < limits.max_transactions {
-            let Some(next) = state.available.front() else {
-                break;
-            };
-            let next_bytes = next.len() as u64;
+        for next in state.available.iter().take(limits.max_transactions) {
+            if &next.0 != base_head {
+                return Err(PortError::new("queued transaction construction head is stale; rebuild required"));
+            }
+            let next_bytes = next.1.len() as u64;
             if next_bytes > limits.max_bytes && transactions.is_empty() {
                 return Err(PortError::new(format!(
                     "front transaction bytes {next_bytes} exceed batch capacity {}",
@@ -762,15 +826,16 @@ impl TransactionSource for QueuedTransactionSource {
                 break;
             }
             bytes += next_bytes;
-            transactions.push(state.available.pop_front().expect("front transaction exists"));
+            transactions.push(next.1.clone());
         }
         if transactions.is_empty() {
-            return Ok(TransactionSelection { transactions, reservation: None });
+            return Ok(TransactionSelection { base_head: base_head.clone(), transactions, reservation: None });
         }
         let reservation = state.next_reservation;
         state.next_reservation = state.next_reservation.checked_add(1).ok_or_else(|| PortError::new("reservation id overflow"))?;
-        state.reserved.insert(reservation, transactions.clone());
-        Ok(TransactionSelection { transactions, reservation: Some(reservation) })
+        state.available.drain(..transactions.len());
+        state.reserved.insert(reservation, transactions.iter().cloned().map(|tx| (base_head.clone(), tx)).collect());
+        Ok(TransactionSelection { base_head: base_head.clone(), transactions, reservation: Some(reservation) })
     }
 
     async fn acknowledge(&self, reservations: Vec<Self::Reservation>) -> Result<(), PortError> {
@@ -819,6 +884,19 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::sync::Mutex as AsyncMutex;
 
+    fn test_head() -> SessionHead {
+        SessionHead {
+            session_id: [1; 32],
+            finalised_height: None,
+            block_hash: [0; 32],
+            state_root: [2; 32],
+            timestamp_ms: 0,
+            input_position: 0,
+            logical_time: 0,
+            sealed_by_successor: None,
+        }
+    }
+
     #[derive(Default)]
     struct TestClock(AtomicU64);
 
@@ -843,11 +921,15 @@ mod tests {
 
     #[async_trait]
     impl CandidateCommitter for RecordingCommitter {
-        async fn commit_candidate(&self, candidate: ProductionCandidate) -> Result<ProductionReceipt, PortError> {
+        async fn current_head(&self) -> Result<SessionHead, PortError> {
+            Ok(test_head())
+        }
+        async fn commit_candidate(&self, candidate: ProductionCandidate) -> Result<ProductionReceipt, CommitError> {
+            candidate.validate_base(&test_head())?;
             if let Some(message) = self.fail.lock().await.take() {
-                return Err(PortError::new(message));
+                return Err(CommitError::Rejected(message));
             }
-            self.candidates.send(candidate).map_err(|_| PortError::new("candidate receiver closed"))?;
+            self.candidates.send(candidate).map_err(|_| CommitError::Rejected("candidate receiver closed".to_owned()))?;
             let block_height = self.next_height.fetch_add(1, Ordering::SeqCst);
             Ok(ProductionReceipt { block_height, block_hash: [block_height as u8; 32] })
         }
@@ -914,9 +996,9 @@ mod tests {
     #[tokio::test]
     async fn instant_closes_bounded_batches_when_transactions_arrive() {
         let (source, _, mut candidates, handle, task) = service(ProductionTrigger::Instant).await;
-        source.submit(vec![1, 2, 3]).await.unwrap();
-        source.submit(vec![4, 5, 6]).await.unwrap();
-        source.submit(vec![7, 8, 9]).await.unwrap();
+        source.submit(test_head(), vec![1, 2, 3]).await.unwrap();
+        source.submit(test_head(), vec![4, 5, 6]).await.unwrap();
+        source.submit(test_head(), vec![7, 8, 9]).await.unwrap();
 
         let first = tokio::time::timeout(Duration::from_secs(1), candidates.recv()).await.unwrap().unwrap();
         let second = tokio::time::timeout(Duration::from_secs(1), candidates.recv()).await.unwrap().unwrap();
@@ -954,7 +1036,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(candidates.try_recv().is_err());
 
-        source.submit(vec![1, 2, 3]).await.unwrap();
+        source.submit(test_head(), vec![1, 2, 3]).await.unwrap();
         tokio::time::advance(Duration::from_secs(5)).await;
         tokio::task::yield_now().await;
         assert_eq!(candidates.recv().await.unwrap().transactions, vec![vec![1, 2, 3]]);
@@ -971,7 +1053,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(candidates.try_recv().is_err());
 
-        source.submit(vec![1, 2, 3]).await.unwrap();
+        source.submit(test_head(), vec![1, 2, 3]).await.unwrap();
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(9)).await;
         tokio::task::yield_now().await;
@@ -987,10 +1069,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn open_accumulates_arrivals_until_its_deadline() {
         let (source, _, mut candidates, handle, task) = service(ProductionTrigger::Open { period: Duration::from_secs(10) }).await;
-        source.submit(vec![1, 2]).await.unwrap();
+        source.submit(test_head(), vec![1, 2]).await.unwrap();
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(4)).await;
-        source.submit(vec![3, 4, 5]).await.unwrap();
+        source.submit(test_head(), vec![3, 4, 5]).await.unwrap();
         tokio::task::yield_now().await;
         assert!(candidates.try_recv().is_err());
 
@@ -1009,13 +1091,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn open_shutdown_releases_its_in_flight_reservations() {
         let (source, _, _, handle, task) = service(ProductionTrigger::Open { period: Duration::from_secs(10) }).await;
-        source.submit(vec![1, 2, 3]).await.unwrap();
+        source.submit(test_head(), vec![1, 2, 3]).await.unwrap();
         tokio::task::yield_now().await;
 
         handle.shutdown().await.unwrap();
         task.await.unwrap().unwrap();
 
-        let selection = source.reserve(config(ProductionTrigger::Never).limits).await.unwrap();
+        let selection = source.reserve(&test_head(), config(ProductionTrigger::Never).limits).await.unwrap();
         assert_eq!(selection.transactions, vec![vec![1, 2, 3]]);
         source.release(selection.reservation.into_iter().collect()).await.unwrap();
     }
@@ -1023,7 +1105,7 @@ mod tests {
     #[tokio::test]
     async fn never_produces_only_through_manual_requests() {
         let (source, _, mut candidates, handle, task) = service(ProductionTrigger::Never).await;
-        source.submit(vec![1, 2, 3]).await.unwrap();
+        source.submit(test_head(), vec![1, 2, 3]).await.unwrap();
         tokio::task::yield_now().await;
         assert!(candidates.try_recv().is_err());
 
@@ -1033,9 +1115,12 @@ mod tests {
         assert!(candidates.recv().await.unwrap().transactions.is_empty());
 
         let explicit = vec![vec![9; 4], vec![8; 4]];
-        handle.produce_block_with_transactions(explicit.clone()).await.unwrap();
+        handle.produce_block_with_transactions(test_head(), explicit.clone()).await.unwrap();
         assert_eq!(candidates.recv().await.unwrap().transactions, explicit);
-        assert!(matches!(handle.produce_block_with_transactions(vec![vec![0; 9]]).await, Err(ProducerError::BatchLimit(_))));
+        assert!(matches!(
+            handle.produce_block_with_transactions(test_head(), vec![vec![0; 9]]).await,
+            Err(ProducerError::BatchLimit(_))
+        ));
         handle.shutdown().await.unwrap();
         task.await.unwrap().unwrap();
     }
@@ -1043,7 +1128,7 @@ mod tests {
     #[tokio::test]
     async fn failed_commit_releases_reserved_transactions() {
         let source = Arc::new(QueuedTransactionSource::new(8, 8).unwrap());
-        source.submit(vec![1, 2, 3]).await.unwrap();
+        source.submit(test_head(), vec![1, 2, 3]).await.unwrap();
         let (failing, _) = RecordingCommitter::new();
         *failing.fail.lock().await = Some("finality unavailable".to_owned());
         let failing = Arc::new(failing);
@@ -1068,5 +1153,85 @@ mod tests {
         assert_eq!(candidates.recv().await.unwrap().transactions, vec![vec![1, 2, 3]]);
         handle.shutdown().await.unwrap();
         task.await.unwrap().unwrap();
+    }
+    #[tokio::test]
+    async fn stale_queue_rejection_does_not_lose_a_valid_prefix() {
+        let source = QueuedTransactionSource::new(8, 8).unwrap();
+        let mut other = test_head();
+        other.state_root = [8; 32];
+        source.submit(test_head(), vec![1]).await.unwrap();
+        source.submit(other, vec![2]).await.unwrap();
+        assert!(source.reserve(&test_head(), config(ProductionTrigger::Never).limits).await.is_err());
+        assert_eq!(source.len().await, 2);
+        let selected = source.reserve(&test_head(), BatchLimits { max_transactions: 1, max_bytes: 8 }).await.unwrap();
+        assert_eq!(selected.transactions, vec![vec![1]]);
+    }
+
+    struct UncertainCommitter;
+    #[async_trait]
+    impl CandidateCommitter for UncertainCommitter {
+        async fn current_head(&self) -> Result<SessionHead, PortError> {
+            Ok(test_head())
+        }
+        async fn commit_candidate(&self, _: ProductionCandidate) -> Result<ProductionReceipt, CommitError> {
+            Err(CommitError::OutcomeUnknown("connection lost after submission".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_commit_retains_reservations_for_reconciliation() {
+        let source = Arc::new(QueuedTransactionSource::new(8, 8).unwrap());
+        source.submit(test_head(), vec![1]).await.unwrap();
+        let (producer, _) =
+            BlockProducer::new(config(ProductionTrigger::Never), source.clone(), Arc::new(UncertainCommitter)).unwrap();
+        let selection = producer.reserve(config(ProductionTrigger::Never).limits).await.unwrap();
+        assert!(matches!(producer.commit_selection(selection, ProductionCause::Manual).await, Err(ProducerError::OutcomeUnknown(_))));
+        assert_eq!(source.len().await, 1);
+        assert!(source.reserve(&test_head(), config(ProductionTrigger::Never).limits).await.unwrap().transactions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_candidate_preserves_construction_head_and_rejects_stale_state() {
+        let source = Arc::new(QueuedTransactionSource::new(8, 8).unwrap());
+        let (committer, mut candidates) = RecordingCommitter::new();
+        let (producer, _) = BlockProducer::new(config(ProductionTrigger::Never), source, Arc::new(committer)).unwrap();
+        let mut stale = test_head();
+        stale.input_position = 1;
+        assert_eq!(producer.commit_explicit(stale, vec![vec![1]]).await, Err(ProducerError::StaleCandidate));
+        assert!(candidates.try_recv().is_err());
+    }
+
+    struct AckFailure(Arc<QueuedTransactionSource>);
+    #[async_trait]
+    impl TransactionSource for AckFailure {
+        type Reservation = u64;
+        fn subscribe(&self) -> watch::Receiver<u64> {
+            self.0.subscribe()
+        }
+        async fn reserve(&self, head: &SessionHead, limits: BatchLimits) -> Result<TransactionSelection<u64>, PortError> {
+            self.0.reserve(head, limits).await
+        }
+        async fn acknowledge(&self, _: Vec<u64>) -> Result<(), PortError> {
+            Err(PortError::new("journal unavailable"))
+        }
+        async fn release(&self, reservations: Vec<u64>) -> Result<(), PortError> {
+            self.0.release(reservations).await
+        }
+    }
+
+    #[tokio::test]
+    async fn committed_but_unacknowledged_work_is_not_released() {
+        let queue = Arc::new(QueuedTransactionSource::new(8, 8).unwrap());
+        queue.submit(test_head(), vec![1]).await.unwrap();
+        let (committer, _candidates) = RecordingCommitter::new();
+        let (producer, _) =
+            BlockProducer::new(config(ProductionTrigger::Never), Arc::new(AckFailure(queue.clone())), Arc::new(committer)).unwrap();
+        let selection = producer.reserve(config(ProductionTrigger::Never).limits).await.unwrap();
+        assert!(matches!(
+            producer.commit_selection(selection, ProductionCause::Manual).await,
+            Err(ProducerError::AcknowledgeAfterCommit { block_height: 0, .. })
+        ));
+        assert_eq!(queue.len().await, 1);
+        assert!(queue.reserve(&test_head(), config(ProductionTrigger::Never).limits).await.unwrap().transactions.is_empty());
     }
 }

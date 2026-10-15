@@ -1,6 +1,6 @@
 [package]
 name = "myelin-session-store-rocksdb"
-version = "0.21.0"
+version = "0.31.0"
 edition = "2021"
 license = "MIT"
 description = "Transactional RocksDB persistence for Myelin session chains"
@@ -13,6 +13,7 @@ rocksdb.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
 myelin-consensus.workspace = true
 myelin-exec.workspace = true
 myelin-session-runtime.workspace = true

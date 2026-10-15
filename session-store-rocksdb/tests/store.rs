@@ -103,6 +103,7 @@ fn config(consensus: &RegisteredFinalityVerifier) -> SessionConfig {
 
 fn application_profile() -> ApplicationProfile {
     ApplicationProfile {
+        command_identity_required: false,
         application_id: "rocks-store-test".to_owned(),
         program_digest: [11; 32],
         input_schema_hash: [12; 32],
@@ -125,6 +126,7 @@ fn application_profile() -> ApplicationProfile {
 
 fn frame_input(position: u64) -> FrameInput {
     FrameInput {
+        commands: vec![],
         start_position: position,
         end_position: position + 1,
         logical_time_start: position,
@@ -177,7 +179,7 @@ fn store_rejects_superseded_internal_schema() {
     let mut options = Options::default();
     options.create_if_missing(true);
     let db: OptimisticTransactionDB = OptimisticTransactionDB::open(&options, directory.path()).unwrap();
-    db.put(b"\0myelin-session-store-schema", b"4").unwrap();
+    db.put(b"\0myelin-session-store-schema", b"6").unwrap();
     drop(db);
 
     assert!(matches!(RocksSessionStore::open(directory.path()), Err(StoreError::Corrupt(_))));
@@ -251,6 +253,199 @@ fn atomic_commit_recovery_wal_and_outbox_lifecycle() {
     let recovered =
         SessionChain::recover([3; 32], &application_profile(), consensus, TestExecutor::from_snapshot(&snapshot), reopened).unwrap();
     assert_eq!(recovered.head(), &head);
+}
+
+#[test]
+fn command_receipts_survive_restart_and_reject_reconstructed_commands() {
+    use myelin_session::{CommandIdentity, CommandStatus};
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(RocksSessionStore::open(directory.path()).unwrap());
+    let (consensus, signer) = consensus();
+    let mut cfg = config(&consensus);
+    cfg.application_profile.command_identity_required = true;
+    let profile = cfg.application_profile.clone();
+    let mut chain = SessionChain::create(cfg, consensus.clone(), TestExecutor { root: [1; 32] }, store.clone()).unwrap();
+    let command = CommandIdentity { id: [31; 32], payload_hash: [32; 32] };
+    let request = |position, command: CommandIdentity| {
+        let mut frame = frame_input(position);
+        frame.commands = vec![command];
+        BlockRequest {
+            transactions: vec![transaction(position as u8)],
+            frame_input: frame,
+            scheduler_commitment: [5; 32],
+            data_commitments: vec![],
+            timestamp_ms: 10 + position,
+            local_now_ms: 10 + position,
+            successor: None,
+            handoffs: vec![],
+            consume_handoffs: vec![],
+        }
+    };
+    assert_eq!(chain.command_status(&command).unwrap(), CommandStatus::Missing);
+    let mut missing = request(0, command.clone());
+    missing.frame_input.commands.clear();
+    assert!(chain.prepare_block(missing).is_err(), "required identities cannot be omitted");
+    let prepared = chain.prepare_block(request(0, command.clone())).unwrap();
+    let engine = match consensus.selected_consensus() {
+        myelin_consensus::SelectedConsensus::ProofOfAuthority(engine) => engine,
+        _ => unreachable!(),
+    };
+    let proof = FinalityProof::ProofOfAuthority(engine.seal_from_signer(prepared.block().hash(), 0, &signer).unwrap());
+    chain.commit_finalised(prepared, proof).unwrap();
+    // Simulate a crash after durable commit but before journal acknowledgement.
+    drop(chain);
+    drop(store);
+    let reopened = Arc::new(RocksSessionStore::open(directory.path()).unwrap());
+    let (_, snapshot) = SessionChain::<TestExecutor, RocksSessionStore>::recovery_snapshot(&reopened, [3; 32]).unwrap();
+    let recovered =
+        SessionChain::recover([3; 32], &profile, consensus, TestExecutor::from_snapshot(&snapshot), reopened.clone()).unwrap();
+    let CommandStatus::Committed(receipt) = recovered.command_status(&command).unwrap() else { panic!("missing committed command") };
+    assert_eq!(receipt.block_height, 0);
+    assert_eq!(receipt.input_position, 0);
+    assert_eq!(receipt.block_hash, recovered.head().block_hash);
+    assert!(recovered.prepare_block(request(1, command.clone())).is_err());
+    let mut changed = command.clone();
+    changed.payload_hash = [33; 32];
+    assert!(matches!(recovered.command_status(&changed).unwrap(), CommandStatus::IdentityConflict(_)));
+    assert!(recovered.prepare_block(request(1, changed)).is_err());
+    assert_eq!(reopened.load_chain([3; 32]).unwrap().len(), 1);
+    drop(recovered);
+    drop(reopened);
+    // Loss of the index must be detected, not interpreted as permission to
+    // execute the command again after restarting.
+    let db: OptimisticTransactionDB = OptimisticTransactionDB::open(&Options::default(), directory.path()).unwrap();
+    let mut key = vec![b'k'];
+    key.extend_from_slice(&[3; 32]);
+    key.extend_from_slice(&command.id);
+    db.delete(key).unwrap();
+    drop(db);
+    let damaged = Arc::new(RocksSessionStore::open(directory.path()).unwrap());
+    let (verifier, _) = crate::consensus();
+    assert!(SessionChain::recover([3; 32], &profile, verifier, TestExecutor::from_snapshot(&snapshot), damaged).is_err());
+}
+
+#[tokio::test]
+async fn recovery_admission_binds_history_bounds_lag_and_rechecks_before_commit() {
+    use myelin_session_runtime::{
+        RecoverabilityAdmission, RecoveryAnchor, RecoveryEvidence, RecoveryEvidenceSource, RecoveryEvidenceVerifier, RuntimeHost,
+        ServiceSupervisor,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
+    struct Evidence {
+        current: Mutex<RecoveryEvidence>,
+        valid: AtomicBool,
+    }
+    impl RecoveryEvidenceSource for Evidence {
+        fn latest(&self, _: [u8; 32]) -> Result<RecoveryEvidence, String> {
+            Ok(self.current.lock().unwrap().clone())
+        }
+    }
+    impl RecoveryEvidenceVerifier for Evidence {
+        fn verify(&self, evidence: &RecoveryEvidence) -> Result<(), String> {
+            // Test-only local verifier. A deployment supplies actual independent
+            // recovery/retention proof validation, not this synthetic certificate.
+            if !self.valid.load(Ordering::SeqCst) || evidence.evidence != evidence.anchor.state_root {
+                return Err("certificate expired or invalid".to_owned());
+            }
+            Ok(())
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(RocksSessionStore::open(directory.path()).unwrap());
+    let (consensus, signer) = consensus();
+    let consensus_config = ConsensusConfig::proof_of_authority(ProofOfAuthorityConfig {
+        authorities: vec![Authority { id: signer.validator_id().to_owned(), public_key: signer.ckb_public_key() }],
+    });
+    let evidence = Arc::new(Evidence {
+        current: Mutex::new(RecoveryEvidence {
+            anchor: RecoveryAnchor { session_id: [3; 32], height: None, block_hash: [0; 32], state_root: [1; 32] },
+            evidence: vec![1; 32],
+        }),
+        valid: AtomicBool::new(true),
+    });
+    assert!(RecoverabilityAdmission::new(store.clone(), evidence.clone(), evidence.clone(), 0).is_err());
+    let policy = Arc::new(RecoverabilityAdmission::new(store.clone(), evidence.clone(), evidence.clone(), 1).unwrap());
+    let mut host = RuntimeHost::create(
+        config(&consensus),
+        consensus_config.clone(),
+        TestExecutor { root: [1; 32] },
+        store.clone(),
+        ServiceSupervisor::new(std::time::Duration::from_secs(1)).unwrap(),
+        policy.clone(),
+    )
+    .unwrap();
+    let request = |position| BlockRequest {
+        transactions: vec![],
+        frame_input: frame_input(position),
+        scheduler_commitment: [5; 32],
+        data_commitments: vec![],
+        timestamp_ms: 10 + position,
+        local_now_ms: 10 + position,
+        successor: None,
+        handoffs: vec![],
+        consume_handoffs: vec![],
+    };
+    assert!(host.prepare_block(request(0)).is_err());
+    host.start_services().await.unwrap();
+    let engine = match consensus.selected_consensus() {
+        myelin_consensus::SelectedConsensus::ProofOfAuthority(engine) => engine,
+        _ => unreachable!(),
+    };
+    let mut stale_base = host.chain().head().clone();
+    stale_base.state_root = [99; 32];
+    assert!(host.prepare_block_at(&stale_base, request(0)).is_err());
+    let prepared = host.prepare_block(request(0)).unwrap();
+    let proof = FinalityProof::ProofOfAuthority(engine.seal_from_signer(prepared.block().hash(), 0, &signer).unwrap());
+    // Evidence can stop being valid while finality is being collected.
+    evidence.valid.store(false, Ordering::SeqCst);
+    assert!(host.commit_finalised(prepared, proof).is_err());
+    assert_eq!(store.load_head([3; 32]).unwrap().finalised_height, None);
+    evidence.valid.store(true, Ordering::SeqCst);
+    let prepared = host.prepare_block(request(0)).unwrap();
+    let proof = FinalityProof::ProofOfAuthority(engine.seal_from_signer(prepared.block().hash(), 0, &signer).unwrap());
+    let head = host.commit_finalised(prepared, proof).unwrap();
+    assert!(host.prepare_block(request(1)).is_err(), "lag applies even to transitions with no deposits or transactions");
+    let correct = RecoveryEvidence {
+        anchor: RecoveryAnchor {
+            session_id: head.session_id,
+            height: head.finalised_height,
+            block_hash: head.block_hash,
+            state_root: head.state_root,
+        },
+        evidence: head.state_root.to_vec(),
+    };
+    for kind in 0..4 {
+        let mut bad = correct.clone();
+        match kind {
+            0 => bad.anchor.session_id = [99; 32],
+            1 => bad.anchor.height = Some(1),
+            2 => bad.anchor.block_hash = [98; 32],
+            _ => bad.anchor.state_root = [97; 32],
+        }
+        *evidence.current.lock().unwrap() = bad;
+        assert!(host.prepare_block(request(1)).is_err());
+    }
+    *evidence.current.lock().unwrap() = correct;
+    host.prepare_block(request(1)).unwrap();
+    host.stop_services().await.unwrap();
+    drop(host);
+    let (_, snapshot) = SessionChain::<TestExecutor, RocksSessionStore>::recovery_snapshot(&store, [3; 32]).unwrap();
+    let mut recovered = RuntimeHost::recover(
+        [3; 32],
+        application_profile(),
+        consensus_config,
+        TestExecutor::from_snapshot(&snapshot),
+        store,
+        ServiceSupervisor::new(std::time::Duration::from_secs(1)).unwrap(),
+        policy,
+    )
+    .unwrap();
+    recovered.start_services().await.unwrap();
+    evidence.valid.store(false, Ordering::SeqCst);
+    assert!(recovered.prepare_block(request(1)).is_err(), "restart must not bypass evidence verification");
 }
 
 #[test]

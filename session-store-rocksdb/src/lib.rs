@@ -4,8 +4,8 @@
 //! Transactional RocksDB implementation of the Myelin session store.
 
 use myelin_session::{
-    ConsensusWal, EvidenceRecord, FinalisedBlockRecord, Hash32, OutboxMessage, PendingDelivery, SessionGenesis, SessionHead,
-    SessionStore, StateCheckpoint, StoreError, StoredHandoff,
+    CommandReceipt, ConsensusWal, EvidenceRecord, FinalisedBlockRecord, Hash32, OutboxMessage, PendingDelivery, SessionGenesis,
+    SessionHead, SessionStore, StateCheckpoint, StoreError, StoredHandoff,
 };
 use myelin_session_network::{DurableEnvelope, EnqueueStatus, NetworkStore, NetworkStoreError};
 use rocksdb::{
@@ -15,7 +15,7 @@ use rocksdb::{
 use std::{collections::HashSet, path::Path};
 
 const SCHEMA_KEY: &[u8] = b"\0myelin-session-store-schema";
-const SCHEMA_VERSION: &[u8] = b"6";
+const SCHEMA_VERSION: &[u8] = b"7";
 const KEY_GENESIS: u8 = b'g';
 const KEY_HEAD: u8 = b'h';
 const KEY_BLOCK: u8 = b'b';
@@ -32,6 +32,7 @@ const KEY_CHECKPOINT: u8 = b'c';
 const KEY_NETWORK_USAGE: u8 = b'u';
 const KEY_EVIDENCE: u8 = b'e';
 const KEY_HANDOFF: u8 = b'j';
+const KEY_COMMAND: u8 = b'k';
 
 /// Local storage policy. It does not alter session consensus or bounded
 /// execution semantics.
@@ -311,6 +312,12 @@ impl SessionStore for RocksSessionStore {
         })
     }
 
+    fn load_command_receipt(&self, session_id: Hash32, command_id: Hash32) -> Result<Option<CommandReceipt>, StoreError> {
+        let mut key = session_key(KEY_COMMAND, session_id);
+        key.extend_from_slice(&command_id);
+        self.db.get(key).map_err(backend)?.map(|bytes| CommandReceipt::decode(&bytes).map_err(corrupt)).transpose()
+    }
+
     fn commit_block(
         &self,
         expected_head: &SessionHead,
@@ -399,6 +406,16 @@ impl SessionStore for RocksSessionStore {
             transaction.put(&target_genesis_key, target_genesis.encode().map_err(corrupt)?).map_err(backend)?;
             transaction.put(&target_head_key, target_head.encode().map_err(corrupt)?).map_err(backend)?;
             transaction.put(&target_checkpoint_key, target_checkpoint.encode().map_err(corrupt)?).map_err(backend)?;
+        }
+
+        for (index, command) in record.frame_input.commands.iter().enumerate() {
+            let mut key = session_key(KEY_COMMAND, session_id);
+            key.extend_from_slice(&command.id);
+            if transaction.get_for_update(&key, true).map_err(backend)?.is_some() {
+                return Err(StoreError::Conflict("command identity already committed".to_owned()));
+            }
+            let receipt = CommandReceipt::for_record(record, index).map_err(corrupt)?;
+            transaction.put(&key, receipt.encode().map_err(corrupt)?).map_err(backend)?;
         }
 
         for handoff in &record.issued_handoffs {

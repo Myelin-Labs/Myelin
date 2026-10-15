@@ -7457,6 +7457,7 @@ fn session_application_profile_from_args(app_id: &str, args: SessionApplicationP
     let parse =
         |value: &str, name: &str| parse_hex_32(value).ok_or_else(|| CliError::InvalidFixture(format!("{name} must be 32-byte hex")));
     let profile = ApplicationProfile {
+        command_identity_required: false,
         application_id: app_id.to_owned(),
         program_digest: parse(&args.program_digest, "program_digest")?,
         input_schema_hash: parse(&args.input_schema_hash, "input_schema_hash")?,
@@ -7482,6 +7483,7 @@ fn session_application_profile_from_args(app_id: &str, args: SessionApplicationP
 fn fixture_application_profile(app_id: &str) -> ApplicationProfile {
     let hash = |label: &[u8]| blake3_chunks(b"myelin:session-fixture-application-artifact", &[app_id.as_bytes(), label]);
     ApplicationProfile {
+        command_identity_required: false,
         application_id: app_id.to_owned(),
         program_digest: hash(b"program"),
         input_schema_hash: hash(b"input-schema"),
@@ -7711,6 +7713,7 @@ fn session_commit_multi_from_open(path: PathBuf, tx_count: usize, chunk_index: u
         frame_payload.extend_from_slice(transaction);
     }
     let frame_input = FrameInput {
+        commands: vec![],
         start_position: chunk_index,
         end_position: chunk_index.checked_add(1).ok_or_else(|| CliError::InvalidFixture("chunk index overflow".to_owned()))?,
         logical_time_start: chunk_index,
@@ -7859,6 +7862,7 @@ fn session_commit_from_open(path: PathBuf, chunk_index: u64) -> Result<SessionCo
     let data_commitment = blake3_chunks(b"myelin:session-fixture-data-commitment", &[&session_id, &index_bytes, &wtxid]);
     let scheduler_commitment = blake3_chunks(b"myelin:session-fixture-scheduler", &[&session_id, &index_bytes, &wtxid]);
     let frame_input = FrameInput {
+        commands: vec![],
         start_position: chunk_index,
         end_position: chunk_index.checked_add(1).ok_or_else(|| CliError::InvalidFixture("chunk index overflow".to_owned()))?,
         logical_time_start: chunk_index,

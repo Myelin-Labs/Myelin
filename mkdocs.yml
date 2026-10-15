@@ -138,6 +138,8 @@ nav:
   - Architecture:
       - architecture/index.md
       - System overview: architecture/overview.md
+      - Session safety contracts: architecture/session-safety.md
+      - Proposed DEX architecture: architecture/dex.md
       - CellScript & typed-cell metadata: architecture/cellscript.md
       - Execution pipeline: architecture/exec-pipeline.md
       - CellDAG scheduler: architecture/scheduler.md

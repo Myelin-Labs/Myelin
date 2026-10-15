@@ -11,6 +11,7 @@
 //! L1.
 
 mod application;
+mod commands;
 mod continuity;
 mod evidence;
 mod replay;
@@ -19,6 +20,7 @@ pub use application::{
     ApplicationProfile, ApplicationResourceEnvelope, ApplicationVmProfile, ExecutionFrame, ExecutionResources, FrameInput,
     InspectContext, InspectPort, InspectionReceipt,
 };
+pub use commands::{CommandIdentity, CommandReceipt, CommandStatus};
 pub use continuity::{
     EvidenceRequirement, HandoffIntent, HandoffTarget, PredecessorReference, SessionHandoff, StoredHandoff, SuccessorDeclaration,
 };
@@ -38,7 +40,7 @@ use std::{collections::HashSet, fmt, sync::Arc};
 pub type Hash32 = [u8; 32];
 
 const RECORD_MAGIC: &[u8; 4] = b"MREC";
-const RECORD_FORMAT_VERSION: u16 = 6;
+const RECORD_FORMAT_VERSION: u16 = 7;
 const RECORD_HEADER_BYTES: usize = 4 + 2 + 8 + 32;
 const SNAPSHOT_MAGIC: &[u8; 4] = b"MSNP";
 const SNAPSHOT_VERSION: u16 = 1;
@@ -381,6 +383,11 @@ impl<E: TransitionExecutor> PreparedBlock<E> {
         &self.block
     }
 
+    /// Exact head used for construction and execution.
+    pub fn base_head(&self) -> &SessionHead {
+        &self.base_head
+    }
+
     /// Deterministic outbox messages committed by the candidate.
     pub fn outbox(&self) -> &[OutboxMessage] {
         &self.outbox
@@ -647,6 +654,17 @@ pub trait SessionStore: Send + Sync + 'static {
             .find(|record| record.block.number == height)
             .ok_or_else(|| StoreError::NotFound(format!("session block {height}")))
     }
+    /// Load a command receipt. Durable backends should index this in the same
+    /// transaction as the block. The fallback is for small in-memory stores.
+    fn load_command_receipt(&self, session_id: Hash32, command_id: Hash32) -> std::result::Result<Option<CommandReceipt>, StoreError> {
+        for record in self.load_chain(session_id)? {
+            if let Some(index) = record.frame_input.commands.iter().position(|command| command.id == command_id) {
+                return CommandReceipt::for_record(&record, index).map(Some).map_err(|error| StoreError::Corrupt(error.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Load the latest full restart checkpoint.
     ///
     /// The default supports stores that retain a full snapshot in each block.
@@ -841,6 +859,12 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
             }
             for record in &page {
                 audit_record(&genesis, finality_verifier, &mut audited_head, record)?;
+                for (index, command) in record.frame_input.commands.iter().enumerate() {
+                    let expected = CommandReceipt::for_record(record, index)?;
+                    if store.load_command_receipt(session_id, command.id)?.as_ref() != Some(&expected) {
+                        return Err(SessionError::Recovery("command index does not match audited history".to_owned()));
+                    }
+                }
                 next_height = record.block.number.checked_add(1).ok_or(SessionError::HeightOverflow)?;
             }
             if page.len() < RECOVERY_PAGE_SIZE {
@@ -1021,11 +1045,25 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
 
     /// Execute a request on an isolated clone and build the exact block that
     /// validators must sign. This function performs no durable mutation.
+    /// Prepare only against the exact snapshot used by a transaction builder.
+    /// A stale request must be rebuilt; it is never silently rebased.
+    pub fn prepare_block_at(&self, base_head: &SessionHead, request: BlockRequest) -> Result<PreparedBlock<E>> {
+        if base_head != &self.head {
+            return Err(SessionError::StalePreparedBlock);
+        }
+        self.prepare_block(request)
+    }
+
     pub fn prepare_block(&self, request: BlockRequest) -> Result<PreparedBlock<E>> {
         if self.head.sealed_by_successor.is_some() {
             return Err(SessionError::Continuity("session is sealed by its declared successor".to_owned()));
         }
         request.frame_input.validate(&self.config.application_profile)?;
+        for command in &request.frame_input.commands {
+            if !matches!(self.command_status(command)?, CommandStatus::Missing) {
+                return Err(SessionError::InvalidFrame("command identity already committed; reconcile before retrying".to_owned()));
+            }
+        }
         if request.frame_input.start_position != self.head.input_position {
             return Err(SessionError::InvalidFrame(format!(
                 "frame input starts at {}, expected {}",
@@ -2257,6 +2295,7 @@ mod tests {
 
     fn application_profile() -> ApplicationProfile {
         ApplicationProfile {
+            command_identity_required: false,
             application_id: "myelin-test-application".to_owned(),
             program_digest: [11; 32],
             input_schema_hash: [12; 32],
@@ -2279,6 +2318,7 @@ mod tests {
 
     fn frame_input(input_count: u64) -> FrameInput {
         FrameInput {
+            commands: vec![],
             start_position: 0,
             end_position: input_count,
             logical_time_start: 0,

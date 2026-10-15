@@ -1,6 +1,8 @@
 # Architecture
 
 - [Canonical Myelin architecture](../MYELIN_ARCHITECTURE.md)
+- [Proposed Myelin DEX architecture](dex.md)
+- [Session safety integration contracts](session-safety.md)
 - [Execution pipeline](exec-pipeline.md)
 - [CellDAG scheduler](scheduler.md)
 - [Mempool and RBF](mempool.md)

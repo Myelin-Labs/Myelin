@@ -4,7 +4,7 @@
 //! Genesis-bound application identity, execution frames, and read-only
 //! inspection for a Myelin session.
 
-use crate::{Hash32, Result, SessionError};
+use crate::{CommandIdentity, Hash32, Result, SessionError};
 use serde::{Deserialize, Serialize};
 
 const APPLICATION_PROFILE_DOMAIN: &[u8] = b"myelin:application-profile";
@@ -76,6 +76,8 @@ impl ApplicationResourceEnvelope {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplicationProfile {
+    /// Require a stable identity for every input in every frame.
+    pub command_identity_required: bool,
     /// Stable human-readable application identity, committed verbatim.
     pub application_id: String,
     /// Exact replayer/program artifact digest.
@@ -125,6 +127,7 @@ impl ApplicationProfile {
     pub fn commitment(&self) -> Hash32 {
         let mut hasher = blake3::Hasher::new();
         hasher.update(APPLICATION_PROFILE_DOMAIN);
+        hasher.update(&[u8::from(self.command_identity_required)]);
         hasher.update(&(self.application_id.len() as u32).to_le_bytes());
         hasher.update(self.application_id.as_bytes());
         hasher.update(&self.program_digest);
@@ -152,6 +155,9 @@ impl ApplicationProfile {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrameInput {
+    /// Optional command identities in input order. Non-empty lists cover the
+    /// entire input range. Applications authenticate them against the payload.
+    pub commands: Vec<CommandIdentity>,
     /// First application input position covered by the frame.
     pub start_position: u64,
     /// Exclusive end application input position.
@@ -176,6 +182,15 @@ impl FrameInput {
                 "frame input count {input_count} exceeds {}",
                 profile.resources.max_frame_inputs
             )));
+        }
+        if (profile.command_identity_required || !self.commands.is_empty()) && self.commands.len() as u64 != input_count {
+            return Err(SessionError::InvalidFrame("command count must match input range".to_owned()));
+        }
+        let mut command_ids = std::collections::HashSet::new();
+        for command in &self.commands {
+            if command.id == [0; 32] || command.payload_hash == [0; 32] || !command_ids.insert(command.id) {
+                return Err(SessionError::InvalidFrame("command identities must be nonzero and unique".to_owned()));
+            }
         }
         if self.payload.len() as u64 > profile.resources.max_frame_input_bytes {
             return Err(SessionError::InvalidFrame(format!(
@@ -207,6 +222,11 @@ impl FrameInput {
     pub fn root(&self) -> Hash32 {
         let mut hasher = blake3::Hasher::new();
         hasher.update(FRAME_INPUT_DOMAIN);
+        hasher.update(&(self.commands.len() as u64).to_le_bytes());
+        for command in &self.commands {
+            hasher.update(&command.id);
+            hasher.update(&command.payload_hash);
+        }
         hasher.update(&self.start_position.to_le_bytes());
         hasher.update(&self.end_position.to_le_bytes());
         hasher.update(&self.logical_time_start.to_le_bytes());
@@ -375,6 +395,7 @@ mod tests {
 
     fn profile() -> ApplicationProfile {
         ApplicationProfile {
+            command_identity_required: false,
             application_id: "test-application".to_owned(),
             program_digest: [1; 32],
             input_schema_hash: [2; 32],
@@ -418,6 +439,9 @@ mod tests {
         baseline.validate().unwrap();
         let commitment = baseline.commitment();
         let mut mutations = Vec::new();
+        let mut changed = baseline.clone();
+        changed.command_identity_required = !changed.command_identity_required;
+        mutations.push(changed);
         let mut changed = baseline.clone();
         changed.application_id.push('x');
         mutations.push(changed);
@@ -472,6 +496,7 @@ mod tests {
     fn frame_binds_input_roots_ranges_state_txids_and_resources() {
         let profile = profile();
         let input = FrameInput {
+            commands: vec![],
             start_position: 1,
             end_position: 2,
             logical_time_start: 10,
@@ -502,13 +527,58 @@ mod tests {
     #[test]
     fn frame_input_fails_closed_on_ranges_and_bounds() {
         let profile = profile();
-        let reversed = FrameInput { start_position: 2, end_position: 1, logical_time_start: 0, logical_time_end: 1, payload: vec![1] };
+        let reversed = FrameInput {
+            commands: vec![],
+            start_position: 2,
+            end_position: 1,
+            logical_time_start: 0,
+            logical_time_end: 1,
+            payload: vec![1],
+        };
         assert!(reversed.validate(&profile).is_err());
-        let inconsistent =
-            FrameInput { start_position: 0, end_position: 0, logical_time_start: 0, logical_time_end: 0, payload: vec![1] };
+        let inconsistent = FrameInput {
+            commands: vec![],
+            start_position: 0,
+            end_position: 0,
+            logical_time_start: 0,
+            logical_time_end: 0,
+            payload: vec![1],
+        };
         assert!(inconsistent.validate(&profile).is_err());
-        let oversized =
-            FrameInput { start_position: 0, end_position: 101, logical_time_start: 0, logical_time_end: 1, payload: vec![1] };
+        let oversized = FrameInput {
+            commands: vec![],
+            start_position: 0,
+            end_position: 101,
+            logical_time_start: 0,
+            logical_time_end: 1,
+            payload: vec![1],
+        };
         assert!(oversized.validate(&profile).is_err());
+    }
+    #[test]
+    fn command_identity_policy_and_frame_commitments_reject_omission_and_duplicates() {
+        let mut profile = profile();
+        profile.command_identity_required = true;
+        let command = CommandIdentity { id: [41; 32], payload_hash: [42; 32] };
+        let mut input = FrameInput {
+            commands: vec![command.clone()],
+            start_position: 0,
+            end_position: 1,
+            logical_time_start: 0,
+            logical_time_end: 1,
+            payload: vec![1],
+        };
+        input.validate(&profile).unwrap();
+        let root = input.root();
+        input.commands[0].payload_hash = [43; 32];
+        assert_ne!(root, input.root());
+        input.commands.clear();
+        assert!(input.validate(&profile).is_err());
+        input.commands = vec![command.clone(), command];
+        input.end_position = 2;
+        assert!(input.validate(&profile).is_err());
+        input.commands[1].id = [44; 32];
+        input.commands[1].payload_hash = [0; 32];
+        assert!(input.validate(&profile).is_err());
     }
 }

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.31.0 — 2026-10-15
+
+### Continuous application safety
+
+- Added genesis-required command identities and atomic command inclusion receipts,
+  with payload conflicts, duplicate execution rejection, restart reconciliation,
+  and recovery validation of the durable receipt index.
+- Bound producer selections, open windows and manual candidates to their exact
+  construction head. Added checked preparation and explicit stale/unknown commit
+  errors; uncertain or committed-but-unacknowledged work stays reserved.
+- Required an explicit runtime admission policy and guarded both preparation and
+  final commit. Added canonical recoverability anchors, local evidence verification
+  and a bound on all block advancement beyond recoverable state.
+- Required escrow application bindings, including transactions that do not touch
+  the ledger. Generic conservation and nonzero evidence metadata do not substitute
+  for application authorization or ownership consistency.
+- Added DEX architecture and session safety integration documentation.
+- Advanced internal records and RocksDB schema to 7. Application profile and frame
+  commitments change; existing development stores/reports must be regenerated.
+  See `docs/releases/myelin-0.31.0.md` for compatibility and validation.
+
 ### CellScript toolchain
 
 - Re-pinned the external CellScript compiler from the private `v0.22.0` witness-placement patch to the exact upstream annotated release `v0.31.0` (`5fd4c4690512b3df4cd5a46d64194d7d4d3b9491`). The former patch was absorbed upstream: the `WitnessArgs.input_type` entry placement merged into the 0.23 nightly line and later upstream schemas versioned the bounded witness selectors, so no private patch revision is tracked anymore.

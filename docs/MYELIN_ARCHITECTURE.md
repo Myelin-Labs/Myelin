@@ -10,6 +10,13 @@ It is not a CKB full node, a source-chain fork, a permissionless consensus syste
 
 `myelin-session` advances a durable session head only after deterministic execution and verification through its session-owned `FinalityVerifier` port. Session genesis commits the complete `ApplicationProfile` (program, input schema, state codec, time/entropy policies, VM capabilities, resource envelope, court procedure, and handoff policy), the consensus kind, canonical validator/quorum configuration, compiled-in module descriptor, and WAL schema. Startup supplies the expected local application profile and fails if it differs from genesis. Each block commits its session id and an `ExecutionFrame`: contiguous input and logical-time ranges, input root, pre/post state roots, ordered raw txids, cycles, transaction bytes, and input bytes.
 
+Version 0.31 also binds `command_identity_required` in the application profile.
+Command-aware frames commit ordered IDs and payload digests. The session rejects
+previously committed IDs, RocksDB indexes receipts atomically with the block,
+and recovery checks that index against the audited history. `command_status`
+supports application-journal reconciliation after commit/ACK failures. Command
+authentication and economic interpretation remain application responsibilities.
+
 `myelin-session-store-rocksdb` is the production persistence implementation for this interface. It uses a versioned database schema, synchronous RocksDB WAL, optimistic head CAS, module/config/schema-bound consensus-round WAL, and durable network queues. One transaction commits the block, latest checkpoint, head, outbox, issued handoffs, consumed-handoff markers, and—when declared—the successor genesis. Rolling checkpoints avoid storing a full state snapshot with every historical block. Recovery audits the finalised chain, application/frame links, successor lineage, and latest checkpoint before reopening the writer. Bounded range replay begins at the newest retained checkpoint before a requested range and deterministically reexecutes through its end.
 
 `InspectPort` receives an immutable snapshot plus bounded query bytes and returns a bounded result with a receipt binding the session, height, root, application profile, query, and result. It has no writer or outbox capability. `EvidenceRuntime` advances registered outbox topics by one descriptor-defined stage at a time. Collection can use an external service, but a stage is persisted only after the exact adapter verifier rechecks the evidence locally. Terminal records survive acknowledgement, so a crash between the terminal CAS and outbox acknowledgement resumes without repeating or promoting a stage.
@@ -22,7 +29,23 @@ A successor is not an upgrade flag on a live chain. The final predecessor block 
 
 `myelin-session-runtime` is the optional embeddable composition root. It adapts the closed `ConsensusCatalog` to the session verifier port, runs receipt-stage evidence adapters, and supervises a declared service dependency graph with readiness, criticality, bounded lifecycle calls, panic containment, reverse shutdown, and a writer gate. It does not turn Myelin into a CKB full node or an official daemon, and it does not provide dynamic consensus loading.
 
+The runtime requires an explicit `BatchAdmission` policy and exposes guarded
+prepare/commit methods instead of mutable chain access. `RecoverabilityAdmission`
+checks a canonical recovery anchor, re-verifies deployment-supplied evidence,
+and limits all advancement beyond independently recoverable state. It runs both
+before execution and before commit. This is operational control; consensus-level
+DA conditions and L1 exit authority require their own protocol enforcement.
+Producer selections and candidates carry their construction head; `prepare_block_at`
+rejects stale construction. Ambiguous commit outcomes retain reservations for
+reconciliation. See [integration contracts](architecture/session-safety.md).
+
 `myelin-session-escrow` is optional. Funding can attach only when participant authorizations and a finalized `myelin-ckb-adapter` receipt chain verify for the exact CKB open transaction, at the required depth and before the configured start deadline. The off-chain ledger conserves the funded asset and enforces participant debit caps. Native-capacity states reject nonzero participant balances below the exact payout Cell occupied-capacity floor; zero balances produce no payout output, and fee change must also meet its floor. Exit builders recover the latest finalized snapshot and bind it to the engine proof; witness collection, node submission, commitment, and configured-depth finality remain explicit later stages. A prepared exit is not a CKB acceptance or finality claim.
+
+The escrow verifier requires an application binding on every transaction,
+including transactions without ledger Cells. Generic conservation and a nonzero
+application evidence root do not establish equivalence with another economic
+ledger. DEX funding should derive claims from canonical DEX state rather than
+independently maintained participant balances.
 
 Application integrations live in external modules. The Veloren adapter in the sibling checkout journals authoritative game events before mutation, commits strict-VM Cell transitions under PoA/committee/Tendermint, reconciles an optional receipt inventory from the conserved ledger, and exposes the exit builders. Its embedded local signer driver is a controlled session deployment, not a distributed or permissionless L2.
 

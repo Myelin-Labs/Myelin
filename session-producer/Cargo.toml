@@ -1,11 +1,12 @@
 [package]
 name = "myelin-session-producer"
-version = "0.21.0"
+version = "0.31.0"
 edition = "2021"
 license = "MIT"
 description = "Bounded block-production trigger policies for Myelin sessions"
 
 [dependencies]
+myelin-session.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 thiserror.workspace = true
