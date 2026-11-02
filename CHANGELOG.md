@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Documentation
+
+- Updated project positioning to the production CKB-aligned session runtime across the README, documentation, and website.
+- Added the CKB Pulse repository badge to the README.
+
 ## 0.31.0 — 2026-10-15
 
 ### Continuous application safety
@@ -40,7 +45,7 @@ and state-root continuity while leaving the meaning of its state implicit:
 genesis fixes the application interpretation, and every finalised block fixes
 the exact slice of application history it executed.
 
-This is still a pre-production release for controlled sessions. Successors,
+This release supports controlled sessions. Successors,
 handoffs, and staged external evidence do not turn Myelin into a CKB full node,
 a new L1, or a finished permissionless L2.
 
@@ -126,7 +131,7 @@ production timing, persistence, transport, funding, and external evidence are
 separate trust boundaries. A session binds its selected closed-validator
 module and exact validator configuration at genesis.
 
-This remains a pre-production release for controlled sessions and research.
+This release supports controlled application sessions.
 The new modules do not make Myelin a CKB full node, a new L1, or a finished
 permissionless L2.
 
@@ -219,7 +224,7 @@ permissionless L2.
 
 Myelin 0.10.0 turns the retained finite-Cell runtime into an evidence-bound CKB execution kernel. It hardens transaction identity, conflict scheduling, state transitions, mempool admission, validator authentication, CKB projection, and the Session L2 path. It also removes the vendored CellScript compiler in favor of an attested adapter to one exact upstream toolchain.
 
-Myelin remains an unpublished, pre-production project. This version deliberately removes obsolete internal formats instead of carrying compatibility shims. It must not be described as a finished trustless or permissionless L2.
+This version deliberately removes obsolete internal formats instead of carrying compatibility shims. Its security model uses closed validators and exact CKB evidence; it does not establish permissionless L2 security.
 
 ### Highlights
 
@@ -269,9 +274,9 @@ Myelin remains an unpublished, pre-production project. This version deliberately
 - The parent CKB integration devnet passes live admission, commitment, inclusion, stability, configured-depth finality, tamper rejection, and competing-settlement rejection checks.
 - The production gate runs the parent CKB devnet path by default. The external Teeworlds workload remains optional because its repository and prebuilt replayer are not vendored.
 
-### Known production blockers
+### Additional deployment and security work
 
-The following work is required before Myelin can make production or permissionless security claims:
+The following work tracks additional custody, public-network adjudication, and security capabilities beyond the session-runtime scope of this release:
 
 1. Deploy and exercise a canonical CKB threshold lock that directly verifies participant signatures on chain. The current devnet funding lock is an integration fixture.
 2. Implement the complete disputed-chunk court, including challenge windows, adjudication, timeout behavior, bonds, slashing, and payout economics.

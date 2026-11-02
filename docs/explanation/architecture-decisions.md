@@ -162,7 +162,7 @@ committee, PoA, and Tendermint all assume a known validator or authority set.
   need its own chain — not the goal.
 - **Permissionless PoS immediately.** Requires staking, slashing,
   identity, and a totally different engine. Out of scope for the
-  current seed.
+  current session-runtime scope.
 - **Static committee only.** Simpler, but doesn't prove the trait
   abstraction actually works.
 
@@ -268,7 +268,7 @@ operational policy, and any public API surface.
 **Alternatives considered.**
 
 - **Daemon from day one.** More familiar, but adds complexity to
-  the kernel that doesn't serve the protocol seed goal.
+  the kernel that doesn't serve its embeddable session-runtime role.
 - **RPC server.** Same problem.
 
 ---

@@ -1,6 +1,6 @@
 ---
 title: Myelin
-description: A CKB-aligned off-chain session runtime for finite Cell execution
+description: A production CKB-aligned off-chain session runtime for finite Cell execution
 hide:
   - navigation
 ---
@@ -9,7 +9,7 @@ hide:
 
 # Myelin
 
-**A CKB-aligned session runtime for finite Cell execution.**
+**A production CKB-aligned session runtime for finite Cell execution.**
 
 Myelin runs high-throughput Cell transitions off-chain, keeps them finite and
 typed, and emits canonical CKB wire data plus staged evidence for context,
@@ -54,10 +54,11 @@ consume a disputed-chunk bundle; no such court is deployed today.
 
 ## What Myelin actually is
 
-Myelin is **not** a CKB full-node fork, **not** a new L1, and **not yet** a
-finished permissionless L2. It is an off-chain finite-Cell runtime for testing
-deterministic execution, durable session history, closed-validator finality,
-and evidence paths that can be checked against CKB.
+Myelin is **in production** as an off-chain finite-Cell session runtime. It
+provides deterministic execution, durable session history, closed-validator
+finality, and evidence paths that can be checked against CKB. Applications
+select their validator configuration and enforce their own authorization,
+recovery, and asset policies.
 
 <div class="grid cards" markdown>
 

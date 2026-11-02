@@ -1,6 +1,6 @@
 # Myelin Production Gate
 
-> The executable release gate for the standalone Myelin runtime prototype.
+> The executable release gate for the standalone Myelin production session runtime.
 > The gate is `scripts/myelin_production_gate.sh`. It proves the current
 > Session L2 spine and workload evidence; it is not, by itself, proof that
 > Myelin is ready for mainnet custody or permissionless production use.
@@ -109,7 +109,7 @@ cargo run -p myelin-cli -- session settlement-intent --bundle /tmp/session-court
 cargo run -p myelin-cli -- session verify-settlement-intent --intent /tmp/session-settlement.json --bundle /tmp/session-court.json --da-manifest /tmp/session-da.json --out /tmp/session-settlement-verify.json
 ```
 
-The full gate is the recommended form for any merge or prototype release.
+The full gate is the recommended form for any merge or release.
 
 ## 5. How to run
 
@@ -257,7 +257,7 @@ reports/myelin-teeworlds-repro.json
 ## 7. Conclusion
 
 The production gate is the single source of truth for whether the current
-release-candidate prototype is internally consistent. It exercises both
+release candidate is internally consistent. It exercises both
 consensus modes, runtime smoke, the Session L2 open/commit/court/verify spine,
 DA payload proof binding, DA anchor RPC dry-run construction, mock live-cell
 context verification, mock capacity/fee-rate economics verification, mock inclusion

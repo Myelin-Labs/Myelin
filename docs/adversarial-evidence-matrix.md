@@ -10,7 +10,7 @@ artefact and at least one rejection path.
 Covered claim:
 
 ```text
-The prototype should not mark production readiness true merely because a JSON
+The runtime must not mark production readiness true merely because a JSON
 field says it is true. Production readiness must be derived from bound,
 recomputable, mutually consistent evidence.
 ```

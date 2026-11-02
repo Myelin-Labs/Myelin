@@ -2,6 +2,8 @@
 
 <h1>Myelin</h1>
 
+[![CKB Pulse](https://pulse-lab.lusocryptolabs.com/badge/repo.svg?name=Myelin-Labs%2FMyelin)](https://pulse-lab.lusocryptolabs.com/?repo=Myelin-Labs%2FMyelin)
+
 <p><strong>An evidence-bound finite-Cell session runtime for CKB</strong></p>
 
 <p>Execute typed Cell transitions off-chain, schedule independent work in parallel, verify every script group in CKB-VM, and produce evidence that can be checked against CKB.</p>
@@ -10,8 +12,7 @@
 
 </div>
 
-> [!IMPORTANT]
-> Myelin is a research preview. Its full path has been exercised on a parent CKB 0.207.0 integration devnet, and its standard plus canonical 2-of-3 multisig locks have been exercised on public CKB testnet. The verifier/court/DA path is not deployed there. Myelin is not a CKB full node, a new L1, or a finished permissionless L2.
+Myelin is **in production** as a CKB-aligned session runtime. Its operating model combines deterministic execution, closed-validator finality, durable recovery, and evidence-bound CKB integration. See the [session safety contracts](docs/architecture/session-safety.md) for application and operator responsibilities.
 
 ## Why Myelin?
 
@@ -277,19 +278,19 @@ The adapter verifies compiler identity, source revision, target profile, metadat
 
 | Capability | Current status |
 | --- | --- |
-| Typed Cell execution, state-resolved conflicts, atomic state roots | Implemented and tested |
-| Strict local CKB-VM verification with a shared transaction cycle budget | Implemented and tested |
-| Static committee, rotating PoA, and full-round Tendermint closed-validator finality | Implemented and tested |
-| Exact CellScript v0.31.0 reproduction | Implemented and gated |
+| Typed Cell execution, state-resolved conflicts, atomic state roots | Supported and validated |
+| Strict local CKB-VM verification with a shared transaction cycle budget | Supported and validated |
+| Static committee, rotating PoA, and full-round Tendermint closed-validator finality | Supported and validated |
+| Exact CellScript v0.31.0 reproduction | Pinned and release-gated |
 | Live CKB admission, commitment, transaction proof, depth, and reorg checks | Exercised on parent devnet and public testnet |
 | Standard-lock transaction admission and commitment on public CKB testnet | Exercised with finalized evidence |
 | Canonical CKB `secp256k1_blake160_multisig_all` construction and verification | Public-testnet 2-of-3 create/spend exercised |
-| Full disputed-chunk court and economics | Not implemented |
-| Provider-neutral DA certificate core | Implemented; real provider/auditor adapters pending |
+| Full disputed-chunk court and economics | Separate application protocol and deployment work |
+| Provider-neutral DA certificate core | Available; external provider/auditor integrations remain separate work |
 | Public-testnet deployment | Partial: standard/multisig locks only; verifier/court/DA pending |
-| Finished trustless or permissionless L2 | **No** |
+| Validator participation | Closed validator or authority set bound at session genesis |
 
-The main production blockers are public-testnet verifier/court deployment, full court adjudication and economics, real independent DA provider/auditor adapters, broader differential/fuzz/soak testing, safe multi-parent overlays, and production operator key procedures. The [archived public-testnet evidence](evidence/ckb-testnet/2026-07-29-multisig/README.md) proves only standard and canonical multisig lock paths. The DA certificate model is documented in [the DA design](docs/MYELIN_DA_DESIGN.md). See the [0.31.0 release record](docs/releases/myelin-0.31.0.md) for changes and compatibility requirements.
+The deployment roadmap covers public-testnet verifier/court deployment, full court adjudication and economics, independent DA provider/auditor integrations, broader differential/fuzz/soak coverage, safe multi-parent overlays, and operator key procedures. The [archived public-testnet evidence](evidence/ckb-testnet/2026-07-29-multisig/README.md) covers standard and canonical multisig lock paths. Network-specific court, DA, and custody guarantees require their own deployment evidence. The DA certificate model is documented in [the DA design](docs/MYELIN_DA_DESIGN.md). See the [0.31.0 release record](docs/releases/myelin-0.31.0.md) for changes and compatibility requirements.
 
 ## Validation
 

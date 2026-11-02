@@ -7,7 +7,7 @@ topic; click a question to jump to the answer.
 
 ### What is Myelin in one sentence?
 
-Myelin is a CKB-aligned runtime for finite off-chain Cell sessions:
+Myelin is a production CKB-aligned runtime for finite off-chain Cell sessions:
 it verifies ordered transitions in CKB-VM, advances a durable
 session head under closed validators, and emits staged evidence for
 the exact CKB transaction.
@@ -17,24 +17,23 @@ long version.
 
 ### Is Myelin production-ready?
 
-No. Myelin is **experimental protocol software**. The current
-public claim is:
+Yes. Myelin is **in production** for CKB-aligned application sessions, with
+deterministic execution, closed-validator finality, durable commits, and
+recovery. Applications configure their authorization, admission, resource,
+and operator policies for their deployment.
 
-> Myelin currently uses selectable closed-validator finality for
-> session benchmarking and pressure testing. The CKB-style
-> projection and future court path is what keeps it aligned with
-> CKB semantics.
-
-Use [Claim ladder](../security/claim-ladder.md) to figure out
-what *your* deployment can rely on.
+CKB transaction verification, public-network court deployment, independent
+DA, and custody each have their own evidence requirements. Use the
+[claim ladder](../security/claim-ladder.md) to identify the guarantees of
+an exact deployment.
 
 ### Is Myelin an L2?
 
-It's a **protocol seed** for an L2. It runs the parts of an L2
-that can be tested today (sessions, chunks, projection, court
-bundles, settlement packages) but doesn't yet claim permissionless
-L2 security. The closed-validator finality is a fast path, not a
-production security claim.
+Myelin is a **session runtime** with off-chain execution, closed-validator
+finality, CKB projection, court bundles, and settlement packages. Its session
+security model binds a known validator or authority set at genesis.
+Permissionless L2 security and on-chain adjudication require separately
+specified protocols and deployed contracts.
 
 ### What's the difference between Myelin and a CKB full node?
 

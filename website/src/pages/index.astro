@@ -23,7 +23,7 @@ import {
 const siteUrl = "https://myelin.network/";
 const pageTitle = "Myelin - CKB-aligned Cell session runtime";
 const pageDescription =
-  "Myelin is a CKB-aligned off-chain Cell session runtime designed for high-throughput, finite Cell execution with inspectable evidence and future CKB-style adjudication paths.";
+  "Myelin is a production CKB-aligned off-chain Cell session runtime for high-throughput, finite Cell execution, durable recovery, and inspectable CKB evidence.";
 const protocolMedia = {
   src: `${import.meta.env.BASE_URL}media/protocol-slot.webp`,
   width: 1280,
@@ -90,7 +90,7 @@ const modules = [
   ["exec", "Cell transactions, script verification, VM and scheduler glue"],
   ["state", "live Cell roots and data-availability proof primitives"],
   ["mempool", "deterministic conflict scoring for Cell transactions"],
-  ["consensus", "closed-validator session fast paths for benchmarking"],
+  ["consensus", "genesis-bound closed-validator session finality"],
   ["cli", "fixture, report, package, and verification entry points"],
 ];
 ---
@@ -164,9 +164,9 @@ const modules = [
         <div class="hero-copy">
           <h1 id="hero-title">Myelin</h1>
           <p class="hero-lead">
-            A CKB-aligned off-chain Cell session runtime designed for
-            high-throughput, finite Cell transitions with evidence that can be inspected,
-            projected, and contested.
+            A production CKB-aligned off-chain Cell session runtime for
+            high-throughput, finite Cell transitions, durable recovery, and
+            evidence that can be inspected, projected, and contested.
           </p>
           <div class="hero-actions">
             <a class="button primary" href="#protocol">
@@ -177,7 +177,7 @@ const modules = [
           </div>
           <div class="terminal-strip" aria-label="Current positioning">
             <TerminalSquare aria-hidden="true" />
-            <span>not a CKB full node · not a new L1 · early closed-validator session fast paths</span>
+            <span>in production · finite Cell sessions · genesis-bound finality</span>
           </div>
         </div>
 
@@ -236,9 +236,9 @@ const modules = [
         <div class="section-copy wide">
           <h2 id="protocol-title">From CellScript to session state</h2>
           <p>
-            The current implementation is a protocol seed. It proves the shape
-            of deterministic session execution and keeps the future court path
-            in view without claiming finished permissionless L2 security.
+            The production session kernel combines deterministic execution,
+            exact state commitments, and closed-validator finality. CKB
+            integration carries explicit evidence for each verification stage.
           </p>
         </div>
         <div class="flow" aria-label="Protocol flow">

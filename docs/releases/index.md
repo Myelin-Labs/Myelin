@@ -1,7 +1,7 @@
 # Releases & positioning
 
-Release-positioning notes that frame what Myelin is, where it sits in its
-research line, and what each release does and does not claim. These are
+Release-positioning notes that describe the production session runtime,
+its architectural background, and the scope of each release. These are
 framing documents, not security claims — for the latter, see the
 [claim ladder](../security/claim-ladder.md).
 

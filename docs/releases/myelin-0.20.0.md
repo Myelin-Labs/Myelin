@@ -11,7 +11,7 @@ timing and closed-validator finality, then binds the chosen module and its exact
 configuration into session genesis, storage, network envelopes, WAL records,
 blocks, proofs, and recovery.
 
-This release is for controlled sessions, integration work, and benchmarking.
+This release supports controlled application sessions, integration work, and benchmarking.
 It is not a CKB full node, a new L1, a public-testnet court, or a finished
 permissionless L2.
 

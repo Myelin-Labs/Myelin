@@ -7,7 +7,7 @@ the exact head it was built against; and a runtime can stop further state
 advancement when independent recovery evidence is missing, invalid or too far
 behind.
 
-This remains a pre-production release for controlled sessions. It does not ship
+This release supports controlled application sessions. It does not ship
 a production DEX, independent DA providers, complete court economics, or a
 permissionless CKB withdrawal protocol.
 

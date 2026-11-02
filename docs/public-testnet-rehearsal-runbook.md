@@ -15,10 +15,10 @@ change, and fee assumptions. See the
 
 ## Goal
 
-Move from:
+Extend the production session runtime's public-testnet evidence from:
 
 ```text
-production-evidence-complete prototype
+public-testnet rehearsal partially complete
 ```
 
 to:

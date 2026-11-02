@@ -157,25 +157,20 @@ These are about what Myelin **is**, not what Myelin **isn't doing
 yet**. See [What is Myelin?](../concepts/what-is-myelin.md) for
 the full positioning.
 
-## The honest disclaimer
+## Production deployment model
 
-Myelin is **experimental protocol software**. The current public
-claim is:
+Myelin is **in production** as a CKB-aligned session runtime. Each session
+binds its application profile and closed validator or authority set at
+genesis. Operators are responsible for admission, recovery, signing keys,
+resource limits, and the application policies of their deployment.
 
-```text
-Myelin currently uses selectable closed-validator finality for session
-benchmarking and pressure testing. The CKB-style projection and future
-court path is what keeps it aligned with CKB semantics.
-```
+Session finality, CKB wire projection, verified transaction receipts,
+independent DA, and deployed court enforcement are separate guarantees.
+Public-network and custody guarantees require evidence for the exact
+network, scripts, transaction, and operator configuration.
 
-The closed-validator finality is not a permissionless security
-claim. The CKB-style projection is a proof-of-shape, not a
-proof-of-validity on a live chain. The future court path is future
-work.
-
-Use the evidence paths and the claim ladder to figure out what
-*your* deployment can rely on. Don't market Myelin past the
-boundary.
+Use the evidence paths and claim ladder to determine the guarantees
+established by a deployment.
 
 ## Where to go next
 

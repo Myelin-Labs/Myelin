@@ -1,16 +1,17 @@
 # Myelin Production Rehearsal Report
 
-This report classifies the current production-readiness evidence by provenance.
+Myelin is in production as a session runtime. This report separately classifies
+network-specific deployment evidence by provenance.
 It is deliberately not a new gate. Its job is to make clear which artefacts are
 real, fixture-backed, mock-backed, devnet-backed, public-testnet-backed, or still
 missing.
 
 ## Status
 
-Current release posture:
+Runtime and public-testnet rehearsal status:
 
 ```text
-production-evidence-complete prototype / public-testnet rehearsal partially complete
+production session runtime / public-testnet rehearsal partially complete
 ```
 
 Not current release posture:
@@ -139,15 +140,15 @@ contains:
    remaining non-mainnet blockers.
 ```
 
-## Release Boundary
+## Public-Testnet Rehearsal Boundary
 
-Until those exit criteria are met, the correct release label is:
+Until those exit criteria are met, the runtime and rehearsal status is:
 
 ```text
-production-evidence-complete prototype / public-testnet rehearsal partially complete
+production session runtime / public-testnet rehearsal partially complete
 ```
 
-After they are met, the correct release label can become:
+After they are met, the public-testnet rehearsal status can become:
 
 ```text
 public-testnet production rehearsal complete

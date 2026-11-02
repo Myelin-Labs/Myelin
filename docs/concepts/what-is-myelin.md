@@ -1,6 +1,6 @@
 # What is Myelin?
 
-Myelin is an experimental, CKB-aligned runtime for finite off-chain Cell
+Myelin is a production, CKB-aligned runtime for finite off-chain Cell
 sessions. It executes version-0 Cell transactions, resolves conflicts from
 authenticated Cell state, verifies script groups in CKB-VM, and commits an
 ordered session history under a configured closed-validator module.

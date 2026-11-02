@@ -11,8 +11,7 @@ system may keep chain-shaped internals, but its public direction is a bounded
 off-chain session ledger whose disputed chunks can be projected into a
 CKB-compatible court path.
 
-The immediate goal is to turn the current prototype into a release-grade
-session kernel:
+The production session kernel follows this execution and evidence flow:
 
 ```text
 session open
@@ -552,5 +551,5 @@ The Session L2 milestone is complete when all of the following are true:
 - Teeworlds remains passing as an external workload.
 - The production gate enforces all of the above.
 
-At that point Myelin can be described as a serious Session L2 prototype. It
-should still not be marketed as an independent chain.
+These criteria validate the bounded Session L2 execution and evidence path.
+Myelin retains its session-runtime identity rather than becoming an independent chain.

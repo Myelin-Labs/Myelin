@@ -1,6 +1,6 @@
 site_name: Myelin
 site_description: >-
-  A CKB-aligned off-chain session runtime for finite Cell execution,
+  A production CKB-aligned off-chain session runtime for finite Cell execution,
   deterministic CKB-VM verification, durable recovery, and staged CKB evidence.
 site_author: Myelin contributors
 
@@ -15,7 +15,7 @@ edit_uri: edit/main/docs/
 
 copyright: >-
   Copyright &copy; Myelin contributors. Documentation under MIT.
-  Myelin is experimental protocol software — see Security & Claims.
+  Production session runtime for CKB applications — see Security & Claims.
 
 theme:
   name: material

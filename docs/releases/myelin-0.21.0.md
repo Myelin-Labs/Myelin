@@ -11,7 +11,7 @@ the modular runtime and finality boundary. This release fixes what each chain
 means, what every block executed, how an operator can replay or inspect it,
 and how external claims move forward without being promoted on trust.
 
-This release is for controlled sessions, integration work, and benchmarking.
+This release supports controlled application sessions, integration work, and benchmarking.
 It is not a CKB full node, a new L1, a public-testnet court, a permissionless
 bridge, or a finished permissionless L2.
 
