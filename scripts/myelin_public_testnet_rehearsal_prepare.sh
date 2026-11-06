@@ -57,11 +57,6 @@ require_cmd seq
 cd "$ROOT"
 mkdir -p "$REHEARSAL_DIR"
 
-DA_PROVIDER="${MYELIN_DA_PROVIDER:-local-rehearsal-da-provider}"
-DA_RECEIPT_ID="${MYELIN_DA_RECEIPT_ID:-local-rehearsal-receipt-0001}"
-DA_RETRIEVAL_ENDPOINT="${MYELIN_DA_RETRIEVAL_ENDPOINT:-https://da.example.invalid/session-court-payloads/${DA_RECEIPT_ID}}"
-DA_AUDIT_LOG_COMMITMENT="${MYELIN_DA_AUDIT_LOG_COMMITMENT:-0x$(hex_repeat a5 32)}"
-DA_PROVIDER_SECRET_KEY="${MYELIN_LOCAL_DA_PROVIDER_SECRET_KEY:-$(hex_repeat 44 32)}"
 AUTHORITY_SIGNER_KEY_0="${MYELIN_LOCAL_AUTHORITY_SIGNER_KEY_0:-$(hex_repeat 11 32)}"
 AUTHORITY_SIGNER_KEY_1="${MYELIN_LOCAL_AUTHORITY_SIGNER_KEY_1:-$(hex_repeat 22 32)}"
 
@@ -99,41 +94,21 @@ myelin session verify-court-bundle \
   --out "$REHEARSAL_DIR/session-court-verify.json"
 assert_valid "$REHEARSAL_DIR/session-court-verify.json"
 
-run_step "Phase 2: build local DA evidence and external DA receipt artefacts" myelin session da-manifest \
+run_step "Phase 2: build DA evidence" myelin session da-manifest \
   --bundle "$REHEARSAL_DIR/session-court.json" \
   --out "$REHEARSAL_DIR/session-da-in-memory.json"
-DA_PAYLOAD_HASH="$(jq -r '.molecule_transaction_hash' "$REHEARSAL_DIR/session-da-in-memory.json")"
-DA_SEGMENT_ROOT="$(jq -r '.segment_root' "$REHEARSAL_DIR/session-da-in-memory.json")"
-myelin session external-da-receipt \
-  --payload-hash "$DA_PAYLOAD_HASH" \
-  --segment-root "$DA_SEGMENT_ROOT" \
-  --provider "$DA_PROVIDER" \
-  --namespace session-court-payloads \
-  --receipt-id "$DA_RECEIPT_ID" \
-  --availability-window production-retention-30d \
-  --service-level production \
-  --retention-seconds 2592000 \
-  --retrieval-endpoint "$DA_RETRIEVAL_ENDPOINT" \
-  --audit-log-commitment "$DA_AUDIT_LOG_COMMITMENT" \
-  --signing-request \
-  --out "$REHEARSAL_DIR/external-da-receipt.signing-request.json"
-myelin session external-da-receipt \
-  --payload-hash "$DA_PAYLOAD_HASH" \
-  --segment-root "$DA_SEGMENT_ROOT" \
-  --provider "$DA_PROVIDER" \
-  --namespace session-court-payloads \
-  --receipt-id "$DA_RECEIPT_ID" \
-  --availability-window production-retention-30d \
-  --service-level production \
-  --retention-seconds 2592000 \
-  --retrieval-endpoint "$DA_RETRIEVAL_ENDPOINT" \
-  --audit-log-commitment "$DA_AUDIT_LOG_COMMITMENT" \
-  --provider-secret-key "$DA_PROVIDER_SECRET_KEY" \
-  --out "$REHEARSAL_DIR/external-da-receipt.json"
+DA_CERTIFICATE_ARGS=()
+if [[ -n "${MYELIN_DA_CERTIFICATE:-}" ]]; then
+  : "${MYELIN_DA_EVALUATION_EPOCH:?MYELIN_DA_CERTIFICATE requires MYELIN_DA_EVALUATION_EPOCH}"
+  DA_CERTIFICATE_ARGS=(--da-certificate "$MYELIN_DA_CERTIFICATE" --da-evaluation-epoch "$MYELIN_DA_EVALUATION_EPOCH")
+elif [[ -n "${MYELIN_DA_EVALUATION_EPOCH:-}" ]]; then
+  printf 'MYELIN_DA_EVALUATION_EPOCH requires MYELIN_DA_CERTIFICATE\n' >&2
+  exit 2
+fi
 myelin session da-manifest \
   --bundle "$REHEARSAL_DIR/session-court.json" \
   --storage-dir "$REHEARSAL_DIR/session-da-store" \
-  --external-da-receipt "$REHEARSAL_DIR/external-da-receipt.json" \
+  "${DA_CERTIFICATE_ARGS[@]}" \
   --out "$REHEARSAL_DIR/session-da.json"
 myelin session verify-da-manifest \
   --manifest "$REHEARSAL_DIR/session-da.json" \
@@ -263,7 +238,7 @@ jq -n \
       settlement_package_valid: $package[0].valid
     },
     remaining_public_testnet_inputs: [
-      "real external DA provider signature or explicitly labelled rehearsal-provider signature",
+      "provider-neutral DA certificate with provider/fault-domain quorum and signed retrieval probes",
       "public CKB testnet funding cell",
       "public CKB testnet verifier code-dep out-points",
       "participant authority signatures from external signer workflow",

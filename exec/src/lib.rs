@@ -14,7 +14,7 @@
 //!
 //! ## 序列化分层治理架构
 //!
-//! 本 crate 采用分层序列化策略，以平衡性能、兼容性和未来演进需求：
+//! 本 crate 采用分层序列化策略，区分共识哈希、存储格式与脚本 ABI：
 //!
 //! ### 三层架构
 //!
@@ -23,7 +23,7 @@
 //! │  Layer 3: VM/Script ABI 层 (Molecule public)                 │
 //! │  - ResolvedHeader, ResolvedCell, Witness Payload                │
 //! │  - 脚本可见的所有数据结构                                        │
-//! │  - 需要: canonical, partial read, version兼容                  │
+//! │  - 需要: canonical, partial read, 当前格式                  │
 //! ├─────────────────────────────────────────────────────────────────┤
 //! │  Layer 2: 内部工具/存储层 (Molecule-compatible envelopes)       │
 //! │  - Active state records use explicit Molecule-compatible bytes   │
@@ -48,7 +48,7 @@
 //!
 //! 3. **VM ABI 是独立抽象层**
 //!    - 通过 [`VmSerializable`](serialization::VmSerializable) trait 抽象序列化实现
-//!    - VM 层可以独立切到 Molecule，不影响存储层和共识哈希层
+//!    - VM-facing 类型直接使用当前 Molecule 编码
 //!
 //! ### 相关模块
 //!
@@ -56,7 +56,7 @@
 //! - [`celltx`](crate::celltx) - Cell 交易类型
 //! - [`vm`](crate::vm) - VM 集成和 ABI 层
 //!
-//! 详细设计文档: `docs/SERIALIZATION_LAYER_GOVERNANCE_MIGRATION_PLAN.md`
+//! 详见执行层的 `serialization/README.md`。
 
 #![warn(missing_docs)]
 
@@ -94,20 +94,11 @@ pub use projection::{project_cell_tx_to_ckb, CkbProjectionReport, ProjectionBloc
 // Re-export serialization framework
 pub use serialization::{
     append_vm_abi_trailer, split_vm_abi_trailer, SerializationError, VersionedEnvelope, VersionedSerializable, VmAbiError,
-    VmAbiFormat, VmAbiNegotiator, VmSerializable,
-};
-
-// Re-export vm_abi helpers
-pub use serialization::vm_abi::{
-    serialize_cell_input, serialize_cell_output, serialize_outpoint, serialize_script, serialized_cell_output_size,
-    serialized_script_size,
+    VmSerializable, VM_ABI_VERSION,
 };
 
 // Re-export utils
-pub use serialization::utils::{
-    deserialize_from_bytes, deserialize_many, estimate_serialized_size, is_valid_versioned_envelope, peek_format_version,
-    peek_schema_version, serialize_many, serialize_to_bytes, SerializeResult,
-};
+pub use serialization::utils::{deserialize_from_bytes, serialize_to_bytes};
 
 // Re-export molecule compatibility layer
 pub use serialization::molecule_compat::{
@@ -117,15 +108,14 @@ pub use serialization::molecule_compat::{
     ckb_header_epoch_index, ckb_header_epoch_length, ckb_header_epoch_number, ckb_header_epoch_start_block_number,
     ckb_header_hash_molecule, ckb_raw_transaction_hash_molecule, ckb_script_hash_molecule,
     ckb_secp256k1_blake160_multisig_all_signing_message_molecule, ckb_secp256k1_blake160_pubkey_hash,
-    ckb_secp256k1_blake160_sighash_all_lock_script, ckb_secp256k1_blake160_sighash_all_type_hash,
-    ckb_sighash_all_message_from_witness_args_molecule, ckb_sighash_all_message_molecule,
-    ckb_sighash_all_message_with_zeroed_witness_lock_molecule, ckb_sign_secp256k1_blake160_multisig_all_molecule,
-    ckb_sign_secp256k1_blake160_sighash_all_input_molecule, ckb_sign_secp256k1_blake160_sighash_all_lock_group_molecule,
-    ckb_sign_secp256k1_blake160_sighash_all_molecule, ckb_transaction_witness_hash_molecule, ckb_type_id_args, ckb_type_id_script,
-    ckb_verify_secp256k1_blake160_multisig_all_molecule, ckb_verify_secp256k1_blake160_recoverable_signature,
-    ckb_verify_secp256k1_blake160_sighash_all_lock_group_molecule, ckb_verify_secp256k1_blake160_sighash_all_molecule,
-    ckb_verify_type_id_script_group_molecule, ckb_verify_type_id_script_molecule, deserialize_cell_dep_molecule,
-    deserialize_cell_input_molecule, deserialize_cell_output_molecule, deserialize_ckb_header_molecule,
+    ckb_secp256k1_blake160_sighash_all_lock_script, ckb_sighash_all_message_from_witness_args_molecule,
+    ckb_sighash_all_message_molecule, ckb_sighash_all_message_with_zeroed_witness_lock_molecule,
+    ckb_sign_secp256k1_blake160_multisig_all_molecule, ckb_sign_secp256k1_blake160_sighash_all_input_molecule,
+    ckb_sign_secp256k1_blake160_sighash_all_lock_group_molecule, ckb_sign_secp256k1_blake160_sighash_all_molecule,
+    ckb_transaction_witness_hash_molecule, ckb_type_id_args, ckb_type_id_script, ckb_verify_secp256k1_blake160_multisig_all_molecule,
+    ckb_verify_secp256k1_blake160_recoverable_signature, ckb_verify_secp256k1_blake160_sighash_all_lock_group_molecule,
+    ckb_verify_secp256k1_blake160_sighash_all_molecule, ckb_verify_type_id_script_group_molecule, ckb_verify_type_id_script_molecule,
+    deserialize_cell_dep_molecule, deserialize_cell_input_molecule, deserialize_cell_output_molecule, deserialize_ckb_header_molecule,
     deserialize_ckb_outpoint_vec_molecule, deserialize_ckb_raw_header_molecule, deserialize_ckb_witness_args_molecule,
     deserialize_outpoint_molecule, deserialize_raw_transaction_molecule, deserialize_resolved_cell_molecule,
     deserialize_resolved_header_molecule, deserialize_script_molecule, deserialize_transaction_molecule, serialize_cell_dep_molecule,
@@ -134,7 +124,7 @@ pub use serialization::molecule_compat::{
     serialize_raw_transaction_molecule, serialize_resolved_cell_molecule, serialize_resolved_header_molecule,
     serialize_script_molecule, serialize_transaction_molecule, CkbEpochNumberWithFraction, CkbHeader, CkbRawHeader,
     CkbSecp256k1Blake160MultisigAllConfig, CkbSecp256k1Blake160MultisigAllLockConfig, CkbSecp256k1Blake160SighashAllLockConfig,
-    CkbWitnessArgs, MoleculeError, MoleculeSerializer, CKB_SCRIPT_HASH_TYPE_TYPE, CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE,
+    CkbWitnessArgs, MoleculeError, CKB_SCRIPT_HASH_TYPE_TYPE, CKB_SECP256K1_BLAKE160_LOCK_ARG_SIZE,
     CKB_SECP256K1_MULTISIG_CONFIG_HEADER_SIZE, CKB_SECP256K1_SIGHASH_ALL_SIGNATURE_SIZE, CKB_TYPE_ID_CODE_HASH,
 };
 

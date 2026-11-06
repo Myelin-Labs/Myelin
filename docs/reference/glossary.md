@@ -108,11 +108,11 @@ submissions against a parent CKB devnet. See
 
 ## E
 
-**End-to-end production readiness** — The aggregate flag that says
-"all six production gates pass." Stays `false` until DA is
-published, court economics are deployed, threshold-lock is
-enforced, the external DA SLA is present, and the operator policy
-is typed and verified. See
+**End-to-end production readiness** — The aggregate protocol-readiness flag.
+It requires verified final L1 script submission and no remaining operational
+policy blockers, plus DA availability and settlement authority/court conditions
+where the submission requires them. A validation-profile pass alone cannot set
+this flag. See
 [L1 submission flow](../interactions/submission-flow.md).
 
 **Evidence path** — A chain of artefacts that together prove a
@@ -136,9 +136,10 @@ certificate. The output of `finalise_block`. See
 
 ## G
 
-**Gate** — A check that the runtime produces a specific report
-with a specific flag. The production gate runs nine gates in
-sequence. See [Production gate](../operations/production-gate.md).
+**Gate** — An acceptance check with an explicit scope and recorded outcome.
+The validation entry point runs only the selected profile or lanes; unselected
+integrations are recorded as skipped. See
+[Production validation](../operations/production-gate.md).
 
 ## L
 
@@ -190,7 +191,7 @@ guarantees are safe to execute together. See
 witnesses to Myelin.
 
 **Production gate** — The `scripts/myelin_production_gate.sh` script
-that runs the full local release gate. See
+that runs an explicitly selected validation profile and records executed/skipped scope. See
 [Production gate](../operations/production-gate.md).
 
 **Projection** — The function from a Myelin CellTx to a

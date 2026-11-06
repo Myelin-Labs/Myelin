@@ -1677,6 +1677,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "myelin-game-browser-fixture"
+version = "0.31.0"
+dependencies = [
+ "blake3",
+ "postcard",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "myelin-hashes"
 version = "0.31.0"
 dependencies = [
@@ -1748,6 +1759,53 @@ dependencies = [
  "myelin-state",
  "postcard",
  "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "myelin-session-authority"
+version = "0.31.0"
+dependencies = [
+ "blake3",
+ "myelin-consensus",
+ "myelin-session",
+ "myelin-session-journal",
+ "myelin-session-network",
+ "myelin-session-runtime",
+ "myelin-session-store-rocksdb",
+ "myelin-session-transfer",
+ "postcard",
+ "prost",
+ "rand 0.8.7",
+ "rocksdb",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
+name = "myelin-session-bundle"
+version = "0.31.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "myelin-consensus",
+ "myelin-session",
+ "myelin-session-network",
+ "myelin-session-runtime",
+ "myelin-session-store-rocksdb",
+ "myelin-session-transfer",
+ "rocksdb",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
 ]
@@ -1762,6 +1820,32 @@ dependencies = [
  "myelin-exec",
  "myelin-session",
  "myelin-state",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "myelin-session-journal"
+version = "0.31.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "futures",
+ "myelin-consensus",
+ "myelin-exec",
+ "myelin-session",
+ "myelin-session-authority",
+ "myelin-session-bundle",
+ "myelin-session-producer",
+ "myelin-session-runtime",
+ "myelin-session-store-rocksdb",
+ "myelin-session-transfer",
+ "myelin-state",
+ "postcard",
+ "rocksdb",
  "secp256k1",
  "serde",
  "serde_json",
@@ -1820,10 +1904,49 @@ dependencies = [
  "myelin-session",
  "myelin-session-network",
  "myelin-session-runtime",
+ "postcard",
  "rocksdb",
+ "secp256k1",
+ "serde",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "myelin-session-transfer"
+version = "0.31.0"
+dependencies = [
+ "blake3",
+ "myelin-consensus",
+ "myelin-session",
+ "myelin-session-runtime",
+ "myelin-session-store-rocksdb",
+ "myelin-session-worker",
+ "postcard",
+ "rocksdb",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "myelin-session-worker"
+version = "0.31.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "myelin-consensus",
+ "myelin-session",
+ "myelin-session-runtime",
+ "myelin-session-store-rocksdb",
+ "postcard",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

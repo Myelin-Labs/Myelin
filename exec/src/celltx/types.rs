@@ -1156,17 +1156,13 @@ impl CellTx {
             .sum()
     }
 
-    /// Get cellbase-style payload from the first output data or fallback witness.
+    /// Get cellbase-style payload from the first output's data.
     pub fn payload(&self) -> Option<&[u8]> {
         if !self.is_coinbase() {
             return None;
         }
 
-        if let Some(first_output_data) = self.outputs_data.first() {
-            return Some(first_output_data);
-        }
-
-        self.witnesses.first().map(Vec::as_slice)
+        self.outputs_data.first().map(Vec::as_slice)
     }
 
     /// Estimate serialized size using the canonical shared estimator.
@@ -1303,8 +1299,7 @@ impl VersionedSerializable for OutPoint {
         crate::serialization::molecule_compat::serialize_outpoint_molecule(self).map_err(Into::into)
     }
 
-    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
-        ensure_celltx_schema_version(version)?;
+    fn from_versioned_payload(bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
         crate::serialization::molecule_compat::deserialize_outpoint_molecule(bytes).map_err(Into::into)
     }
 }
@@ -1316,8 +1311,7 @@ impl VersionedSerializable for Script {
         crate::serialization::molecule_compat::serialize_script_molecule(self).map_err(Into::into)
     }
 
-    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
-        ensure_celltx_schema_version(version)?;
+    fn from_versioned_payload(bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
         crate::serialization::molecule_compat::deserialize_script_molecule(bytes).map_err(Into::into)
     }
 }
@@ -1329,8 +1323,7 @@ impl VersionedSerializable for CellOutput {
         crate::serialization::molecule_compat::serialize_cell_output_molecule(self).map_err(Into::into)
     }
 
-    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
-        ensure_celltx_schema_version(version)?;
+    fn from_versioned_payload(bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
         crate::serialization::molecule_compat::deserialize_cell_output_molecule(bytes).map_err(Into::into)
     }
 }
@@ -1342,8 +1335,7 @@ impl VersionedSerializable for CellInput {
         crate::serialization::molecule_compat::serialize_cell_input_molecule(self).map_err(Into::into)
     }
 
-    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
-        ensure_celltx_schema_version(version)?;
+    fn from_versioned_payload(bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
         crate::serialization::molecule_compat::deserialize_cell_input_molecule(bytes).map_err(Into::into)
     }
 }
@@ -1355,8 +1347,7 @@ impl VersionedSerializable for CellDep {
         crate::serialization::molecule_compat::serialize_cell_dep_molecule(self).map_err(Into::into)
     }
 
-    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
-        ensure_celltx_schema_version(version)?;
+    fn from_versioned_payload(bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
         crate::serialization::molecule_compat::deserialize_cell_dep_molecule(bytes).map_err(Into::into)
     }
 }
@@ -1371,8 +1362,7 @@ impl VersionedSerializable for DepType {
         }])
     }
 
-    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
-        ensure_celltx_schema_version(version)?;
+    fn from_versioned_payload(bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
         match bytes {
             [0] => Ok(DepType::Code),
             [1] => Ok(DepType::DepGroup),
@@ -1390,29 +1380,8 @@ impl VersionedSerializable for CellTx {
         crate::serialization::molecule_compat::serialize_transaction_molecule(self).map_err(Into::into)
     }
 
-    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
-        ensure_celltx_schema_version(version)?;
+    fn from_versioned_payload(bytes: &[u8]) -> Result<Self, crate::serialization::SerializationError> {
         crate::serialization::molecule_compat::deserialize_transaction_molecule(bytes).map_err(Into::into)
-    }
-}
-
-impl VersionedSerializable for TransactionInfo {
-    const CURRENT_VERSION: u8 = CELLTX_SCHEMA_VERSION;
-}
-
-impl VersionedSerializable for ResolvedCellMeta {
-    const CURRENT_VERSION: u8 = CELLTX_SCHEMA_VERSION;
-}
-
-impl VersionedSerializable for ResolvedCellTx {
-    const CURRENT_VERSION: u8 = CELLTX_SCHEMA_VERSION;
-}
-
-fn ensure_celltx_schema_version(version: u8) -> Result<(), crate::serialization::SerializationError> {
-    if version == CELLTX_SCHEMA_VERSION {
-        Ok(())
-    } else {
-        Err(crate::serialization::SerializationError::UpgradePathNotAvailable { from: version, to: CELLTX_SCHEMA_VERSION })
     }
 }
 

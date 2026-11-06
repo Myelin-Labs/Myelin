@@ -19,6 +19,7 @@ const MAX_EVIDENCE_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceStage {
+    #[serde(deserialize_with = "crate::codec::bounded_string")]
     pub name: String,
     pub verifier_commitment: Hash32,
 }
@@ -27,8 +28,11 @@ pub struct EvidenceStage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidencePipelineDescriptor {
+    #[serde(deserialize_with = "crate::codec::bounded_string")]
     pub pipeline_name: String,
+    #[serde(deserialize_with = "crate::codec::bounded_string")]
     pub topic: String,
+    #[serde(deserialize_with = "crate::codec::bounded_vec")]
     pub stages: Vec<EvidenceStage>,
 }
 
@@ -139,9 +143,11 @@ impl EvidencePipelineDescriptor {
 #[serde(deny_unknown_fields)]
 pub struct EvidenceReceipt {
     pub stage_index: u16,
+    #[serde(deserialize_with = "crate::codec::bounded_string")]
     pub stage_name: String,
     pub verifier_commitment: Hash32,
     pub previous_receipt_commitment: Hash32,
+    #[serde(deserialize_with = "crate::codec::bounded_bytes")]
     pub evidence: Vec<u8>,
 }
 
@@ -192,6 +198,7 @@ pub struct EvidenceRecord {
     pub message_id: Hash32,
     pub message_commitment: Hash32,
     pub descriptor: EvidencePipelineDescriptor,
+    #[serde(deserialize_with = "crate::codec::bounded_vec")]
     pub receipts: Vec<EvidenceReceipt>,
     pub revision: u64,
 }

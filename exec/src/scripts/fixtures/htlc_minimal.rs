@@ -7,7 +7,7 @@ use core::arch::asm;
 
 const SYS_EXIT: usize = 93;
 const SYS_LOAD_WITNESS: usize = 2074;
-const SOURCE_GROUP_INPUT: usize = 0x0100;
+const SOURCE_GROUP_INPUT: usize = 0x0100000000000001;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {

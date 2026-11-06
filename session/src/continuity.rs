@@ -6,7 +6,6 @@
 use crate::{decode_record, encode_record, Hash32, Result, SessionConfig, SessionError};
 use serde::{Deserialize, Serialize};
 
-const SUCCESSOR_DOMAIN: &[u8] = b"myelin:successor-declaration";
 const HANDOFF_DOMAIN: &[u8] = b"myelin:session-handoff";
 const HANDOFF_CONSUMPTION_DOMAIN: &[u8] = b"myelin:session-handoff-consumption";
 const MAX_HANDOFF_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -31,6 +30,8 @@ pub struct SuccessorDeclaration {
     pub source_state_root: Hash32,
     pub source_application_profile_commitment: Hash32,
     pub target_config: SessionConfig,
+    /// Source-authorized continuation or state conversion receipt.
+    pub transition: crate::SuccessorTransition,
 }
 
 impl SuccessorDeclaration {
@@ -40,7 +41,6 @@ impl SuccessorDeclaration {
             || self.source_session_id == self.target_config.session_id
             || self.source_state_root == [0; 32]
             || self.source_application_profile_commitment == [0; 32]
-            || self.target_config.initial_state_root != self.source_state_root
             || self.target_config.predecessor
                 != Some(PredecessorReference {
                     session_id: self.source_session_id,
@@ -51,19 +51,39 @@ impl SuccessorDeclaration {
         {
             return Err(SessionError::Continuity("invalid successor source/target identity or state root".to_owned()));
         }
+        self.transition.validate_shape(self.source_state_root, self.target_config.initial_state_root)?;
         Ok(())
     }
 
     pub fn commitment(&self) -> Hash32 {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(SUCCESSOR_DOMAIN);
-        hasher.update(&self.source_session_id);
-        hasher.update(&self.source_height.to_le_bytes());
-        hasher.update(&self.source_state_root);
-        hasher.update(&self.source_application_profile_commitment);
-        hasher.update(&self.target_config.commitment());
-        *hasher.finalize().as_bytes()
+        successor_commitment(
+            self.source_session_id,
+            self.source_height,
+            self.source_state_root,
+            self.source_application_profile_commitment,
+            self.target_config.commitment(),
+            &self.transition,
+        )
     }
+}
+
+pub(crate) fn successor_commitment(
+    source_session_id: Hash32,
+    source_height: u64,
+    source_state_root: Hash32,
+    source_profile: Hash32,
+    target_config: Hash32,
+    transition: &crate::SuccessorTransition,
+) -> Hash32 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"myelin:successor-declaration-v2");
+    hasher.update(&source_session_id);
+    hasher.update(&source_height.to_le_bytes());
+    hasher.update(&source_state_root);
+    hasher.update(&source_profile);
+    hasher.update(&target_config);
+    transition.update_commitment(&mut hasher);
+    *hasher.finalize().as_bytes()
 }
 
 /// Exact target session or any session whose genesis-bound intake policy
@@ -91,32 +111,25 @@ pub struct EvidenceRequirement {
 pub struct HandoffIntent {
     pub target: HandoffTarget,
     pub expires_at_ms: u64,
+    #[serde(deserialize_with = "crate::codec::bounded_bytes")]
     pub payload: Vec<u8>,
-    /// Application-interpreted authorization material. Its meaning is fixed by
-    /// the target profile's handoff policy and target executor program.
+    /// Application-interpreted authorization. New source execution must validate
+    /// it under its genesis-bound protocol-effects policy; target intake applies
+    /// its own allowlist and semantics. Nonempty bytes alone confer no rights.
+    #[serde(deserialize_with = "crate::codec::bounded_bytes")]
     pub authorization: Vec<u8>,
     pub evidence_requirement: Option<EvidenceRequirement>,
 }
 
 impl HandoffIntent {
     pub fn validate(&self) -> Result<()> {
-        match self.target {
-            HandoffTarget::Session(id) | HandoffTarget::Policy(id) if id == [0; 32] => {
-                return Err(SessionError::Continuity("handoff target must not be zero".to_owned()));
-            }
-            _ => {}
-        }
-        if self.expires_at_ms == 0 || self.payload.is_empty() || self.payload.len() > MAX_HANDOFF_PAYLOAD_BYTES {
-            return Err(SessionError::Continuity("handoff expiry or payload bounds are invalid".to_owned()));
-        }
-        if self.authorization.is_empty() || self.authorization.len() > MAX_HANDOFF_AUTHORIZATION_BYTES {
-            return Err(SessionError::Continuity("handoff authorization bounds are invalid".to_owned()));
-        }
-        if let Some(requirement) = &self.evidence_requirement {
-            if requirement.message_id == [0; 32] || requirement.pipeline_commitment == [0; 32] {
-                return Err(SessionError::Continuity("handoff evidence requirement has a zero commitment".to_owned()));
-            }
-        }
+        validate_handoff_fields(
+            &self.target,
+            self.expires_at_ms,
+            self.payload.len(),
+            self.authorization.len(),
+            self.evidence_requirement.as_ref(),
+        )?;
         Ok(())
     }
 }
@@ -132,7 +145,9 @@ pub struct SessionHandoff {
     pub source_consensus_module_commitment: Hash32,
     pub target: HandoffTarget,
     pub expires_at_ms: u64,
+    #[serde(deserialize_with = "crate::codec::bounded_bytes")]
     pub payload: Vec<u8>,
+    #[serde(deserialize_with = "crate::codec::bounded_bytes")]
     pub authorization: Vec<u8>,
     pub evidence_requirement: Option<EvidenceRequirement>,
 }
@@ -203,14 +218,13 @@ impl SessionHandoff {
     }
 
     pub fn validate(&self, source_timestamp_ms: u64) -> Result<()> {
-        HandoffIntent {
-            target: self.target.clone(),
-            expires_at_ms: self.expires_at_ms,
-            payload: self.payload.clone(),
-            authorization: self.authorization.clone(),
-            evidence_requirement: self.evidence_requirement.clone(),
-        }
-        .validate()?;
+        validate_handoff_fields(
+            &self.target,
+            self.expires_at_ms,
+            self.payload.len(),
+            self.authorization.len(),
+            self.evidence_requirement.as_ref(),
+        )?;
         if self.source_session_id == [0; 32]
             || self.source_state_root == [0; 32]
             || self.source_application_profile_commitment == [0; 32]
@@ -239,27 +253,28 @@ impl SessionHandoff {
 #[serde(deny_unknown_fields)]
 pub struct StoredHandoff {
     pub handoff: SessionHandoff,
-    pub consumed_by_session: Option<Hash32>,
-    pub consumed_at_height: Option<u64>,
-    pub consumed_by_block_hash: Option<Hash32>,
+    pub lifecycle: crate::HandoffLifecycle,
 }
 
 impl StoredHandoff {
     pub fn is_consumed(&self) -> bool {
-        self.consumed_by_session.is_some()
+        self.consumption().is_some()
+    }
+
+    pub fn consumption(&self) -> Option<&crate::HandoffBlockReference> {
+        match &self.lifecycle.terminal {
+            crate::HandoffTerminal::Consumed { at } | crate::HandoffTerminal::Retired { consumed_at: at, .. } => Some(at),
+            _ => None,
+        }
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.validate_lifecycle()?;
         encode_record(self)
     }
-
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let value: Self = decode_record(bytes)?;
-        let markers =
-            [value.consumed_by_session.is_some(), value.consumed_at_height.is_some(), value.consumed_by_block_hash.is_some()];
-        if markers.iter().any(|marker| *marker != markers[0]) {
-            return Err(SessionError::Continuity("handoff consumption markers are incomplete".to_owned()));
-        }
+        value.validate_lifecycle()?;
         Ok(value)
     }
 }
@@ -271,4 +286,31 @@ pub(crate) fn handoff_consumption_commitment(session_id: Hash32, height: u64, ha
     hasher.update(&height.to_le_bytes());
     hasher.update(&handoff_id);
     *hasher.finalize().as_bytes()
+}
+
+fn validate_handoff_fields(
+    target: &HandoffTarget,
+    expires_at_ms: u64,
+    payload_len: usize,
+    authorization_len: usize,
+    evidence_requirement: Option<&EvidenceRequirement>,
+) -> Result<()> {
+    match target {
+        HandoffTarget::Session(id) | HandoffTarget::Policy(id) if *id == [0; 32] => {
+            return Err(SessionError::Continuity("handoff target must not be zero".to_owned()));
+        }
+        _ => {}
+    }
+    if expires_at_ms == 0 || payload_len == 0 || payload_len > MAX_HANDOFF_PAYLOAD_BYTES {
+        return Err(SessionError::Continuity("handoff expiry or payload bounds are invalid".to_owned()));
+    }
+    if authorization_len == 0 || authorization_len > MAX_HANDOFF_AUTHORIZATION_BYTES {
+        return Err(SessionError::Continuity("handoff authorization bounds are invalid".to_owned()));
+    }
+    if let Some(requirement) = evidence_requirement {
+        if requirement.message_id == [0; 32] || requirement.pipeline_commitment == [0; 32] {
+            return Err(SessionError::Continuity("handoff evidence requirement has a zero commitment".to_owned()));
+        }
+    }
+    Ok(())
 }

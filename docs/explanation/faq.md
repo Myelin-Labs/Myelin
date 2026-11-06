@@ -47,13 +47,33 @@ it.
 
 ### What's the difference between Myelin and a sidechain?
 
-A sidechain has its own open-ended chain and consensus. Myelin uses
-a configured static committee, PoA authority set, or Tendermint validator set
-for a finite session. CKB can provide asset custody and may host a future court;
-the repository does not ship a deployed court today.
+Myelin supplies an application-chain runtime: execution, state roots, blocks,
+configured static committee/PoA/Tendermint finality, durable storage and recovery.
+Continuous production advances the session head, and explicit succession can
+change its configuration. DA is one evidence component of that runtime.
 
-The terminology is fuzzy in the L2 literature; we use "session
-runtime" to make the distinction explicit.
+An application can use these modules to build a CKB-oriented app sidechain.
+It must still supply its node/service integration, networking and operating
+policies, plus any CKB custody/bridge and dispute contracts. Myelin finality is
+the configured validators' finality; an L1 DA anchor alone does not make CKB
+verify the sidechain's execution. The repository does not ship a deployed court
+or a turnkey permissionless sidechain node.
+
+### Can CellScript contracts run on Myelin?
+
+Yes, through its CellTx/CKB-strict execution path. CellScript compiles `.cell`
+source into a RISC-V ELF and metadata. The pinned compiler adapter checks the
+artifact, target profile and witness ABI; the application supplies the code
+CellDeps, input/output Cells and witnesses. Myelin resolves scheduling accesses
+from actual state and verifies the lock/type script groups before committing.
+
+This requires the contract's dependencies and syscalls to fit the admitted
+execution profile. Uploading source or a blob to DA does not deploy an executable
+contract, and running the ELF in Myelin does not deploy it on CKB L1. The current
+adapter uses the `ckb` target and `WitnessArgs.input_type` entry payload; it does
+not accept the old raw entry-witness format. See the
+[CellScript adapter](../architecture/cellscript.md) and
+[execution/state/finality flow](../concepts/what-is-myelin.md).
 
 ## CKB concepts
 
@@ -169,7 +189,7 @@ end-to-end walk.
 ### How do I run the production gate?
 
 ```bash
-scripts/myelin_production_gate.sh
+scripts/myelin_production_gate.sh --profile core --out target/validation
 ```
 
 See [Production gate](../operations/production-gate.md) for what

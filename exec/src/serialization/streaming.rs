@@ -189,161 +189,44 @@ mod tests {
     use super::*;
     use crate::celltx::{CellOutput, Script};
 
-    fn create_test_output() -> CellOutput {
-        CellOutput { lock: Script::new([0xAA; 32], 0, vec![0xBB; 20]), type_: None, capacity: 1000 }
-    }
-
     #[test]
-    fn test_streaming_serializer_basic() {
-        let mut buf = Vec::new();
-        let mut serializer = StreamingSerializer::new(&mut buf);
-
-        let output = create_test_output();
-        serializer.serialize(&output).unwrap();
-
-        assert!(serializer.bytes_written() > 0);
-        assert!(!buf.is_empty());
-    }
-
-    #[test]
-    fn test_streaming_deserializer_basic() {
-        let output = create_test_output();
-        let envelope = crate::serialization::VersionedEnvelope::new(&output).unwrap();
-        let bytes = envelope.to_bytes();
-
-        let mut deserializer = StreamingDeserializer::new(&bytes[..]);
-        let restored: CellOutput = deserializer.deserialize().unwrap();
-
-        assert_eq!(output, restored);
-    }
-
-    #[test]
-    fn test_streaming_roundtrip() {
-        let outputs: Vec<CellOutput> = (0..5)
-            .map(|i| CellOutput { lock: Script::new([i as u8; 32], 0, vec![i as u8; 20]), type_: None, capacity: i as u64 })
-            .collect();
-
-        // Serialize
-        let mut buf = Vec::new();
-        {
-            let mut serializer = StreamingSerializer::new(&mut buf);
-            serializer.write_length(outputs.len() as u32).unwrap();
-            for output in &outputs {
-                serializer.serialize(output).unwrap();
+    fn streaming_sequences_roundtrip_and_reject_truncation() {
+        for count in [0, 1, 5, 1000] {
+            let outputs: Vec<CellOutput> = (0..count)
+                .map(|i| CellOutput {
+                    lock: Script::new([i as u8; 32], 0, vec![0xBB; 100]),
+                    type_: (i % 2 == 0).then(|| Script::new([0xCC; 32], 1, vec![0xDD; 50])),
+                    capacity: i as u64,
+                })
+                .collect();
+            let mut bytes = Vec::new();
+            assert_eq!(serialize_streaming(&mut bytes, &outputs).unwrap(), bytes.len());
+            let mut reader = bytes.as_slice();
+            assert_eq!(deserialize_streaming::<_, CellOutput>(&mut reader).unwrap(), outputs);
+            assert!(reader.is_empty());
+            for cut in [0, 1, 3, bytes.len() - 1] {
+                assert!(deserialize_streaming::<_, CellOutput>(&mut &bytes[..cut]).is_err());
             }
         }
-
-        // Deserialize
-        let mut deserializer = StreamingDeserializer::new(&buf[..]);
-        let count = deserializer.read_length().unwrap() as usize;
-        let mut restored = Vec::with_capacity(count);
-        for _ in 0..count {
-            restored.push(deserializer.deserialize::<CellOutput>().unwrap());
-        }
-
-        assert_eq!(outputs, restored);
+        // One item with an impossible envelope length.
+        assert!(deserialize_streaming::<_, CellOutput>(&mut &[1, 0, 0, 0, 3, 0, 0, 0][..]).is_err());
     }
 
     #[test]
-    fn test_serialize_streaming_helper() {
-        let outputs: Vec<CellOutput> = (0..3).map(|_| create_test_output()).collect();
+    fn streaming_raw_frames_preserve_bytes_and_counters() {
+        let mut serializer = StreamingSerializer::new(Vec::new());
+        serializer.write_length(42).unwrap();
+        serializer.write_raw(&[0x01, 0x02, 0x03]).unwrap();
+        assert_eq!(serializer.bytes_written(), 7);
+        let bytes = serializer.into_inner();
+        assert_eq!(bytes, [42, 0, 0, 0, 1, 2, 3]);
 
-        let mut buf = Vec::new();
-        let bytes_written = serialize_streaming(&mut buf, &outputs).unwrap();
-
-        assert!(bytes_written > 0);
-        assert_eq!(buf.len(), bytes_written);
-    }
-
-    #[test]
-    fn test_deserialize_streaming_helper() {
-        let outputs: Vec<CellOutput> = (0..3).map(|_| create_test_output()).collect();
-
-        let mut buf = Vec::new();
-        serialize_streaming(&mut buf, &outputs).unwrap();
-
-        let restored = deserialize_streaming::<_, CellOutput>(&mut &buf[..]).unwrap();
-        assert_eq!(outputs.len(), restored.len());
-    }
-
-    #[test]
-    fn test_streaming_write_read_raw() {
-        let mut buf = Vec::new();
-
-        // Write
-        {
-            let mut serializer = StreamingSerializer::new(&mut buf);
-            serializer.write_length(42).unwrap();
-            serializer.write_raw(&[0x01, 0x02, 0x03]).unwrap();
-        }
-
-        // Read
-        {
-            let mut deserializer = StreamingDeserializer::new(&buf[..]);
-            let len = deserializer.read_length().unwrap();
-            assert_eq!(len, 42);
-
-            let mut raw = [0u8; 3];
-            deserializer.read_raw(&mut raw).unwrap();
-            assert_eq!(raw, [0x01, 0x02, 0x03]);
-        }
-    }
-
-    #[test]
-    fn test_streaming_bytes_tracking() {
-        let mut buf = Vec::new();
-        let mut serializer = StreamingSerializer::new(&mut buf);
-
-        let initial = serializer.bytes_written();
-        serializer.write_length(100).unwrap();
-        let after_length = serializer.bytes_written();
-        serializer.write_raw(&[0x00; 10]).unwrap();
-        let after_raw = serializer.bytes_written();
-
-        assert_eq!(after_length - initial, 4);
-        assert_eq!(after_raw - after_length, 10);
-    }
-
-    #[test]
-    fn test_streaming_into_inner() {
-        let buf = Vec::new();
-        let serializer = StreamingSerializer::new(buf);
-        let buf = serializer.into_inner();
-        assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn test_streaming_empty_sequence() {
-        let outputs: Vec<CellOutput> = vec![];
-
-        let mut buf = Vec::new();
-        serialize_streaming(&mut buf, &outputs).unwrap();
-
-        let restored = deserialize_streaming::<_, CellOutput>(&mut &buf[..]).unwrap();
-        assert!(restored.is_empty());
-    }
-
-    #[test]
-    fn test_streaming_large_data() {
-        let outputs: Vec<CellOutput> = (0..1000)
-            .map(|i| CellOutput {
-                lock: Script::new([i as u8; 32], 0, vec![0xBB; 100]),
-                type_: Some(Script::new([0xCC; 32], 1, vec![0xDD; 50])),
-                capacity: i as u64,
-            })
-            .collect();
-
-        let mut buf = Vec::new();
-        let bytes_written = serialize_streaming(&mut buf, &outputs).unwrap();
-
-        let restored = deserialize_streaming::<_, CellOutput>(&mut &buf[..]).unwrap();
-        assert_eq!(outputs.len(), restored.len());
-
-        // Verify a few items
-        for i in [0, 100, 500, 999] {
-            assert_eq!(outputs[i], restored[i]);
-        }
-
-        println!("Serialized {} items, {} bytes", outputs.len(), bytes_written);
+        let mut deserializer = StreamingDeserializer::new(bytes.as_slice());
+        assert_eq!(deserializer.read_length().unwrap(), 42);
+        let mut raw = [0; 3];
+        deserializer.read_raw(&mut raw).unwrap();
+        assert_eq!(raw, [1, 2, 3]);
+        assert_eq!(deserializer.bytes_read(), bytes.len());
+        assert!(deserializer.into_inner().is_empty());
     }
 }

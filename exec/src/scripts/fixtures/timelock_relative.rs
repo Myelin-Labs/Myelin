@@ -34,7 +34,7 @@ fn exit(code: usize) -> ! {
 }
 
 /// Load input since field via syscall 2083 (LOAD_INPUT_BY_FIELD)
-/// Source: 0x0100 (GROUP_INPUT), Field: 0x01 (SINCE)
+/// Source: 0x0100000000000001 (GROUP_INPUT), Field: 0x01 (SINCE)
 fn load_input_since() -> u64 {
     let mut buf = [0u8; 8];
     let mut size = buf.len() as u64;
@@ -47,7 +47,7 @@ fn load_input_since() -> u64 {
             in("a1") (&mut size as *mut u64) as usize,
             in("a2") 0usize,      // offset
             in("a3") 0usize,      // index
-            in("a4") 0x0100usize, // source: GROUP_INPUT
+            in("a4") 0x0100000000000001usize, // source: GROUP_INPUT
             in("a5") 0x01usize,   // field: SINCE
             in("a7") 2083usize,   // syscall: LOAD_INPUT_BY_FIELD
         );

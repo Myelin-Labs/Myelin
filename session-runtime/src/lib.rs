@@ -1055,8 +1055,30 @@ mod tests {
             self.head.lock().unwrap().clone().ok_or_else(|| StoreError::NotFound("head".to_owned()))
         }
 
-        fn load_chain(&self, _session_id: Hash32) -> std::result::Result<Vec<FinalisedBlockRecord>, StoreError> {
+        fn load_chain_page(&self, _: Hash32, _: u64, _: usize) -> std::result::Result<Vec<FinalisedBlockRecord>, StoreError> {
             Ok(vec![])
+        }
+
+        fn load_command_receipt(
+            &self,
+            _: Hash32,
+            _: Hash32,
+        ) -> std::result::Result<Option<myelin_session::CommandReceipt>, StoreError> {
+            Ok(None)
+        }
+
+        fn load_checkpoint(&self, id: Hash32) -> std::result::Result<myelin_session::StateCheckpoint, StoreError> {
+            let genesis = self.load_genesis(id)?;
+            Ok(myelin_session::StateCheckpoint {
+                session_id: id,
+                finalised_height: None,
+                state_root: genesis.config.initial_state_root,
+                state_snapshot: genesis.state_snapshot,
+            })
+        }
+
+        fn load_checkpoint_before(&self, id: Hash32, _: u64) -> std::result::Result<myelin_session::StateCheckpoint, StoreError> {
+            self.load_checkpoint(id)
         }
 
         fn commit_block(
@@ -1150,6 +1172,8 @@ mod tests {
             max_block_transactions: 1,
             max_block_bytes: 1,
             max_future_drift_ms: 1,
+            commit_limits: myelin_session::CommitResourceLimits::default(),
+            protocol_effects: myelin_session::ProtocolEffectsPolicy::Disabled,
         };
         let events = Arc::new(Mutex::new(Vec::new()));
         let (writer, writer_health) = fake("writer", events);

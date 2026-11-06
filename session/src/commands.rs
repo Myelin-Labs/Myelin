@@ -68,6 +68,18 @@ pub enum CommandStatus {
 }
 
 impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
+    /// Recover the exact committed frame for application-level result decoding.
+    /// A mismatched payload is not the caller's business result.
+    pub fn command_record(&self, command: &CommandIdentity) -> Result<Option<FinalisedBlockRecord>> {
+        match self.command_status(command)? {
+            CommandStatus::Missing => Ok(None),
+            CommandStatus::IdentityConflict(_) => {
+                Err(SessionError::InvalidFrame("command identity has a different committed payload".into()))
+            }
+            CommandStatus::Committed(receipt) => Ok(Some(self.store.load_block(receipt.session_id, receipt.block_height)?)),
+        }
+    }
+
     /// Resolve an application journal entry against this audited session head.
     pub fn command_status(&self, command: &CommandIdentity) -> Result<CommandStatus> {
         let Some(receipt) = self.store.load_command_receipt(self.config.session_id, command.id)? else {

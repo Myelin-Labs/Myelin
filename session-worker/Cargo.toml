@@ -1,0 +1,34 @@
+[package]
+name = "myelin-session-worker"
+version = "0.31.0"
+edition = "2021"
+license = "MIT"
+description = "Terminable resource-limited native execution for Myelin sessions"
+
+[dependencies]
+blake3.workspace = true
+myelin-session.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+myelin-consensus.workspace = true
+myelin-session-runtime.workspace = true
+myelin-session-store-rocksdb.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "myelin-worker-test-fixture"
+path = "tests/fixtures/worker.rs"
+required-features = ["test-fixture"]
+
+[features]
+test-fixture = []
+
+[lints]
+workspace = true

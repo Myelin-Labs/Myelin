@@ -71,8 +71,7 @@ public_key = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
 
 The engine rejects empty sets, duplicate ids or keys, invalid keys, the wrong
 scheduled signer, signer/key mismatches, and any height, hash, or signature
-drift. `poa` is accepted as an input alias; reports emit
-`proof-of-authority`.
+drift. Configuration and reports use the canonical `proof-of-authority` name.
 
 ## Tendermint configuration
 
@@ -106,8 +105,7 @@ public_key = "e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13"
 weight = 1
 ```
 
-The old `weighted-precommit` config spelling is accepted only as a migration
-alias. Reports emit the canonical `tendermint` name.
+Configuration and reports use `tendermint`; historical aliases are rejected.
 
 ## Round state
 

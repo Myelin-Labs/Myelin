@@ -1,0 +1,55 @@
+name: Validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+      - name: Linux build and isolation dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake protobuf-compiler pkg-config libssl-dev openssl bubblewrap
+      - name: macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install llvm protobuf cmake
+      - name: Install pinned workspace toolchain
+        run: rustup show active-toolchain
+      - name: Run core profile
+        run: scripts/myelin_production_gate.sh --profile core --out target/validation
+      - name: Retain exact reports, logs and artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: core-${{ matrix.os }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/validation
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1

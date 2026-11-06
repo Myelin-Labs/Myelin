@@ -174,7 +174,7 @@ impl<D: CellDataProvider, M: SupportMachine> Syscalls<M> for Exec<D> {
         }
 
         let index = machine.registers()[A0].to_u64() as usize;
-        let source = Source::parse_from_u64_for_semantics(machine.registers()[A1].to_u64(), self.semantics)?;
+        let source = Source::parse_from_u64(machine.registers()[A1].to_u64())?;
         let place = ExecPlace::parse_from_u64(machine.registers()[A2].to_u64())?;
 
         let payload = match place {
@@ -217,7 +217,7 @@ impl<D: CellDataProvider, M: SupportMachine> Syscalls<M> for Exec<D> {
             &payload[offset..end]
         };
         let program_slice = match split_vm_abi_trailer(program_slice) {
-            Ok((program_slice, _)) => program_slice,
+            Ok(program_slice) => program_slice,
             Err(_) => {
                 machine.set_register(A0, M::REG::from_u8(WRONG_FORMAT));
                 return Ok(true);

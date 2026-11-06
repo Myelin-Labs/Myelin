@@ -3,9 +3,8 @@
 //
 // Spawn syscall
 
-use super::{MAX_VMS_SPAWNED, SPAWN_EXTRA_CYCLES_BASE, SPAWN_SYSCALL_NUMBER, SPAWN_YIELD_CYCLES_BASE};
+use super::{SPAWN_EXTRA_CYCLES_BASE, SPAWN_SYSCALL_NUMBER, SPAWN_YIELD_CYCLES_BASE};
 use crate::vm::scheduler::{Fd, Message, ProgramLocation, ProgramPiece, ProgramResolver, SpawnRequest, VmId, VmRuntime};
-use crate::vm::VmSemantics;
 use ckb_vm::{
     memory::Memory,
     registers::{A0, A1, A2, A3, A4, A7},
@@ -17,43 +16,17 @@ use std::sync::Arc;
 ///
 /// Syscall number: 2601
 ///
-/// When attached to a scheduler runtime, this syscall yields to the outer
-/// multi-VM loop with a spawn request. Without a runtime it preserves the old
-/// placeholder behavior for compatibility with narrow unit tests.
+/// Requires a scheduler runtime and yields requests to its multi-VM loop.
 #[derive(Clone)]
 pub struct Spawn {
-    runtime: Option<SpawnRuntime>,
-    semantics: VmSemantics,
-}
-
-#[derive(Clone)]
-struct SpawnRuntime {
     id: VmId,
     message_box: Arc<std::sync::Mutex<Vec<Message>>>,
     program_resolver: ProgramResolver,
 }
 
-impl Default for Spawn {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Spawn {
-    pub fn new() -> Self {
-        Self { runtime: None, semantics: VmSemantics::MyelinExtended }
-    }
-
     pub fn with_runtime(id: VmId, runtime: &VmRuntime, program_resolver: ProgramResolver) -> Self {
-        Self {
-            runtime: Some(SpawnRuntime { id, message_box: Arc::clone(&runtime.message_box), program_resolver }),
-            semantics: VmSemantics::MyelinExtended,
-        }
-    }
-
-    pub fn with_semantics(mut self, semantics: VmSemantics) -> Self {
-        self.semantics = semantics;
-        self
+        Self { id, message_box: Arc::clone(&runtime.message_box), program_resolver }
     }
 }
 
@@ -67,15 +40,8 @@ impl<M: SupportMachine> Syscalls<M> for Spawn {
             return Ok(false);
         }
 
-        let Some(runtime) = &self.runtime else {
-            machine.add_cycles_no_checking(SPAWN_EXTRA_CYCLES_BASE)?;
-            machine.add_cycles_no_checking(SPAWN_YIELD_CYCLES_BASE)?;
-            machine.set_register(A0, M::REG::from_u8(MAX_VMS_SPAWNED));
-            return Ok(true);
-        };
-
         let index = machine.registers()[A0].to_u64() as usize;
-        let source = super::Source::parse_from_u64_for_semantics(machine.registers()[A1].to_u64(), self.semantics)?;
+        let source = super::Source::parse_from_u64(machine.registers()[A1].to_u64())?;
         let Some(place) = crate::vm::scheduler::ProgramPlace::parse(machine.registers()[A2].to_u64()) else {
             machine.set_register(A0, M::REG::from_u8(super::INDEX_OUT_OF_BOUND));
             return Ok(true);
@@ -106,7 +72,7 @@ impl<M: SupportMachine> Syscalls<M> for Spawn {
         }
 
         let piece = ProgramPiece { source, index, place };
-        let payload = match (runtime.program_resolver)(&piece) {
+        let payload = match (self.program_resolver)(&piece) {
             Ok(payload) => payload,
             Err(code) => {
                 machine.set_register(A0, M::REG::from_u8(code));
@@ -120,8 +86,8 @@ impl<M: SupportMachine> Syscalls<M> for Spawn {
 
         machine.add_cycles_no_checking(SPAWN_EXTRA_CYCLES_BASE)?;
         machine.add_cycles_no_checking(SPAWN_YIELD_CYCLES_BASE)?;
-        runtime.message_box.lock().map_err(|e| VMError::Unexpected(e.to_string()))?.push(Message::Spawn(
-            runtime.id,
+        self.message_box.lock().map_err(|e| VMError::Unexpected(e.to_string()))?.push(Message::Spawn(
+            self.id,
             SpawnRequest { location: ProgramLocation { piece, offset, length }, argc, argv, fds, process_id_addr },
         ));
         Err(VMError::Yield)
@@ -134,7 +100,7 @@ mod tests {
     use crate::vm::scheduler::{ProgramLocation, ProgramPiece, ProgramPlace, ProgramResolver, VmRuntime};
     use crate::vm::syscalls::Source;
     use crate::vm::ScriptVersion;
-    use ckb_vm::{CoreMachine, Error as VMError, Memory, Register};
+    use ckb_vm::{CoreMachine, Error as VMError, Memory};
     use std::sync::{atomic::AtomicU64, Arc, Mutex};
 
     const SPGS_ADDR: u64 = 0x1000;
@@ -142,30 +108,6 @@ mod tests {
 
     fn runtime() -> VmRuntime {
         VmRuntime::with_parts(Arc::new(AtomicU64::new(0)), Arc::new(Mutex::new(Vec::new())))
-    }
-
-    #[test]
-    fn test_spawn_returns_max_vms_spawned() {
-        let mut machine = ScriptVersion::V2.init_core_machine(200_000);
-        machine.set_register(A7, SPAWN_SYSCALL_NUMBER);
-
-        let mut syscall = Spawn::new();
-        let handled = syscall.ecall(&mut machine).expect("spawn syscall should succeed");
-
-        assert!(handled);
-        assert_eq!(machine.registers()[A0].to_u64(), MAX_VMS_SPAWNED as u64);
-        assert_eq!(machine.cycles(), SPAWN_EXTRA_CYCLES_BASE + SPAWN_YIELD_CYCLES_BASE);
-    }
-
-    #[test]
-    fn test_spawn_ignores_other_syscalls() {
-        let mut machine = ScriptVersion::V2.init_core_machine(10_000);
-        machine.set_register(A7, 9999);
-
-        let mut syscall = Spawn::new();
-        let handled = syscall.ecall(&mut machine).expect("non-spawn syscall should not fail");
-
-        assert!(!handled);
     }
 
     #[test]

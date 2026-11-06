@@ -45,11 +45,11 @@ Set these before the run:
 ```bash
 export MYELIN_REHEARSAL_DIR=reports/public-testnet-rehearsal-$(date +%Y%m%d)
 export CKB_TESTNET_RPC=https://example-testnet-rpc.invalid
-export CKB_TESTNET_FUNDING_TX_HASH=0x...
-export CKB_TESTNET_FUNDING_INDEX=0x0
-export CKB_TESTNET_FUNDING_CAPACITY_SHANNONS=...
-export CKB_TESTNET_CARRIER_CAPACITY_SHANNONS=...
-export CKB_TESTNET_FEE_SHANNONS=...
+export CKB_TESTNET_DA_INPUT_TX_HASH=0x...
+export CKB_TESTNET_DA_INPUT_INDEX=0x0
+export CKB_TESTNET_DA_INPUT_CAPACITY_SHANNONS=...
+export CKB_TESTNET_DA_CARRIER_CAPACITY_SHANNONS=...
+export CKB_TESTNET_DA_FEE_SHANNONS=...
 export CKB_TESTNET_LOCK_CODE_HASH=0x...
 export CKB_TESTNET_LOCK_HASH_TYPE=type
 export CKB_TESTNET_LOCK_ARGS=0x...
@@ -60,12 +60,6 @@ export CKB_TESTNET_DA_VERIFIER_CODE_HASH=0x...
 export CKB_TESTNET_DA_VERIFIER_DEP_TX_HASH=0x...
 export CKB_TESTNET_DA_VERIFIER_DEP_INDEX=0x...
 export CKB_TESTNET_DA_WITNESS=0x...
-export MYELIN_DA_PROVIDER=...
-export MYELIN_DA_RECEIPT_ID=...
-export MYELIN_DA_RETRIEVAL_ENDPOINT=https://...
-export MYELIN_DA_AUDIT_LOG_COMMITMENT=0x...
-export MYELIN_DA_PROVIDER_PUBKEY_HASH=...
-export MYELIN_DA_PROVIDER_SIGNATURE=...
 export MYELIN_DA_CERTIFICATE="$MYELIN_REHEARSAL_DIR/provider-neutral-da-certificate.json"
 export MYELIN_DA_EVALUATION_EPOCH=...
 export MYELIN_COURT_VERIFIER_CODE_HASH=0x...
@@ -147,7 +141,7 @@ deployment out-points before using a copied template as CLI input. After
 replacement, save them with the filenames used below:
 
 ```text
-external-da-receipt.json
+provider-neutral-da-certificate.json
 court-economics-deployment.json
 threshold-lock-deployment.json
 authority-signature-evidence.json
@@ -195,7 +189,7 @@ session-court-verify.json has valid = true
 ## Phase 2: Build DA Evidence
 
 First build an in-memory DA manifest to expose the payload hash and segment
-root that the provider receipt must sign:
+root that the provider-neutral certificate must bind:
 
 ```bash
 cargo run -p myelin-cli -- session da-manifest \
@@ -206,50 +200,7 @@ export MYELIN_DA_PAYLOAD_HASH=$(jq -r '.molecule_transaction_hash' "$MYELIN_REHE
 export MYELIN_DA_SEGMENT_ROOT=$(jq -r '.segment_root' "$MYELIN_REHEARSAL_DIR/session-da-in-memory.json")
 ```
 
-Create the provider signing request. The DA provider signs
-`provider_message_hash` from this JSON with its external signing process:
-
-```bash
-cargo run -p myelin-cli -- session external-da-receipt \
-  --payload-hash "$MYELIN_DA_PAYLOAD_HASH" \
-  --segment-root "$MYELIN_DA_SEGMENT_ROOT" \
-  --provider "$MYELIN_DA_PROVIDER" \
-  --namespace session-court-payloads \
-  --receipt-id "$MYELIN_DA_RECEIPT_ID" \
-  --availability-window production-retention-30d \
-  --service-level production \
-  --retention-seconds 2592000 \
-  --retrieval-endpoint "$MYELIN_DA_RETRIEVAL_ENDPOINT" \
-  --audit-log-commitment "$MYELIN_DA_AUDIT_LOG_COMMITMENT" \
-  --signing-request \
-  --out "$MYELIN_REHEARSAL_DIR/external-da-receipt.signing-request.json"
-```
-
-After the provider returns the pubkey hash and recoverable signature, generate
-the receipt JSON:
-
-```bash
-cargo run -p myelin-cli -- session external-da-receipt \
-  --payload-hash "$MYELIN_DA_PAYLOAD_HASH" \
-  --segment-root "$MYELIN_DA_SEGMENT_ROOT" \
-  --provider "$MYELIN_DA_PROVIDER" \
-  --namespace session-court-payloads \
-  --receipt-id "$MYELIN_DA_RECEIPT_ID" \
-  --availability-window production-retention-30d \
-  --service-level production \
-  --retention-seconds 2592000 \
-  --retrieval-endpoint "$MYELIN_DA_RETRIEVAL_ENDPOINT" \
-  --audit-log-commitment "$MYELIN_DA_AUDIT_LOG_COMMITMENT" \
-  --provider-pubkey-hash "$MYELIN_DA_PROVIDER_PUBKEY_HASH" \
-  --provider-signature "$MYELIN_DA_PROVIDER_SIGNATURE" \
-  --out "$MYELIN_REHEARSAL_DIR/external-da-receipt.json"
-```
-
-`--provider-secret-key` exists for disposable rehearsal keys only. Do not pass
-real provider or custody keys through shell history.
-
-One receipt is rehearsal/testnet evidence only. For production DA, collect a
-provider-neutral certificate with independent provider/fault-domain quorum and
+Collect a provider-neutral certificate with independent provider/fault-domain quorum and
 auditor-signed retrieval probes as described in
 [`MYELIN_DA_DESIGN.md`](MYELIN_DA_DESIGN.md). Then build the durable manifest:
 
@@ -257,7 +208,6 @@ auditor-signed retrieval probes as described in
 cargo run -p myelin-cli -- session da-manifest \
   --bundle "$MYELIN_REHEARSAL_DIR/session-court.json" \
   --storage-dir "$MYELIN_REHEARSAL_DIR/session-da-store" \
-  --external-da-receipt "$MYELIN_REHEARSAL_DIR/external-da-receipt.json" \
   --da-certificate "$MYELIN_DA_CERTIFICATE" \
   --da-evaluation-epoch "$MYELIN_DA_EVALUATION_EPOCH" \
   --out "$MYELIN_REHEARSAL_DIR/session-da.json"
@@ -277,8 +227,8 @@ session-da.json has availability.production_ready = true only if the sealed
 payload and provider-neutral certificate both verify
 ```
 
-If the receipt is not a real provider receipt, label it as rehearsal-provider
-evidence in `MYELIN_PRODUCTION_REHEARSAL_REPORT.md`.
+Label certificates assembled with fixture providers as rehearsal evidence.
+They do not establish real provider availability.
 
 ## Phase 3: Build Packages
 
@@ -411,11 +361,11 @@ For the DA-anchor carrier path:
 ```bash
 cargo run -p myelin-cli -- session carrier-submission \
   --package "$MYELIN_REHEARSAL_DIR/session-da-anchor-package.json" \
-  --input-tx-hash "$CKB_TESTNET_FUNDING_TX_HASH" \
-  --input-index "$CKB_TESTNET_FUNDING_INDEX" \
-  --input-capacity-shannons "$CKB_TESTNET_FUNDING_CAPACITY_SHANNONS" \
-  --carrier-capacity-shannons "$CKB_TESTNET_CARRIER_CAPACITY_SHANNONS" \
-  --fee-shannons "$CKB_TESTNET_FEE_SHANNONS" \
+  --input-tx-hash "$CKB_TESTNET_DA_INPUT_TX_HASH" \
+  --input-index "$CKB_TESTNET_DA_INPUT_INDEX" \
+  --input-capacity-shannons "$CKB_TESTNET_DA_INPUT_CAPACITY_SHANNONS" \
+  --carrier-capacity-shannons "$CKB_TESTNET_DA_CARRIER_CAPACITY_SHANNONS" \
+  --fee-shannons "$CKB_TESTNET_DA_FEE_SHANNONS" \
   --lock-code-hash "$CKB_TESTNET_LOCK_CODE_HASH" \
   --lock-hash-type "$CKB_TESTNET_LOCK_HASH_TYPE" \
   --lock-args "$CKB_TESTNET_LOCK_ARGS" \

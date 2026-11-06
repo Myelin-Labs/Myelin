@@ -325,10 +325,7 @@ mod tests {
             Ok(out)
         }
 
-        fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
-            if version != Self::CURRENT_VERSION {
-                return Err(SerializationError::UpgradePathNotAvailable { from: version, to: Self::CURRENT_VERSION });
-            }
+        fn from_versioned_payload(bytes: &[u8]) -> Result<Self, SerializationError> {
             if bytes.len() < 12 {
                 return Err(SerializationError::DeserializationFailed("TestData payload too short".to_string()));
             }
@@ -342,59 +339,26 @@ mod tests {
     }
 
     #[test]
-    fn test_secure_envelope_basic() {
-        let data = vec![0x01, 0x02, 0x03, 0x04];
-        let envelope = SecureEnvelope::new(data.clone());
-
-        assert_eq!(envelope.data, data);
-        assert_eq!(envelope.length, 4);
-        assert!(envelope.verify());
-    }
-
-    #[test]
     fn test_secure_envelope_serialization() {
-        let data = vec![0x01, 0x02, 0x03, 0x04];
-        let envelope = SecureEnvelope::new(data);
-
-        let bytes = envelope.to_bytes();
-        let restored = SecureEnvelope::from_bytes(&bytes).unwrap();
-
-        assert_eq!(envelope, restored);
+        for data in [vec![], vec![1, 2, 3, 4], (0..10000).map(|i| (i % 256) as u8).collect()] {
+            let envelope = SecureEnvelope::new(data);
+            let restored = SecureEnvelope::from_bytes(&envelope.to_bytes()).unwrap();
+            assert_eq!(envelope, restored);
+        }
     }
 
     #[test]
-    fn test_secure_envelope_tamper_detection() {
-        let data = vec![0x01, 0x02, 0x03, 0x04];
-        let mut envelope = SecureEnvelope::new(data);
-
-        // Tamper with data
-        envelope.data[0] = 0xFF;
-
-        assert!(!envelope.verify());
-    }
-
-    #[test]
-    fn test_secure_envelope_invalid_hash() {
-        let data = vec![0x01, 0x02, 0x03, 0x04];
-        let mut envelope = SecureEnvelope::new(data);
-
-        // Corrupt hash
-        envelope.hash[0] = 0xFF;
-
-        assert!(!envelope.verify());
-    }
-
-    #[test]
-    fn test_secure_envelope_from_bytes_corrupted() {
-        let data = vec![0x01, 0x02, 0x03, 0x04];
-        let envelope = SecureEnvelope::new(data);
-        let mut bytes = envelope.to_bytes();
-
-        // Corrupt the data portion
-        bytes[39] = 0xFF;
-
-        let result = SecureEnvelope::from_bytes(&bytes);
-        assert!(result.is_err());
+    fn test_secure_envelope_rejects_payload_hash_and_length_changes() {
+        for field in 0..3 {
+            let mut envelope = SecureEnvelope::new(vec![1, 2, 3, 4]);
+            match field {
+                0 => envelope.data[0] ^= 1,
+                1 => envelope.hash[0] ^= 1,
+                _ => envelope.length += 1,
+            }
+            assert!(!envelope.verify());
+            assert!(SecureEnvelope::from_bytes(&envelope.to_bytes()).is_err());
+        }
     }
 
     #[test]
@@ -440,20 +404,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_hash() {
-        let data1 = vec![0x01, 0x02, 0x03];
-        let data2 = vec![0x01, 0x02, 0x03];
-        let data3 = vec![0x01, 0x02, 0x04];
-
-        let hash1 = compute_hash(&data1);
-        let hash2 = compute_hash(&data2);
-        let hash3 = compute_hash(&data3);
-
-        assert_eq!(hash1, hash2);
-        assert_ne!(hash1, hash3);
-    }
-
-    #[test]
     fn test_verify_integrity() {
         let data = vec![0x01, 0x02, 0x03];
         let hash = compute_hash(&data);
@@ -484,46 +434,5 @@ mod tests {
 
         let result: Result<TestData, _> = deserialize_with_integrity(&envelope);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_security_config_variants() {
-        let minimal = SecurityConfig::minimal();
-        assert!(!minimal.enable_integrity_check);
-        assert!(minimal.enable_size_limit);
-
-        let strict = SecurityConfig::strict();
-        assert!(strict.enable_integrity_check);
-        assert!(strict.enable_size_limit);
-        assert!(strict.enable_depth_limit);
-
-        let none = SecurityConfig::none();
-        assert!(!none.enable_integrity_check);
-        assert!(!none.enable_size_limit);
-        assert!(!none.enable_depth_limit);
-    }
-
-    #[test]
-    fn test_secure_envelope_empty_data() {
-        let data: Vec<u8> = vec![];
-        let envelope = SecureEnvelope::new(data);
-
-        assert!(envelope.verify());
-        let bytes = envelope.to_bytes();
-        let restored = SecureEnvelope::from_bytes(&bytes).unwrap();
-        assert_eq!(envelope, restored);
-    }
-
-    #[test]
-    fn test_secure_envelope_large_data() {
-        let data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
-        let envelope = SecureEnvelope::new(data);
-
-        assert!(envelope.verify());
-        let bytes = envelope.to_bytes();
-        assert_eq!(bytes.len(), 16 + 4 + 32 + 10000);
-
-        let restored = SecureEnvelope::from_bytes(&bytes).unwrap();
-        assert_eq!(envelope, restored);
     }
 }

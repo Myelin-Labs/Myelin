@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate the local, uncommitted reports/myelin-teeworlds-repro.json from the
+Generate reproducibility.json inside the selected acceptance directory from the
 live Teeworlds acceptance output. Run after
 `bash scripts/myelin_teeworlds_acceptance.sh` to merge the static-committee and
 Tendermint reports into a single reproducible JSON artefact.
@@ -12,16 +12,14 @@ import sys
 from pathlib import Path
 
 MYELIN_ROOT = Path(__file__).resolve().parent.parent
-# TEEWORLDS_ROOT is overridable. The default is the local-machine path
-# used during the standalone Myelin audit; CI / other developers should
-# set TEEWORLDS_ROOT to their own clone.
-TEEWORLDS_ROOT = os.environ.get("TEEWORLDS_ROOT", str(Path.home() / "RustroverProjects" / "teeworlds"))
+# Standard sibling checkout, with an explicit override for other layouts.
+TEEWORLDS_ROOT = os.environ.get("TEEWORLDS_ROOT", str(MYELIN_ROOT.parent / "teeworlds"))
 # ACCEPTANCE_DIR is the directory the Teeworlds acceptance script writes
 # its raw reports into. The acceptance script defaults to
 # /tmp/myelin-teeworlds-acceptance; if it was redirected, ACCEPTANCE_DIR
 # must agree.
 ACCEPTANCE_DIR = os.environ.get("MYELIN_TEEWORLDS_ACCEPTANCE_DIR", "/tmp/myelin-teeworlds-acceptance")
-REPORT_PATH = MYELIN_ROOT / "reports" / "myelin-teeworlds-repro.json"
+REPORT_PATH = Path(ACCEPTANCE_DIR) / "reproducibility.json"
 
 def run_myelin(*args):
     return subprocess.run(
@@ -43,8 +41,8 @@ def load_or_run_static(mock_tx_path):
 
 def run_weighted_precommit(mock_tx_path):
     """Run inspect / court-bundle with --consensus tendermint."""
-    out_dir = Path("/tmp/myelin-tendermint-teeworlds")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(ACCEPTANCE_DIR) / "tendermint"
+    out_dir.mkdir(parents=True, exist_ok=False)
     inspect_path = out_dir / "inspect-tendermint.json"
     court_path = out_dir / "court-bundle-tendermint.json"
     verify_path = out_dir / "court-bundle-verify-tendermint.json"

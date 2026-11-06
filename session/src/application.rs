@@ -79,6 +79,7 @@ pub struct ApplicationProfile {
     /// Require a stable identity for every input in every frame.
     pub command_identity_required: bool,
     /// Stable human-readable application identity, committed verbatim.
+    #[serde(deserialize_with = "crate::codec::bounded_string")]
     pub application_id: String,
     /// Exact replayer/program artifact digest.
     pub program_digest: Hash32,
@@ -157,6 +158,7 @@ impl ApplicationProfile {
 pub struct FrameInput {
     /// Optional command identities in input order. Non-empty lists cover the
     /// entire input range. Applications authenticate them against the payload.
+    #[serde(deserialize_with = "crate::codec::bounded_vec")]
     pub commands: Vec<CommandIdentity>,
     /// First application input position covered by the frame.
     pub start_position: u64,
@@ -167,6 +169,7 @@ pub struct FrameInput {
     /// Exclusive logical-time end.
     pub logical_time_end: u64,
     /// Canonical application-owned command/tape bytes.
+    #[serde(deserialize_with = "crate::codec::bounded_bytes")]
     pub payload: Vec<u8>,
 }
 
@@ -263,6 +266,7 @@ pub struct ExecutionFrame {
     pub logical_time_end: u64,
     pub state_root_before: Hash32,
     pub state_root_after: Hash32,
+    #[serde(deserialize_with = "crate::codec::bounded_vec")]
     pub ordered_cell_tx_commitments: Vec<Hash32>,
     pub resources: ExecutionResources,
 }

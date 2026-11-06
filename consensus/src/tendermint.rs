@@ -9,7 +9,7 @@
 
 use super::{
     verify_schnorr, CommitteeSigner, ConsensusError, EncodedConsensusMessage, FinalisedWeightedPrecommitBlock, Hash32, MyelinBlock,
-    Result, Signature64, WeightedPrecommit, WeightedPrecommitCertificate, CONSENSUS_MESSAGE_FORMAT_VERSION,
+    Result, Signature64, Tendermint, WeightedPrecommitCertificate, CONSENSUS_MESSAGE_FORMAT_VERSION,
 };
 use secp256k1::{Keypair, Message, Secp256k1};
 use serde::{Deserialize, Serialize};
@@ -165,7 +165,7 @@ pub enum TendermintProgress {
     Decided(TendermintDecision),
 }
 
-impl WeightedPrecommit {
+impl Tendermint {
     pub fn new_round_state(&self, height: u64) -> Result<TendermintRoundState> {
         self.validate_tendermint_quorum()?;
         Ok(TendermintRoundState {
@@ -285,9 +285,9 @@ impl WeightedPrecommit {
         block: MyelinBlock,
         decision: TendermintDecision,
     ) -> Result<FinalisedWeightedPrecommitBlock> {
-        if block.consensus_kind != super::ConsensusKind::WeightedPrecommit {
+        if block.consensus_kind != super::ConsensusKind::Tendermint {
             return Err(ConsensusError::WrongEngine {
-                expected: super::ConsensusKind::WeightedPrecommit.as_str(),
+                expected: super::ConsensusKind::Tendermint.as_str(),
                 actual: block.consensus_kind.as_str(),
             });
         }
@@ -384,7 +384,7 @@ impl CommitteeSigner {
 }
 
 impl TendermintRoundState {
-    pub fn receive_proposal(&mut self, engine: &WeightedPrecommit, proposal: TendermintProposal) -> Result<TendermintProgress> {
+    pub fn receive_proposal(&mut self, engine: &Tendermint, proposal: TendermintProposal) -> Result<TendermintProgress> {
         self.ensure_live()?;
         if proposal.height != self.height {
             return Err(ConsensusError::WrongHeight { expected: self.height, actual: proposal.height });
@@ -410,7 +410,7 @@ impl TendermintRoundState {
         Ok(TendermintProgress::ProposalAccepted)
     }
 
-    pub fn prevote_value(&self, engine: &WeightedPrecommit) -> Result<Option<Hash32>> {
+    pub fn prevote_value(&self, engine: &Tendermint) -> Result<Option<Hash32>> {
         self.ensure_live()?;
         let Some(proposal) = self.proposals.iter().find(|proposal| proposal.round == self.round) else {
             return Ok(None);
@@ -430,7 +430,7 @@ impl TendermintRoundState {
         }
     }
 
-    pub fn receive_vote(&mut self, engine: &WeightedPrecommit, vote: TendermintVote) -> Result<TendermintProgress> {
+    pub fn receive_vote(&mut self, engine: &Tendermint, vote: TendermintVote) -> Result<TendermintProgress> {
         self.ensure_live()?;
         if vote.height != self.height {
             return Err(ConsensusError::WrongHeight { expected: self.height, actual: vote.height });
@@ -492,7 +492,7 @@ impl TendermintRoundState {
         }
     }
 
-    pub fn precommit_value(&mut self, engine: &WeightedPrecommit) -> Result<Option<Hash32>> {
+    pub fn precommit_value(&mut self, engine: &Tendermint) -> Result<Option<Hash32>> {
         self.ensure_live()?;
         let mut candidates = self
             .votes
@@ -578,7 +578,7 @@ fn signature64(signature: &[u8], validator_id: &str) -> Result<Signature64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CommitteeValidator, ConsensusKind, WeightedPrecommitConfig};
+    use crate::{CommitteeValidator, ConsensusKind, TendermintConfig};
     use secp256k1::{SecretKey, XOnlyPublicKey};
 
     fn signer(id: &str, seed: u8) -> CommitteeSigner {
@@ -589,9 +589,9 @@ mod tests {
         vec![signer("alice", 1), signer("bob", 2), signer("carol", 3), signer("dave", 4)]
     }
 
-    fn engine() -> WeightedPrecommit {
+    fn engine() -> Tendermint {
         let validators = signers().iter().map(|signer| signer.validator(1)).collect::<Vec<CommitteeValidator>>();
-        WeightedPrecommit::new(WeightedPrecommitConfig { validators, quorum_power: 3 }).unwrap()
+        Tendermint::new(TendermintConfig { validators, quorum_power: 3 }).unwrap()
     }
 
     fn block() -> MyelinBlock {
@@ -601,7 +601,7 @@ mod tests {
             parent_hash: [0; 32],
             number: 8,
             timestamp_ms: 0,
-            consensus_kind: ConsensusKind::WeightedPrecommit,
+            consensus_kind: ConsensusKind::Tendermint,
             application_profile_commitment: [10; 32],
             execution_frame_commitment: [11; 32],
             state_root_before: [1; 32],
@@ -612,7 +612,7 @@ mod tests {
         }
     }
 
-    fn run_round(engine: &WeightedPrecommit, block: &MyelinBlock) -> (TendermintRoundState, TendermintDecision) {
+    fn run_round(engine: &Tendermint, block: &MyelinBlock) -> (TendermintRoundState, TendermintDecision) {
         let signers = signers();
         let mut state = engine.new_round_state(block.number).unwrap();
         let proposer_id = engine.proposer_id(block.number, 0).unwrap();
@@ -691,7 +691,7 @@ mod tests {
         let encoded = toml::to_string(&state).unwrap();
         assert_eq!(toml::from_str::<TendermintRoundState>(&encoded).unwrap(), state);
 
-        let unsafe_engine = WeightedPrecommit::new(WeightedPrecommitConfig {
+        let unsafe_engine = Tendermint::new(TendermintConfig {
             validators: signers().iter().take(3).map(|signer| signer.validator(1)).collect(),
             quorum_power: 2,
         })

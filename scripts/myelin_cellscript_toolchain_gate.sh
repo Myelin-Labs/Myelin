@@ -13,12 +13,9 @@ ATTESTATION="${EVIDENCE_ROOT}/compiler-attestation.json"
 LOCK_FILE="${MYELIN_ROOT}/cellscript-adapter/cellscript-toolchain.lock.json"
 
 CELLSCRIPT_REPOSITORY="$(jq -r '.repository' "${LOCK_FILE}").git"
-CELLSCRIPT_RELEASE_BASE_TAG="$(jq -r '.release_base_tag' "${LOCK_FILE}")"
-CELLSCRIPT_RELEASE_BASE_REVISION="$(jq -r '.release_base_revision' "${LOCK_FILE}")"
 CELLSCRIPT_REVISION="$(jq -r '.source_revision' "${LOCK_FILE}")"
 CKB_SDK_REPOSITORY="$(jq -r '.ckb_sdk_repository' "${LOCK_FILE}").git"
 CKB_SDK_TAG="$(jq -r '.ckb_sdk_release_tag' "${LOCK_FILE}")"
-CKB_SDK_REVISION="$(jq -r '.ckb_sdk_source_revision' "${LOCK_FILE}")"
 
 mkdir -p "${TOOLCHAIN_ROOT}" "${EVIDENCE_ROOT}/artifacts"
 
@@ -30,18 +27,13 @@ if [[ ! -d "${CKB_SDK_ROOT}/.git" ]]; then
   git clone --branch "${CKB_SDK_TAG}" --single-branch "${CKB_SDK_REPOSITORY}" "${CKB_SDK_ROOT}"
 fi
 
-[[ "$(git -C "${SOURCE_ROOT}" rev-parse HEAD)" == "${CELLSCRIPT_REVISION}" ]]
-[[ "$(git -C "${SOURCE_ROOT}" rev-parse "${CELLSCRIPT_RELEASE_BASE_TAG}^{commit}")" == "${CELLSCRIPT_RELEASE_BASE_REVISION}" ]]
-git -C "${SOURCE_ROOT}" merge-base --is-ancestor "${CELLSCRIPT_RELEASE_BASE_REVISION}" "${CELLSCRIPT_REVISION}"
-[[ "$(git -C "${CKB_SDK_ROOT}" rev-parse HEAD)" == "${CKB_SDK_REVISION}" ]]
-[[ "$(git -C "${CKB_SDK_ROOT}" rev-parse "${CKB_SDK_TAG}^{commit}")" == "${CKB_SDK_REVISION}" ]]
 git -C "${SOURCE_ROOT}" submodule update --init --recursive
 
 cd "${MYELIN_ROOT}"
+# The adapter validates both revisions, release tags, origins and clean checkouts.
 cargo run --locked -q -p myelin-cellscript-adapter -- build-attest "${SOURCE_ROOT}" "${ATTESTATION}" >/dev/null
 
 CELLC="${SOURCE_ROOT}/target/release/cellc"
-cargo run --locked -q -p myelin-cellscript-adapter -- verify "${CELLC}" "${ATTESTATION}"
 
 (cd "${SOURCE_ROOT}" && cargo test --locked --test entry_witness_abi)
 

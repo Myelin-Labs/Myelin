@@ -30,12 +30,6 @@ pub use tendermint::{
     TendermintVote,
 };
 
-/// Public name for the finite-session Tendermint engine. The legacy Rust type
-/// name remains alias-compatible for v0.10 callers.
-pub type Tendermint = WeightedPrecommit;
-/// Public name for the Tendermint validator-set configuration.
-pub type TendermintConfig = WeightedPrecommitConfig;
-
 /// Fixed-width hash used by consensus artefacts.
 pub type Hash32 = [u8; 32];
 
@@ -65,10 +59,6 @@ pub enum ConsensusKind {
 }
 
 impl ConsensusKind {
-    /// Legacy source-compatibility name. New code should use `Tendermint`.
-    #[allow(non_upper_case_globals)]
-    pub const WeightedPrecommit: Self = Self::Tendermint;
-
     /// Stable config string for this consensus kind.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -131,16 +121,10 @@ impl ConsensusConfig {
         Self { kind: ConsensusKind::Tendermint, static_committee: None, proof_of_authority: None, tendermint: Some(tendermint) }
     }
 
-    /// Legacy constructor retained for source migration.
-    #[deprecated(note = "use ConsensusConfig::tendermint")]
-    pub fn weighted_precommit(weighted_precommit: WeightedPrecommitConfig) -> Self {
-        Self::tendermint(weighted_precommit)
-    }
-
     /// Parse a TOML consensus config.
     pub fn from_toml_str(input: &str) -> Result<Self> {
         let raw: RawConsensusConfig = toml::from_str(input).map_err(|err| ConsensusError::InvalidConfig(err.to_string()))?;
-        let kind = parse_consensus_kind(&raw.kind)?;
+        let kind = ConsensusKind::from_canonical_str(&raw.kind)?;
         match kind {
             ConsensusKind::StaticClosedCommittee => {
                 let raw_committee = raw
@@ -155,10 +139,8 @@ impl ConsensusConfig {
                 Ok(Self::proof_of_authority(raw_poa.try_into()?))
             }
             ConsensusKind::Tendermint => {
-                let raw_weighted_precommit = raw
-                    .tendermint
-                    .or(raw.weighted_precommit)
-                    .ok_or_else(|| ConsensusError::InvalidConfig("tendermint requires [tendermint]".to_owned()))?;
+                let raw_weighted_precommit =
+                    raw.tendermint.ok_or_else(|| ConsensusError::InvalidConfig("tendermint requires [tendermint]".to_owned()))?;
                 Ok(Self::tendermint(raw_weighted_precommit.try_into()?))
             }
         }
@@ -188,8 +170,7 @@ struct RawConsensusConfig {
     kind: String,
     static_committee: Option<RawStaticCommitteeConfig>,
     proof_of_authority: Option<RawProofOfAuthorityConfig>,
-    weighted_precommit: Option<RawWeightedPrecommitConfig>,
-    tendermint: Option<RawWeightedPrecommitConfig>,
+    tendermint: Option<RawTendermintConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,7 +203,7 @@ struct RawAuthority {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawWeightedPrecommitConfig {
+struct RawTendermintConfig {
     quorum_power: u64,
     validators: Vec<RawCommitteeValidator>,
 }
@@ -242,10 +223,10 @@ impl TryFrom<RawStaticCommitteeConfig> for StaticCommitteeConfig {
     }
 }
 
-impl TryFrom<RawWeightedPrecommitConfig> for WeightedPrecommitConfig {
+impl TryFrom<RawTendermintConfig> for TendermintConfig {
     type Error = ConsensusError;
 
-    fn try_from(raw: RawWeightedPrecommitConfig) -> Result<Self> {
+    fn try_from(raw: RawTendermintConfig) -> Result<Self> {
         let validators = raw
             .validators
             .into_iter()
@@ -267,15 +248,6 @@ impl TryFrom<RawProofOfAuthorityConfig> for ProofOfAuthorityConfig {
             .map(|authority| Ok(Authority { id: authority.id, public_key: parse_hex_33(&authority.public_key)? }))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self { authorities })
-    }
-}
-
-fn parse_consensus_kind(kind: &str) -> Result<ConsensusKind> {
-    match kind {
-        "static-closed-committee" => Ok(ConsensusKind::StaticClosedCommittee),
-        "proof-of-authority" | "poa" => Ok(ConsensusKind::ProofOfAuthority),
-        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::Tendermint),
-        other => Err(ConsensusError::UnknownEngine(other.to_owned())),
     }
 }
 
@@ -464,10 +436,10 @@ pub struct StaticCommitteeConfig {
     pub quorum_weight: u64,
 }
 
-/// WeightedPrecommit-style validator set for finite Myelin sessions.
+/// Tendermint-style validator set for finite Myelin sessions.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WeightedPrecommitConfig {
-    /// WeightedPrecommit validators.
+pub struct TendermintConfig {
+    /// Tendermint validators.
     pub validators: Vec<CommitteeValidator>,
     /// Voting power required for a block precommit certificate.
     pub quorum_power: u64,
@@ -528,14 +500,14 @@ pub struct CommitteeCertificate {
     pub signatures: Vec<CommitteeSignature>,
 }
 
-/// WeightedPrecommit precommit certificate for one block height and round.
+/// Tendermint precommit certificate for one block height and round.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WeightedPrecommitCertificate {
     /// Hash being precommitted.
     pub block_hash: Hash32,
     /// Session-local block height being precommitted.
     pub height: u64,
-    /// WeightedPrecommit round being precommitted.
+    /// Tendermint round being precommitted.
     pub round: u32,
     /// Validator precommit signatures.
     pub signatures: Vec<CommitteeSignature>,
@@ -604,19 +576,6 @@ pub struct FinalisedConsensusBlock {
 pub trait ConsensusEngine {
     /// Engine kind.
     fn kind(&self) -> ConsensusKind;
-
-    /// Verify a certificate for a block hash.
-    fn verify_certificate(&self, block_hash: Hash32, certificate: &CommitteeCertificate) -> Result<()>;
-
-    /// Verify and finalise a block.
-    fn finalise_block(&self, block: MyelinBlock, certificate: CommitteeCertificate) -> Result<FinalisedBlock> {
-        if block.consensus_kind != self.kind() {
-            return Err(ConsensusError::WrongEngine { expected: self.kind().as_str(), actual: block.consensus_kind.as_str() });
-        }
-        let block_hash = block.hash();
-        self.verify_certificate(block_hash, &certificate)?;
-        Ok(FinalisedBlock { block, block_hash, certificate })
-    }
 }
 
 /// A selected consensus engine.
@@ -705,14 +664,6 @@ impl ConsensusEngine for SelectedConsensus {
             SelectedConsensus::Tendermint(engine) => engine.kind(),
         }
     }
-
-    fn verify_certificate(&self, block_hash: Hash32, certificate: &CommitteeCertificate) -> Result<()> {
-        match self {
-            SelectedConsensus::StaticClosedCommittee(engine) => engine.verify_certificate(block_hash, certificate),
-            SelectedConsensus::ProofOfAuthority(_) => Err(ConsensusError::TypedFinalityProofRequired("proof-of-authority")),
-            SelectedConsensus::Tendermint(engine) => engine.verify_certificate(block_hash, certificate),
-        }
-    }
 }
 
 /// Static closed-committee finality engine.
@@ -788,8 +739,19 @@ impl ConsensusEngine for StaticClosedCommittee {
     fn kind(&self) -> ConsensusKind {
         ConsensusKind::StaticClosedCommittee
     }
+}
 
-    fn verify_certificate(&self, block_hash: Hash32, certificate: &CommitteeCertificate) -> Result<()> {
+impl StaticClosedCommittee {
+    /// Verify and finalise a block.
+    pub fn finalise_block(&self, block: MyelinBlock, certificate: CommitteeCertificate) -> Result<FinalisedBlock> {
+        if block.consensus_kind != self.kind() {
+            return Err(ConsensusError::WrongEngine { expected: self.kind().as_str(), actual: block.consensus_kind.as_str() });
+        }
+        let block_hash = block.hash();
+        self.verify_certificate(block_hash, &certificate)?;
+        Ok(FinalisedBlock { block, block_hash, certificate })
+    }
+    pub fn verify_certificate(&self, block_hash: Hash32, certificate: &CommitteeCertificate) -> Result<()> {
         if certificate.block_hash != block_hash {
             return Err(ConsensusError::WrongBlockHash);
         }
@@ -830,16 +792,16 @@ fn static_signature_digest(validator_id: &str, block_hash: Hash32) -> Hash32 {
     *hasher.finalize().as_bytes()
 }
 
-/// WeightedPrecommit-style weighted precommit finality engine.
+/// Tendermint-style weighted precommit finality engine.
 #[derive(Debug, Clone)]
-pub struct WeightedPrecommit {
+pub struct Tendermint {
     validators: HashMap<String, CommitteeValidator>,
     quorum_power: u64,
 }
 
-impl WeightedPrecommit {
-    /// Validate and build a WeightedPrecommit validator set.
-    pub fn new(config: WeightedPrecommitConfig) -> Result<Self> {
+impl Tendermint {
+    /// Validate and build a Tendermint validator set.
+    pub fn new(config: TendermintConfig) -> Result<Self> {
         if config.quorum_power == 0 {
             return Err(ConsensusError::InvalidConfig("quorum_power must be non-zero".to_owned()));
         }
@@ -902,7 +864,7 @@ impl WeightedPrecommit {
         Ok(WeightedPrecommitCertificate { block_hash, height, round, signatures })
     }
 
-    /// Verify a WeightedPrecommit precommit certificate for a block at height and round.
+    /// Verify a Tendermint precommit certificate for a block at height and round.
     pub fn verify_precommit_certificate(
         &self,
         block_hash: Hash32,
@@ -946,16 +908,16 @@ impl WeightedPrecommit {
         Ok(())
     }
 
-    /// Verify and finalise a block with a WeightedPrecommit precommit certificate.
+    /// Verify and finalise a block with a Tendermint precommit certificate.
     pub fn finalise_block_with_precommit(
         &self,
         block: MyelinBlock,
         round: u32,
         certificate: WeightedPrecommitCertificate,
     ) -> Result<FinalisedWeightedPrecommitBlock> {
-        if block.consensus_kind != ConsensusKind::WeightedPrecommit {
+        if block.consensus_kind != ConsensusKind::Tendermint {
             return Err(ConsensusError::WrongEngine {
-                expected: ConsensusKind::WeightedPrecommit.as_str(),
+                expected: ConsensusKind::Tendermint.as_str(),
                 actual: block.consensus_kind.as_str(),
             });
         }
@@ -965,31 +927,22 @@ impl WeightedPrecommit {
     }
 }
 
-/// Finalised WeightedPrecommit block artefact.
+/// Finalised Tendermint block artefact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalisedWeightedPrecommitBlock {
     /// Finalised block.
     pub block: MyelinBlock,
-    /// Block hash verified by WeightedPrecommit precommits.
+    /// Block hash verified by Tendermint precommits.
     pub block_hash: Hash32,
-    /// WeightedPrecommit round that reached quorum.
+    /// Tendermint round that reached quorum.
     pub round: u32,
     /// Precommit certificate that reached quorum.
     pub certificate: WeightedPrecommitCertificate,
 }
 
-impl ConsensusEngine for WeightedPrecommit {
+impl ConsensusEngine for Tendermint {
     fn kind(&self) -> ConsensusKind {
-        ConsensusKind::WeightedPrecommit
-    }
-
-    fn verify_certificate(&self, _block_hash: Hash32, _certificate: &CommitteeCertificate) -> Result<()> {
-        // WeightedPrecommit finality is always height-bound, round-bound, and
-        // block-hash-bound. The legacy CommitteeCertificate API is not
-        // a structurally valid WeightedPrecommit certificate: it carries no
-        // (height, round). Reject it explicitly so callers cannot
-        // accidentally use the wrong API shape.
-        Err(ConsensusError::LegacyCertificatePathUnsupported)
+        ConsensusKind::Tendermint
     }
 }
 
@@ -1048,7 +1001,7 @@ pub enum ConsensusError {
     /// Certificate points at another block.
     #[error("certificate block hash does not match")]
     WrongBlockHash,
-    /// WeightedPrecommit precommit certificate is for another height.
+    /// Tendermint precommit certificate is for another height.
     #[error("wrong weighted_precommit height: expected {expected}, got {actual}")]
     WrongHeight {
         /// Expected block height.
@@ -1056,7 +1009,7 @@ pub enum ConsensusError {
         /// Certificate height.
         actual: u64,
     },
-    /// WeightedPrecommit precommit certificate is for another round.
+    /// Tendermint precommit certificate is for another round.
     #[error("wrong weighted_precommit round: expected {expected}, got {actual}")]
     WrongRound {
         /// Expected round.
@@ -1101,14 +1054,6 @@ pub enum ConsensusError {
         /// Weight required for finality.
         quorum_weight: u64,
     },
-    /// WeightedPrecommit does not implement the legacy generic CommitteeCertificate
-    /// path. Use `verify_precommit_certificate` with a typed
-    /// `WeightedPrecommitCertificate` instead.
-    #[error("weighted_precommit does not implement verify_certificate; use verify_precommit_certificate with a typed WeightedPrecommitCertificate")]
-    LegacyCertificatePathUnsupported,
-    /// The selected engine requires its typed finality proof.
-    #[error("{0} requires the typed finality proof API")]
-    TypedFinalityProofRequired(&'static str),
     /// A proposal was not signed by the deterministic proposer for the round.
     #[error("unexpected Tendermint proposer: expected {expected}, got {actual}")]
     UnexpectedProposer {
@@ -1375,8 +1320,8 @@ public_key = "{}"
         );
     }
 
-    fn weighted_precommit() -> WeightedPrecommit {
-        WeightedPrecommit::new(WeightedPrecommitConfig {
+    fn weighted_precommit() -> Tendermint {
+        Tendermint::new(TendermintConfig {
             validators: vec![validator("alice", 1, 1), validator("bob", 2, 1), validator("carol", 3, 1)],
             quorum_power: 2,
         })
@@ -1386,7 +1331,7 @@ public_key = "{}"
     #[test]
     fn weighted_precommit_finalises_with_precommit_quorum() {
         let engine = weighted_precommit();
-        let block = block_for(ConsensusKind::WeightedPrecommit);
+        let block = block_for(ConsensusKind::Tendermint);
         let cert = engine.precommit_certificate_from_signers(block.hash(), block.number, 0, &signers(&["alice", "bob"])).unwrap();
         let finalised = engine.finalise_block_with_precommit(block.clone(), 0, cert).unwrap();
         assert_eq!(finalised.block, block);
@@ -1397,7 +1342,7 @@ public_key = "{}"
     #[test]
     fn weighted_precommit_rejects_below_quorum() {
         let engine = weighted_precommit();
-        let block = block_for(ConsensusKind::WeightedPrecommit);
+        let block = block_for(ConsensusKind::Tendermint);
         let block_hash = block.hash();
         let cert = engine.precommit_certificate_from_signers(block_hash, block.number, 0, &signers(&["alice"])).unwrap();
         assert_eq!(
@@ -1409,7 +1354,7 @@ public_key = "{}"
     #[test]
     fn weighted_precommit_rejects_wrong_height_and_round() {
         let engine = weighted_precommit();
-        let block = block_for(ConsensusKind::WeightedPrecommit);
+        let block = block_for(ConsensusKind::Tendermint);
         let block_hash = block.hash();
         let cert = engine.precommit_certificate_from_signers(block_hash, block.number, 0, &signers(&["alice", "bob"])).unwrap();
         assert_eq!(
@@ -1451,7 +1396,7 @@ public_key = "e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13"
 weight = 1
 "#;
         let selected = SelectedConsensus::from_config(ConsensusConfig::from_toml_str(toml).unwrap()).unwrap();
-        assert_eq!(selected.kind(), ConsensusKind::WeightedPrecommit);
+        assert_eq!(selected.kind(), ConsensusKind::Tendermint);
         assert_eq!(selected.kind().as_str(), "tendermint");
     }
 
@@ -1508,12 +1453,12 @@ weight = 1
         assert_eq!(f1.certificate.block_hash, f2.certificate.block_hash);
     }
 
-    // ─── Additional WeightedPrecommit tests ──────────────────────────────────────────────
+    // ─── Additional Tendermint tests ──────────────────────────────────────────────
 
     #[test]
     fn weighted_precommit_rejects_wrong_block_hash() {
         let engine = weighted_precommit();
-        let block = block_for(ConsensusKind::WeightedPrecommit);
+        let block = block_for(ConsensusKind::Tendermint);
         let block_hash = block.hash();
         let cert = engine.precommit_certificate_from_signers(block_hash, block.number, 0, &signers(&["alice", "bob"])).unwrap();
         let wrong_hash = [0xEE; 32];
@@ -1523,7 +1468,7 @@ weight = 1
     #[test]
     fn weighted_precommit_rejects_duplicate_validator() {
         let engine = weighted_precommit();
-        let block = block_for(ConsensusKind::WeightedPrecommit);
+        let block = block_for(ConsensusKind::Tendermint);
         let block_hash = block.hash();
         let mut cert = engine.precommit_certificate_from_signers(block_hash, block.number, 0, &signers(&["alice", "bob"])).unwrap();
         cert.signatures.push(cert.signatures[0].clone());
@@ -1533,7 +1478,7 @@ weight = 1
     #[test]
     fn weighted_precommit_rejects_unknown_validator() {
         let engine = weighted_precommit();
-        let block = block_for(ConsensusKind::WeightedPrecommit);
+        let block = block_for(ConsensusKind::Tendermint);
         let block_hash = block.hash();
         let mut cert = engine.precommit_certificate_from_signers(block_hash, block.number, 0, &signers(&["alice", "bob"])).unwrap();
         cert.signatures.push(CommitteeSignature { validator_id: "ghost".to_owned(), signature: [0xAA; 64] });
@@ -1546,7 +1491,7 @@ weight = 1
     #[test]
     fn weighted_precommit_rejects_invalid_signature() {
         let engine = weighted_precommit();
-        let block = block_for(ConsensusKind::WeightedPrecommit);
+        let block = block_for(ConsensusKind::Tendermint);
         let block_hash = block.hash();
         let mut cert = engine.precommit_certificate_from_signers(block_hash, block.number, 0, &signers(&["alice", "bob"])).unwrap();
         cert.signatures[0].signature = [0xCD; 64];
@@ -1559,7 +1504,7 @@ weight = 1
     #[test]
     fn weighted_precommit_rejects_height_round_combination() {
         let engine = weighted_precommit();
-        let block = block_for(ConsensusKind::WeightedPrecommit);
+        let block = block_for(ConsensusKind::Tendermint);
         let block_hash = block.hash();
         let cert = engine.precommit_certificate_from_signers(block_hash, block.number, 2, &signers(&["alice", "bob"])).unwrap();
         // Verify the same precommit under (height, round) = (number+1, 3) must fail
@@ -1571,18 +1516,13 @@ weight = 1
 
     #[test]
     fn weighted_precommit_does_not_silently_fall_back_to_static_committee() {
-        // WeightedPrecommit's legacy `verify_certificate` path is explicitly
-        // rejected: a CommitteeCertificate carries no (height, round),
-        // so it is not a structurally valid WeightedPrecommit precommit. A
-        // caller who tries to use the legacy path must get an explicit
-        // error, never a silent acceptance.
         let weighted_precommit_engine = weighted_precommit();
         let static_engine = committee();
 
         let block = block_for(ConsensusKind::StaticClosedCommittee);
         let block_hash = block.hash();
 
-        // Build a WeightedPrecommit precommit certificate on the same block hash
+        // Build a Tendermint precommit certificate on the same block hash
         // and hand its signatures to the static-committee verifier as a
         // CommitteeCertificate. The signature domains differ, so the
         // static engine must reject as InvalidSignature.
@@ -1591,20 +1531,12 @@ weight = 1
             .unwrap();
         let cross_cert = CommitteeCertificate { block_hash, signatures: precommit.signatures.clone() };
         assert!(matches!(static_engine.verify_certificate(block_hash, &cross_cert), Err(ConsensusError::InvalidSignature(_))));
-
-        // The WeightedPrecommit engine's legacy `verify_certificate` path must
-        // explicitly reject the generic CommitteeCertificate API shape.
-        let static_cert = static_engine.certificate_from_signers(block_hash, &signers(&["alice", "bob"])).unwrap();
-        assert!(matches!(
-            weighted_precommit_engine.verify_certificate(block_hash, &static_cert),
-            Err(ConsensusError::LegacyCertificatePathUnsupported)
-        ));
     }
 
     #[test]
     fn weighted_precommit_finalised_block_is_stable() {
         let engine = weighted_precommit();
-        let block = block_for(ConsensusKind::WeightedPrecommit);
+        let block = block_for(ConsensusKind::Tendermint);
         let cert1 = engine.precommit_certificate_from_signers(block.hash(), block.number, 0, &signers(&["alice", "bob"])).unwrap();
         let cert2 = engine.precommit_certificate_from_signers(block.hash(), block.number, 0, &signers(&["alice", "bob"])).unwrap();
         let f1 = engine.finalise_block_with_precommit(block.clone(), 0, cert1).unwrap();
@@ -1667,8 +1599,8 @@ weight = 1
 
     #[test]
     fn selected_consensus_rejects_wrong_engine_on_block() {
-        // A static-committee block must not be finalised by the WeightedPrecommit
-        // SelectedConsensus path. The WeightedPrecommit finalise path requires
+        // A static-committee block must not be finalised by the Tendermint
+        // SelectedConsensus path. The Tendermint finalise path requires
         // (round, WeightedPrecommitCertificate), so we exercise the
         // wrong-engine guard via the precommit entry point.
         let weighted_precommit_engine = weighted_precommit();
@@ -1684,12 +1616,15 @@ weight = 1
 
     #[test]
     fn selected_consensus_static_committee_does_not_accept_weighted_precommit_kind_block() {
-        // A WeightedPrecommit block (consensus_kind = WeightedPrecommit) must not be
+        // A Tendermint block (consensus_kind = Tendermint) must not be
         // accepted by the static-committee finalise path either.
         let static_engine = committee();
         let selected = SelectedConsensus::StaticClosedCommittee(static_engine.clone());
-        let weighted_precommit_block = block_for(ConsensusKind::WeightedPrecommit);
+        let weighted_precommit_block = block_for(ConsensusKind::Tendermint);
         let cert = static_engine.certificate_from_signers(weighted_precommit_block.hash(), &signers(&["alice", "bob"])).unwrap();
-        assert!(matches!(selected.finalise_block(weighted_precommit_block, cert), Err(ConsensusError::WrongEngine { .. })));
+        assert!(matches!(
+            selected.finalise_with_proof(weighted_precommit_block, FinalityProof::StaticClosedCommittee(cert)),
+            Err(ConsensusError::WrongEngine { .. })
+        ));
     }
 }

@@ -10,7 +10,6 @@ use crate::celltx::{CellTx, Script};
 use crate::serialization::molecule_compat::{
     ckb_cell_data_hash, ckb_script_hash_molecule, serialize_cell_output_molecule, serialize_script_molecule,
 };
-use crate::serialization::VmAbiFormat;
 use crate::vm::transferred_byte_cycles;
 use crate::vm::{CellDataProvider, ResolvedCell, VmSemantics};
 use ckb_vm::{
@@ -30,7 +29,6 @@ pub struct LoadCell<D: CellDataProvider> {
     group_input_indices: Vec<usize>,
     group_output_indices: Vec<usize>,
     semantics: VmSemantics,
-    abi_format: VmAbiFormat,
 }
 
 enum CellLookupResult {
@@ -41,24 +39,11 @@ enum CellLookupResult {
 
 impl<D: CellDataProvider> LoadCell<D> {
     pub fn new(tx: Arc<CellTx>, provider: Arc<D>, group_input_indices: Vec<usize>, group_output_indices: Vec<usize>) -> Self {
-        Self {
-            tx,
-            provider,
-            group_input_indices,
-            group_output_indices,
-            semantics: VmSemantics::MyelinExtended,
-            abi_format: VmAbiFormat::Molecule,
-        }
+        Self { tx, provider, group_input_indices, group_output_indices, semantics: VmSemantics::MyelinExtended }
     }
 
     pub fn with_semantics(mut self, semantics: VmSemantics) -> Self {
         self.semantics = semantics;
-        self
-    }
-
-    /// Select the VM ABI wire format used by full cell and script field loads.
-    pub fn with_abi_format(mut self, abi_format: VmAbiFormat) -> Self {
-        self.abi_format = abi_format;
         self
     }
 
@@ -134,9 +119,7 @@ impl<D: CellDataProvider> LoadCell<D> {
     }
 
     fn serialize_script(&self, script: &Script) -> Result<Vec<u8>, VMError> {
-        match self.abi_format {
-            VmAbiFormat::Molecule => serialize_script_molecule(script).map_err(|e| VMError::External(e.to_string())),
-        }
+        serialize_script_molecule(script).map_err(|e| VMError::External(e.to_string()))
     }
 
     fn script_hash(&self, script: &Script) -> Result<[u8; 32], VMError> {
@@ -163,9 +146,7 @@ impl<D: CellDataProvider> LoadCell<D> {
     }
 
     fn serialize_cell(&self, cell: &ResolvedCell) -> Result<Vec<u8>, VMError> {
-        match self.abi_format {
-            VmAbiFormat::Molecule => serialize_cell_output_molecule(&cell.cell_output).map_err(|e| VMError::External(e.to_string())),
-        }
+        serialize_cell_output_molecule(&cell.cell_output).map_err(|e| VMError::External(e.to_string()))
     }
 }
 
@@ -188,7 +169,7 @@ impl<D: CellDataProvider, M: SupportMachine> Syscalls<M> for LoadCell<D> {
         // A4: source
         // A5: field (only for 2081)
         let index = machine.registers()[A3].to_u64() as usize;
-        let source = Source::parse_from_u64_for_semantics(machine.registers()[A4].to_u64(), self.semantics)?;
+        let source = Source::parse_from_u64(machine.registers()[A4].to_u64())?;
 
         // Get cell
         let cell = match self.resolve_cell(source, index) {
@@ -235,7 +216,6 @@ mod tests {
     use crate::serialization::molecule_compat::{
         ckb_cell_data_hash, ckb_script_hash_molecule, deserialize_cell_output_molecule, serialize_cell_output_molecule,
     };
-    use crate::serialization::VmAbiFormat;
     use crate::vm::syscalls::SUCCESS;
     use crate::vm::{ResolvedCell, ScriptVersion, SimpleDataProvider, VmSemantics};
     use ckb_vm::{
@@ -342,8 +322,7 @@ mod tests {
         machine.set_register(A4, Source::Output as u64);
         machine.set_register(A7, LOAD_CELL_SYSCALL_NUMBER);
 
-        let mut syscall =
-            LoadCell::new(tx, Arc::new(SimpleDataProvider::new()), vec![], vec![]).with_abi_format(VmAbiFormat::Molecule);
+        let mut syscall = LoadCell::new(tx, Arc::new(SimpleDataProvider::new()), vec![], vec![]);
         let handled = syscall.ecall(&mut machine).expect("load cell syscall should succeed");
 
         assert!(handled);
@@ -432,7 +411,7 @@ mod tests {
         machine.set_register(A5, CellField::Capacity as u64);
         machine.set_register(A7, LOAD_CELL_BY_FIELD_SYSCALL_NUMBER);
 
-        let mut syscall = LoadCell::new(tx, Arc::new(provider), vec![0], vec![]).with_abi_format(VmAbiFormat::Molecule);
+        let mut syscall = LoadCell::new(tx, Arc::new(provider), vec![0], vec![]);
         let handled = syscall.ecall(&mut machine).expect("load cell syscall should succeed");
 
         assert!(handled);
@@ -473,7 +452,7 @@ mod tests {
         machine.set_register(A5, 99);
         machine.set_register(A7, LOAD_CELL_BY_FIELD_SYSCALL_NUMBER);
 
-        let mut syscall = LoadCell::new(tx, Arc::new(provider), vec![0], vec![]).with_abi_format(VmAbiFormat::Molecule);
+        let mut syscall = LoadCell::new(tx, Arc::new(provider), vec![0], vec![]);
         let err = syscall.ecall(&mut machine).expect_err("unknown field should trap");
 
         assert_eq!(err, VMError::External("CellField parse_from_u64 99".to_string()));
@@ -544,7 +523,7 @@ mod tests {
         machine.set_register(A4, Source::Input as u64);
         machine.set_register(A7, LOAD_CELL_SYSCALL_NUMBER);
 
-        let mut syscall = LoadCell::new(tx, Arc::new(provider), vec![0], vec![]).with_abi_format(VmAbiFormat::Molecule);
+        let mut syscall = LoadCell::new(tx, Arc::new(provider), vec![0], vec![]);
         let handled = syscall.ecall(&mut machine).expect("load cell syscall should succeed");
 
         assert!(handled);

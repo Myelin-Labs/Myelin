@@ -1,0 +1,34 @@
+[package]
+name = "myelin-session-transfer"
+version = "0.31.0"
+edition = "2021"
+license = "MIT"
+description = "Explicit authorized transfer and copyable receipt reference policies for Myelin sessions"
+
+[dependencies]
+blake3.workspace = true
+myelin-session.workspace = true
+myelin-session-worker = { workspace = true, optional = true }
+postcard.workspace = true
+secp256k1.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rocksdb.workspace = true
+myelin-consensus.workspace = true
+myelin-session-runtime.workspace = true
+myelin-session-store-rocksdb.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "myelin-transfer-test-worker"
+path = "tests/fixtures/worker.rs"
+required-features = ["test-fixture"]
+
+[features]
+test-fixture = ["dep:myelin-session-worker"]
+
+[lints]
+workspace = true

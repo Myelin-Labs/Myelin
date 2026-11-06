@@ -3,8 +3,7 @@
 These files are starter artefacts for `docs/public-testnet-rehearsal-runbook.md`.
 They are not gates and they are not proof of production readiness.
 
-For signed or commitment-bound evidence, prefer the `myelin session
-external-da-receipt`, `authority-signature-evidence`,
+For signed or commitment-bound evidence, prefer `myelin session authority-signature-evidence`,
 `threshold-lock-deployment-evidence`, and
 `court-economics-deployment-evidence` helpers. These templates are primarily
 shape references and fallback review aids.
@@ -14,7 +13,6 @@ Use them as follows:
 ```text
 operator-custody-policy.json       usable starter; replace operator details
 operator-runbook.json              usable starter; keep fee/finality values aligned with the run
-external-da-receipt.template.json  shape only; must be signed by the DA provider
 court-economics-deployment.template.json
                                   shape only; must be filled from the generated settlement intent
 threshold-lock-deployment.template.json

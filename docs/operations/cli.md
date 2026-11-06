@@ -116,7 +116,6 @@ This is the largest subcommand surface. It maps 1:1 onto the
 | `--rpc-url <url>` | `submit-*`, `verify-submission-*` | CKB JSON-RPC endpoint. |
 | `--dry-run` | `submit-*` | Build the request without sending. |
 | `--storage-dir <path>` | `da-manifest`, `verify-da-manifest` | Local DA store location. |
-| `--external-da-receipt <path>` | `da-manifest` | Bind a provider-signed receipt. |
 | `--operator-custody-policy <path>` | readiness commands | Bind a typed operator custody policy. |
 | `--operator-runbook <path>` | readiness commands | Bind a typed operator runbook. |
 | `--court-economics-deployment-evidence <path>` | `settlement-package` | Bind checked mainnet court economics. |

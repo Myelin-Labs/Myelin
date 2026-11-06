@@ -139,6 +139,17 @@ nav:
       - architecture/index.md
       - System overview: architecture/overview.md
       - Session safety contracts: architecture/session-safety.md
+      - Source-effect authorization: architecture/protocol-effects.md
+      - Reference transfer policy: architecture/reference-transfer.md
+      - Handoff lifecycle: architecture/handoff-lifecycle.md
+      - Command journal: architecture/command-journal.md
+      - Native command applications: architecture/command-applications.md
+      - Session evidence bundles: architecture/session-bundles.md
+      - Writer fencing: architecture/writer-fencing.md
+      - Authority network: architecture/authority-network.md
+      - Aggregate commit limits: architecture/commit-resources.md
+      - Native execution workers: architecture/native-workers.md
+      - Cross-session protocol: architecture/cross-session-protocol.md
       - Proposed DEX architecture: architecture/dex.md
       - CellScript & typed-cell metadata: architecture/cellscript.md
       - Execution pipeline: architecture/exec-pipeline.md
@@ -171,6 +182,9 @@ nav:
       - operations/index.md
       - CLI reference: operations/cli.md
       - Production gate: operations/production-gate.md
+      - Writer migration: operations/writer-migration.md
+      - Workload measurements: operations/workload-measurements.md
+      - Downstream releases: operations/downstream-release.md
       - Concurrency plan: operations/concurrency-optimization-plan.md
       - Local CKB devnet smoke: operations/devnet-smoke.md
   - Security & claims:

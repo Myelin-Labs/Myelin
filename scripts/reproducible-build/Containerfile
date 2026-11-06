@@ -1,0 +1,7 @@
+# The resulting image is exported and pinned by its image and archive digests.
+# apt is used only while PREPARING that toolchain, never during a replay build.
+FROM docker.io/library/rust@sha256:e90e846de4124376164ddfbaab4b0774c7bdeef5e738866295e5a90a34a307a2
+RUN apt-get -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends \
+    clang libclang-dev cmake protobuf-compiler python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir /inputs /work && chmod 1777 /work

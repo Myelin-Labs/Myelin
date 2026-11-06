@@ -1,0 +1,12 @@
+syntax = "proto3";
+package myelin.session.authority.v1;
+
+// The inner bounded postcard protocol is versioned independently. Responses
+// bind the exact request bytes and are signed with the pinned certificate key.
+service AuthorityGateway {
+  rpc Call(Packet) returns (Packet);
+}
+message Packet {
+  uint32 version = 1;
+  bytes body = 2;
+}

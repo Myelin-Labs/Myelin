@@ -1,0 +1,33 @@
+[package]
+name = "myelin-session-journal"
+version = "0.31.0"
+edition = "2021"
+license = "MIT"
+description = "Durable original-command journal and conservative commit reconciliation for Myelin"
+
+[dependencies]
+blake3.workspace = true
+myelin-session.workspace = true
+myelin-session-authority.workspace = true
+myelin-session-producer.workspace = true
+postcard.workspace = true
+rocksdb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+futures.workspace = true
+myelin-session-bundle.workspace = true
+myelin-consensus.workspace = true
+myelin-exec.workspace = true
+myelin-state.workspace = true
+myelin-session-runtime.workspace = true
+myelin-session-store-rocksdb.workspace = true
+myelin-session-transfer.workspace = true
+secp256k1.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -249,10 +249,9 @@ DA SLA, and a typed operator policy.
 
 ## Where this runs
 
-The production gate keeps mock RPC tests for deterministic negative
-coverage and, by default, also runs the full flow against a live parent
-CKB devnet. The latter is real local-chain evidence but not a public
-testnet deployment.
+The core profile includes mock RPC tests for deterministic negative coverage.
+The explicit `ckb` profile also runs the full flow against a live parent CKB
+devnet. The latter is local-chain evidence, not a public testnet deployment.
 
 For the devnet path specifically, two extra pieces of evidence are
 required:
