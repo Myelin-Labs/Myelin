@@ -56,11 +56,19 @@ impl Clock for FixedClock {
     }
 }
 fn openssl(root: &Path, args: &[&str]) {
-    let output = Command::new("openssl").args(args).current_dir(root).output().expect("network tests require openssl");
+    let output = Command::new("openssl")
+        .args(args)
+        .env("OPENSSL_CONF", root.join("openssl.cnf"))
+        .current_dir(root)
+        .output()
+        .expect("network tests require openssl");
     assert!(output.status.success(), "openssl: {}", String::from_utf8_lossy(&output.stderr));
 }
 fn make_tls(root: &Path) {
     std::fs::create_dir_all(root).unwrap();
+    // All fixture extensions are explicit below. A host config can otherwise
+    // add a second basicConstraints extension and produce an invalid test CA.
+    std::fs::write(root.join("openssl.cnf"), "[req]\ndistinguished_name=dn\n[dn]\n").unwrap();
     openssl(
         root,
         &[

@@ -36,7 +36,17 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake protobuf-compiler pkg-config libssl-dev openssl bubblewrap
+          sudo apt-get install -y clang libclang-dev cmake protobuf-compiler pkg-config libssl-dev openssl libcap-dev meson ninja-build
+          # Ubuntu 22.04's bubblewrap lacks --disable-userns. Use the same
+          # non-setuid release as the reference isolation acceptance run.
+          cd "$RUNNER_TEMP"
+          curl --fail --location --retry 3 -o bubblewrap-0.13.1.tar.xz https://github.com/containers/bubblewrap/releases/download/v0.13.1/bubblewrap-0.13.1.tar.xz
+          echo '0e85c8702248b8dd64144f594147553650cdd0e4c951690345faace79c217c4d  bubblewrap-0.13.1.tar.xz' | sha256sum --check
+          tar -xf bubblewrap-0.13.1.tar.xz
+          meson setup bubblewrap-build bubblewrap-0.13.1 -Dman=disabled -Dtests=false -Dbash_completion=disabled -Dzsh_completion=disabled
+          meson compile -C bubblewrap-build
+          echo "MYELIN_BWRAP=$RUNNER_TEMP/bubblewrap-build/bwrap" >> "$GITHUB_ENV"
+          bubblewrap-build/bwrap --version
       - name: macOS build dependencies
         if: runner.os == 'macOS'
         run: brew install llvm protobuf cmake

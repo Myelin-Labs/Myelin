@@ -55,14 +55,22 @@ current file packages are mandatory; there is no separate game-export gate.
 Use Python 3.11+, Git and the Rust toolchain in `rust-toolchain.toml` (including
 rustfmt and Clippy). Linux builds need a C/C++ compiler, Clang/libclang, CMake,
 protoc, pkg-config/OpenSSL development headers, and the openssl executable for
-ephemeral TLS fixtures. Install bubblewrap and permit unprivileged user/mount/PID/
-network namespaces for Linux isolation tests. Their failure fails the core lane.
+ephemeral TLS fixtures. Install bubblewrap with `--disable-userns` support and
+permit unprivileged user/mount/PID/network namespaces for Linux isolation tests.
+Their failure fails the core lane. Hosted Ubuntu 22.04 builds bubblewrap 0.13.1
+from the upstream release with its pinned SHA-256, selects that executable through
+`MYELIN_BWRAP`, and keeps all sandbox restrictions enabled; its distro package is
+too old for the current isolation policy.
 
 On Debian/Ubuntu, install `clang libclang-dev cmake protobuf-compiler pkg-config
 libssl-dev openssl bubblewrap`. On macOS, install Xcode command-line tools and
 Homebrew `llvm protobuf cmake`; set `LIBCLANG_PATH` to the installed LLVM library
 directory when discovery requires it. Apple Silicon's standard Homebrew location
 is detected. No developer-home path is assumed.
+
+TLS tests create a minimal, fixture-owned OpenSSL configuration and declare all
+certificate extensions explicitly. The host's `openssl.cnf` must not add a
+duplicate `basicConstraints` extension to the test CA.
 
 `CARGO_BUILD_JOBS` defaults to 4. `CARGO_TARGET_DIR` may use a cache, but checks still
 execute and report exact source identities. Put `TMPDIR` on a filesystem with
