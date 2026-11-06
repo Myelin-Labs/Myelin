@@ -77,6 +77,7 @@ def command(argv, out, label, timeout=300):
 
 
 def archive(root, names, destination):
+    root = root.resolve(strict=True)
     records = {}
     with tarfile.open(destination, "w", format=tarfile.PAX_FORMAT) as output:
         for name in sorted(names):

@@ -17,6 +17,12 @@ class BuildKitBoundary(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        # Exercise parent aliases on every OS, including macOS /var -> /private/var.
+        source = self.root / "actual"
+        source.mkdir()
+        alias = self.root / "alias"
+        alias.symlink_to(source, target_is_directory=True)
+        self.root = alias
 
     def kit(self):
         source = self.root / "source"
@@ -48,6 +54,13 @@ class BuildKitBoundary(unittest.TestCase):
             build.verify_inputs(self.root, expected)
 
     def test_tar_paths_links_duplicates_and_missing_members_reject(self):
+        source = self.root / "source"
+        source.mkdir()
+        (self.root / "outside").mkdir()
+        (self.root / "outside/file").write_bytes(b"outside")
+        (source / "escape").symlink_to(self.root / "outside", target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "source escapes its package"):
+            build.archive(source, ["escape/file"], self.root / "escape.tar")
         for case in ("parent", "absolute", "symlink", "hardlink", "duplicate", "missing"):
             with self.subTest(case=case):
                 name = {"parent": "../escape", "absolute": "/escape"}.get(case, "file")
