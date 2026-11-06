@@ -242,13 +242,16 @@ fn retirement_archive_retains_consuming_target_and_replays_without_source_databa
     let (store, _) = open(&archive, &trusted).unwrap();
     for head in expected {
         let cfg = store.config(head.session_id).unwrap().clone();
-        let result = store
-            .replay_current_process(head.session_id, move |bytes, store| {
-                restore_executor(&cfg, bytes, store).map_err(|e| SessionError::Replay(e.to_string()))
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(result.state_root_after, head.state_root);
+        let result = store.replay_current_process(head.session_id, move |bytes, store| {
+            restore_executor(&cfg, bytes, store).map_err(|e| SessionError::Replay(e.to_string()))
+        });
+        // Pinning the running executable is Linux-only. Keep the retirement
+        // dependency checks below portable, and require explicit refusal here
+        // on other platforms instead of accepting an unpinned replay.
+        #[cfg(target_os = "linux")]
+        assert_eq!(result.unwrap().unwrap().state_root_after, head.state_root);
+        #[cfg(not(target_os = "linux"))]
+        error(result, ErrorCode::UnsupportedPlatform);
     }
     assert!(matches!(store.load_handoff(id).unwrap().unwrap().lifecycle.terminal, HandoffTerminal::Retired { .. }));
     let source = manifest.sessions.iter().find(|s| s.session_id == [3; 32]).unwrap();
