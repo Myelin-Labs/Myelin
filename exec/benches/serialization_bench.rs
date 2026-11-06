@@ -4,7 +4,6 @@
 // Serialization Performance Benchmarks
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use myelin_exec::celltx::{ResolvedCellMeta, TransactionInfo};
 use myelin_exec::{
     deserialize_from_bytes, serialize_to_bytes, CellInput, CellOutput, CellTx, OutPoint, ResolvedHeader, Script, VersionedEnvelope,
     VersionedSerializable, VmSerializable,
@@ -44,21 +43,6 @@ fn create_sample_resolved_header() -> ResolvedHeader {
         dao: [0x33; 32],
         epoch: 500,
         uncles_hash: [0x44; 32],
-    }
-}
-
-fn create_sample_resolved_cell_meta() -> ResolvedCellMeta {
-    ResolvedCellMeta {
-        cell_output: CellOutput {
-            lock: Script::new([0xAA; 32], 0, vec![0xBB; 20]),
-            type_: Some(Script::new([0xCC; 32], 1, vec![0xDD; 10])),
-            capacity: 1000,
-        },
-        out_point: OutPoint::new([0xEE; 32], 0),
-        transaction_info: Some(TransactionInfo { tx_hash: [0xFF; 32], block_number: 100, block_hash: [0x11; 32], is_cellbase: false }),
-        data_bytes: 100,
-        mem_cell_data: Some(vec![0x22; 100]),
-        mem_cell_data_hash: Some([0x33; 32]),
     }
 }
 
@@ -118,31 +102,6 @@ fn bench_resolved_header_serialization(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_resolved_cell_meta_serialization(c: &mut Criterion) {
-    let cell = create_sample_resolved_cell_meta();
-    let size = serialize_to_bytes(&cell).unwrap().len();
-
-    let mut group = c.benchmark_group("resolved_cell_meta_serialization");
-    group.throughput(Throughput::Bytes(size as u64));
-
-    group.bench_function("versioned_envelope_create", |b| {
-        b.iter(|| {
-            let envelope = VersionedEnvelope::new(black_box(&cell)).unwrap();
-            black_box(envelope);
-        })
-    });
-
-    let envelope_bytes = serialize_to_bytes(&cell).unwrap();
-    group.bench_function("versioned_envelope_parse", |b| {
-        b.iter(|| {
-            let cell: ResolvedCellMeta = deserialize_from_bytes(black_box(&envelope_bytes)).unwrap();
-            black_box(cell);
-        })
-    });
-
-    group.finish();
-}
-
 fn bench_versioned_envelope_overhead(c: &mut Criterion) {
     let tx = create_sample_tx();
 
@@ -151,7 +110,7 @@ fn bench_versioned_envelope_overhead(c: &mut Criterion) {
     group.bench_function("payload_only", |b| {
         b.iter(|| {
             let bytes = black_box(&tx).to_versioned_payload().unwrap();
-            let _: CellTx = CellTx::upgrade_from(CellTx::CURRENT_VERSION, &bytes).unwrap();
+            let _: CellTx = CellTx::from_versioned_payload(&bytes).unwrap();
         })
     });
 
@@ -165,11 +124,5 @@ fn bench_versioned_envelope_overhead(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_celltx_serialization,
-    bench_resolved_header_serialization,
-    bench_resolved_cell_meta_serialization,
-    bench_versioned_envelope_overhead
-);
+criterion_group!(benches, bench_celltx_serialization, bench_resolved_header_serialization, bench_versioned_envelope_overhead);
 criterion_main!(benches);

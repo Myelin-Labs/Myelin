@@ -1060,7 +1060,7 @@ impl VmScheduler {
             VmArgs::Reader { vm_id, argc, argv } => self.collect_args_from_vm(vm_id, argc, argv)?,
         };
 
-        let (program, _) = split_vm_abi_trailer(program)
+        let program = split_vm_abi_trailer(program)
             .map_err(|err| ScriptError::VM(VMError::InvalidData(format!("invalid VM ABI artifact trailer: {}", err))))?;
         let program = Bytes::copy_from_slice(program);
         let metadata = parse_elf::<u64>(&program, machine.inner_mut().version())

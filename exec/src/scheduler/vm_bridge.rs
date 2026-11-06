@@ -73,6 +73,6 @@ pub fn verify_with_existing_dag<D: CellDataProvider>(
             .with_semantics(VmSemantics::CkbStrict)
             .with_max_cycles(max_cycles);
         let cycles = verifier.verify_with_cycles().map_err(|err| err.to_string())?;
-        Ok(ExecutionReceipt { cycles, exit_code: 0, gas_used: 0, logs: Vec::new() })
+        Ok(ExecutionReceipt { cycles, exit_code: 0 })
     })
 }

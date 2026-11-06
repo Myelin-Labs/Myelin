@@ -115,7 +115,7 @@ impl<D: CellDataProvider> LoadCellData<D> {
         let content_offset = machine.registers()[A2].to_u64();
         let content_size = machine.registers()[A3].to_u64();
         let index = machine.registers()[A4].to_u64() as usize;
-        let source = Source::parse_from_u64_for_semantics(machine.registers()[A5].to_u64(), self.semantics)?;
+        let source = Source::parse_from_u64(machine.registers()[A5].to_u64())?;
 
         let cell_data = match self.get_cell_data(source, index) {
             CellDataLookupResult::Data(data) => data,
@@ -174,7 +174,7 @@ impl<D: CellDataProvider, M: SupportMachine> Syscalls<M> for LoadCellData<D> {
         }
 
         let index = machine.registers()[A3].to_u64() as usize;
-        let source = Source::parse_from_u64_for_semantics(machine.registers()[A4].to_u64(), self.semantics)?;
+        let source = Source::parse_from_u64(machine.registers()[A4].to_u64())?;
 
         // Get cell data
         let cell_data = match self.get_cell_data(source, index) {

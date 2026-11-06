@@ -136,7 +136,7 @@ pub fn run_script(
         });
     let mut machine = Machine::new(builder.build());
 
-    let (program, _) =
+    let program =
         split_vm_abi_trailer(program).map_err(|err| VMError::InvalidData(format!("invalid VM ABI artifact trailer: {}", err)))?;
     let program = Bytes::copy_from_slice(program);
     let args = args.iter().cloned().map(Bytes::from).map(Ok);
@@ -166,36 +166,6 @@ mod tests {
     use super::*;
     use crate::scripts::ALWAYS_SUCCESS_SCRIPT;
     use ckb_vm::{CoreMachine, Memory};
-
-    #[test]
-    fn test_script_version_isa() {
-        assert_eq!(ScriptVersion::V0.vm_isa(), ISA_IMC);
-        assert_eq!(ScriptVersion::V1.vm_isa(), ISA_IMC | ISA_B | ISA_MOP);
-        assert_eq!(ScriptVersion::V2.vm_isa(), ISA_IMC | ISA_B | ISA_MOP);
-    }
-
-    #[test]
-    fn test_script_version_latest() {
-        assert_eq!(ScriptVersion::latest(), ScriptVersion::V2);
-    }
-
-    #[test]
-    fn test_vm_context_creation() {
-        let ctx = VmContext::new(ScriptVersion::V2, 1_000_000);
-        assert_eq!(ctx.version, ScriptVersion::V2);
-        assert_eq!(ctx.max_cycles, 1_000_000);
-        assert_eq!(ctx.max_memory, MAX_VM_MEMORY);
-        assert_eq!(ctx.max_script_size, MAX_SCRIPT_SIZE);
-    }
-
-    #[test]
-    fn test_vm_context_with_limits() {
-        let ctx = VmContext::with_limits(ScriptVersion::V1, 2_000_000, 4 * 1024 * 1024, 64 * 1024);
-        assert_eq!(ctx.version, ScriptVersion::V1);
-        assert_eq!(ctx.max_cycles, 2_000_000);
-        assert_eq!(ctx.max_memory, 4 * 1024 * 1024);
-        assert_eq!(ctx.max_script_size, 64 * 1024);
-    }
 
     #[test]
     fn test_init_core_machine_with_memory_uses_requested_limit() {

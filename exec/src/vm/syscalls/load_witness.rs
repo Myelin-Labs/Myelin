@@ -71,7 +71,7 @@ impl<M: SupportMachine> Syscalls<M> for LoadWitness {
         }
 
         let index = machine.registers()[A3].to_u64() as usize;
-        let source = Source::parse_from_u64_for_semantics(machine.registers()[A4].to_u64(), self.semantics)?;
+        let source = Source::parse_from_u64(machine.registers()[A4].to_u64())?;
 
         // Get witness data
         let witness = match self.get_witness(source, index) {

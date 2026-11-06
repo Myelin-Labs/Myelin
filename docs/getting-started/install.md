@@ -23,10 +23,8 @@ cargo --version
 rustc --version
 ```
 
-> [!TIP]
-> If you're on macOS and `cargo build` panics about `rlimit`, see the
-> project-level notes in `AGENTS.md` — `ulimit -n 16384` before invoking
-> cargo fixes it.
+For OS packages and isolation prerequisites, see
+[validation dependencies](../operations/production-gate.md#machines-and-dependencies).
 
 ## 2. Clone and build Myelin
 
@@ -34,14 +32,12 @@ rustc --version
 git clone https://github.com/Myelin-Labs/Myelin.git
 cd Myelin
 
-# Sanity check: formatting, clippy, tests
-cargo fmt --all --check
-cargo check --locked --workspace --all-targets
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo test --locked --workspace
+# Formatting, all-target lint/type checking, workspace and process fixtures
+scripts/myelin_production_gate.sh --profile core --out target/validation
 ```
 
-If all four pass, you have a working Myelin workspace.
+Inspect `target/validation/report.json` for the executed scope and retained logs.
+External integrations are explicitly skipped by the core profile.
 
 ## 3. Build the CLI
 
@@ -60,12 +56,11 @@ CKB checkout, reproduces the exact CellScript compiler, deploys four
 verifiers, and exercises valid and invalid transactions:
 
 ```bash
-CKB_ROOT=/home/arthur/a19q3/ckb \
-RUN_TEEWORLDS=0 scripts/myelin_production_gate.sh
+CKB_ROOT=/absolute/ckb scripts/myelin_production_gate.sh --profile ckb --out target/ckb-validation
 ```
 
-Set `RUN_CKB_DEVNET=0` only for a deliberately reduced local validation
-when the parent checkout is unavailable.
+The selected CKB profile requires both compiler reproduction and devnet acceptance;
+missing inputs fail that profile. Use `--profile core` for independent core work.
 
 ## 5. Verify
 

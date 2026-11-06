@@ -10,7 +10,6 @@ use crate::serialization::molecule_compat::{
     ckb_header_epoch_length, ckb_header_epoch_number, ckb_header_epoch_start_block_number, serialize_ckb_header_molecule,
     serialize_resolved_header_molecule, CkbHeader,
 };
-use crate::serialization::VmAbiFormat;
 use crate::vm::transferred_byte_cycles;
 use crate::vm::{CellDataProvider, ResolvedHeader, VmSemantics};
 use ckb_vm::{
@@ -30,7 +29,6 @@ pub struct LoadHeader<D: CellDataProvider> {
     provider: Arc<D>,
     group_input_indices: Vec<usize>,
     group_output_indices: Vec<usize>,
-    abi_format: VmAbiFormat,
     semantics: VmSemantics,
 }
 
@@ -42,20 +40,7 @@ enum HeaderLookupResult<H> {
 
 impl<D: CellDataProvider> LoadHeader<D> {
     pub fn new(tx: Arc<CellTx>, provider: Arc<D>, group_input_indices: Vec<usize>, group_output_indices: Vec<usize>) -> Self {
-        Self {
-            tx,
-            provider,
-            group_input_indices,
-            group_output_indices,
-            abi_format: VmAbiFormat::Molecule,
-            semantics: VmSemantics::MyelinExtended,
-        }
-    }
-
-    /// Select the VM ABI wire format used by full header loads.
-    pub fn with_abi_format(mut self, abi_format: VmAbiFormat) -> Self {
-        self.abi_format = abi_format;
-        self
+        Self { tx, provider, group_input_indices, group_output_indices, semantics: VmSemantics::MyelinExtended }
     }
 
     /// Select target-chain semantics for header loads.
@@ -168,9 +153,7 @@ impl<D: CellDataProvider> LoadHeader<D> {
     }
 
     fn serialize_header(&self, header: &ResolvedHeader) -> Result<Vec<u8>, VMError> {
-        match self.abi_format {
-            VmAbiFormat::Molecule => serialize_resolved_header_molecule(header).map_err(|e| VMError::External(e.to_string())),
-        }
+        serialize_resolved_header_molecule(header).map_err(|e| VMError::External(e.to_string()))
     }
 
     fn serialize_ckb_header_field(&self, header: &CkbHeader, field: u64) -> Result<Vec<u8>, VMError> {
@@ -202,7 +185,7 @@ impl<D: CellDataProvider, M: SupportMachine> Syscalls<M> for LoadHeader<D> {
         }
 
         let index = machine.registers()[A3].to_u64() as usize;
-        let source = Source::parse_from_u64_for_semantics(machine.registers()[A4].to_u64(), self.semantics)?;
+        let source = Source::parse_from_u64(machine.registers()[A4].to_u64())?;
 
         if self.semantics == VmSemantics::CkbStrict {
             let header = match self.get_ckb_header(source, index) {
@@ -267,7 +250,7 @@ mod tests {
         ckb_epoch_number_with_fraction_full_value, ckb_header_hash_molecule, serialize_ckb_header_molecule,
         serialize_resolved_header_molecule, CkbHeader, CkbRawHeader,
     };
-    use crate::serialization::{VmAbiFormat, VmSerializable};
+    use crate::serialization::VmSerializable;
     use crate::vm::syscalls::SUCCESS;
     use crate::vm::{ScriptVersion, SimpleDataProvider, VmSemantics};
     use ckb_vm::{
@@ -550,7 +533,7 @@ mod tests {
         machine.set_register(A4, Source::HeaderDep as u64);
         machine.set_register(A7, LOAD_HEADER_SYSCALL_NUMBER);
 
-        let mut syscall = LoadHeader::new(tx, provider, vec![0], vec![]).with_abi_format(VmAbiFormat::Molecule);
+        let mut syscall = LoadHeader::new(tx, provider, vec![0], vec![]);
         let handled = syscall.ecall(&mut machine).expect("load header syscall should succeed");
 
         assert!(handled);

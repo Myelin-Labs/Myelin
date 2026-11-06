@@ -21,12 +21,9 @@ FIXTURES=(
     load_header_timestamp
     load_dep_cell_data
     load_ecdsa_signature_hash
-    secp256k1_lock_fixture
-    secp256k1_blake3_lock
     timelock_absolute
     timelock_relative
     htlc_minimal
-    htlc
 )
 
 echo "Building RISC-V ELF fixtures..."

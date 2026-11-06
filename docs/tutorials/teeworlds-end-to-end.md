@@ -253,7 +253,7 @@ is produced by:
 
 ```bash
 python3 scripts/build_myelin_teeworlds_repro.py
-# -> writes reports/myelin-teeworlds-repro.json (not committed; carries local paths)
+# -> writes reproducibility.json inside the selected acceptance directory
 ```
 
 Its `shared_metrics` match the static summary:
@@ -285,8 +285,8 @@ It does **not** exercise (yet):
 
 - [First run](../getting-started/first-run.md) — the zero-dependency session
   demo (no teeworlds clone required).
-- [Production gate](../operations/production-gate.md) — the broader gate that
-  includes this path.
+- [Production validation](../operations/production-gate.md) — select the
+  `teeworlds` lane or `games` profile to include this path.
 - [Concurrency plan](../operations/concurrency-optimization-plan.md) — where
   the CellDAG + parallel VM verification path (exercised by
   `session commit-multi`) fits.

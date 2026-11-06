@@ -346,7 +346,9 @@ gantt
 
 ## 10 — Production gate pipeline
 
-The nine-step production gate.
+One entry point runs the selected profile or individual lanes. Core checks run
+once; external integration lanes are explicit selections. Every selected lane
+must pass. See [production validation](../operations/production-gate.md).
 
 ```mermaid
 %%{init: {
@@ -361,17 +363,12 @@ The nine-step production gate.
   }
 }}%%
 flowchart TB
-    A["Step 1<br/>Formatting"]:::step
-    B["Step 2<br/>Workspace check"]:::step
-    C["Step 3<br/>Clippy"]:::step
-    D["Step 4<br/>Focused tests"]:::step
-    E["Step 5<br/>Runtime smoke"]:::step
-    F["Step 6<br/>Session L2 path"]:::step
-    G["Step 7<br/>Both consensus engines"]:::step
-    H["Step 8<br/>Dep + stale-surface scan"]:::step
-    I["Step 9<br/>Teeworlds acceptance"]:::step
+    A["Explicit profile / lane selection"]:::step
+    B["Core, when selected<br/>fmt + diff → Clippy → workspace tests<br/>→ Python boundaries → transfer CLI"]:::step
+    C["Selected external lanes<br/>CellScript · CKB devnet · Teeworlds<br/>Browser · bundle container · archived build"]:::step
+    D["Report: pass / fail / skip<br/>Source identity · commands · logs · artifact hashes"]:::step
 
-    A --> B --> C --> D --> E --> F --> G --> H --> I
+    A --> B --> C --> D
 
     classDef step fill:#A5B4FC,stroke:#4F46E5,color:#1E293B;
 ```

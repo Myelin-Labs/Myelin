@@ -7,7 +7,6 @@ use super::utils::store_data;
 use super::{CKB_LOAD_SCRIPT_SYSCALL_NUMBER, LOAD_SCRIPT_HASH_SYSCALL_NUMBER, LOAD_SCRIPT_SYSCALL_NUMBER};
 use crate::celltx::Script;
 use crate::serialization::molecule_compat::{ckb_script_hash_molecule, serialize_script_molecule};
-use crate::serialization::VmAbiFormat;
 use crate::vm::{transferred_byte_cycles, VmSemantics};
 use ckb_vm::{
     registers::{A0, A7},
@@ -22,19 +21,12 @@ use std::sync::Arc;
 /// Loads the current script being executed
 pub struct LoadScript {
     script: Arc<Script>,
-    abi_format: VmAbiFormat,
     semantics: VmSemantics,
 }
 
 impl LoadScript {
     pub fn new(script: Arc<Script>) -> Self {
-        Self { script, abi_format: VmAbiFormat::Molecule, semantics: VmSemantics::MyelinExtended }
-    }
-
-    /// Select the VM ABI wire format used by full script loads.
-    pub fn with_abi_format(mut self, abi_format: VmAbiFormat) -> Self {
-        self.abi_format = abi_format;
-        self
+        Self { script, semantics: VmSemantics::MyelinExtended }
     }
 
     /// Select the hash/syscall semantics used by hash field loads.
@@ -44,9 +36,7 @@ impl LoadScript {
     }
 
     fn serialize_script(&self) -> Result<Vec<u8>, VMError> {
-        match self.abi_format {
-            VmAbiFormat::Molecule => serialize_script_molecule(&self.script).map_err(|e| VMError::External(e.to_string())),
-        }
+        serialize_script_molecule(&self.script).map_err(|e| VMError::External(e.to_string()))
     }
 
     fn script_hash(&self) -> Result<[u8; 32], VMError> {
@@ -99,7 +89,6 @@ impl<M: SupportMachine> Syscalls<M> for LoadScript {
 mod tests {
     use super::*;
     use crate::serialization::molecule_compat::{ckb_script_hash_molecule, serialize_script_molecule};
-    use crate::serialization::VmAbiFormat;
     use crate::vm::syscalls::SUCCESS;
     use crate::vm::{ScriptVersion, VmSemantics};
     use ckb_vm::{
@@ -120,7 +109,7 @@ mod tests {
         machine.set_register(A2, 33);
         machine.set_register(A7, LOAD_SCRIPT_SYSCALL_NUMBER);
 
-        let mut syscall = LoadScript::new(Arc::clone(&script)).with_abi_format(VmAbiFormat::Molecule);
+        let mut syscall = LoadScript::new(Arc::clone(&script));
         let handled = syscall.ecall(&mut machine).expect("load script syscall should succeed");
 
         assert!(handled);
@@ -141,7 +130,7 @@ mod tests {
         machine.set_register(A2, 0);
         machine.set_register(A7, LOAD_SCRIPT_SYSCALL_NUMBER);
 
-        let mut syscall = LoadScript::new(script).with_abi_format(VmAbiFormat::Molecule);
+        let mut syscall = LoadScript::new(script);
         let handled = syscall.ecall(&mut machine).expect("load script syscall should succeed");
 
         assert!(handled);
@@ -161,7 +150,7 @@ mod tests {
         machine.set_register(A2, 0);
         machine.set_register(A7, CKB_LOAD_SCRIPT_SYSCALL_NUMBER);
 
-        let mut syscall = LoadScript::new(script).with_abi_format(VmAbiFormat::Molecule).with_semantics(VmSemantics::CkbStrict);
+        let mut syscall = LoadScript::new(script).with_semantics(VmSemantics::CkbStrict);
         let handled = syscall.ecall(&mut machine).expect("ckb load script syscall should succeed");
 
         assert!(handled);

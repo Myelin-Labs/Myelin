@@ -1,9 +1,9 @@
 # Myelin Serialization API Guide
 
-The public/default Myelin serialization path is Molecule-compatible. Legacy
-custom formats exist only behind explicit compatibility switches and must not be
-used for new VM ABI, state, typed metadata, scheduler-witness, or default
-storage bytes.
+Myelin uses Molecule-compatible serialization and accepts each type's exact
+current schema. Historical formats, schema upgrades and compatibility switches
+are not supported. Typed decoding validates the envelope and payload together;
+there is no separate permissive version-range validator.
 
 ## Basic Storage Bytes
 
@@ -22,8 +22,8 @@ let restored: CellOutput = deserialize_from_bytes(&bytes)?;
 
 ## VersionedSerializable
 
-`VersionedSerializable` requires an explicit payload codec. There is no default
-derive-based codec.
+`VersionedSerializable` requires both payload codec methods at compile time.
+There is no default codec or macro that generates a version-only implementation.
 
 ```rust
 use myelin_exec::{SerializationError, VersionedEnvelope, VersionedSerializable};
@@ -40,20 +40,11 @@ impl VersionedSerializable for MyData {
         Ok(self.value.to_le_bytes().to_vec())
     }
 
-    fn upgrade_from(version: u8, bytes: &[u8]) -> Result<Self, SerializationError> {
-        match version {
-            1 if bytes.len() == 8 => {
-                let value = u64::from_le_bytes(bytes.try_into().expect("length checked"));
-                Ok(Self { value })
-            }
-            1 => Err(SerializationError::DeserializationFailed(
-                "MyData payload must be 8 bytes".to_string(),
-            )),
-            _ => Err(SerializationError::UpgradePathNotAvailable {
-                from: version,
-                to: Self::CURRENT_VERSION,
-            }),
+    fn from_versioned_payload(bytes: &[u8]) -> Result<Self, SerializationError> {
+        if bytes.len() != 8 {
+            return Err(SerializationError::DeserializationFailed("MyData payload must be 8 bytes".into()));
         }
+        Ok(Self { value: u64::from_le_bytes(bytes.try_into().expect("length checked")) })
     }
 }
 
@@ -66,8 +57,8 @@ assert_eq!(data, restored);
 
 ## VM ABI Bytes
 
-`VmSerializable` describes script-visible bytes. Current public/default objects
-advertise the Molecule ABI version.
+`VmSerializable` encodes and decodes script-visible Molecule bytes. The sole
+supported version is `VM_ABI_VERSION` (`0x8001`); there is no version negotiation.
 
 ```rust
 use myelin_exec::{ResolvedHeader, VmSerializable};
@@ -101,13 +92,16 @@ These helpers all sit above the same explicit serialization model:
 
 - `SerializationCache` stores `serialize_to_bytes` results.
 - `StreamingSerializer` writes `VersionedEnvelope::to_bytes()` frames.
+  Sequences use `serialize_streaming` / `deserialize_streaming`: an item count
+  followed directly by those frames. Metadata comes from `VersionedEnvelope`;
+  the encoded buffer length gives the exact size.
 - `SecureEnvelope::to_bytes()` uses its own Molecule-compatible envelope, and
   `SecureEnvelope::from_bytes()` accepts only that Molecule-compatible table.
 
 ## Format Policy
 
-- `0x80..=0xFF`: Molecule-compatible public/default envelope formats.
-- `0x00..=0x7F`: rejected on native execution paths.
+- `0x80`: the current Molecule-compatible envelope format.
+- Every other envelope format and every non-current schema is rejected by typed decoding.
 
 New protocol evidence should use Molecule-compatible bytes and should be
 reported with its semantic profile and CKB projection status.

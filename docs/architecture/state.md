@@ -157,7 +157,7 @@ chunk_index
 payload_hash        -> hash of the chunk payload bytes
 segment_root        -> Merkle root of the DA segment tree
 segment_proof       -> proof that the chunk payload is in the tree
-external_da_receipt -> optional, signed by the external DA provider
+provider_neutral_certificate -> optional provider quorum and signed retrieval proofs
 da_availability     -> testnet_beta_ready | production_ready | local_only
 l1_da_published     -> false (unless explicitly published to L1)
 ```

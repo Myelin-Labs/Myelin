@@ -1,0 +1,42 @@
+[package]
+name = "myelin-session-bundle"
+version = "0.31.0"
+edition = "2021"
+license = "MIT"
+description = "Bounded session evidence export, explicit external trust and read-only historical auditing"
+
+[features]
+reference-replayer = ["dep:myelin-session-transfer"]
+test-fixture = ["reference-replayer"]
+
+[[bin]]
+name = "myelin-reference-transfer-replayer"
+path = "src/bin/reference_transfer_replayer.rs"
+required-features = ["reference-replayer"]
+
+[[bin]]
+name = "myelin-bundle-sandbox-fixture"
+path = "src/bin/sandbox_fixture.rs"
+required-features = ["test-fixture"]
+
+[dependencies]
+blake3.workspace = true
+libc.workspace = true
+myelin-session.workspace = true
+myelin-consensus.workspace = true
+myelin-session-runtime.workspace = true
+myelin-session-store-rocksdb.workspace = true
+myelin-session-transfer = { workspace = true, optional = true }
+tempfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+myelin-session-network.workspace = true
+tempfile.workspace = true
+myelin-session-transfer.workspace = true
+rocksdb.workspace = true
+
+[lints]
+workspace = true

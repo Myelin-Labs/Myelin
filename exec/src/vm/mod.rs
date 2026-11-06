@@ -124,12 +124,6 @@ impl VmSemantics {
     pub const fn allow_myelin_header_abi(self) -> bool {
         matches!(self, Self::MyelinExtended)
     }
-
-    /// Whether legacy Myelin group source encodings such as `0x0100` are
-    /// accepted in addition to canonical CKB high-bit group source values.
-    pub const fn allow_legacy_group_source_encoding(self) -> bool {
-        matches!(self, Self::MyelinExtended)
-    }
 }
 
 impl VmLimits {

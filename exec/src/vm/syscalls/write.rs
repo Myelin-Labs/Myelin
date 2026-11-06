@@ -15,32 +15,16 @@ use std::sync::Arc;
 ///
 /// Syscall number: 2605
 ///
-/// When attached to a scheduler runtime this syscall yields a write request.
-/// Without a runtime it preserves the placeholder behavior.
+/// Requires a scheduler runtime and yields requests to its multi-VM loop.
 #[derive(Clone)]
 pub struct Write {
-    runtime: Option<WriteRuntime>,
-}
-
-#[derive(Clone)]
-struct WriteRuntime {
     id: VmId,
     message_box: Arc<std::sync::Mutex<Vec<Message>>>,
 }
 
-impl Default for Write {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Write {
-    pub fn new() -> Self {
-        Self { runtime: None }
-    }
-
     pub fn with_runtime(id: VmId, runtime: &VmRuntime) -> Self {
-        Self { runtime: Some(WriteRuntime { id, message_box: Arc::clone(&runtime.message_box) }) }
+        Self { id, message_box: Arc::clone(&runtime.message_box) }
     }
 }
 
@@ -54,11 +38,6 @@ impl<M: SupportMachine> Syscalls<M> for Write {
             return Ok(false);
         }
 
-        let Some(runtime) = &self.runtime else {
-            machine.set_register(A0, M::REG::from_u8(INVALID_FD));
-            return Ok(true);
-        };
-
         let fd = Fd(machine.registers()[A0].to_u64());
         let buffer_addr = machine.registers()[A1].to_u64();
         let length_addr = machine.registers()[A2].to_u64();
@@ -70,11 +49,10 @@ impl<M: SupportMachine> Syscalls<M> for Write {
         }
 
         machine.add_cycles_no_checking(SPAWN_YIELD_CYCLES_BASE)?;
-        runtime
-            .message_box
+        self.message_box
             .lock()
             .map_err(|e| VMError::Unexpected(e.to_string()))?
-            .push(Message::FdWrite(runtime.id, FdRequest { fd, length, buffer_addr, length_addr }));
+            .push(Message::FdWrite(self.id, FdRequest { fd, length, buffer_addr, length_addr }));
         Err(VMError::Yield)
     }
 }
@@ -84,34 +62,11 @@ mod tests {
     use super::*;
     use crate::vm::scheduler::VmRuntime;
     use crate::vm::ScriptVersion;
-    use ckb_vm::{CoreMachine, Error as VMError, Memory, Register};
+    use ckb_vm::{CoreMachine, Error as VMError, Memory};
     use std::sync::{atomic::AtomicU64, Arc, Mutex};
 
     fn runtime() -> VmRuntime {
         VmRuntime::with_parts(Arc::new(AtomicU64::new(0)), Arc::new(Mutex::new(Vec::new())))
-    }
-
-    #[test]
-    fn test_write_returns_invalid_fd() {
-        let mut machine = ScriptVersion::V2.init_core_machine(10_000);
-        machine.set_register(A7, WRITE_SYSCALL_NUMBER);
-
-        let mut syscall = Write::new();
-        let handled = syscall.ecall(&mut machine).expect("write syscall should succeed");
-
-        assert!(handled);
-        assert_eq!(machine.registers()[A0].to_u64(), INVALID_FD as u64);
-    }
-
-    #[test]
-    fn test_write_ignores_other_syscalls() {
-        let mut machine = ScriptVersion::V2.init_core_machine(10_000);
-        machine.set_register(A7, 9999);
-
-        let mut syscall = Write::new();
-        let handled = syscall.ecall(&mut machine).expect("non-write syscall should not fail");
-
-        assert!(!handled);
     }
 
     #[test]

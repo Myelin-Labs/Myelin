@@ -11,8 +11,11 @@ myelin-session.workspace = true
 myelin-session-network.workspace = true
 rocksdb.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+postcard.workspace = true
 
 [dev-dependencies]
+secp256k1.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 myelin-consensus.workspace = true
 myelin-exec.workspace = true

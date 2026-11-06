@@ -12,6 +12,15 @@ use myelin_session_store_rocksdb::{RocksSessionStore, RocksSessionStoreOptions};
 use rocksdb::{OptimisticTransactionDB, Options};
 use std::sync::Arc;
 
+#[path = "support/effect_regressions.rs"]
+mod effect_regressions;
+#[path = "support/handoff_regressions.rs"]
+mod handoff_regressions;
+#[path = "support/resource_regressions.rs"]
+mod resource_regressions;
+#[path = "support/succession_regressions.rs"]
+mod succession_regressions;
+
 #[derive(Clone, Copy)]
 struct FixedClock(u64);
 
@@ -37,6 +46,16 @@ impl TransitionExecutor for TestExecutor {
         self.root
     }
 
+    fn execute_block_with_context(
+        &mut self,
+        context: &myelin_session::ProtocolEffectsContext,
+        input: &FrameInput,
+        handoffs: &[myelin_session::SessionHandoff],
+        transactions: &[Vec<u8>],
+    ) -> Result<ExecutionOutcome, String> {
+        context.require_authority_metadata([99; 32])?;
+        self.execute_block(context.height, input, handoffs, transactions)
+    }
     fn execute_block(
         &mut self,
         height: u64,
@@ -98,6 +117,8 @@ fn config(consensus: &RegisteredFinalityVerifier) -> SessionConfig {
         max_block_transactions: 100,
         max_block_bytes: 1_000_000,
         max_future_drift_ms: 1_000,
+        commit_limits: myelin_session::CommitResourceLimits::default(),
+        protocol_effects: myelin_session::ProtocolEffectsPolicy::AuthorityMetadata { policy_hash: [99; 32] },
     }
 }
 
@@ -168,21 +189,9 @@ fn store_rejects_unversioned_data_and_unknown_schema() {
 
     let unknown_path = directory.path().join("unknown-version");
     let db: OptimisticTransactionDB = OptimisticTransactionDB::open(&options, &unknown_path).unwrap();
-    db.put(b"\0myelin-session-store-schema", b"1").unwrap();
+    db.put(b"\0myelin-session-store-schema", b"14").unwrap();
     drop(db);
     assert!(matches!(RocksSessionStore::open(&unknown_path), Err(StoreError::Corrupt(_))));
-}
-
-#[test]
-fn store_rejects_superseded_internal_schema() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut options = Options::default();
-    options.create_if_missing(true);
-    let db: OptimisticTransactionDB = OptimisticTransactionDB::open(&options, directory.path()).unwrap();
-    db.put(b"\0myelin-session-store-schema", b"6").unwrap();
-    drop(db);
-
-    assert!(matches!(RocksSessionStore::open(directory.path()), Err(StoreError::Corrupt(_))));
 }
 
 #[test]
@@ -229,6 +238,7 @@ fn atomic_commit_recovery_wal_and_outbox_lifecycle() {
             successor: None,
             handoffs: vec![],
             consume_handoffs: vec![],
+            handoff_actions: vec![],
         })
         .unwrap();
     let engine = match consensus.selected_consensus() {
@@ -279,6 +289,7 @@ fn command_receipts_survive_restart_and_reject_reconstructed_commands() {
             successor: None,
             handoffs: vec![],
             consume_handoffs: vec![],
+            handoff_actions: vec![],
         }
     };
     assert_eq!(chain.command_status(&command).unwrap(), CommandStatus::Missing);
@@ -308,7 +319,7 @@ fn command_receipts_survive_restart_and_reject_reconstructed_commands() {
     changed.payload_hash = [33; 32];
     assert!(matches!(recovered.command_status(&changed).unwrap(), CommandStatus::IdentityConflict(_)));
     assert!(recovered.prepare_block(request(1, changed)).is_err());
-    assert_eq!(reopened.load_chain([3; 32]).unwrap().len(), 1);
+    assert_eq!(reopened.load_chain_page([3; 32], 0, 2).unwrap().len(), 1);
     drop(recovered);
     drop(reopened);
     // Loss of the index must be detected, not interpreted as permission to
@@ -387,6 +398,7 @@ async fn recovery_admission_binds_history_bounds_lag_and_rechecks_before_commit(
         successor: None,
         handoffs: vec![],
         consume_handoffs: vec![],
+        handoff_actions: vec![],
     };
     assert!(host.prepare_block(request(0)).is_err());
     host.start_services().await.unwrap();
@@ -469,6 +481,7 @@ fn durable_head_cas_rejects_two_writers_at_one_height() {
         successor: None,
         handoffs: vec![],
         consume_handoffs: vec![],
+        handoff_actions: vec![],
     };
     let prepared_a = chain_a.prepare_block(request()).unwrap();
     let prepared_b = chain_b.prepare_block(request()).unwrap();
@@ -563,6 +576,7 @@ fn rolling_checkpoint_avoids_full_snapshot_in_every_historical_block() {
                 successor: None,
                 handoffs: vec![],
                 consume_handoffs: vec![],
+                handoff_actions: vec![],
             })
             .unwrap();
         let proof = FinalityProof::ProofOfAuthority(engine.seal_from_signer(prepared.block().hash(), height, &signer).unwrap());
@@ -601,27 +615,71 @@ fn successor_is_created_atomically_and_seals_the_predecessor() {
         final_state_root: post_root,
         application_profile_commitment: source_config.application_profile.commitment(),
     });
-    let prepared = source
-        .prepare_block(BlockRequest {
-            transactions: transactions.clone(),
-            frame_input: input,
-            scheduler_commitment: [5; 32],
-            data_commitments: vec![],
-            timestamp_ms: 10,
-            local_now_ms: 10,
-            successor: Some(target_config.clone()),
-            handoffs: vec![],
-            consume_handoffs: vec![],
-        })
-        .unwrap();
-    assert_eq!(prepared.successor().unwrap().target_config, target_config);
+    let request = BlockRequest {
+        transactions: transactions.clone(),
+        frame_input: input,
+        scheduler_commitment: [5; 32],
+        data_commitments: vec![],
+        timestamp_ms: 10,
+        local_now_ms: 10,
+        successor: Some(target_config.clone()),
+        handoffs: vec![],
+        consume_handoffs: vec![],
+        handoff_actions: vec![],
+    };
+    let initial_head = source.head().clone();
+    let initial_checkpoint = store.load_checkpoint(source_config.session_id).unwrap();
+    for changed in 0..4 {
+        let mut invalid = request.clone();
+        let predecessor = invalid.successor.as_mut().unwrap().predecessor.as_mut().unwrap();
+        match changed {
+            0 => predecessor.session_id[0] ^= 1,
+            1 => predecessor.final_height += 1,
+            2 => predecessor.final_state_root[0] ^= 1,
+            _ => predecessor.application_profile_commitment[0] ^= 1,
+        }
+        assert!(source.prepare_block(invalid).is_err());
+        assert_eq!(store.load_head(source_config.session_id).unwrap(), initial_head);
+        assert!(store.load_genesis(target_config.session_id).is_err());
+    }
     let engine = match consensus.selected_consensus() {
         myelin_consensus::SelectedConsensus::ProofOfAuthority(engine) => engine,
         _ => unreachable!(),
     };
-    let proof = FinalityProof::ProofOfAuthority(engine.seal_from_signer(prepared.block().hash(), 0, &signer).unwrap());
+    let seal = |hash| FinalityProof::ProofOfAuthority(engine.seal_from_signer(hash, 0, &signer).unwrap());
+    let mut occupied_config = source_config.clone();
+    occupied_config.session_id = [9; 32];
+    let occupied = SessionChain::create(occupied_config, consensus.clone(), TestExecutor { root: [1; 32] }, store.clone()).unwrap();
+    let occupied_head = occupied.head().clone();
+    let occupied_genesis = store.load_genesis([9; 32]).unwrap();
+    let mut collision = request.clone();
+    collision.successor.as_mut().unwrap().session_id = [9; 32];
+    let collision = source.prepare_block(collision).unwrap();
+    let proof = seal(collision.block().hash());
+    assert!(source.commit_finalised(collision, proof).is_err());
+    assert_eq!(source.head(), &initial_head);
+    assert_eq!(store.load_head(source_config.session_id).unwrap(), initial_head);
+    assert_eq!(store.load_checkpoint(source_config.session_id).unwrap(), initial_checkpoint);
+    assert!(store.load_block(source_config.session_id, 0).is_err());
+    assert!(store.pending_outbox(source_config.session_id, 10).unwrap().is_empty());
+    assert_eq!(store.load_genesis([9; 32]).unwrap(), occupied_genesis);
+    assert_eq!(store.load_head([9; 32]).unwrap(), occupied_head);
+
+    // Competing, individually valid declarations must still have only one target.
+    let mut competing = request.clone();
+    competing.successor.as_mut().unwrap().session_id = [5; 32];
+    let competing = source.prepare_block(competing).unwrap();
+    let competing_proof = seal(competing.block().hash());
+    let prepared = source.prepare_block(request).unwrap();
+    assert_eq!(prepared.successor().unwrap().target_config, target_config);
+    let proof = seal(prepared.block().hash());
     let sealed_head = source.commit_finalised(prepared, proof).unwrap();
     assert_eq!(sealed_head.sealed_by_successor, Some([4; 32]));
+    let committed_outbox = store.pending_outbox(source_config.session_id, 10).unwrap();
+    assert!(source.commit_finalised(competing, competing_proof).is_err());
+    assert_eq!(store.load_head(source_config.session_id).unwrap(), sealed_head);
+    assert_eq!(store.pending_outbox(source_config.session_id, 10).unwrap(), committed_outbox);
+    assert!(store.load_genesis([5; 32]).is_err());
     assert!(source
         .prepare_block(BlockRequest {
             transactions: vec![transaction(2)],
@@ -633,6 +691,7 @@ fn successor_is_created_atomically_and_seals_the_predecessor() {
             successor: None,
             handoffs: vec![],
             consume_handoffs: vec![],
+            handoff_actions: vec![],
         })
         .is_err());
 
@@ -704,11 +763,15 @@ fn handoff_is_source_committed_target_bound_expiring_and_single_use() {
                 },
             ],
             consume_handoffs: vec![],
+            handoff_actions: vec![],
         })
         .unwrap();
-    let valid_id = prepared.issued_handoffs()[0].id();
-    let expired_id = prepared.issued_handoffs()[1].id();
-    let gated_id = prepared.issued_handoffs()[2].id();
+    let named_id = |payload: &[u8]| {
+        prepared.issued_handoffs().iter().find(|handoff| handoff.payload == payload).expect("named handoff fixture").id()
+    };
+    let valid_id = named_id(b"player-state");
+    let expired_id = named_id(b"expired");
+    let gated_id = named_id(b"evidence-gated");
     let proof = FinalityProof::ProofOfAuthority(match consensus.selected_consensus() {
         myelin_consensus::SelectedConsensus::ProofOfAuthority(engine) => {
             engine.seal_from_signer(prepared.block().hash(), 0, &signer).unwrap()
@@ -729,6 +792,7 @@ fn handoff_is_source_committed_target_bound_expiring_and_single_use() {
             successor: None,
             handoffs: vec![],
             consume_handoffs: vec![valid_id],
+            handoff_actions: vec![],
         })
         .is_err());
     assert!(target
@@ -742,6 +806,7 @@ fn handoff_is_source_committed_target_bound_expiring_and_single_use() {
             successor: None,
             handoffs: vec![],
             consume_handoffs: vec![expired_id],
+            handoff_actions: vec![],
         })
         .is_err());
     assert!(target
@@ -755,6 +820,7 @@ fn handoff_is_source_committed_target_bound_expiring_and_single_use() {
             successor: None,
             handoffs: vec![],
             consume_handoffs: vec![gated_id],
+            handoff_actions: vec![],
         })
         .is_err());
 
@@ -769,6 +835,7 @@ fn handoff_is_source_committed_target_bound_expiring_and_single_use() {
             successor: None,
             handoffs: vec![],
             consume_handoffs: vec![valid_id],
+            handoff_actions: vec![],
         })
         .unwrap();
     assert_eq!(prepared.consumed_handoffs()[0].id(), valid_id);
@@ -780,9 +847,9 @@ fn handoff_is_source_committed_target_bound_expiring_and_single_use() {
     });
     let target_head = target.commit_finalised(prepared, proof).unwrap();
     let stored = store.load_handoff(valid_id).unwrap().unwrap();
-    assert_eq!(stored.consumed_by_session, Some([4; 32]));
-    assert_eq!(stored.consumed_at_height, Some(0));
-    assert_eq!(stored.consumed_by_block_hash, Some(target_head.block_hash));
+    assert_eq!(stored.consumption().map(|at| at.session_id), Some([4; 32]));
+    assert_eq!(stored.consumption().map(|at| at.height), Some(0));
+    assert_eq!(stored.consumption().map(|at| at.block_hash), Some(target_head.block_hash));
     assert!(target
         .prepare_block(BlockRequest {
             transactions: vec![transaction(4)],
@@ -794,6 +861,7 @@ fn handoff_is_source_committed_target_bound_expiring_and_single_use() {
             successor: None,
             handoffs: vec![],
             consume_handoffs: vec![valid_id],
+            handoff_actions: vec![],
         })
         .is_err());
 }

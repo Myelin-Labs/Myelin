@@ -1,0 +1,22 @@
+[package]
+name = "myelin-game-browser-fixture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "WASM differential checker for the three shared application examples"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+blake3.workspace = true
+postcard.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+
+[lints]
+workspace = true

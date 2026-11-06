@@ -8,13 +8,15 @@ optimization work is in flight, done, or planned for the Myelin runtime.
 It is written so a contributor can pick an item and know its rationale,
 touch points, and "done when" criterion before starting.
 
-## Current state (as of 2026-07)
+## Current state (reviewed 2026-11-06)
 
-Myelin is a **synchronous library** that uses **rayon data-parallelism**
-in a small number of well-defined places. There is deliberately no
-async runtime (no tokio / async-std) in the runtime crates; the session
-loop is a straight call chain in the CLI. This is a design choice, not a
-gap — see [Non-goals](#non-goals).
+Canonical execution, application replay and RocksDB commit APIs are synchronous.
+Rayon parallelizes independent CellTx/script work. Tokio drives the producer and
+network services; authority RPC dispatches execution/WAL work through a bounded
+`spawn_blocking` admission path. Cancelling an RPC does not cancel an admitted
+commit. Native workers and historical archive programs have separate process
+limits. These boundaries require workload measurements; async transport alone
+does not establish session isolation or throughput.
 
 | Dimension | Status | Evidence |
 | --- | --- | --- |
@@ -25,19 +27,20 @@ gap — see [Non-goals](#non-goals).
 | Mempool conflict scoring | **Implemented** (serial, deterministic) | `mempool/src/cellpool.rs` |
 | Mempool batch / parallel admission | **Planned** | see item #2 |
 | Consensus precommit verification | **Implemented** (serial, deterministic) | `consensus/src/lib.rs` |
-| Consensus parallel signature verification | **Planned** (waits on real crypto) | see item #6 |
+| Consensus parallel signature verification | **Planned** (requires measurements) | see item #6 |
 | State root (incremental MuHash) | **Implemented** (O(1) per op) | `state/src/cell_tree.rs` |
 | DA Merkle proof generation | **Implemented** (parallel leaf hashing) | `state/src/store/proof.rs` — rayon `par_chunks` |
 | Serialization cache (thread-safe LRU) | **Implemented** | `exec/src/serialization/cache.rs` |
-| Sighash reused-values cache | **Planned** | see item #4 — `NoCache` placeholder today |
+| Sighash reused-values cache | **Planned** | see item #4 — `NoCache` exists only in tests |
 | Content-addressable VM-result cache | **Planned** | see item #5 |
 | Segment-reader cache contention | **Implemented** | `state/src/store/segment.rs` — handle cloned under lock, read outside |
 
-The single biggest structural caveat (out of scope for "no VM changes",
-flagged here for visibility): `cli/src/main.rs` is a ~17.5k-line single
-translation unit and `exec/src/lib.rs` is ~1.1 MB. Splitting either is a
-prerequisite for rustc's own parallel codegen and for editor
-responsiveness, but it does not affect runtime concurrency.
+`cli/src/main.rs` remains a large command dispatcher. `exec/src/lib.rs` is a
+small module/export facade; VM implementation lives under `exec/src/vm`, and
+session, producer, authority, journal, worker and bundle logic are separate
+workspace crates. Source-file sizes are not performance evidence. Use `wc -lc`
+on the actual checkout if size is relevant to a refactor; historical byte/line
+counts are not an architectural contract.
 
 ---
 
@@ -112,19 +115,16 @@ real cost on large seals.
 
 ### 4. Real sighash reused-values cache — Planned
 
-`exec/src/celltx/sighash.rs` ships a `NoCache` placeholder for CKB's
-`StandardSigHashReusedValues`. The structural hook exists; nothing is
-cached today, so repeated sighash sub-computations across inputs of the
-same tx are recomputed.
+`StandardSigHashReusedValues` defines reusable component hashes for native
+Myelin signature hashing. Its `NoCache` implementation is a test helper, not a
+production cache. Any cache implementation must bind the exact transaction and
+hashing semantics. Measure host CPU and wall time; host hash caching does not
+change a CKB script's VM instruction cycles.
 
-- **Rationale:** fill the placeholder with the real reused-values cache
-  that CKB-VM's lock-script path expects. Pure host-side optimization.
-- **Files:** `exec/src/celltx/sighash.rs`.
-- **Effort:** M. **Risk:** low if it mirrors the ckb-std / ckb-vm
-  reference shape exactly. **VM changed?** No.
-- **Done when:** `NoCache` is replaced by a `ReusedValues` impl that
-  caches the documented sub-fields, and the teeworlds VM probe cycle
-  count is measured before/after to confirm it does not regress.
+- **Files:** `exec/src/celltx/sighash.rs` and its callers.
+- **Done when:** a caller uses a transaction-scoped cache, mutation invalidation
+  preserves the existing digest vectors, and a representative input-count matrix
+  demonstrates a measured host-side improvement.
 
 ### 5. Content-addressable VM-result cache — Planned
 
@@ -150,24 +150,17 @@ loop, this is repeated work.
   changed input byte forces a re-run, and a bench shows wall-clock
   improvement on a replay workload.
 
-### 6. Parallel consensus signature verification — Planned (waits on real crypto)
+### 6. Parallel consensus signature verification — Planned
 
-Both consensus engines verify precommit certificates with a serial
-`for signature in &certificate.signatures` loop. Today the "signatures"
-are deterministic blake3 digests (explicitly a closed-committee
-development signature, `consensus/src/lib.rs`), so the cost is trivial
-and parallelism is not worth it yet.
+Both committee paths verify real BIP340 secp256k1 signatures through
+`verify_schnorr` in `consensus/src/lib.rs`. Verification is serial. Parallelization
+must preserve signer uniqueness, deterministic quorum accounting and exact
+rejection behavior. Benchmark committee sizes and malformed-signature loads
+before changing this path.
 
-- **Rationale:** once the deterministic-blake3 stubs are replaced with
-  real secp256k1 / BLS, signature verification becomes the hot path and
-  the loop parallelizes trivially with rayon.
 - **Files:** `consensus/src/lib.rs`, `consensus/Cargo.toml`.
-- **Effort:** S (once crypto lands). **Risk:** low — embarrassingly
-  parallel, preserve stable ordering for the quorum accumulation. **VM
-  changed?** No.
-- **Done when:** certificate verification uses `par_iter`, quorum weight
-  accumulation stays deterministic, and a test with N validators
-  confirms correct accept/reject under threshold.
+- **Done when:** measured parallel verification improves the relevant workload
+  while existing threshold, identity and malformed-proof cases still pass.
 
 ### 7. Segment-reader cache contention — Done
 
@@ -192,13 +185,11 @@ its determinism guarantees easy to reason about.
 
 - **No CKB-VM changes.** The VM is a fixed oracle. All work above is
   host-side orchestration, caching, or scheduling.
-- **No async runtime.** Myelin stays synchronous + rayon. Introducing
-  tokio/async-std would touch every crate, complicate the deterministic
-  finality model, and is not justified by any current bottleneck — the
-  session loop is CPU-bound, not I/O-bound.
-- **No permissionless consensus concurrency.** Committee signature
-  fan-out (#6) is gated on real cryptography arriving first; the closed
-  committee today does not benefit.
+- **No asynchronous consensus state transition.** Transport and producer timing
+  may use Tokio; canonical commit ordering and deterministic execution remain
+  explicit synchronous boundaries.
+- **No permissionless consensus redesign.** Parallel committee verification is
+  a local optimization and does not introduce a new consensus or authority model.
 - **No unbenchmarked large refactors.** Items marked Planned land only
   after a design pass and a measurable win; this doc is the queue, not
   a commitment to ship everything as-is.

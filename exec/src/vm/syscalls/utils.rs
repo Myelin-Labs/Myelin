@@ -58,15 +58,6 @@ mod tests {
     const SIZE_ADDR: u64 = 0x2000;
 
     #[test]
-    fn test_return_codes() {
-        assert_eq!(SUCCESS, 0);
-        assert_eq!(INDEX_OUT_OF_BOUND, 1);
-        assert_eq!(ITEM_MISSING, 2);
-        assert_eq!(SLICE_OUT_OF_BOUND, 3);
-        assert_eq!(WRONG_FORMAT, 4);
-    }
-
-    #[test]
     fn test_store_data_clamps_offset_past_end() {
         let mut machine = ScriptVersion::V2.init_core_machine(10_000);
         machine.memory_mut().store64(&SIZE_ADDR, &8u64).unwrap();

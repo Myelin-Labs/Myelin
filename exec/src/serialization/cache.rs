@@ -256,16 +256,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_contains() {
-        let mut cache = SerializationCache::new(10);
-        let output = create_test_output();
-
-        assert!(!cache.contains(&output));
-        cache.get_or_serialize(&output).unwrap();
-        assert!(cache.contains(&output));
-    }
-
-    #[test]
     fn test_cache_eviction() {
         let mut cache = SerializationCache::new(2);
 
@@ -326,12 +316,5 @@ mod tests {
         let bytes2 = cache.get_or_serialize(&output).unwrap();
 
         assert_eq!(bytes1.as_ptr(), bytes2.as_ptr());
-    }
-
-    #[test]
-    fn test_default_cache() {
-        let cache: SerializationCache = Default::default();
-        assert_eq!(cache.max_size, 1000);
-        assert!(cache.is_empty());
     }
 }

@@ -60,8 +60,8 @@ After a crash, query `SessionChain::command_status` on the recovered chain:
 
 `SessionStore::load_command_receipt` is the underlying indexed lookup. It is not
 a replacement for recovery audit or a remote cryptographic inclusion verifier.
-Custom stores must provide atomic persistence and uniqueness; the default lookup
-scans history for small in-memory backends.
+Custom stores must provide atomic persistence, uniqueness and an explicit receipt
+lookup. The interface has no full-history scan fallback.
 
 Producer commit errors distinguish definite rejection, stale construction, and
 an unknown outcome. Definite failures release reservations. `OutcomeUnknown`
@@ -69,6 +69,71 @@ stops production and retains reservations for reconciliation. Likewise, an ACK
 failure after successful commit returns `AcknowledgeAfterCommit` with the durable
 block identity and does not release the work. Never classify a timeout after
 submission as a definite rejection without checking the durable result.
+
+## Bounded recovery
+
+`RecoveryAudit::advance` verifies chain finality and durable command/handoff
+indexes from genesis. Each call has limits for completed blocks, logical store
+reads, returned encoded bytes and elapsed time. `RecoveryCancellation` can stop
+the audit between reads and verification operations. The default step allows
+10,000 blocks, 100,000 reads, 512 MiB of returned bytes and 30 seconds.
+
+`RecoveryOutcome::Paused` includes a reason, per-step/cumulative usage, the
+captured head and the next unverified height. Its owned cursor can resume with
+a fresh budget and cancellation token. A partly checked block is rechecked;
+only completely audited blocks advance the cursor. Budget exhaustion never
+returns `AuditedRecovery` or a writable chain. `SessionChain::audit_recovery`
+uses the default budget and preserves a paused cursor in
+`SessionError::RecoveryPaused`.
+
+Only `Complete` supplies a checkpoint for `recover_audited`. Attaching an
+executor requires the same store instance and unchanged durable head. A changed
+head during a pause requires a fresh audit. Cursors are process-local; serialized
+progress is informational and cannot skip verification after a restart. This
+is a finality/index audit, not application reexecution or a trusted-anchor suffix
+audit. Full application replay remains a separate operation.
+
+Variable-sized reads reserve the 128 MiB codec ceiling before calling storage,
+then charge the actual returned encoding, including repeated dependency reads.
+A step needs that much remaining capacity to attempt such a read. Byte/read
+usage measures the logical store API, not native I/O, decoded heap size or RSS.
+RocksDB pages normally stop at 16 MiB; one larger record can occupy a page alone,
+up to the 128 MiB codec limit. A short nonempty page does not end iteration.
+Cancellation and deadlines are cooperative: synchronous storage calls and
+finality verifiers cannot be preempted. Deployment-level hard time/RSS limits
+still require process isolation.
+
+`SessionChain::start_replay_range` constructs application reexecution without
+performing I/O. `RangeReplay::advance` uses the same budget, cancellation,
+usage and progress types as recovery. Its restore callback and executor are owned
+across pauses. Warm-up blocks count against work budgets even though receipt
+resource totals cover only the requested inclusive range. The executor is cloned
+for each candidate block; a cancellation or dependency-read limit after execution
+discards that candidate, preserving the last completely checked state. Resume
+does not restore the original snapshot or restart completed blocks.
+
+| Entry point | Work performed | Checkpoint assumption |
+| --- | --- | --- |
+| `RecoveryAudit` | Genesis-to-head finality and durable-index audit | Application execution is not checked |
+| `replay_range`, or `start_replay_range` with no anchor | Application execution from session genesis, including warm-up | Restored genesis must produce its configured root |
+| `start_replay_range` with `ReplayAnchor` | Application execution strictly after the trusted anchor | Caller independently trusts the complete anchor identity |
+
+An explicit anchor binds genesis commitment, height, block hash, state root and
+snapshot hash. It must precede the requested range and reference a retained
+snapshot with a valid finality proof. Missing bytes fail; no older checkpoint is
+substituted. An anchor copied from an untrusted database does not establish trust.
+Receipt checkpoint fields distinguish suffix execution from execution starting
+at genesis, and participate in the receipt commitment.
+
+`ReplayOutcome::Paused` never contains a successful receipt. Resume it with a
+fresh per-call budget/token; only `Complete` returns a receipt and cumulative
+usage. The default convenience method preserves the same cursor in
+`SessionError::ReplayPaused`. Authority replay exposes the same start/advance
+flow outside the writer lock and retains default-budget pauses in
+`AuthorityError::ReplayPaused`. A changed durable head requires a new replay.
+These cursors remain process-local. Synchronous application restore/execute calls
+are cooperative boundaries too, so untrusted code still requires worker isolation;
+application-owned I/O is not included in the session store-read counters.
 
 ## Recheck admission at both boundaries
 
@@ -126,11 +191,13 @@ of that root without application rules. A nonzero hash is not evidence that two
 ownership models agree. The required binding makes this responsibility explicit;
 it does not turn the existing fixed-participant ledger into an open DEX ledger.
 
-## Compatibility
+## Current formats
 
-Version 0.31 changes the application-profile and frame commitment formats, the
-session binary record version to 7, and RocksDB schema to 7. Old records and stores
-are rejected. Use a new development store and regenerate fixtures/reports; there
-is no automatic migration or replay of live funds. External hosts must update
-their producer, runtime and escrow adapter implementations for the new required
-parameters and error classification.
+Only MREC 13, block 6 and RocksDB schema 15 are supported. Earlier records and
+stores are rejected; there is no schema-marker upgrade or historical decoder.
+Schema 13 atomically indexes each retained archival checkpoint by height and
+block hash. Lookup seeks one index entry and verifies its referenced block,
+instead of scanning and decoding intervening history. Bundle imports reconstruct
+the same checkpoint-height index from their content-checked block inventory.
+Application-authorized successor conversion remains a current protocol operation,
+independent of storage format compatibility.

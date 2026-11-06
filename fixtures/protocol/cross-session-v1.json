@@ -1,0 +1,509 @@
+{
+  "format": "myelin-cross-session-reference-v1",
+  "vectors": [
+    {
+      "name": "deployment",
+      "domain": "myelin:deployment:v1",
+      "fields": [
+        {
+          "name": "network_genesis_hash",
+          "encoding": "hash32",
+          "value": "1414141414141414141414141414141414141414141414141414141414141414"
+        },
+        {
+          "name": "deployment_nonce",
+          "encoding": "hash32",
+          "value": "1515151515151515151515151515151515151515151515151515151515151515"
+        }
+      ],
+      "preimage_hex": "6d79656c696e3a6465706c6f796d656e743a763114141414141414141414141414141414141414141414141414141414141414141515151515151515151515151515151515151515151515151515151515151515",
+      "blake3": "5d75efac3288ed7cef52afb5c0b43b4498ca3c8fad71b464289a287fd44687ae"
+    },
+    {
+      "name": "object",
+      "domain": "myelin:object:v1",
+      "fields": [
+        {
+          "name": "deployment_id",
+          "encoding": "hash32",
+          "value": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "name": "issuer_genesis_commitment",
+          "encoding": "hash32",
+          "value": "0303030303030303030303030303030303030303030303030303030303030303"
+        },
+        {
+          "name": "schema_hash",
+          "encoding": "hash32",
+          "value": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+        },
+        {
+          "name": "object_key",
+          "encoding": "bytes",
+          "value": "6974656d2d3432"
+        }
+      ],
+      "preimage_hex": "6d79656c696e3a6f626a6563743a7631010101010101010101010101010101010101010101010101010101010101010103030303030303030303030303030303030303030303030303030303030303030d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d07000000000000006974656d2d3432",
+      "blake3": "2785362fe8efb468bbcde9ef4deeb1ed9f2900d3f84678272ee5f81391bae15b"
+    },
+    {
+      "name": "command-authorization",
+      "domain": "myelin:command-authorization:v1",
+      "fields": [
+        {
+          "name": "deployment_id",
+          "encoding": "hash32",
+          "value": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "name": "session_genesis_commitment",
+          "encoding": "hash32",
+          "value": "0303030303030303030303030303030303030303030303030303030303030303"
+        },
+        {
+          "name": "profile_commitment",
+          "encoding": "hash32",
+          "value": "0404040404040404040404040404040404040404040404040404040404040404"
+        },
+        {
+          "name": "command_id",
+          "encoding": "hash32",
+          "value": "0909090909090909090909090909090909090909090909090909090909090909"
+        },
+        {
+          "name": "canonical_payload_hash",
+          "encoding": "hash32",
+          "value": "1616161616161616161616161616161616161616161616161616161616161616"
+        }
+      ],
+      "preimage_hex": "6d79656c696e3a636f6d6d616e642d617574686f72697a6174696f6e3a763101010101010101010101010101010101010101010101010101010101010101010303030303030303030303030303030303030303030303030303030303030303040404040404040404040404040404040404040404040404040404040404040409090909090909090909090909090909090909090909090909090909090909091616161616161616161616161616161616161616161616161616161616161616",
+      "blake3": "28fef7eabaca499d52b4e3fb8575e666d507e1b430c2904aaede3f8d8d8dca8b"
+    },
+    {
+      "name": "exact-target-exclusive-intent",
+      "domain": "myelin:transfer-intent:v1",
+      "fields": [
+        {
+          "name": "version",
+          "encoding": "u16",
+          "value": "1"
+        },
+        {
+          "name": "deployment_id",
+          "encoding": "hash32",
+          "value": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "name": "source_session_id",
+          "encoding": "hash32",
+          "value": "0202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "name": "source_genesis_commitment",
+          "encoding": "hash32",
+          "value": "0303030303030303030303030303030303030303030303030303030303030303"
+        },
+        {
+          "name": "source_profile_commitment",
+          "encoding": "hash32",
+          "value": "0404040404040404040404040404040404040404040404040404040404040404"
+        },
+        {
+          "name": "source_authority_commitment",
+          "encoding": "hash32",
+          "value": "0505050505050505050505050505050505050505050505050505050505050505"
+        },
+        {
+          "name": "capability",
+          "encoding": "u8",
+          "value": "2"
+        },
+        {
+          "name": "actor",
+          "encoding": "hash32",
+          "value": "0606060606060606060606060606060606060606060606060606060606060606"
+        },
+        {
+          "name": "participants.length",
+          "encoding": "u64",
+          "value": "2"
+        },
+        {
+          "name": "participants[0]",
+          "encoding": "hash32",
+          "value": "0606060606060606060606060606060606060606060606060606060606060606"
+        },
+        {
+          "name": "participants[1]",
+          "encoding": "hash32",
+          "value": "0707070707070707070707070707070707070707070707070707070707070707"
+        },
+        {
+          "name": "object_id",
+          "encoding": "hash32",
+          "value": "0808080808080808080808080808080808080808080808080808080808080808"
+        },
+        {
+          "name": "object_version",
+          "encoding": "u64",
+          "value": "42"
+        },
+        {
+          "name": "command_id",
+          "encoding": "hash32",
+          "value": "0909090909090909090909090909090909090909090909090909090909090909"
+        },
+        {
+          "name": "nonce",
+          "encoding": "hash32",
+          "value": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        },
+        {
+          "name": "target.tag",
+          "encoding": "u8",
+          "value": "0"
+        },
+        {
+          "name": "target.deployment_id",
+          "encoding": "hash32",
+          "value": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "name": "target.genesis_commitment",
+          "encoding": "hash32",
+          "value": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+        },
+        {
+          "name": "target.session_id",
+          "encoding": "hash32",
+          "value": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+        },
+        {
+          "name": "payload_schema",
+          "encoding": "hash32",
+          "value": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+        },
+        {
+          "name": "payload",
+          "encoding": "bytes",
+          "value": "01020304"
+        },
+        {
+          "name": "authorization_policy",
+          "encoding": "hash32",
+          "value": "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+        },
+        {
+          "name": "expires_at_target_timestamp_ms",
+          "encoding": "u64",
+          "value": "1000"
+        },
+        {
+          "name": "evidence_requirement.tag",
+          "encoding": "u8",
+          "value": "0"
+        }
+      ],
+      "preimage_hex": "6d79656c696e3a7472616e736665722d696e74656e743a763101000101010101010101010101010101010101010101010101010101010101010101020202020202020202020202020202020202020202020202020202020202020203030303030303030303030303030303030303030303030303030303030303030404040404040404040404040404040404040404040404040404040404040404050505050505050505050505050505050505050505050505050505050505050502060606060606060606060606060606060606060606060606060606060606060602000000000000000606060606060606060606060606060606060606060606060606060606060606070707070707070707070707070707070707070707070707070707070707070708080808080808080808080808080808080808080808080808080808080808082a0000000000000009090909090909090909090909090909090909090909090909090909090909090a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0001010101010101010101010101010101010101010101010101010101010101010b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0400000000000000010203040e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0ee80300000000000000",
+      "blake3": "931caf7f0515eca4404beef125c45ebab5b128082f8b062a8cb7fa13ccd17811"
+    },
+    {
+      "name": "shared-store-policy-exclusive-intent",
+      "domain": "myelin:transfer-intent:v1",
+      "fields": [
+        {
+          "name": "version",
+          "encoding": "u16",
+          "value": "1"
+        },
+        {
+          "name": "deployment_id",
+          "encoding": "hash32",
+          "value": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "name": "source_session_id",
+          "encoding": "hash32",
+          "value": "0202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "name": "source_genesis_commitment",
+          "encoding": "hash32",
+          "value": "0303030303030303030303030303030303030303030303030303030303030303"
+        },
+        {
+          "name": "source_profile_commitment",
+          "encoding": "hash32",
+          "value": "0404040404040404040404040404040404040404040404040404040404040404"
+        },
+        {
+          "name": "source_authority_commitment",
+          "encoding": "hash32",
+          "value": "0505050505050505050505050505050505050505050505050505050505050505"
+        },
+        {
+          "name": "capability",
+          "encoding": "u8",
+          "value": "2"
+        },
+        {
+          "name": "actor",
+          "encoding": "hash32",
+          "value": "0606060606060606060606060606060606060606060606060606060606060606"
+        },
+        {
+          "name": "participants.length",
+          "encoding": "u64",
+          "value": "2"
+        },
+        {
+          "name": "participants[0]",
+          "encoding": "hash32",
+          "value": "0606060606060606060606060606060606060606060606060606060606060606"
+        },
+        {
+          "name": "participants[1]",
+          "encoding": "hash32",
+          "value": "0707070707070707070707070707070707070707070707070707070707070707"
+        },
+        {
+          "name": "object_id",
+          "encoding": "hash32",
+          "value": "0808080808080808080808080808080808080808080808080808080808080808"
+        },
+        {
+          "name": "object_version",
+          "encoding": "u64",
+          "value": "42"
+        },
+        {
+          "name": "command_id",
+          "encoding": "hash32",
+          "value": "0909090909090909090909090909090909090909090909090909090909090909"
+        },
+        {
+          "name": "nonce",
+          "encoding": "hash32",
+          "value": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+        },
+        {
+          "name": "target.tag",
+          "encoding": "u8",
+          "value": "1"
+        },
+        {
+          "name": "target.deployment_id",
+          "encoding": "hash32",
+          "value": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "name": "target.uniqueness_domain",
+          "encoding": "hash32",
+          "value": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
+        },
+        {
+          "name": "target.policy_commitment",
+          "encoding": "hash32",
+          "value": "1010101010101010101010101010101010101010101010101010101010101010"
+        },
+        {
+          "name": "payload_schema",
+          "encoding": "hash32",
+          "value": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+        },
+        {
+          "name": "payload",
+          "encoding": "bytes",
+          "value": "01020304"
+        },
+        {
+          "name": "authorization_policy",
+          "encoding": "hash32",
+          "value": "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+        },
+        {
+          "name": "expires_at_target_timestamp_ms",
+          "encoding": "u64",
+          "value": "1000"
+        },
+        {
+          "name": "evidence_requirement.tag",
+          "encoding": "u8",
+          "value": "1"
+        },
+        {
+          "name": "source_message_id",
+          "encoding": "hash32",
+          "value": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        {
+          "name": "pipeline_commitment",
+          "encoding": "hash32",
+          "value": "1212121212121212121212121212121212121212121212121212121212121212"
+        },
+        {
+          "name": "minimum_stage_index",
+          "encoding": "u16",
+          "value": "1"
+        }
+      ],
+      "preimage_hex": "6d79656c696e3a7472616e736665722d696e74656e743a763101000101010101010101010101010101010101010101010101010101010101010101020202020202020202020202020202020202020202020202020202020202020203030303030303030303030303030303030303030303030303030303030303030404040404040404040404040404040404040404040404040404040404040404050505050505050505050505050505050505050505050505050505050505050502060606060606060606060606060606060606060606060606060606060606060602000000000000000606060606060606060606060606060606060606060606060606060606060606070707070707070707070707070707070707070707070707070707070707070708080808080808080808080808080808080808080808080808080808080808082a0000000000000009090909090909090909090909090909090909090909090909090909090909090a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0101010101010101010101010101010101010101010101010101010101010101010f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f10101010101010101010101010101010101010101010101010101010101010100d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0400000000000000010203040e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0ee80300000000000001111111111111111111111111111111111111111111111111111111111111111112121212121212121212121212121212121212121212121212121212121212120100",
+      "blake3": "b68d4ff5f37c2590459e9cf19072f0992fecf5eb29fd604f71e7690d49b7ca9b"
+    },
+    {
+      "name": "finalized-effect-envelope",
+      "domain": "myelin:finalized-effect-envelope:v1",
+      "fields": [
+        {
+          "name": "source.deployment_id",
+          "encoding": "hash32",
+          "value": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "name": "source.session_id",
+          "encoding": "hash32",
+          "value": "0202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "name": "source.genesis_commitment",
+          "encoding": "hash32",
+          "value": "0303030303030303030303030303030303030303030303030303030303030303"
+        },
+        {
+          "name": "source.block_height",
+          "encoding": "u64",
+          "value": "23"
+        },
+        {
+          "name": "source.block_hash",
+          "encoding": "hash32",
+          "value": "1818181818181818181818181818181818181818181818181818181818181818"
+        },
+        {
+          "name": "source.post_state_root",
+          "encoding": "hash32",
+          "value": "1919191919191919191919191919191919191919191919191919191919191919"
+        },
+        {
+          "name": "source.profile_commitment",
+          "encoding": "hash32",
+          "value": "0404040404040404040404040404040404040404040404040404040404040404"
+        },
+        {
+          "name": "source.authority_commitment",
+          "encoding": "hash32",
+          "value": "0505050505050505050505050505050505050505050505050505050505050505"
+        },
+        {
+          "name": "intent_commitment",
+          "encoding": "hash32",
+          "value": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+        },
+        {
+          "name": "effect_commitment",
+          "encoding": "hash32",
+          "value": "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b"
+        },
+        {
+          "name": "authorization_commitment",
+          "encoding": "hash32",
+          "value": "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+        },
+        {
+          "name": "handoff_id",
+          "encoding": "hash32",
+          "value": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d"
+        }
+      ],
+      "preimage_hex": "6d79656c696e3a66696e616c697a65642d6566666563742d656e76656c6f70653a7631010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303170000000000000018181818181818181818181818181818181818181818181818181818181818181919191919191919191919191919191919191919191919191919191919191919040404040404040404040404040404040404040404040404040404040404040405050505050505050505050505050505050505050505050505050505050505051a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+      "blake3": "31f7289e7061dcf73480c093db12d46f41be07e3fda24755d5a1d295e653eaf0"
+    },
+    {
+      "name": "successor-authorization",
+      "domain": "myelin:successor-authorization:v1",
+      "fields": [
+        {
+          "name": "source_genesis_commitment",
+          "encoding": "hash32",
+          "value": "0303030303030303030303030303030303030303030303030303030303030303"
+        },
+        {
+          "name": "command_id",
+          "encoding": "hash32",
+          "value": "0909090909090909090909090909090909090909090909090909090909090909"
+        },
+        {
+          "name": "expected_source_pre_root",
+          "encoding": "hash32",
+          "value": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
+        },
+        {
+          "name": "complete_target_config_commitment",
+          "encoding": "hash32",
+          "value": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
+        },
+        {
+          "name": "compatibility_or_migration_artifact_digest",
+          "encoding": "hash32",
+          "value": "2020202020202020202020202020202020202020202020202020202020202020"
+        }
+      ],
+      "preimage_hex": "6d79656c696e3a737563636573736f722d617574686f72697a6174696f6e3a7631030303030303030303030303030303030303030303030303030303030303030309090909090909090909090909090909090909090909090909090909090909091e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f2020202020202020202020202020202020202020202020202020202020202020",
+      "blake3": "f9da688cf250e74b6324d918d9a17ad3d31ef197291318d5b92fca288f750b83"
+    },
+    {
+      "name": "evidence-composition",
+      "domain": "myelin:evidence-composition:v1",
+      "fields": [
+        {
+          "name": "source_envelopes.length",
+          "encoding": "u64",
+          "value": "2"
+        },
+        {
+          "name": "source_envelopes[0]",
+          "encoding": "hash32",
+          "value": "2121212121212121212121212121212121212121212121212121212121212121"
+        },
+        {
+          "name": "source_envelopes[1]",
+          "encoding": "hash32",
+          "value": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        {
+          "name": "causal_edges.length",
+          "encoding": "u64",
+          "value": "1"
+        },
+        {
+          "name": "causal_edges[0].source",
+          "encoding": "hash32",
+          "value": "2121212121212121212121212121212121212121212121212121212121212121"
+        },
+        {
+          "name": "causal_edges[0].target",
+          "encoding": "hash32",
+          "value": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        {
+          "name": "causal_edges[0].kind",
+          "encoding": "u8",
+          "value": "0"
+        },
+        {
+          "name": "causal_edges[0].policy_digest",
+          "encoding": "hash32",
+          "value": "2323232323232323232323232323232323232323232323232323232323232323"
+        },
+        {
+          "name": "composition_program_digest",
+          "encoding": "hash32",
+          "value": "2424242424242424242424242424242424242424242424242424242424242424"
+        }
+      ],
+      "preimage_hex": "6d79656c696e3a65766964656e63652d636f6d706f736974696f6e3a76310200000000000000212121212121212121212121212121212121212121212121212121212121212122222222222222222222222222222222222222222222222222222222222222220100000000000000212121212121212121212121212121212121212121212121212121212121212122222222222222222222222222222222222222222222222222222222222222220023232323232323232323232323232323232323232323232323232323232323232424242424242424242424242424242424242424242424242424242424242424",
+      "blake3": "e4f4408b22c07e579e98df29e707f38069528fbc468570f706018dd994349495"
+    }
+  ]
+}

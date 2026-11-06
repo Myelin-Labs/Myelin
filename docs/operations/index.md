@@ -28,39 +28,35 @@ running it, and proving it works against a real (or mock) CKB node.
     submissions, type-script execution, and live rejection of
     tampered carriers on a parent CKB devnet.
 
+-   [Workload measurements](workload-measurements.md)
+
+    ---
+
+    Reproduce three host-game workload scales, trigger comparisons, raw latency
+    and resource samples, and fresh-process archive recovery.
+
+-   [Downstream releases](downstream-release.md)
+
+    ---
+
+    Pin the framework source archive and build an independent game image from
+    its own release package.
+
 </div>
 
 ## What "running Myelin" looks like today
 
-There is **no daemon**. There is **no P2P layer**. There is **no
-RPC server**. The way you run Myelin today is:
-
-1. **Compile the CLI.**
-2. **Run subcommands** that produce and verify reports on disk.
-3. **Run scripts** that orchestrate the subcommands and assert
-   properties of the reports.
-
-If you want a daemon or RPC server, that's a separate piece of work
-— Myelin today is a kernel + CLI, not a service.
+The workspace supplies synchronous execution/storage libraries, a CLI, a
+Tokio producer and mTLS session/authority network services. Applications construct
+their executor, genesis, trust policy, keys and service lifecycle. There is no
+universal application daemon or automatic authority failover. See
+[authority networking](../architecture/authority-network.md) for the service and
+[writer migration](writer-migration.md) for ownership requirements.
 
 ## What "production evidence" looks like today
 
-Two scripts in `scripts/` produce the evidence:
-
-```bash
-scripts/myelin_production_gate.sh       # full local gate
-scripts/myelin_teeworlds_acceptance.sh  # narrower Teeworlds gate
-scripts/myelin_ckb_devnet_smoke.sh      # live CKB devnet path
-```
-
-Each one leaves behind a set of JSON reports in `reports/` that
-record what was measured, what was projected, and what was
-submitted. Those reports are the evidence; the CLI exit codes are
-the gate.
-
-## Where to go next
-
-- [CLI reference](cli.md) — pick the subcommand you need.
-- [Production gate](production-gate.md) — run the whole thing.
-- [Local CKB devnet smoke](devnet-smoke.md) — if you have a local
-  CKB devnet and want live evidence.
+Use the single [validation entry point](production-gate.md) with an explicit
+profile or lane. Each invocation retains `report.json`, exact commands, logs and
+artifact hashes in its new output directory. Unselected integrations are marked
+skipped; a selected lane with missing inputs fails. A core-only pass makes no
+CellScript, CKB, Teeworlds, browser or complete-build acceptance claim.

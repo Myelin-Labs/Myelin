@@ -4,8 +4,7 @@
 // Serialization Layer Usage Examples
 
 use myelin_exec::{
-    CellInput, CellOutput, CellTx, OutPoint, ResolvedHeader, Script, VersionedEnvelope, VersionedSerializable, VmAbiNegotiator,
-    VmSerializable,
+    CellInput, CellOutput, CellTx, OutPoint, ResolvedHeader, Script, VersionedEnvelope, VmSerializable, VM_ABI_VERSION,
 };
 
 fn store_cell_tx_example() {
@@ -45,32 +44,12 @@ fn vm_abi_example() {
 
     let vm_bytes = header.to_vm_bytes();
     println!("VM bytes size: {} bytes", vm_bytes.len());
-    println!("ABI version: 0x{:04X}", ResolvedHeader::abi_version());
+    println!("ABI version: 0x{:04X}", VM_ABI_VERSION);
 
     let restored_header = ResolvedHeader::from_vm_bytes(&vm_bytes).expect("VM deserialization should succeed");
 
     assert_eq!(header.hash, restored_header.hash);
     println!("VM ABI roundtrip successful");
-}
-
-fn abi_negotiation_example() {
-    let vm_capabilities = VmAbiNegotiator::default_capabilities();
-    println!("VM supports ABI versions: {:?}", vm_capabilities);
-
-    let script_version = VmAbiNegotiator::ABI_VERSION_MOLECULE;
-    match VmAbiNegotiator::negotiate(script_version, &vm_capabilities) {
-        Ok(agreed_version) => {
-            println!("ABI negotiation successful: 0x{:04X}", agreed_version);
-        }
-        Err(e) => {
-            println!("ABI negotiation failed: {}", e);
-        }
-    }
-}
-
-fn schema_evolution_example() {
-    println!("CellTx schema version: {}", CellTx::CURRENT_VERSION);
-    println!("Schema upgrades must implement explicit payload codecs.");
 }
 
 fn create_sample_tx() -> CellTx {
@@ -90,14 +69,6 @@ fn main() {
 
     println!("--- VM ABI Layer (VmSerializable) ---");
     vm_abi_example();
-    println!();
-
-    println!("--- ABI Version Negotiation ---");
-    abi_negotiation_example();
-    println!();
-
-    println!("--- Schema Evolution ---");
-    schema_evolution_example();
     println!();
 
     println!("All examples completed successfully");

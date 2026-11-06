@@ -72,7 +72,7 @@ pub struct DaManifest {
     pub payload_hash: [u8; 32],
     pub segment_root: [u8; 32],
     pub segment_proof: SegmentProof,
-    pub external_da_receipt: Option<ExternalDaReceipt>,
+    pub provider_neutral_certificate: Option<DaCertificate>,
     pub da_availability: DaAvailability,
     pub l1_da_published: bool,
 }
@@ -146,35 +146,7 @@ This:
 The local store can be reused across many chunks; the manifest
 identifies its segment by `payload_hash`.
 
-## Step 2 — External DA receipt (optional)
-
-For `testnet_beta_ready`, attach a provider-signed receipt:
-
-```bash
-cargo run -p myelin-cli -- session da-manifest \
-  --bundle reports/session-court-bundle.json \
-  --storage-dir reports/session-da-store \
-  --external-da-receipt reports/external-da-receipt.json \
-  --out reports/session-da-manifest.json
-```
-
-The receipt must use the schema `myelin-external-da-receipt`,
-bind to the same `payload_hash` and `segment_root`, and carry a
-provider-recoverable secp256k1 signature over the receipt fields.
-
-Legacy receipts may also carry rehearsal SLA fields:
-
-```text
-service_level       = "production"
-retention_window    >= 30 days
-retrieval_endpoint  -> HTTPS URL with documented retrieval procedure
-audit_log_commitment -> 32-byte commitment to the operator's audit log
-```
-
-These fields are hashed into the DA availability commitment, but one receipt
-cannot make the manifest production-ready.
-
-## Step 3 — Provider-neutral certificate
+## Step 2 — Provider-neutral certificate
 
 Production DA requires a `DaCertificate` with independent provider and fault
 domain quorum plus signed, fresh retrieval probes:

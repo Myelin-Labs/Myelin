@@ -50,15 +50,18 @@ flowchart LR
 ```
 
 The next candidate waits for the previous commit. Myelin does not build
-speculative descendants or rebase a candidate chain. A failed commit or orderly
-shutdown releases the reservation. Source acknowledgement follows the durable
-head advance and has its own reconciliation path.
+speculative descendants or rebase a candidate chain. A definitive rejection can
+release a reservation; an unknown commit outcome retains it for reconciliation.
+Source acknowledgement follows the durable head advance and has its own
+reconciliation path. Shutdown does not turn an unknown outcome into a rejection.
 
 On restart, Myelin streams and audits parent hashes, heights, state roots,
 timestamps, module commitments, and finality proofs. It restores the latest
 checkpoint, checks the restored root against the durable head, and then opens
-the writer. Ordinary recovery does not re-execute every historical transaction;
-full replay is a future deep-audit mode.
+the writer. Ordinary recovery does not re-execute every historical transaction.
+Explicit budgeted range replay can execute from genesis or from an independently
+trusted checkpoint, and portable bundles retain the original program for offline
+replay. See [session bundles](../architecture/session-bundles.md).
 
 ## What “CKB-aligned” permits Myelin to claim
 

@@ -10,7 +10,7 @@
 //! claim that an arbitrary message signature is a CKB transaction witness.
 
 use base64::{engine::general_purpose, Engine as _};
-use bech32::{Bech32m, Hrp};
+use bech32::{primitives::decode::CheckedHrpstring, Bech32m, Hrp};
 use blake2b_simd::Params;
 use hmac::{Hmac, Mac};
 use ring::signature::{RsaPublicKeyComponents, UnparsedPublicKey, ECDSA_P256_SHA256_ASN1, RSA_PKCS1_2048_8192_SHA256};
@@ -356,33 +356,28 @@ pub fn ckb_sighash_address(lock_arg: CkbLockArg, network: u8) -> Result<String, 
     bech32::encode::<Bech32m>(hrp, &payload).map_err(|error| WalletAuthError::InvalidAddress(error.to_string()))
 }
 
-/// Validate a standard CKB secp256k1-blake160 address and return its canonical
-/// CKB2021 spelling plus exact 20-byte lock argument. Legacy short/full-type
-/// spellings are accepted but normalized before identity binding.
-pub fn normalize_ckb_sighash_address(address: &str, network: u8) -> Result<(String, CkbLockArg), WalletAuthError> {
+fn current_address_payload(address: &str, network: u8) -> Result<Vec<u8>, WalletAuthError> {
     if address.len() > 160 {
         return Err(WalletAuthError::InvalidAddress("address is too long".to_owned()));
     }
-    let (hrp, payload) = bech32::decode(address).map_err(|error| WalletAuthError::InvalidAddress(error.to_string()))?;
-    if hrp != ckb_hrp(network)? {
+    let decoded = CheckedHrpstring::new::<Bech32m>(address).map_err(|error| WalletAuthError::InvalidAddress(error.to_string()))?;
+    if decoded.hrp() != ckb_hrp(network)? {
         return Err(WalletAuthError::InvalidAddress("network prefix mismatch".to_owned()));
     }
+    Ok(decoded.byte_iter().collect())
+}
+
+/// Validate a current CKB2021 Bech32m sighash address and return its canonical
+/// spelling plus exact 20-byte lock argument.
+pub fn normalize_ckb_sighash_address(address: &str, network: u8) -> Result<(String, CkbLockArg), WalletAuthError> {
+    let payload = current_address_payload(address, network)?;
     let args = match payload.first().copied() {
-        // Deprecated short address: 0x01 | sighash code-hash index 0x00 | args.
-        Some(1) if payload.len() == 22 && payload[1] == 0 => &payload[2..],
         // CKB2021: 0x00 | code_hash | hash_type | args.
         Some(0) if payload.len() == 54 => {
             if payload[1..33] != CKB_SIGHASH_TYPE_HASH || payload[33] != 1 {
                 return Err(WalletAuthError::InvalidAddress("address does not use the standard CKB sighash lock".to_owned()));
             }
             &payload[34..]
-        }
-        // Deprecated full type: 0x04 | code_hash | args.
-        Some(4) if payload.len() == 53 => {
-            if payload[1..33] != CKB_SIGHASH_TYPE_HASH {
-                return Err(WalletAuthError::InvalidAddress("address does not use the standard CKB sighash lock".to_owned()));
-            }
-            &payload[33..]
         }
         _ => {
             return Err(WalletAuthError::InvalidAddress("unsupported standard CKB address payload".to_owned()));
@@ -397,13 +392,7 @@ pub fn normalize_ckb_sighash_address(address: &str, network: u8) -> Result<(Stri
 /// network, type hash, type hash mode, and 22-byte JoyID lock arguments; it
 /// does not by itself prove that a supplied credential belongs to the address.
 pub fn normalize_joyid_address(address: &str, network: u8) -> Result<String, WalletAuthError> {
-    if address.len() > 160 {
-        return Err(WalletAuthError::InvalidAddress("address is too long".to_owned()));
-    }
-    let (hrp, payload) = bech32::decode(address).map_err(|error| WalletAuthError::InvalidAddress(error.to_string()))?;
-    if hrp != ckb_hrp(network)? {
-        return Err(WalletAuthError::InvalidAddress("network prefix mismatch".to_owned()));
-    }
+    let payload = current_address_payload(address, network)?;
     let expected_hash = match network {
         0 => JOYID_MAINNET_TYPE_HASH,
         1 => JOYID_TESTNET_TYPE_HASH,
@@ -419,13 +408,6 @@ pub fn normalize_joyid_address(address: &str, network: u8) -> Result<String, Wal
             }
             &payload[34..]
         }
-        // Legacy full type: 0x04 | code_hash | args.
-        Some(4) if payload.len() == 55 => {
-            if payload[1..33] != expected_hash {
-                return Err(WalletAuthError::InvalidAddress("address does not use the configured JoyID type lock".to_owned()));
-            }
-            &payload[33..]
-        }
         _ => {
             return Err(WalletAuthError::InvalidAddress("unsupported JoyID address payload".to_owned()));
         }
@@ -438,7 +420,7 @@ pub fn normalize_joyid_address(address: &str, network: u8) -> Result<String, Wal
     canonical.extend_from_slice(&expected_hash);
     canonical.push(1);
     canonical.extend_from_slice(args);
-    bech32::encode::<Bech32m>(hrp, &canonical).map_err(|error| WalletAuthError::InvalidAddress(error.to_string()))
+    bech32::encode::<Bech32m>(ckb_hrp(network)?, &canonical).map_err(|error| WalletAuthError::InvalidAddress(error.to_string()))
 }
 
 /// Verify the cryptographic half of a JoyID login proof. Callers must also
@@ -779,10 +761,20 @@ mod tests {
         assert_eq!(payload[33], 1);
         assert_eq!(&payload[34..], &lock_arg);
         assert!(normalize_ckb_sighash_address(&address, 0).is_err());
+        let wrong_checksum = bech32::encode::<bech32::Bech32>(hrp, &payload).unwrap();
+        assert!(normalize_ckb_sighash_address(&wrong_checksum, 1).is_err());
+        for old_payload in
+            [[vec![1, 0], lock_arg.to_vec()].concat(), [vec![4], CKB_SIGHASH_TYPE_HASH.to_vec(), lock_arg.to_vec()].concat()]
+        {
+            assert!(normalize_ckb_sighash_address(&bech32::encode::<Bech32m>(hrp, &old_payload).unwrap(), 1).is_err());
+        }
 
         let joyid = "ckt1qrfrwcdnvssswdwpn3s9v8fp87emat306ctjwsm3nmlkjg8qyza2cqgqq9mxjf0qnyfusww65kapv2rc0qdm6sjpvvadd4hp";
         assert_eq!(normalize_joyid_address(joyid, 1).unwrap(), joyid);
         assert!(normalize_joyid_address(joyid, 0).is_err());
         assert!(normalize_joyid_address(joyid, 2).is_err());
+        let (_, payload) = bech32::decode(joyid).unwrap();
+        let old_payload = [vec![4], payload[1..33].to_vec(), payload[34..].to_vec()].concat();
+        assert!(normalize_joyid_address(&bech32::encode::<Bech32m>(hrp, &old_payload).unwrap(), 1).is_err());
     }
 }

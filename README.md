@@ -69,19 +69,30 @@ Four rules keep the modules from trusting data outside their remit:
 
 ### Continuous service modules
 
-The reusable continuous-session path is split into seven optional workspace crates:
+The reusable continuous-session path is split into twelve optional workspace crates:
 
 | Crate | Boundary |
 | --- | --- |
 | `myelin-session` | Genesis-bound application profiles, execution frames, read-only inspection, bounded range replay, continuous heads, successor sealing, single-use handoffs, exact finality binding, and transactional outbox |
 | `myelin-session-producer` | Strictly configurable `Instant`, `Interval`, lazy `Open`, `Never`, and manual production; bounded reserving batches; reusable host scheduling; and a single-writer hand-off to finality and atomic commit |
+| `myelin-session-journal` | Durable original commands, authenticated identities, bounded reconstruction, exact signed submission bindings, canonical result recovery and later-epoch absence reconciliation; original identities survive retries |
+| `myelin-session-authority` | Explicit single-authority PoA gateway with durable ownership epochs, canonical-head watermark, signed command observations, mTLS service/client and certified idempotent effects |
+| `myelin-session-bundle` | Bounded content-addressed export, independent genesis/profile/artifact trust, causal dependency checks, finality audit and Linux isolated replay; typed file packages carry complete reference source/vendor/toolchain inputs for offline reproduction |
 | `myelin-session-store-rocksdb` | Versioned RocksDB schema, synchronous WAL, atomic block/checkpoint/head/outbox/successor/handoff CAS, receipt-stage persistence, and durable per-peer network queues |
 | `myelin-session-network` | Recipient-bound Schnorr envelopes, closed-peer authorization, replay/equivocation checks, mTLS gRPC transport, and ACK-after-durability delivery |
+| `myelin-session-worker` | Opt-in Linux process execution with pinned artifacts, CPU/address-space/wall-time limits, cancellation, bounded transport and separate host metrics |
+| `myelin-session-transfer` | Owner-authorized scarce transfers and copyable receipts in one store, with canonical payloads and replay; authoritative cancellation, later refunds, consumed-lock retirement and exact-successor inheritance |
 | `myelin-session-runtime` | Embeddable composition root, locally verified crash-resumable evidence pipelines, dependency-ordered lifecycle supervision, health enforcement, and the session writer gate |
 | `myelin-session-escrow` | Optional finalized-CKB funding attachment, conserved balances, expiry/debit constraints, pluggable typed assets, evidence-bound exit construction, and finalized-settlement verification |
 | `myelin-wallet-auth` | Standard CKB Blake160 identity derivation, CKB-personalized login/PoA digests, and compact recoverable secp256k1 signatures |
 
 These crates are adapters, not a daemon that silently changes Myelin's scope. An application may embed a one-process PoA driver or connect an external coordinator through the finality and network interfaces. PoA, static committee, and Tendermint here are closed-validator session engines; none makes Myelin a permissionless chain.
+
+The optional [native command adapter](docs/architecture/command-applications.md)
+includes standalone inventory/save and two-player turn examples. They share
+profile, journal, query, receipt and crash-recovery contracts while keeping game
+rules outside the session core. Their capability manifests distinguish native
+host replay from CKB-VM, settlement and tick-tape support.
 
 ### Session safety in 0.31.0
 
@@ -120,8 +131,8 @@ flowchart LR
 when a batch closes. They do not decide VM validity or create finality. On
 restart, Myelin audits the finalised block-and-proof chain, restores the latest
 checkpoint, checks its root against the durable head, and opens the writer only
-after those checks pass. A bounded range replay starts from the newest retained
-checkpoint before the requested range, reexecutes every intervening frame, and
+after those checks pass. A bounded range replay starts from genesis or an
+explicit caller-trusted anchor before the requested range, reexecutes every intervening frame, and
 emits a receipt binding the profile, inputs, roots, transaction bytes, and
 resource totals.
 
@@ -132,8 +143,7 @@ The repository pins its Rust toolchain and tracks `Cargo.lock`.
 ### 1. Check the workspace
 
 ```bash
-cargo check --locked --workspace --all-targets
-cargo test --locked --workspace
+scripts/myelin_production_gate.sh --profile core --out target/validation
 ```
 
 ### 2. Run a complete local session
@@ -294,22 +304,17 @@ The deployment roadmap covers public-testnet verifier/court deployment, full cou
 
 ## Validation
 
-Run the Rust release checks:
+Run local workspace and process validation:
 
 ```bash
-cargo fmt --all --check
-cargo check --locked --workspace --all-targets
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo test --locked --workspace
+scripts/myelin_production_gate.sh --profile core --out target/validation
 ```
 
-Run the comprehensive gate:
-
-```bash
-RUN_TEEWORLDS=0 scripts/myelin_production_gate.sh
-```
-
-The comprehensive path rebuilds the locked CellScript compiler, compiles all four Myelin fixtures, runs all three closed-validator modes, exercises the Session L2 spine, and deploys valid and adversarial DA/settlement transactions to the parent CKB devnet. Set `RUN_CKB_DEVNET=0` only when the parent devnet is outside the chosen validation scope. The external Teeworlds acceptance requires its separate repository and prebuilt replayer.
+Select `--profile ckb` for locked CellScript reproduction plus parent CKB devnet acceptance,
+or choose independent lanes with `--lane`. Each selected lane is required; missing tools
+fail that profile. The default core profile explicitly skips external integrations.
+Reports bind the exact working tree, commands, logs and artifacts. See
+[validation profiles and CI](docs/operations/production-gate.md).
 
 ## Repository guide
 
@@ -321,6 +326,7 @@ The comprehensive path rebuilds the locked CellScript compiler, compiles all fou
 | [`consensus/`](consensus) | inspect closed-validator signatures and finality |
 | [`session/`](session) | inspect canonical session blocks, durable heads, finality verification, and recovery audit |
 | [`session-producer/`](session-producer) | inspect production policies, reservations, batch caps, and the single-writer hand-off |
+| [`session-worker/`](session-worker) | run trusted native executors in terminable, resource-limited processes |
 | [`session-runtime/`](session-runtime) | inspect component wiring, lifecycle supervision, health checks, and the writer gate |
 | [`session-store-rocksdb/`](session-store-rocksdb) | inspect atomic block/checkpoint/head/outbox persistence, WAL, and durable queues |
 | [`session-network/`](session-network) | inspect authenticated module-neutral envelopes and replay/equivocation checks |

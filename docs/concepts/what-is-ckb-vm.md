@@ -133,10 +133,10 @@ be split.
 
 ## VM versions
 
-CKB has introduced several CKB-VM versions over time, each adding
-performance, security fixes, or new RISC-V extensions. The current
-network runs the latest VM version enabled by the active hard fork;
-older versions remain valid for backward compatibility.
+Myelin's CKB-strict verifier selects the VM from the script's hash type:
+`data` selects VM 0, `data1` selects VM 1, and `type`/`data2` select VM 2.
+This is an explicit execution rule for admitted CKB scripts. It does not
+decode or upgrade an older Myelin store, record or snapshot format.
 
 Myelin's `vm_profile` field reports which profile the chunk was
 verified under — for example `ckb-strict-basic` is the conservative

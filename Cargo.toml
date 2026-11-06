@@ -15,7 +15,13 @@ members = [
     "session-escrow",
     "session-network",
     "session-producer",
+    "session-journal",
+    "session-journal/examples/browser",
+    "session-authority",
+    "session-bundle",
     "session-runtime",
+    "session-worker",
+    "session-transfer",
     "session-store-rocksdb",
     "state",
     "wallet-auth",
@@ -42,6 +48,7 @@ include = [
 [workspace.dependencies]
 blake3 = { version = "1.8.2"}
 log = "0.4.20"
+libc = "0.2.189"
 myelin-exec = { version = "0.31.0", path = "exec" }
 myelin-cellscript-adapter = { version = "0.31.0", path = "cellscript-adapter" }
 myelin-ckb-adapter = { version = "0.31.0", path = "ckb-adapter" }
@@ -56,7 +63,12 @@ myelin-session = { version = "0.31.0", path = "session" }
 myelin-session-escrow = { version = "0.31.0", path = "session-escrow" }
 myelin-session-network = { version = "0.31.0", path = "session-network" }
 myelin-session-producer = { version = "0.31.0", path = "session-producer" }
+myelin-session-journal = { version = "0.31.0", path = "session-journal" }
+myelin-session-authority = { version = "0.31.0", path = "session-authority" }
+myelin-session-bundle = { version = "0.31.0", path = "session-bundle" }
 myelin-session-runtime = { version = "0.31.0", path = "session-runtime" }
+myelin-session-worker = { version = "0.31.0", path = "session-worker" }
+myelin-session-transfer = { version = "0.31.0", path = "session-transfer" }
 myelin-session-store-rocksdb = { version = "0.31.0", path = "session-store-rocksdb" }
 myelin-state = { version = "0.31.0", path = "state" }
 myelin-wallet-auth = { version = "0.31.0", path = "wallet-auth" }

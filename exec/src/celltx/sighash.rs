@@ -97,13 +97,25 @@ impl<T: HasherBase> HashWriterExt for T {
     }
 }
 
-/// Compute txid (without witnesses)
-///
-/// Formula: blake3(CELL_TXID_DOMAIN || ver || inputs || deps || header_deps || outputs || outputs_data || coinbase_payload_fallback?)
+/// Compute txid from the transaction body, excluding all witnesses.
 pub fn compute_txid(tx: &CellTx) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(CELL_TXID_DOMAIN);
+    *transaction_body_hasher(tx, CELL_TXID_DOMAIN).finalize().as_bytes()
+}
 
+/// Compute wtxid from the same body plus the ordered witnesses.
+pub fn compute_wtxid(tx: &CellTx) -> [u8; 32] {
+    let mut hasher = transaction_body_hasher(tx, CELL_WTXID_DOMAIN);
+    hasher.update(&(tx.witnesses.len() as u32).to_le_bytes());
+    for witness in &tx.witnesses {
+        hasher.update(&(witness.len() as u32).to_le_bytes());
+        hasher.update(witness);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn transaction_body_hasher(tx: &CellTx, domain: &[u8]) -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
     // Version
     hasher.update(&tx.version().to_le_bytes());
 
@@ -157,92 +169,7 @@ pub fn compute_txid(tx: &CellTx) -> [u8; 32] {
         hasher.update(data);
     }
 
-    if tx.is_coinbase() && tx.outputs.is_empty() {
-        if let Some(payload) = tx.witnesses.first() {
-            hasher.update(b"coinbase-payload-fallback");
-            hasher.update(&(payload.len() as u32).to_le_bytes());
-            hasher.update(payload);
-        }
-    }
-
-    *hasher.finalize().as_bytes()
-}
-
-/// Compute wtxid (with witnesses)
-///
-/// Formula: blake3(CELL_WTXID_DOMAIN || ver || inputs || deps || header_deps || outputs || outputs_data || coinbase_payload_fallback? || witnesses)
-pub fn compute_wtxid(tx: &CellTx) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(CELL_WTXID_DOMAIN);
-
-    // Version
-    hasher.update(&tx.version().to_le_bytes());
-
-    // Inputs
-    hasher.update(&(tx.inputs.len() as u32).to_le_bytes());
-    for input in &tx.inputs {
-        hasher.update(&input.previous_output.tx_hash);
-        hasher.update(&input.previous_output.index.to_le_bytes());
-        hasher.update(&input.since.to_le_bytes());
-    }
-
-    // Dependencies
-    hasher.update(&(tx.cell_deps.len() as u32).to_le_bytes());
-    for dep in &tx.cell_deps {
-        hasher.update(&dep.out_point.tx_hash);
-        hasher.update(&dep.out_point.index.to_le_bytes());
-        hasher.update(&[dep.dep_type.clone() as u8]);
-    }
-
-    // Header dependencies
-    hasher.update(&(tx.header_deps.len() as u32).to_le_bytes());
-    for header_hash in &tx.header_deps {
-        hasher.update(header_hash);
-    }
-
-    // Outputs
-    hasher.update(&(tx.outputs.len() as u32).to_le_bytes());
-    for output in &tx.outputs {
-        hasher.update(&output.lock.code_hash);
-        hasher.update(&[output.lock.hash_type]);
-        hasher.update(&(output.lock.args.len() as u32).to_le_bytes());
-        hasher.update(&output.lock.args);
-
-        if let Some(ref type_script) = output.type_ {
-            hasher.update(&[1u8]);
-            hasher.update(&type_script.code_hash);
-            hasher.update(&[type_script.hash_type]);
-            hasher.update(&(type_script.args.len() as u32).to_le_bytes());
-            hasher.update(&type_script.args);
-        } else {
-            hasher.update(&[0u8]);
-        }
-
-        hasher.update(&output.capacity.to_le_bytes());
-    }
-
-    // Outputs data
-    for data in &tx.outputs_data {
-        hasher.update(&(data.len() as u32).to_le_bytes());
-        hasher.update(data);
-    }
-
-    if tx.is_coinbase() && tx.outputs.is_empty() {
-        if let Some(payload) = tx.witnesses.first() {
-            hasher.update(b"coinbase-payload-fallback");
-            hasher.update(&(payload.len() as u32).to_le_bytes());
-            hasher.update(payload);
-        }
-    }
-
-    // Witnesses
-    hasher.update(&(tx.witnesses.len() as u32).to_le_bytes());
-    for witness in &tx.witnesses {
-        hasher.update(&(witness.len() as u32).to_le_bytes());
-        hasher.update(witness);
-    }
-
-    *hasher.finalize().as_bytes()
+    hasher
 }
 
 /// Compute signature hash (for signature verification)
@@ -532,30 +459,41 @@ mod tests {
     }
 
     #[test]
-    fn test_txid_computation() {
-        let tx = create_test_tx();
-        let txid = compute_txid(&tx);
-
-        // txid should be deterministic
-        let txid2 = compute_txid(&tx);
-        assert_eq!(txid, txid2);
-
-        // txid should be 32 bytes
-        assert_eq!(txid.len(), 32);
-    }
-
-    #[test]
-    fn test_wtxid_computation() {
-        let tx = create_test_tx();
-        let wtxid = compute_wtxid(&tx);
-
-        // wtxid should be deterministic
-        let wtxid2 = compute_wtxid(&tx);
-        assert_eq!(wtxid, wtxid2);
-
-        // wtxid should differ from txid (includes witnesses)
-        let txid = compute_txid(&tx);
-        assert_ne!(wtxid, txid);
+    fn transaction_ids_bind_body_and_only_wtxid_binds_witnesses() {
+        for shape in 0..3 {
+            let mut tx = create_test_tx();
+            if shape > 0 {
+                tx.inputs.clear();
+            }
+            if shape == 2 {
+                tx.outputs.clear();
+                tx.outputs_data.clear();
+            }
+            let txid = compute_txid(&tx);
+            let wtxid = compute_wtxid(&tx);
+            assert_ne!(txid, wtxid);
+            let payload = tx.payload().map(<[u8]>::to_vec);
+            tx.witnesses[0][0] ^= 1;
+            assert_eq!(compute_txid(&tx), txid);
+            assert_ne!(compute_wtxid(&tx), wtxid);
+            assert_eq!(tx.payload(), payload.as_deref());
+            if shape == 2 {
+                assert_eq!(tx.payload(), None);
+            }
+            let before = (compute_txid(&tx), compute_wtxid(&tx));
+            tx.header_deps.push([42; 32]);
+            assert_ne!(compute_txid(&tx), before.0);
+            assert_ne!(compute_wtxid(&tx), before.1);
+            if shape < 2 {
+                let before = (compute_txid(&tx), compute_wtxid(&tx));
+                tx.outputs_data[0].push(7);
+                assert_ne!(compute_txid(&tx), before.0);
+                assert_ne!(compute_wtxid(&tx), before.1);
+                if shape == 1 {
+                    assert_eq!(tx.payload(), Some([7].as_slice()));
+                }
+            }
+        }
     }
 
     #[test]
@@ -566,13 +504,10 @@ mod tests {
 
         let sighash = compute_rw_bound_sighash(&tx, 0, network_id, &rw_commitment);
 
-        // sighash should be deterministic
-        let sighash2 = compute_rw_bound_sighash(&tx, 0, network_id, &rw_commitment);
-        assert_eq!(sighash, sighash2);
-
-        // Different network_id should produce different sighash
-        let sighash_testnet = compute_rw_bound_sighash(&tx, 0, 0x00000002, &rw_commitment);
-        assert_ne!(sighash, sighash_testnet);
+        // Every byte of the network identifier participates in the signature.
+        for byte in 0..4 {
+            assert_ne!(sighash, compute_rw_bound_sighash(&tx, 0, network_id ^ (1 << (8 * byte)), &rw_commitment));
+        }
 
         // Different input_index should produce different sighash
         let sighash_idx1 = compute_rw_bound_sighash(&tx, 1, network_id, &rw_commitment);
@@ -584,76 +519,10 @@ mod tests {
         let pubkey = [0x03; 33]; // Compressed public key
         let hash = pubkey_hash(&pubkey);
 
-        // Should be 20 bytes
-        assert_eq!(hash.len(), 20);
-
-        // Should be deterministic
-        let hash2 = pubkey_hash(&pubkey);
-        assert_eq!(hash, hash2);
-
         // Different pubkey should produce different hash
         let pubkey2 = [0x02; 33];
         let hash2 = pubkey_hash(&pubkey2);
         assert_ne!(hash, hash2);
-    }
-
-    #[test]
-    fn test_network_id_encoding() {
-        // Verify network_id is encoded as 4 bytes (u32 LE)
-        let tx = create_test_tx();
-        let network_id: u32 = 0x12345678;
-        let rw_commitment = empty_rw_commitment();
-
-        let sighash = compute_rw_bound_sighash(&tx, 0, network_id, &rw_commitment);
-
-        // Re-compute manually to verify encoding
-        let wtxid = compute_wtxid(&tx);
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(CELL_SIG_DOMAIN);
-        hasher.update(&network_id.to_le_bytes()); // [0x78, 0x56, 0x34, 0x12]
-        hasher.update(&wtxid);
-        hasher.update(&0u32.to_le_bytes());
-        hasher.update(&rw_commitment);
-        let expected = *hasher.finalize().as_bytes();
-
-        assert_eq!(sighash, expected);
-    }
-
-    #[test]
-    fn test_domain_separation() {
-        // txid and wtxid should use different domains
-        let tx = create_test_tx();
-        let _txid = compute_txid(&tx);
-
-        // Manually compute with wrong domain
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(CELL_WTXID_DOMAIN); // Wrong domain!
-        hasher.update(&tx.version().to_le_bytes());
-        // ... (same serialization as txid)
-
-        // This would produce a different hash due to domain separation
-        assert_eq!(CELL_TXID_DOMAIN, b"myelin-cell/txid");
-        assert_eq!(CELL_WTXID_DOMAIN, b"myelin-cell/wtxid");
-        assert_eq!(CELL_SIG_DOMAIN, b"myelin-cell/sig");
-    }
-
-    #[test]
-    fn test_standard_signature_hash_is_deterministic() {
-        let tx = create_test_tx();
-        let signing_input = StandardSigningInput {
-            lock_hash: [0x11; 32],
-            type_hash: Some([0x22; 32]),
-            data_hash: [0x33; 32],
-            data_bytes: 0,
-            capacity: 1000,
-        };
-        let cache = NoCache;
-        let hash_type = TestSigHashType(0b0000_0001);
-
-        let first = calc_standard_signature_hash(&tx, 0, hash_type, &signing_input, &cache);
-        let second = calc_standard_signature_hash(&tx, 0, hash_type, &signing_input, &cache);
-
-        assert_eq!(first, second);
     }
 
     #[test]

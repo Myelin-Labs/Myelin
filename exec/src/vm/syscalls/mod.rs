@@ -126,43 +126,23 @@ pub enum Source {
     /// Load from header dependencies
     HeaderDep = 0x04,
     /// Load from current script group
-    GroupInput = 0x0100,
+    GroupInput = SOURCE_GROUP_FLAG | 0x01,
     /// Load from current script group outputs
-    GroupOutput = 0x0200,
+    GroupOutput = SOURCE_GROUP_FLAG | 0x02,
     /// Load from current script group's cell deps
-    GroupCellDep = 0x0300,
+    GroupCellDep = SOURCE_GROUP_FLAG | 0x03,
     /// Load from current script group's header deps
-    GroupHeaderDep = 0x0400,
+    GroupHeaderDep = SOURCE_GROUP_FLAG | 0x04,
 }
 
 impl Source {
     /// Parse source from u64
     pub fn parse(source: u64) -> Option<Self> {
-        if let Some(legacy) = Self::parse_legacy(source) {
-            return Some(legacy);
-        }
-
         Self::parse_canonical(source)
     }
 
     pub fn parse_from_u64(source: u64) -> Result<Self, ckb_vm::Error> {
         if let Some(parsed) = Self::parse(source) {
-            return Ok(parsed);
-        }
-
-        Err(ckb_vm::Error::External(format!("SourceEntry parse_from_u64 {}", source & SOURCE_ENTRY_MASK)))
-    }
-
-    pub fn parse_for_semantics(source: u64, semantics: crate::vm::VmSemantics) -> Option<Self> {
-        if semantics.allow_legacy_group_source_encoding() {
-            Self::parse(source)
-        } else {
-            Self::parse_canonical(source)
-        }
-    }
-
-    pub fn parse_from_u64_for_semantics(source: u64, semantics: crate::vm::VmSemantics) -> Result<Self, ckb_vm::Error> {
-        if let Some(parsed) = Self::parse_for_semantics(source, semantics) {
             return Ok(parsed);
         }
 
@@ -186,20 +166,6 @@ impl Source {
                 0x04 => Some(Self::GroupHeaderDep),
                 _ => None,
             },
-            _ => None,
-        }
-    }
-
-    fn parse_legacy(source: u64) -> Option<Self> {
-        match source {
-            0x01 => Some(Self::Input),
-            0x02 => Some(Self::Output),
-            0x03 => Some(Self::CellDep),
-            0x04 => Some(Self::HeaderDep),
-            0x0100 => Some(Self::GroupInput),
-            0x0200 => Some(Self::GroupOutput),
-            0x0300 => Some(Self::GroupCellDep),
-            0x0400 => Some(Self::GroupHeaderDep),
             _ => None,
         }
     }
@@ -340,21 +306,13 @@ mod tests {
         assert_eq!(Source::parse(0x01), Some(Source::Input));
         assert_eq!(Source::parse(0x02), Some(Source::Output));
         assert_eq!(Source::parse(0x03), Some(Source::CellDep));
-        assert_eq!(Source::parse(0x0100), Some(Source::GroupInput));
-        assert_eq!(Source::parse(0x0200), Some(Source::GroupOutput));
+        assert_eq!(Source::parse(0x0100), None);
+        assert_eq!(Source::parse(0x0200), None);
         assert_eq!(Source::parse(0x0100_0000_0000_0001), Some(Source::GroupInput));
         assert_eq!(Source::parse(0x0100_0000_0000_0002), Some(Source::GroupOutput));
         assert_eq!(Source::parse(0x0100_0000_0000_0003), Some(Source::GroupCellDep));
         assert_eq!(Source::parse(0x0100_0000_0000_0004), Some(Source::GroupHeaderDep));
         assert_eq!(Source::parse(0x99), None);
-    }
-
-    #[test]
-    fn test_source_parse_for_semantics_rejects_legacy_group_values_under_ckb_strict() {
-        assert_eq!(Source::parse_for_semantics(0x0100, crate::vm::VmSemantics::MyelinExtended), Some(Source::GroupInput));
-        assert_eq!(Source::parse_for_semantics(0x0100, crate::vm::VmSemantics::CkbStrict), None);
-        assert_eq!(Source::parse_for_semantics(0x0100_0000_0000_0001, crate::vm::VmSemantics::CkbStrict), Some(Source::GroupInput));
-        assert_eq!(Source::parse_for_semantics(0x0200_0000_0000_0001, crate::vm::VmSemantics::CkbStrict), None);
     }
 
     #[test]

@@ -238,7 +238,7 @@ public-chain locator.
 
 ```bash
 # Normally run through the production gate, which reproduces CellScript first.
-RUN_TEEWORLDS=0 scripts/myelin_production_gate.sh
+scripts/myelin_production_gate.sh --profile ckb --out target/ckb-validation
 ```
 
 The script exits non-zero on any failure. The output report is

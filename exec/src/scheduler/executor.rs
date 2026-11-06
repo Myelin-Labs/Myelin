@@ -166,19 +166,13 @@ impl ExecutionResult {
 
 /// Execution receipt for a verified Cell transaction.
 ///
-/// Carries the real CKB-VM outcome: consumed cycles and the script exit
-/// code. `gas_used` and `logs` are retained for forward compatibility but
-/// are zero/empty until a richer VM receipt is wired.
+/// Carries consumed cycles and the script exit code from CKB-VM.
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionReceipt {
     /// Cycles consumed by the CKB-VM run.
     pub cycles: u64,
     /// Script exit code (0 = success). Mirrors CKB-VM's exit code convention.
     pub exit_code: i8,
-    /// Gas used (for future compatibility; currently 0).
-    pub gas_used: u64,
-    /// Output logs (for debugging; currently empty).
-    pub logs: Vec<String>,
 }
 
 /// Execution statistics
@@ -232,28 +226,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parallel_execution() {
-        let executor = ParallelExecutor::default();
-
-        // Create independent transactions (no dependencies)
-        let tx0 = create_test_tx(vec![]);
-        let tx1 = create_test_tx(vec![]);
-        let tx2 = create_test_tx(vec![]);
-
-        let txs = vec![tx0, tx1, tx2];
-
-        // Use sequential execution for simplicity
-        let results = executor
-            .execute_sequential(&txs, |_tx, node_id| {
-                Ok(ExecutionReceipt { cycles: 1000, exit_code: 0, gas_used: 100, logs: vec![format!("Executed tx {}", node_id)] })
-            })
-            .unwrap();
-
-        assert_eq!(results.len(), 3);
-        assert!(results.iter().all(|r| r.is_success()));
-    }
-
-    #[test]
     fn test_execution_stats() {
         let results = vec![
             ExecutionResult::Success { node_id: 0, layer: 0, receipt: ExecutionReceipt::default() },
@@ -277,9 +249,7 @@ mod tests {
         let txs = vec![create_test_tx(vec![]), create_test_tx(vec![])];
 
         let results = executor
-            .execute_sequential(&txs, |_tx, node_id| {
-                Ok(ExecutionReceipt { cycles: node_id as u64 * 100, exit_code: 0, gas_used: 0, logs: vec![] })
-            })
+            .execute_sequential(&txs, |_tx, node_id| Ok(ExecutionReceipt { cycles: node_id as u64 * 100, exit_code: 0 }))
             .unwrap();
 
         assert_eq!(results.len(), 2);
@@ -312,9 +282,7 @@ mod tests {
         let dag = CellDAG::build(&txs).expect("DAG builds over the 3-tx chain");
 
         let results = executor
-            .execute(&dag, &txs, |_tx, node_id| {
-                Ok(ExecutionReceipt { cycles: 1000 + node_id as u64, exit_code: 0, gas_used: 0, logs: vec![] })
-            })
+            .execute(&dag, &txs, |_tx, node_id| Ok(ExecutionReceipt { cycles: 1000 + node_id as u64, exit_code: 0 }))
             .expect("parallel execute succeeds");
 
         assert_eq!(results.len(), 3, "one result per input tx");

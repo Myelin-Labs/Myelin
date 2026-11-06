@@ -59,16 +59,6 @@ require_file() {
   fi
 }
 
-env_or() {
-  local primary="$1"
-  local fallback="$2"
-  local value="${!primary:-}"
-  if [[ -z "$value" ]]; then
-    value="${!fallback:-}"
-  fi
-  printf '%s' "$value"
-}
-
 require_value() {
   local label="$1"
   local value="$2"
@@ -106,11 +96,11 @@ role_config() {
       verifier_dep_tx_hash="${CKB_TESTNET_DA_VERIFIER_DEP_TX_HASH:-}"
       verifier_dep_index="${CKB_TESTNET_DA_VERIFIER_DEP_INDEX:-}"
       witness="${CKB_TESTNET_DA_WITNESS:-}"
-      input_tx_hash="$(env_or CKB_TESTNET_DA_INPUT_TX_HASH CKB_TESTNET_FUNDING_TX_HASH)"
-      input_index="$(env_or CKB_TESTNET_DA_INPUT_INDEX CKB_TESTNET_FUNDING_INDEX)"
-      input_capacity="$(env_or CKB_TESTNET_DA_INPUT_CAPACITY_SHANNONS CKB_TESTNET_FUNDING_CAPACITY_SHANNONS)"
-      carrier_capacity="$(env_or CKB_TESTNET_DA_CARRIER_CAPACITY_SHANNONS CKB_TESTNET_CARRIER_CAPACITY_SHANNONS)"
-      fee_shannons="$(env_or CKB_TESTNET_DA_FEE_SHANNONS CKB_TESTNET_FEE_SHANNONS)"
+      input_tx_hash="${CKB_TESTNET_DA_INPUT_TX_HASH:-}"
+      input_index="${CKB_TESTNET_DA_INPUT_INDEX:-}"
+      input_capacity="${CKB_TESTNET_DA_INPUT_CAPACITY_SHANNONS:-}"
+      carrier_capacity="${CKB_TESTNET_DA_CARRIER_CAPACITY_SHANNONS:-}"
+      fee_shannons="${CKB_TESTNET_DA_FEE_SHANNONS:-}"
       ;;
     settlement)
       role_slug="settlement"
@@ -124,8 +114,8 @@ role_config() {
       input_tx_hash="${CKB_TESTNET_SETTLEMENT_INPUT_TX_HASH:-}"
       input_index="${CKB_TESTNET_SETTLEMENT_INPUT_INDEX:-}"
       input_capacity="${CKB_TESTNET_SETTLEMENT_INPUT_CAPACITY_SHANNONS:-}"
-      carrier_capacity="${CKB_TESTNET_SETTLEMENT_CARRIER_CAPACITY_SHANNONS:-${CKB_TESTNET_CARRIER_CAPACITY_SHANNONS:-}}"
-      fee_shannons="${CKB_TESTNET_SETTLEMENT_FEE_SHANNONS:-${CKB_TESTNET_FEE_SHANNONS:-}}"
+      carrier_capacity="${CKB_TESTNET_SETTLEMENT_CARRIER_CAPACITY_SHANNONS:-}"
+      fee_shannons="${CKB_TESTNET_SETTLEMENT_FEE_SHANNONS:-}"
       ;;
     settlement-final)
       role_slug="settlement-final"
@@ -139,8 +129,8 @@ role_config() {
       input_tx_hash="${CKB_TESTNET_SETTLEMENT_FINAL_INPUT_TX_HASH:-}"
       input_index="${CKB_TESTNET_SETTLEMENT_FINAL_INPUT_INDEX:-}"
       input_capacity="${CKB_TESTNET_SETTLEMENT_FINAL_INPUT_CAPACITY_SHANNONS:-}"
-      carrier_capacity="${CKB_TESTNET_SETTLEMENT_FINAL_CARRIER_CAPACITY_SHANNONS:-${CKB_TESTNET_CARRIER_CAPACITY_SHANNONS:-}}"
-      fee_shannons="${CKB_TESTNET_SETTLEMENT_FINAL_FEE_SHANNONS:-${CKB_TESTNET_FEE_SHANNONS:-}}"
+      carrier_capacity="${CKB_TESTNET_SETTLEMENT_FINAL_CARRIER_CAPACITY_SHANNONS:-}"
+      fee_shannons="${CKB_TESTNET_SETTLEMENT_FINAL_FEE_SHANNONS:-}"
       evidence_tx_hash="${CKB_TESTNET_SETTLEMENT_FINAL_EVIDENCE_TX_HASH:-}"
       evidence_index="${CKB_TESTNET_SETTLEMENT_FINAL_EVIDENCE_INDEX:-}"
       evidence_capacity="${CKB_TESTNET_SETTLEMENT_FINAL_EVIDENCE_CAPACITY_SHANNONS:-}"

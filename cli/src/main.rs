@@ -8,9 +8,9 @@
 use clap::{Args, Parser, Subcommand};
 use myelin_ckb_adapter::{parse_ckb_json_transaction, verify_projection, CkbEvidenceEngine, CkbEvidenceProjection, HttpCkbRpc};
 use myelin_consensus::{
-    Authority, CommitteeCertificate, CommitteeSignature, CommitteeSigner, ConsensusConfig, ConsensusEngine, ConsensusKind,
-    FinalityProof, MyelinBlock, ProofOfAuthority, ProofOfAuthorityConfig, ProofOfAuthoritySeal, SelectedConsensus,
-    StaticClosedCommittee, StaticCommitteeConfig, TendermintDecision, TendermintStep, WeightedPrecommit, WeightedPrecommitConfig,
+    Authority, CommitteeCertificate, CommitteeSignature, CommitteeSigner, ConsensusConfig, ConsensusKind, FinalityProof, MyelinBlock,
+    ProofOfAuthority, ProofOfAuthorityConfig, ProofOfAuthoritySeal, SelectedConsensus, StaticClosedCommittee, StaticCommitteeConfig,
+    Tendermint, TendermintConfig, TendermintDecision, TendermintStep,
 };
 use myelin_exec::{
     build_cell_tx_execution_report, celltx::compute_wtxid, ckb_assemble_secp256k1_blake160_multisig_all_witness_molecule,
@@ -31,8 +31,8 @@ use myelin_session::{
 };
 use myelin_session_store_rocksdb::RocksSessionStore;
 use myelin_state::{
-    CellEntry, CellStateTree, DaCertificate, DaCertificateVerification, MerkleTreeBuilder, SegmentProof, SegmentReader, SegmentWriter,
-    StateTransitionContext, StateTransitionEngine,
+    CellEntry, CellStateTree, DaCertificate, MerkleTreeBuilder, SegmentProof, SegmentReader, SegmentWriter, StateTransitionContext,
+    StateTransitionEngine,
 };
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -559,8 +559,6 @@ enum SessionCommand {
     SubmitSettlementPackage(SessionSubmitSettlementPackageArgs),
     /// Build a compact CKB carrier transaction submission for a DA or settlement package.
     CarrierSubmission(Box<SessionCarrierSubmissionArgs>),
-    /// Emit a signed external DA receipt document for a DA manifest rehearsal.
-    ExternalDaReceipt(SessionExternalDaReceiptArgs),
     /// Emit participant authority signature evidence from a settlement package.
     AuthoritySignatureEvidence(SessionAuthoritySignatureEvidenceArgs),
     /// Emit threshold-lock deployment evidence from a settlement package.
@@ -758,9 +756,6 @@ struct SessionDaManifestArgs {
     /// SegmentReader.
     #[arg(long)]
     storage_dir: Option<PathBuf>,
-    /// Optional JSON receipt from an external DA provider.
-    #[arg(long)]
-    external_da_receipt: Option<PathBuf>,
     /// Provider-neutral DA certificate containing a provider/fault-domain
     /// quorum and signed retrieval probes.
     #[arg(long)]
@@ -968,13 +963,13 @@ struct SessionCarrierSubmissionArgs {
     #[arg(long)]
     input_capacity_shannons: u64,
     /// Optional read-only evidence CellDep transaction hash. When supplied, index and capacity must also be supplied.
-    #[arg(long, alias = "evidence-input-tx-hash")]
+    #[arg(long)]
     evidence_cell_dep_tx_hash: Option<String>,
     /// Optional read-only evidence CellDep output index as a CKB hex quantity.
-    #[arg(long, alias = "evidence-input-index")]
+    #[arg(long)]
     evidence_cell_dep_index: Option<String>,
     /// Optional read-only evidence CellDep capacity in shannons.
-    #[arg(long, alias = "evidence-input-capacity-shannons")]
+    #[arg(long)]
     evidence_cell_dep_capacity_shannons: Option<u64>,
     /// Optional consumed settlement authority input transaction hash. Used by final L1 settlement submissions.
     #[arg(long)]
@@ -1057,55 +1052,6 @@ struct SessionCarrierSubmissionArgs {
     /// Externally recorded CKB tx hash returned by send_transaction. This is not live RPC acceptance.
     #[arg(long)]
     accepted_tx_hash: Option<String>,
-    /// Optional output JSON path.
-    #[arg(long)]
-    out: Option<PathBuf>,
-}
-
-#[derive(Debug, Args)]
-struct SessionExternalDaReceiptArgs {
-    /// Court replay payload hash from the in-memory DA manifest.
-    #[arg(long)]
-    payload_hash: String,
-    /// DA segment root from the in-memory DA manifest.
-    #[arg(long)]
-    segment_root: String,
-    /// DA provider identifier.
-    #[arg(long, default_value = "public-testnet-rehearsal-da-provider")]
-    provider: String,
-    /// Provider namespace for the stored court payload.
-    #[arg(long, default_value = "session-court-payloads")]
-    namespace: String,
-    /// Provider receipt id.
-    #[arg(long)]
-    receipt_id: String,
-    /// Human-readable availability window.
-    #[arg(long, default_value = "testnet-rehearsal-retention-window")]
-    availability_window: String,
-    /// Optional service level. Use "production" only when the provider signs production SLA fields.
-    #[arg(long)]
-    service_level: Option<String>,
-    /// Optional retention window in seconds.
-    #[arg(long)]
-    retention_seconds: Option<u64>,
-    /// Optional HTTPS retrieval endpoint.
-    #[arg(long)]
-    retrieval_endpoint: Option<String>,
-    /// Optional 32-byte audit log commitment.
-    #[arg(long)]
-    audit_log_commitment: Option<String>,
-    /// Provider secp256k1 secret key. Rehearsal helper only; prefer external signing for real providers.
-    #[arg(long)]
-    provider_secret_key: Option<String>,
-    /// Provider 20-byte pubkey hash when using an externally created signature.
-    #[arg(long)]
-    provider_pubkey_hash: Option<String>,
-    /// Provider recoverable secp256k1 signature when using external signing.
-    #[arg(long)]
-    provider_signature: Option<String>,
-    /// Emit the provider signing request instead of a signed receipt.
-    #[arg(long)]
-    signing_request: bool,
     /// Optional output JSON path.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -1484,7 +1430,6 @@ fn run() -> Result<()> {
                 let report = session_da_manifest_with_certificate(
                     args.bundle,
                     args.storage_dir,
-                    args.external_da_receipt,
                     args.da_certificate,
                     args.da_evaluation_epoch,
                 )?;
@@ -1554,11 +1499,6 @@ fn run() -> Result<()> {
             SessionCommand::CarrierSubmission(args) => {
                 let out = args.out.clone();
                 let report = session_carrier_submission(*args)?;
-                write_json(out, &report)
-            }
-            SessionCommand::ExternalDaReceipt(args) => {
-                let out = args.out.clone();
-                let report = session_external_da_receipt(args)?;
                 write_json(out, &report)
             }
             SessionCommand::AuthoritySignatureEvidence(args) => {
@@ -2304,8 +2244,8 @@ fn finalise_proof_of_authority_demo(config: ConsensusConfig, selected: SelectedC
 fn finalise_weighted_precommit_demo(config: ConsensusConfig, selected: SelectedConsensus) -> Result<CommitteeDemoReport> {
     let weighted_precommit_config =
         config.tendermint.ok_or_else(|| CliError::InvalidFixture("demo finality requires a tendermint config".to_owned()))?;
-    let weighted_precommit = WeightedPrecommit::new(weighted_precommit_config.clone())?;
-    let block = demo_block(vec![[0xB1; 32]], ConsensusKind::WeightedPrecommit);
+    let weighted_precommit = Tendermint::new(weighted_precommit_config.clone())?;
+    let block = demo_block(vec![[0xB1; 32]], ConsensusKind::Tendermint);
     let block_hash = block.hash();
     let height = block.number;
     let signer_ids = weighted_precommit_quorum_signers(&weighted_precommit_config)?;
@@ -2316,7 +2256,7 @@ fn finalise_weighted_precommit_demo(config: ConsensusConfig, selected: SelectedC
     let round = decision.round;
     selected.finalise_with_proof(block, FinalityProof::Tendermint(decision))?;
     Ok(CommitteeDemoReport {
-        consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
+        consensus_kind: ConsensusKind::Tendermint.as_str(),
         block_hash: hex::encode(block_hash),
         quorum_weight: weighted_precommit_config.quorum_power,
         signer_ids,
@@ -2341,7 +2281,7 @@ fn quorum_signers(config: &StaticCommitteeConfig) -> Result<Vec<String>> {
     Err(CliError::InvalidFixture("static committee config cannot satisfy quorum".to_owned()))
 }
 
-fn weighted_precommit_quorum_signers(config: &WeightedPrecommitConfig) -> Result<Vec<String>> {
+fn weighted_precommit_quorum_signers(config: &TendermintConfig) -> Result<Vec<String>> {
     let mut signers = Vec::new();
     let mut power = 0u64;
     for validator in &config.validators {
@@ -2355,7 +2295,7 @@ fn weighted_precommit_quorum_signers(config: &WeightedPrecommitConfig) -> Result
 }
 
 fn tendermint_decision_from_signers(
-    engine: &WeightedPrecommit,
+    engine: &Tendermint,
     block: &MyelinBlock,
     voting_signers: &[CommitteeSigner],
     all_signers: &[CommitteeSigner],
@@ -2499,8 +2439,8 @@ impl TeeworldsBundleBlock {
         };
         let consensus_kind = match self.consensus_kind.as_str() {
             "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
-            "proof-of-authority" | "poa" => ConsensusKind::ProofOfAuthority,
-            "tendermint" | "weighted-precommit" => ConsensusKind::Tendermint,
+            "proof-of-authority" => ConsensusKind::ProofOfAuthority,
+            "tendermint" => ConsensusKind::Tendermint,
             other => return Err(format!("unknown consensus_kind in bundle block: {other}")),
         };
         let ordered_cell_tx_commitments = self
@@ -2546,7 +2486,7 @@ struct TeeworldsCourtBundleReport {
     scheduler_report_hash: String,
     /// Canonical MyelinBlock whose data fields match the bundle's runtime
     /// evidence. The block's `block_hash()` MUST equal the hash that the
-    /// static-closed-committee certificate or WeightedPrecommit precommit
+    /// static-closed-committee certificate or Tendermint precommit
     /// certificate is bound to. This is the data-binding guarantee the
     /// verifier relies on.
     block: TeeworldsBundleBlock,
@@ -2557,13 +2497,13 @@ struct TeeworldsCourtBundleReport {
     vm_profile: &'static str,
     ckb_spawn_ipc_required: bool,
     ckb_projection: TeeworldsChunkProjectionReport,
-    /// Selectable finality evidence: static closed committee OR WeightedPrecommit
+    /// Selectable finality evidence: static closed committee OR Tendermint
     /// weighted precommit certificate. The same `signatures` field carries
     /// both modes; the `consensus_kind` field disambiguates.
     static_committee_evidence: StaticCommitteeEvidenceReport,
     /// PoA seal evidence; present only for proof-of-authority bundles.
     proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceReport>,
-    /// WeightedPrecommit-only fields: precommit round, certificate step, height.
+    /// Tendermint-only fields: precommit round, certificate step, height.
     /// `None` for static-closed-committee bundles.
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceReport>,
     court_verifiable: bool,
@@ -2609,8 +2549,8 @@ struct TeeworldsCourtBundleInput {
     static_committee_evidence: StaticCommitteeEvidenceInput,
     /// Optional scheduled-authority seal evidence.
     proof_of_authority_evidence: Option<ProofOfAuthorityEvidenceInput>,
-    /// Optional WeightedPrecommit precommit evidence. When present, the challenge
-    /// payload hash binds to the WeightedPrecommit block hash and the static
+    /// Optional Tendermint precommit evidence. When present, the challenge
+    /// payload hash binds to the Tendermint block hash and the static
     /// committee evidence block hash is reported for completeness only.
     weighted_precommit_evidence: Option<WeightedPrecommitEvidenceInput>,
     court_verifiable: bool,
@@ -2784,8 +2724,8 @@ fn inspect_teeworlds_mock_tx(path: PathBuf, chunk_bytes: usize, consensus: &str)
 fn parse_teeworlds_consensus(consensus: &str) -> Result<ConsensusKind> {
     match consensus {
         "static-closed-committee" => Ok(ConsensusKind::StaticClosedCommittee),
-        "proof-of-authority" | "poa" => Ok(ConsensusKind::ProofOfAuthority),
-        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::Tendermint),
+        "proof-of-authority" => Ok(ConsensusKind::ProofOfAuthority),
+        "tendermint" => Ok(ConsensusKind::Tendermint),
         other => Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     }
 }
@@ -2984,8 +2924,8 @@ fn teeworlds_court_bundle(
     }
     let consensus_kind = match consensus {
         "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
-        "proof-of-authority" | "poa" => ConsensusKind::ProofOfAuthority,
-        "tendermint" | "weighted-precommit" => ConsensusKind::Tendermint,
+        "proof-of-authority" => ConsensusKind::ProofOfAuthority,
+        "tendermint" => ConsensusKind::Tendermint,
         other => return Err(CliError::InvalidFixture(format!("unknown consensus engine for court-bundle: {other}"))),
     };
 
@@ -3119,10 +3059,10 @@ fn teeworlds_court_bundle(
             )
         }
         ConsensusKind::Tendermint => {
-            // Build a WeightedPrecommit precommit cert over the same canonical
+            // Build a Tendermint precommit cert over the same canonical
             // block. The cert's `block_hash` and `height` MUST equal
             // `canonical_block_hash` and `canonical_block.number`. The
-            // WeightedPrecommit signature domain is independent of the static
+            // Tendermint signature domain is independent of the static
             // committee's, so the two paths are not interchangeable.
             let weighted_precommit_engine = weighted_precommit_fixture_engine();
             let height = canonical_block.number;
@@ -3146,7 +3086,7 @@ fn teeworlds_court_bundle(
                 })
                 .collect::<Vec<_>>();
             let weighted_precommit_evidence = WeightedPrecommitEvidenceReport {
-                consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
+                consensus_kind: ConsensusKind::Tendermint.as_str(),
                 block_hash: hex::encode(canonical_block_hash),
                 quorum_power: 3,
                 height,
@@ -3158,7 +3098,7 @@ fn teeworlds_court_bundle(
             };
             // Static evidence is still emitted so the bundle surface stays
             // uniform, but it is informational only — the active finality
-            // path is the WeightedPrecommit precommit.
+            // path is the Tendermint precommit.
             let committee_config = static_fixture_committee_config();
             let quorum_weight = committee_config.quorum_weight;
             let static_evidence = StaticCommitteeEvidenceReport {
@@ -3169,8 +3109,7 @@ fn teeworlds_court_bundle(
                 signatures: vec![],
                 finalised: false,
             };
-            let mut notes =
-                vec!["This bundle carries WeightedPrecommit precommit evidence over the canonical MyelinBlock.".to_owned()];
+            let mut notes = vec!["This bundle carries Tendermint precommit evidence over the canonical MyelinBlock.".to_owned()];
             notes.push("The static-closed-committee evidence slot is informational; the challenge-payload-hash binds to the canonical block hash.".to_owned());
             (static_evidence, None, Some(weighted_precommit_evidence), notes)
         }
@@ -3399,7 +3338,7 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
         "bundle.block.data_commitments[0] == bundle.chunk_commitment",
     );
     // The active block hash is the reconstructed hash. The supplied
-    // static-committee / WeightedPrecommit `block_hash` fields must equal it.
+    // static-committee / Tendermint `block_hash` fields must equal it.
     let active_block_hash = reconstructed_block_hash;
     let proof_shape_ok = match reconstructed_block.consensus_kind {
         ConsensusKind::StaticClosedCommittee => {
@@ -3573,7 +3512,7 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
             certificate_ok,
             Some(format!("quorum power {} height {} round {}", 3, tm.height, tm.round)),
             Some(format!("quorum power {}, finalised {}", tm.quorum_power, tm.finalised)),
-            "WeightedPrecommit precommit certificate verifies against the phase-one fixture engine",
+            "Tendermint precommit certificate verifies against the phase-one fixture engine",
         );
         push_check(
             &mut checks,
@@ -3581,7 +3520,7 @@ fn verify_teeworlds_court_bundle(path: PathBuf) -> Result<TeeworldsCourtBundleVe
             tm.quorum_power == 3,
             Some("3".to_owned()),
             Some(tm.quorum_power.to_string()),
-            "bundle WeightedPrecommit quorum power matches the phase-one fixture engine",
+            "bundle Tendermint quorum power matches the phase-one fixture engine",
         );
     } else {
         // Static-closed-committee certificate verification
@@ -3812,7 +3751,7 @@ fn finalise_teeworlds_fixture_block(chunks: &[TeeworldsChunkReport], consensus_k
                 parent_hash: [0; 32],
                 number: 1,
                 timestamp_ms: 0,
-                consensus_kind: ConsensusKind::WeightedPrecommit,
+                consensus_kind: ConsensusKind::Tendermint,
                 application_profile_commitment: [10; 32],
                 execution_frame_commitment: [11; 32],
                 state_root_before: [0; 32],
@@ -3835,7 +3774,7 @@ fn finalise_teeworlds_fixture_block(chunks: &[TeeworldsChunkReport], consensus_k
                 .finalise_block_with_decision(weighted_precommit_block, decision)
                 .expect("Tendermint fixture finality");
             CommitteeDemoReport {
-                consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
+                consensus_kind: ConsensusKind::Tendermint.as_str(),
                 block_hash: hex::encode(block_hash),
                 quorum_weight: 3,
                 signer_ids,
@@ -3855,8 +3794,8 @@ fn static_fixture_committee_config() -> StaticCommitteeConfig {
     }
 }
 
-fn weighted_precommit_fixture_config() -> WeightedPrecommitConfig {
-    WeightedPrecommitConfig {
+fn weighted_precommit_fixture_config() -> TendermintConfig {
+    TendermintConfig {
         quorum_power: 3,
         validators: fixture_signers(&["validator-0", "validator-1", "validator-2", "validator-3"])
             .iter()
@@ -3904,8 +3843,8 @@ fn fixture_signers_for_ids(ids: &[String]) -> Result<Vec<CommitteeSigner>> {
         .collect()
 }
 
-fn weighted_precommit_fixture_engine() -> WeightedPrecommit {
-    WeightedPrecommit::new(weighted_precommit_fixture_config()).expect("weighted_precommit fixture engine")
+fn weighted_precommit_fixture_engine() -> Tendermint {
+    Tendermint::new(weighted_precommit_fixture_config()).expect("weighted_precommit fixture engine")
 }
 
 fn static_committee_evidence_for_commitments(data_commitments: Vec<[u8; 32]>) -> StaticCommitteeEvidenceReport {
@@ -4101,380 +4040,6 @@ fn carrier_payload_data_hash_hex(payload_hex: &str) -> Result<String> {
         return Err(CliError::InvalidFixture(format!("carrier payload must be 160 bytes, got {} bytes", payload.len())));
     }
     Ok(format!("0x{}", hex::encode(ckb_cell_data_hash(&payload))))
-}
-
-fn external_da_receipt_evidence(
-    receipt_path: Option<PathBuf>,
-    payload_hash: &str,
-    segment_root: &str,
-) -> Result<Option<SessionExternalDaReceiptEvidence>> {
-    let Some(receipt_path) = receipt_path else {
-        return Ok(None);
-    };
-    let receipt_bytes = fs::read(&receipt_path)?;
-    if receipt_bytes.is_empty() {
-        return Err(CliError::InvalidFixture(format!("external DA receipt is empty: {}", receipt_path.display())));
-    }
-    let receipt_json: Value = serde_json::from_slice(&receipt_bytes)?;
-    let receipt = receipt_json
-        .as_object()
-        .ok_or_else(|| CliError::InvalidFixture(format!("external DA receipt must be a JSON object: {}", receipt_path.display())))?;
-    let schema = receipt
-        .get("schema")
-        .and_then(Value::as_str)
-        .ok_or_else(|| CliError::InvalidFixture(format!("external DA receipt is missing schema: {}", receipt_path.display())))?;
-    if schema != "myelin-external-da-receipt" {
-        return Err(CliError::InvalidFixture(format!(
-            "external DA receipt has unsupported schema {schema}; expected myelin-external-da-receipt"
-        )));
-    }
-    let string_field = |field: &str| -> Result<String> {
-        let value = receipt
-            .get(field)
-            .and_then(Value::as_str)
-            .ok_or_else(|| CliError::InvalidFixture(format!("external DA receipt is missing string field {field}")))?;
-        if value.trim().is_empty() {
-            return Err(CliError::InvalidFixture(format!("external DA receipt field {field} must be non-empty")));
-        }
-        Ok(value.to_owned())
-    };
-    let provider = string_field("provider")?;
-    let namespace = string_field("namespace")?;
-    let receipt_payload_hash = string_field("payload_hash")?;
-    let receipt_segment_root = string_field("segment_root")?;
-    let receipt_id = string_field("receipt_id")?;
-    let availability_window = string_field("availability_window")?;
-    let provider_pubkey_hash = string_field("provider_pubkey_hash")?;
-    let provider_signature = string_field("provider_signature")?;
-    let optional_string_field = |field: &str| -> Result<Option<String>> {
-        match receipt.get(field) {
-            Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value.to_owned())),
-            Some(Value::String(_)) => {
-                Err(CliError::InvalidFixture(format!("external DA receipt optional field {field} must be non-empty when present")))
-            }
-            Some(_) => {
-                Err(CliError::InvalidFixture(format!("external DA receipt optional field {field} must be a string when present")))
-            }
-            None => Ok(None),
-        }
-    };
-    let service_level = optional_string_field("service_level")?;
-    let retrieval_endpoint = optional_string_field("retrieval_endpoint")?;
-    let audit_log_commitment = optional_string_field("audit_log_commitment")?;
-    let retention_seconds = match receipt.get("retention_seconds") {
-        Some(value) => Some(value.as_u64().ok_or_else(|| {
-            CliError::InvalidFixture("external DA receipt optional field retention_seconds must be a non-negative integer".to_owned())
-        })?),
-        None => None,
-    };
-    if receipt_payload_hash != payload_hash {
-        return Err(CliError::InvalidFixture(format!(
-            "external DA receipt payload_hash mismatch: expected {payload_hash}, got {receipt_payload_hash}"
-        )));
-    }
-    if receipt_segment_root != segment_root {
-        return Err(CliError::InvalidFixture(format!(
-            "external DA receipt segment_root mismatch: expected {segment_root}, got {receipt_segment_root}"
-        )));
-    }
-    if parse_hex_32(&receipt_payload_hash).is_none() {
-        return Err(CliError::InvalidFixture("external DA receipt payload_hash must be 32-byte hex".to_owned()));
-    }
-    if parse_hex_32(&receipt_segment_root).is_none() {
-        return Err(CliError::InvalidFixture("external DA receipt segment_root must be 32-byte hex".to_owned()));
-    }
-    let provider_pubkey_hash_bytes = decode_hex_bytes(&provider_pubkey_hash)
-        .ok_or_else(|| CliError::InvalidFixture("external DA receipt provider_pubkey_hash must be hex".to_owned()))?;
-    if provider_pubkey_hash_bytes.len() != 20 {
-        return Err(CliError::InvalidFixture("external DA receipt provider_pubkey_hash must be a 20-byte pubkey hash".to_owned()));
-    }
-    let mut provider_pubkey_hash_array = [0u8; 20];
-    provider_pubkey_hash_array.copy_from_slice(&provider_pubkey_hash_bytes);
-    let provider_signature_bytes = decode_hex_bytes(&provider_signature)
-        .ok_or_else(|| CliError::InvalidFixture("external DA receipt provider_signature must be hex".to_owned()))?;
-    if provider_signature_bytes.len() != 65 {
-        return Err(CliError::InvalidFixture(
-            "external DA receipt provider_signature must be a 65-byte recoverable secp256k1 signature".to_owned(),
-        ));
-    }
-    let mut provider_signature_array = [0u8; 65];
-    provider_signature_array.copy_from_slice(&provider_signature_bytes);
-    let provider_message_fields = ExternalDaReceiptSignatureFields {
-        schema,
-        provider: &provider,
-        namespace: &namespace,
-        payload_hash: &receipt_payload_hash,
-        segment_root: &receipt_segment_root,
-        receipt_id: &receipt_id,
-        availability_window: &availability_window,
-        service_level: service_level.as_deref(),
-        retention_seconds,
-        retrieval_endpoint: retrieval_endpoint.as_deref(),
-        audit_log_commitment: audit_log_commitment.as_deref(),
-    };
-    let provider_message_hash = external_da_receipt_provider_message_hash(&provider_message_fields);
-    let provider_signature_verified =
-        secp256k1_signature_matches_pubkey_hash(&provider_message_hash, &provider_signature_array, &provider_pubkey_hash_array);
-    if !provider_signature_verified {
-        return Err(CliError::InvalidFixture("external DA receipt provider_signature does not match provider_pubkey_hash".to_owned()));
-    }
-    let receipt_hash = hex::encode(blake3_32(b"myelin:external-da-receipt-document", &receipt_bytes));
-    let retention_seconds_string = retention_seconds.map(|seconds| seconds.to_string()).unwrap_or_default();
-    let receipt_commitment = hex::encode(blake3_chunks(
-        b"myelin:external-da-receipt-commitment",
-        &[
-            provider.as_bytes(),
-            namespace.as_bytes(),
-            receipt_payload_hash.as_bytes(),
-            receipt_segment_root.as_bytes(),
-            receipt_id.as_bytes(),
-            availability_window.as_bytes(),
-            service_level.as_deref().unwrap_or("").as_bytes(),
-            retention_seconds_string.as_bytes(),
-            retrieval_endpoint.as_deref().unwrap_or("").as_bytes(),
-            audit_log_commitment.as_deref().unwrap_or("").as_bytes(),
-            provider_pubkey_hash.as_bytes(),
-            provider_signature.as_bytes(),
-            hex::encode(provider_message_hash).as_bytes(),
-            receipt_hash.as_bytes(),
-        ],
-    ));
-    let production_guarantee_checked = external_da_receipt_production_guarantee_checked(
-        service_level.as_deref(),
-        retention_seconds,
-        retrieval_endpoint.as_deref(),
-        audit_log_commitment.as_deref(),
-    );
-    Ok(Some(SessionExternalDaReceiptEvidence {
-        schema: schema.to_owned(),
-        provider,
-        namespace,
-        payload_hash: receipt_payload_hash,
-        segment_root: receipt_segment_root,
-        receipt_id,
-        availability_window,
-        service_level,
-        retention_seconds,
-        retrieval_endpoint,
-        audit_log_commitment,
-        signature_scheme: "secp256k1-recoverable-blake3-pubkey-hash20".to_owned(),
-        provider_pubkey_hash,
-        provider_signature,
-        provider_message_hash: hex::encode(provider_message_hash),
-        provider_signature_verified,
-        production_guarantee_checked,
-        receipt_hash,
-        receipt_commitment,
-    }))
-}
-
-struct ExternalDaReceiptSignatureFields<'a> {
-    schema: &'a str,
-    provider: &'a str,
-    namespace: &'a str,
-    payload_hash: &'a str,
-    segment_root: &'a str,
-    receipt_id: &'a str,
-    availability_window: &'a str,
-    service_level: Option<&'a str>,
-    retention_seconds: Option<u64>,
-    retrieval_endpoint: Option<&'a str>,
-    audit_log_commitment: Option<&'a str>,
-}
-
-fn external_da_receipt_provider_message_hash(fields: &ExternalDaReceiptSignatureFields<'_>) -> [u8; 32] {
-    let retention_seconds = fields.retention_seconds.map(|seconds| seconds.to_string()).unwrap_or_default();
-    blake3_chunks(
-        b"myelin:external-da-receipt-provider-signature",
-        &[
-            fields.schema.as_bytes(),
-            fields.provider.as_bytes(),
-            fields.namespace.as_bytes(),
-            fields.payload_hash.as_bytes(),
-            fields.segment_root.as_bytes(),
-            fields.receipt_id.as_bytes(),
-            fields.availability_window.as_bytes(),
-            fields.service_level.unwrap_or("").as_bytes(),
-            retention_seconds.as_bytes(),
-            fields.retrieval_endpoint.unwrap_or("").as_bytes(),
-            fields.audit_log_commitment.unwrap_or("").as_bytes(),
-        ],
-    )
-}
-
-fn external_da_receipt_provider_signature_valid(receipt: &SessionExternalDaReceiptEvidence) -> bool {
-    if receipt.signature_scheme != "secp256k1-recoverable-blake3-pubkey-hash20" {
-        return false;
-    }
-    if receipt.production_guarantee_checked
-        != external_da_receipt_production_guarantee_checked(
-            receipt.service_level.as_deref(),
-            receipt.retention_seconds,
-            receipt.retrieval_endpoint.as_deref(),
-            receipt.audit_log_commitment.as_deref(),
-        )
-    {
-        return false;
-    }
-    let provider_message_fields = ExternalDaReceiptSignatureFields {
-        schema: &receipt.schema,
-        provider: &receipt.provider,
-        namespace: &receipt.namespace,
-        payload_hash: &receipt.payload_hash,
-        segment_root: &receipt.segment_root,
-        receipt_id: &receipt.receipt_id,
-        availability_window: &receipt.availability_window,
-        service_level: receipt.service_level.as_deref(),
-        retention_seconds: receipt.retention_seconds,
-        retrieval_endpoint: receipt.retrieval_endpoint.as_deref(),
-        audit_log_commitment: receipt.audit_log_commitment.as_deref(),
-    };
-    let provider_message_hash = external_da_receipt_provider_message_hash(&provider_message_fields);
-    if receipt.provider_message_hash != hex::encode(provider_message_hash) {
-        return false;
-    }
-    let Some(provider_pubkey_hash) = decode_hex_bytes(&receipt.provider_pubkey_hash) else {
-        return false;
-    };
-    if provider_pubkey_hash.len() != 20 {
-        return false;
-    }
-    let Some(provider_signature) = decode_hex_bytes(&receipt.provider_signature) else {
-        return false;
-    };
-    if provider_signature.len() != 65 {
-        return false;
-    }
-    let mut provider_pubkey_hash_array = [0u8; 20];
-    provider_pubkey_hash_array.copy_from_slice(&provider_pubkey_hash);
-    let mut provider_signature_array = [0u8; 65];
-    provider_signature_array.copy_from_slice(&provider_signature);
-    secp256k1_signature_matches_pubkey_hash(&provider_message_hash, &provider_signature_array, &provider_pubkey_hash_array)
-}
-
-fn session_external_da_receipt(args: SessionExternalDaReceiptArgs) -> Result<Value> {
-    let payload_hash = bare_hex_32_arg(&args.payload_hash, "external DA receipt payload_hash")?;
-    let segment_root = bare_hex_32_arg(&args.segment_root, "external DA receipt segment_root")?;
-    let audit_log_commitment = args
-        .audit_log_commitment
-        .as_deref()
-        .map(|commitment| bare_hex_32_arg(commitment, "external DA receipt audit_log_commitment"))
-        .transpose()?;
-    let provider_message_fields = ExternalDaReceiptSignatureFields {
-        schema: "myelin-external-da-receipt",
-        provider: &args.provider,
-        namespace: &args.namespace,
-        payload_hash: &payload_hash,
-        segment_root: &segment_root,
-        receipt_id: &args.receipt_id,
-        availability_window: &args.availability_window,
-        service_level: args.service_level.as_deref(),
-        retention_seconds: args.retention_seconds,
-        retrieval_endpoint: args.retrieval_endpoint.as_deref(),
-        audit_log_commitment: audit_log_commitment.as_deref(),
-    };
-    let provider_message_hash = external_da_receipt_provider_message_hash(&provider_message_fields);
-    if args.signing_request {
-        if args.provider_secret_key.is_some() || args.provider_pubkey_hash.is_some() || args.provider_signature.is_some() {
-            return Err(CliError::InvalidFixture(
-                "external DA receipt signing request must not include provider signing inputs".to_owned(),
-            ));
-        }
-        let mut request = serde_json::json!({
-            "schema": "myelin-external-da-receipt-signing-request",
-            "receipt_schema": "myelin-external-da-receipt",
-            "signature_scheme": "secp256k1-recoverable-blake3-pubkey-hash20",
-            "provider_message_hash": hex::encode(provider_message_hash),
-            "provider": args.provider,
-            "namespace": args.namespace,
-            "payload_hash": payload_hash,
-            "segment_root": segment_root,
-            "receipt_id": args.receipt_id,
-            "availability_window": args.availability_window
-        });
-        if let Some(service_level) = args.service_level {
-            request["service_level"] = Value::String(service_level);
-        }
-        if let Some(retention_seconds) = args.retention_seconds {
-            request["retention_seconds"] = Value::Number(serde_json::Number::from(retention_seconds));
-        }
-        if let Some(retrieval_endpoint) = args.retrieval_endpoint {
-            request["retrieval_endpoint"] = Value::String(retrieval_endpoint);
-        }
-        if let Some(audit_log_commitment) = audit_log_commitment {
-            request["audit_log_commitment"] = Value::String(audit_log_commitment);
-        }
-        return Ok(request);
-    }
-    let (provider_pubkey_hash, provider_signature) = match args.provider_secret_key.as_deref() {
-        Some(secret_key) => {
-            if args.provider_pubkey_hash.is_some() || args.provider_signature.is_some() {
-                return Err(CliError::InvalidFixture(
-                    "external DA receipt accepts either --provider-secret-key or externally supplied --provider-pubkey-hash/--provider-signature, not both"
-                        .to_owned(),
-                ));
-            }
-            sign_recoverable_pubkey_hash20(&provider_message_hash, secret_key, "external DA provider secret key")?
-        }
-        None => {
-            let provider_pubkey_hash = args
-                .provider_pubkey_hash
-                .as_deref()
-                .ok_or_else(|| {
-                    CliError::InvalidFixture(
-                        "external DA receipt requires --provider-pubkey-hash without --provider-secret-key".to_owned(),
-                    )
-                })
-                .and_then(|value| bare_hex_20_arg(value, "external DA receipt provider_pubkey_hash"))?;
-            let provider_signature = args
-                .provider_signature
-                .as_deref()
-                .ok_or_else(|| {
-                    CliError::InvalidFixture(
-                        "external DA receipt requires --provider-signature without --provider-secret-key".to_owned(),
-                    )
-                })
-                .and_then(|value| recoverable_signature_hex_arg(value, "external DA receipt provider_signature"))?;
-            let pubkey_hash: [u8; 20] = hex::decode(&provider_pubkey_hash)
-                .ok()
-                .and_then(|bytes| bytes.try_into().ok())
-                .ok_or_else(|| CliError::InvalidFixture("external DA receipt provider_pubkey_hash must be 20 bytes".to_owned()))?;
-            let signature: [u8; 65] = hex::decode(&provider_signature)
-                .ok()
-                .and_then(|bytes| bytes.try_into().ok())
-                .ok_or_else(|| CliError::InvalidFixture("external DA receipt provider_signature must be 65 bytes".to_owned()))?;
-            if !secp256k1_signature_matches_pubkey_hash(&provider_message_hash, &signature, &pubkey_hash) {
-                return Err(CliError::InvalidFixture(
-                    "external DA receipt provider_signature does not recover to provider_pubkey_hash".to_owned(),
-                ));
-            }
-            (provider_pubkey_hash, provider_signature)
-        }
-    };
-    let mut receipt = serde_json::json!({
-        "schema": "myelin-external-da-receipt",
-        "provider": args.provider,
-        "namespace": args.namespace,
-        "payload_hash": payload_hash,
-        "segment_root": segment_root,
-        "receipt_id": args.receipt_id,
-        "availability_window": args.availability_window,
-        "provider_pubkey_hash": provider_pubkey_hash,
-        "provider_signature": provider_signature
-    });
-    if let Some(service_level) = args.service_level {
-        receipt["service_level"] = Value::String(service_level);
-    }
-    if let Some(retention_seconds) = args.retention_seconds {
-        receipt["retention_seconds"] = Value::Number(serde_json::Number::from(retention_seconds));
-    }
-    if let Some(retrieval_endpoint) = args.retrieval_endpoint {
-        receipt["retrieval_endpoint"] = Value::String(retrieval_endpoint);
-    }
-    if let Some(audit_log_commitment) = audit_log_commitment {
-        receipt["audit_log_commitment"] = Value::String(audit_log_commitment);
-    }
-    Ok(receipt)
 }
 
 fn session_authority_signature_evidence(
@@ -4806,24 +4371,6 @@ fn session_court_economics_deployment_evidence(
     )
 }
 
-fn sign_recoverable_pubkey_hash20(message_hash: &[u8; 32], secret_key_hex: &str, label: &str) -> Result<(String, String)> {
-    let secret_key_bytes: [u8; 32] = decode_hex_bytes(secret_key_hex)
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| CliError::InvalidFixture(format!("{label} must be a 32-byte hex secp256k1 secret key")))?;
-    let secret_key = SecretKey::from_slice(&secret_key_bytes)
-        .map_err(|_| CliError::InvalidFixture(format!("{label} is not a valid secp256k1 secret key")))?;
-    let secp = Secp256k1::new();
-    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-    let pubkey_hash = secp256k1_pubkey_hash20(&public_key);
-    let message = Message::from_digest_slice(message_hash).expect("blake3 hash is a valid secp256k1 message digest");
-    let signature = secp.sign_ecdsa_recoverable(&message, &secret_key);
-    let (recovery_id, compact_signature) = signature.serialize_compact();
-    let mut signature_bytes = [0u8; 65];
-    signature_bytes[..64].copy_from_slice(&compact_signature);
-    signature_bytes[64] = recovery_id.to_i32() as u8;
-    Ok((hex::encode(pubkey_hash), hex::encode(signature_bytes)))
-}
-
 fn sign_recoverable_ckb_pubkey_hash20(message_hash: &[u8; 32], secret_key_hex: &str, label: &str) -> Result<(String, String)> {
     let secret_key_bytes: [u8; 32] = decode_hex_bytes(secret_key_hex)
         .and_then(|bytes| bytes.try_into().ok())
@@ -4842,14 +4389,6 @@ fn sign_recoverable_ckb_pubkey_hash20(message_hash: &[u8; 32], secret_key_hex: &
     Ok((hex::encode(pubkey_hash), hex::encode(signature_bytes)))
 }
 
-fn bare_hex_32_arg(value: &str, field: &str) -> Result<String> {
-    let bytes = decode_hex_bytes(value).ok_or_else(|| CliError::InvalidFixture(format!("{field} must be 32-byte hex")))?;
-    if bytes.len() != 32 {
-        return Err(CliError::InvalidFixture(format!("{field} must decode to exactly 32 bytes")));
-    }
-    Ok(hex::encode(bytes))
-}
-
 fn bare_hex_20_arg(value: &str, field: &str) -> Result<String> {
     let bytes = decode_hex_bytes(value).ok_or_else(|| CliError::InvalidFixture(format!("{field} must be 20-byte hex")))?;
     if bytes.len() != 20 {
@@ -4866,34 +4405,19 @@ fn recoverable_signature_hex_arg(value: &str, field: &str) -> Result<String> {
     Ok(hex::encode(bytes))
 }
 
-fn external_da_receipt_production_guarantee_checked(
-    service_level: Option<&str>,
-    retention_seconds: Option<u64>,
-    retrieval_endpoint: Option<&str>,
-    audit_log_commitment: Option<&str>,
-) -> bool {
-    const MIN_PRODUCTION_RETENTION_SECONDS: u64 = 30 * 24 * 60 * 60;
-    service_level == Some("production")
-        && retention_seconds.is_some_and(|seconds| seconds >= MIN_PRODUCTION_RETENTION_SECONDS)
-        && retrieval_endpoint.is_some_and(|endpoint| endpoint.starts_with("https://") && endpoint.len() > "https://".len())
-        && audit_log_commitment.is_some_and(|commitment| commitment.len() == 64 && hex::decode(commitment).is_ok())
-}
-
 fn da_availability_production_ready(availability: &SessionDaAvailabilityEvidence) -> bool {
-    availability.testnet_beta_ready
-        && availability.provider_neutral_certificate.as_ref().is_some_and(|evidence| {
-            evidence.verified && evidence.verification.certificate_commitment == evidence.certificate.commitment()
-        })
+    availability.testnet_beta_ready && availability.provider_neutral_certificate.is_some()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn da_availability_evidence(
     session_id: &str,
+    chunk_index: u64,
     court_bundle_hash: &str,
     molecule_transaction_hash: &str,
     segment_root: &str,
     proof_molecule_hex: &str,
     local_da_published: bool,
-    external_receipt: Option<SessionExternalDaReceiptEvidence>,
     provider_neutral_certificate: Option<SessionDaCertificateEvidence>,
 ) -> Result<SessionDaAvailabilityEvidence> {
     let session_id_bytes = parse_hex_32(session_id)
@@ -4964,53 +4488,35 @@ fn da_availability_evidence(
     for attestation in &attestation_hashes {
         hasher.update(attestation.as_bytes());
     }
-    let external_receipt_checked = external_receipt.as_ref().is_some_and(external_da_receipt_provider_signature_valid);
-    if let Some(receipt) = external_receipt.as_ref() {
-        hasher.update(receipt.schema.as_bytes());
-        hasher.update(receipt.provider.as_bytes());
-        hasher.update(receipt.namespace.as_bytes());
-        hasher.update(receipt.payload_hash.as_bytes());
-        hasher.update(receipt.segment_root.as_bytes());
-        hasher.update(receipt.receipt_id.as_bytes());
-        hasher.update(receipt.availability_window.as_bytes());
-        hasher.update(receipt.service_level.as_deref().unwrap_or("").as_bytes());
-        hasher.update(receipt.retention_seconds.map(|seconds| seconds.to_string()).unwrap_or_default().as_bytes());
-        hasher.update(receipt.retrieval_endpoint.as_deref().unwrap_or("").as_bytes());
-        hasher.update(receipt.audit_log_commitment.as_deref().unwrap_or("").as_bytes());
-        hasher.update(receipt.signature_scheme.as_bytes());
-        hasher.update(receipt.provider_pubkey_hash.as_bytes());
-        hasher.update(receipt.provider_signature.as_bytes());
-        hasher.update(receipt.provider_message_hash.as_bytes());
-        hasher.update(&[receipt.provider_signature_verified as u8]);
-        hasher.update(&[receipt.production_guarantee_checked as u8]);
-        hasher.update(receipt.receipt_hash.as_bytes());
-        hasher.update(receipt.receipt_commitment.as_bytes());
-    }
     if let Some(evidence) = provider_neutral_certificate.as_ref() {
-        hasher.update(&evidence.verification.blob_id);
-        hasher.update(&evidence.verification.certificate_commitment);
+        let certificate = &evidence.certificate;
+        let proof = SegmentProof::from_molecule_bytes(&proof_bytes)
+            .map_err(|error| CliError::InvalidFixture(format!("DA proof decode error: {error}")))?;
+        if evidence.schema != "myelin-provider-neutral-da-certificate-evidence"
+            || certificate.blob.session_id != session_id_bytes
+            || certificate.blob.chunk_index != chunk_index
+            || certificate.blob.payload_hash != payload_hash_bytes
+            || certificate.blob.payload_len != proof.chunk_data.len() as u64
+            || certificate.blob.segment_root != segment_root_bytes
+        {
+            return Err(CliError::InvalidFixture("DA certificate does not match the exact manifest blob".to_owned()));
+        }
+        let verification = certificate
+            .verify(evidence.evaluation_epoch)
+            .map_err(|error| CliError::InvalidFixture(format!("DA certificate verification failed: {error}")))?;
+        hasher.update(&verification.blob_id);
+        hasher.update(&verification.certificate_commitment);
         hasher.update(&evidence.evaluation_epoch.to_le_bytes());
-        hasher.update(&evidence.verification.provider_count.to_le_bytes());
-        hasher.update(&evidence.verification.fault_domain_count.to_le_bytes());
-        hasher.update(&evidence.verification.successful_probe_count.to_le_bytes());
-        hasher.update(&evidence.verification.probed_provider_count.to_le_bytes());
+        hasher.update(&verification.provider_count.to_le_bytes());
+        hasher.update(&verification.fault_domain_count.to_le_bytes());
+        hasher.update(&verification.successful_probe_count.to_le_bytes());
+        hasher.update(&verification.probed_provider_count.to_le_bytes());
     }
     let availability_commitment = *hasher.finalize().as_bytes();
     let attestation_count = u32::try_from(attestation_signatures.len()).expect("static DA committee fits into u32");
     let retrieval_probe_count = if local_da_published { 2 } else { 1 };
-    // XD-02 invariant: `testnet_beta_ready`, `external_receipt_count`, and
-    // `external_receipt.is_some()` must stay in lockstep. Previously
-    // `testnet_beta_ready` keyed off `external_receipt_checked` (the
-    // signature-verification boolean) while `external_receipt_count` keyed
-    // off `external_receipt.is_some()` — two different sources of truth that
-    // only agreed because both were falsy in commitment-only mode. A receipt
-    // present-but-signature-invalid state would have set count=1 yet left
-    // `testnet_beta_ready` derived from a separate signal. Now beta-readiness
-    // requires the receipt to actually be present AND signature-valid, which
-    // keeps the three receipt-side fields consistent in every state.
-    let external_receipt_present = external_receipt.is_some();
-    let certificate_verified = provider_neutral_certificate.as_ref().is_some_and(|evidence| evidence.verified);
-    let testnet_beta_ready = local_da_published && ((external_receipt_present && external_receipt_checked) || certificate_verified);
+    let certificate_verified = provider_neutral_certificate.is_some();
+    let testnet_beta_ready = local_da_published && certificate_verified;
     let production_ready = local_da_published && certificate_verified;
     Ok(SessionDaAvailabilityEvidence {
         schema: "myelin-da-availability".to_owned(),
@@ -5023,15 +4529,12 @@ fn da_availability_evidence(
         payload_hash: molecule_transaction_hash.to_owned(),
         segment_root: segment_root.to_owned(),
         proof_molecule_hash: hex::encode(proof_molecule_hash_bytes),
-        external_receipt_count: u32::from(external_receipt.is_some()),
-        external_receipt_checked,
-        external_receipt,
         provider_neutral_certificate,
         attester_pubkey_hashes,
         attestation_signatures,
         attestation_hashes,
         availability_commitment_algorithm:
-            "blake3(myelin:session-da-availability-commitment,session_id,court_bundle_hash,payload_hash,segment_root,proof_molecule_hash,fixture_attestations,legacy_external_receipt,provider_neutral_da_certificate)"
+            "blake3(myelin:session-da-availability-commitment,session_id,court_bundle_hash,payload_hash,segment_root,proof_molecule_hash,fixture_attestations,provider_neutral_da_certificate)"
                 .to_owned(),
         availability_commitment: hex::encode(availability_commitment),
         attestation_signature_verified: attestation_signature_verified && attestation_count >= required_attestations,
@@ -6649,6 +6152,7 @@ struct SessionDaManifestReport {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct SessionDaAvailabilityEvidence {
     schema: String,
     mode: String,
@@ -6660,10 +6164,6 @@ struct SessionDaAvailabilityEvidence {
     payload_hash: String,
     segment_root: String,
     proof_molecule_hash: String,
-    external_receipt_count: u32,
-    external_receipt_checked: bool,
-    external_receipt: Option<SessionExternalDaReceiptEvidence>,
-    #[serde(default)]
     provider_neutral_certificate: Option<SessionDaCertificateEvidence>,
     attester_pubkey_hashes: Vec<String>,
     attestation_signatures: Vec<String>,
@@ -6677,41 +6177,12 @@ struct SessionDaAvailabilityEvidence {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct SessionDaCertificateEvidence {
     schema: String,
     source: String,
     evaluation_epoch: u64,
     certificate: DaCertificate,
-    verification: DaCertificateVerification,
-    verified: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct SessionExternalDaReceiptEvidence {
-    schema: String,
-    provider: String,
-    namespace: String,
-    payload_hash: String,
-    segment_root: String,
-    receipt_id: String,
-    availability_window: String,
-    #[serde(default)]
-    service_level: Option<String>,
-    #[serde(default)]
-    retention_seconds: Option<u64>,
-    #[serde(default)]
-    retrieval_endpoint: Option<String>,
-    #[serde(default)]
-    audit_log_commitment: Option<String>,
-    signature_scheme: String,
-    provider_pubkey_hash: String,
-    provider_signature: String,
-    provider_message_hash: String,
-    provider_signature_verified: bool,
-    #[serde(default)]
-    production_guarantee_checked: bool,
-    receipt_hash: String,
-    receipt_commitment: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -6840,7 +6311,7 @@ struct SessionCourtEconomicsEvidence {
     economics_commitment_algorithm: String,
     economics_commitment: String,
     court_economics_checked: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     court_economics_deployment: Option<SessionCourtEconomicsDeploymentEvidence>,
     testnet_beta_ready: bool,
     production_ready: bool,
@@ -6867,9 +6338,7 @@ struct SessionCourtEconomicsDeploymentEvidence {
     ckb_enforceable_checked: bool,
     testnet_beta_ready: bool,
     production_ready: bool,
-    #[serde(default)]
     evidence_commitment_algorithm: String,
-    #[serde(default)]
     evidence_commitment: String,
 }
 
@@ -6949,17 +6418,13 @@ struct SessionAuthorityAuthenticationEvidence {
     ckb_lock_args: String,
     ckb_lock_args_hash: String,
     ckb_lock_policy: String,
-    #[serde(default)]
     ckb_multisig_require_first_n: u8,
-    #[serde(default)]
     ckb_multisig_participant_pubkey_hashes: Vec<String>,
-    #[serde(default)]
     ckb_multisig_witness_config: String,
-    #[serde(default)]
     ckb_multisig_config_hash: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     participant_signature_evidence: Option<SessionAuthoritySignatureEvidence>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     threshold_lock_deployment: Option<SessionThresholdLockDeploymentEvidence>,
     ckb_enforceable: bool,
     testnet_beta_ready: bool,
@@ -6972,22 +6437,15 @@ struct SessionAuthoritySignatureEvidence {
     signature_scheme: String,
     participant_set_hash: String,
     threshold: u32,
-    #[serde(default)]
     signer_count: u32,
     message_hash: String,
     signer_pubkey_hashes: Vec<String>,
     signatures: Vec<String>,
-    #[serde(default)]
     participant_pubkey_hashes: Vec<String>,
-    #[serde(default)]
     require_first_n: u8,
-    #[serde(default)]
     attestation_hashes: Vec<String>,
-    #[serde(default)]
     signature_verified: bool,
-    #[serde(default)]
     evidence_commitment_algorithm: String,
-    #[serde(default)]
     evidence_commitment: String,
 }
 
@@ -7000,44 +6458,28 @@ struct SessionThresholdLockDeploymentEvidence {
     hash_type: String,
     code_dep_tx_hash: String,
     code_dep_index: String,
-    #[serde(default)]
     code_dep_type: String,
     deployment_policy: String,
     ckb_lock_args_hash: String,
     threshold: u32,
     signer_pubkey_hashes: Vec<String>,
-    #[serde(default)]
     multisig_participant_pubkey_hashes: Vec<String>,
-    #[serde(default)]
     multisig_require_first_n: u8,
-    #[serde(default)]
     multisig_config_hash: String,
-    #[serde(default)]
     node_chain: String,
-    #[serde(default)]
     genesis_hash: String,
-    #[serde(default)]
     dep_group_live: bool,
-    #[serde(default)]
     dep_group_data_hash: String,
-    #[serde(default)]
     dep_group_member_out_points: Vec<String>,
-    #[serde(default)]
     multisig_v2_member_out_point: Option<String>,
-    #[serde(default)]
     multisig_v2_data_hash: Option<String>,
-    #[serde(default)]
     secp256k1_data_member_out_point: Option<String>,
-    #[serde(default)]
     secp256k1_data_hash: Option<String>,
-    #[serde(default)]
     system_script_identity_checked: bool,
     ckb_enforceable_checked: bool,
     testnet_beta_ready: bool,
     production_ready: bool,
-    #[serde(default)]
     evidence_commitment_algorithm: String,
-    #[serde(default)]
     evidence_commitment: String,
 }
 
@@ -8322,18 +7764,13 @@ fn verify_session_court_bundle(path: PathBuf) -> Result<SessionCourtBundleVerifi
 }
 
 #[cfg(test)]
-fn session_da_manifest(
-    bundle_path: PathBuf,
-    storage_dir: Option<PathBuf>,
-    external_da_receipt_path: Option<PathBuf>,
-) -> Result<SessionDaManifestReport> {
-    session_da_manifest_with_certificate(bundle_path, storage_dir, external_da_receipt_path, None, None)
+fn session_da_manifest(bundle_path: PathBuf, storage_dir: Option<PathBuf>) -> Result<SessionDaManifestReport> {
+    session_da_manifest_with_certificate(bundle_path, storage_dir, None, None)
 }
 
 fn session_da_manifest_with_certificate(
     bundle_path: PathBuf,
     storage_dir: Option<PathBuf>,
-    external_da_receipt_path: Option<PathBuf>,
     da_certificate_path: Option<PathBuf>,
     da_evaluation_epoch: Option<u64>,
 ) -> Result<SessionDaManifestReport> {
@@ -8396,25 +7833,15 @@ fn session_da_manifest_with_certificate(
     let proof_molecule_hex = hex::encode(proof.to_molecule_bytes());
     let court_bundle_hash = blake3_32(b"myelin:session-court-bundle-json", &bundle_bytes);
     let segment_root = hex::encode(proof.segment_root);
-    let external_da_receipt =
-        external_da_receipt_evidence(external_da_receipt_path, &bundle.molecule_transaction_hash, &segment_root)?;
-    let provider_neutral_certificate = da_certificate_evidence(
-        da_certificate_path,
-        da_evaluation_epoch,
-        &bundle.session_id,
-        bundle.chunk_index,
-        &bundle.molecule_transaction_hash,
-        proof.chunk_data.len(),
-        &segment_root,
-    )?;
+    let provider_neutral_certificate = da_certificate_evidence(da_certificate_path, da_evaluation_epoch)?;
     let availability = da_availability_evidence(
         &bundle.session_id,
+        bundle.chunk_index,
         &hex::encode(court_bundle_hash),
         &bundle.molecule_transaction_hash,
         &segment_root,
         &proof_molecule_hex,
         local_da_published,
-        external_da_receipt,
         provider_neutral_certificate,
     )?;
 
@@ -8454,11 +7881,6 @@ fn session_da_manifest_with_certificate(
 fn da_certificate_evidence(
     certificate_path: Option<PathBuf>,
     evaluation_epoch: Option<u64>,
-    session_id: &str,
-    chunk_index: u64,
-    payload_hash: &str,
-    payload_len: usize,
-    segment_root: &str,
 ) -> Result<Option<SessionDaCertificateEvidence>> {
     let Some(path) = certificate_path else {
         if evaluation_epoch.is_some() {
@@ -8468,35 +7890,11 @@ fn da_certificate_evidence(
     };
     let evaluation_epoch =
         evaluation_epoch.ok_or_else(|| CliError::InvalidFixture("--da-certificate requires --da-evaluation-epoch".to_owned()))?;
-    let certificate = read_json_report::<DaCertificate>(&path)?;
-    let expected_session_id = parse_hex_32(session_id)
-        .ok_or_else(|| CliError::InvalidFixture("DA certificate session_id must be 32-byte hex".to_owned()))?;
-    let expected_payload_hash = parse_hex_32(payload_hash)
-        .ok_or_else(|| CliError::InvalidFixture("DA certificate payload hash must be 32-byte hex".to_owned()))?;
-    let expected_segment_root = parse_hex_32(segment_root)
-        .ok_or_else(|| CliError::InvalidFixture("DA certificate segment root must be 32-byte hex".to_owned()))?;
-    let expected_payload_len =
-        u64::try_from(payload_len).map_err(|_| CliError::InvalidFixture("DA certificate payload length exceeds u64".to_owned()))?;
-    if certificate.blob.session_id != expected_session_id
-        || certificate.blob.chunk_index != chunk_index
-        || certificate.blob.payload_hash != expected_payload_hash
-        || certificate.blob.payload_len != expected_payload_len
-        || certificate.blob.segment_root != expected_segment_root
-    {
-        return Err(CliError::InvalidFixture(
-            "DA certificate blob commitment does not match the session, chunk, payload, length, and sealed segment root".to_owned(),
-        ));
-    }
-    let verification = certificate
-        .verify(evaluation_epoch)
-        .map_err(|error| CliError::InvalidFixture(format!("DA certificate verification failed: {error}")))?;
     Ok(Some(SessionDaCertificateEvidence {
         schema: "myelin-provider-neutral-da-certificate-evidence".to_owned(),
         source: path.display().to_string(),
         evaluation_epoch,
-        certificate,
-        verification,
-        verified: true,
+        certificate: read_json_report::<DaCertificate>(&path)?,
     }))
 }
 
@@ -8668,12 +8066,12 @@ fn verify_session_da_manifest(
     );
     let expected_availability = da_availability_evidence(
         &manifest.session_id,
+        manifest.chunk_index,
         &manifest.court_bundle_hash,
         &manifest.molecule_transaction_hash,
         &manifest.segment_root,
         &manifest.proof_molecule_hex,
         manifest.local_da_published,
-        manifest.availability.external_receipt.clone(),
         manifest.availability.provider_neutral_certificate.clone(),
     )?;
     push_check(
@@ -8703,42 +8101,19 @@ fn verify_session_da_manifest(
     push_check(
         &mut checks,
         "da-availability-ready",
-        manifest.availability.availability_checked
+        manifest.availability == expected_availability
+            && manifest.availability.availability_checked
             && manifest.availability.attestation_signature_verified
-            && manifest.availability.attestation_signatures.len() == manifest.availability.attester_pubkey_hashes.len()
-            && manifest.availability.attestation_count >= manifest.availability.required_attestations
-            && manifest.availability.external_receipt_count
-                == u32::from(manifest.availability.external_receipt.as_ref().is_some())
-            && (manifest.availability.external_receipt.is_none() || manifest.availability.external_receipt_checked)
-            && manifest.availability.testnet_beta_ready
-                == (manifest.local_da_published
-                    && manifest.availability.external_receipt.is_some()
-                    && manifest.availability.external_receipt_checked)
             && manifest.availability.production_ready == da_availability_production_ready(&manifest.availability),
         Some(
-            "availability_checked && attestation_signature_verified && signatures match attesters && attestation_count >= required_attestations && external_receipt_count == external_receipt presence && present external receipt checked && testnet_beta_ready == local_da_published && external receipt present and checked && production_ready == signed production SLA guarantee"
+            "availability evidence recomputes exactly; readiness requires a verified quorum certificate and local publication"
                 .to_owned(),
         ),
         Some(format!(
-            "{} && {} && {} == {} && {} >= {} && {} == {} && ({} || {}) && {} == ({} && {} && {}) && {} == {}",
-            manifest.availability.availability_checked,
-            manifest.availability.attestation_signature_verified,
-            manifest.availability.attestation_signatures.len(),
-            manifest.availability.attester_pubkey_hashes.len(),
-            manifest.availability.attestation_count,
-            manifest.availability.required_attestations,
-            manifest.availability.external_receipt_count,
-            u32::from(manifest.availability.external_receipt.as_ref().is_some()),
-            manifest.availability.external_receipt.is_none(),
-            manifest.availability.external_receipt_checked,
-            manifest.availability.testnet_beta_ready,
-            manifest.local_da_published,
-            manifest.availability.external_receipt.is_some(),
-            manifest.availability.external_receipt_checked,
-            manifest.availability.production_ready,
-            da_availability_production_ready(&manifest.availability)
+            "testnet_beta_ready={}, production_ready={}",
+            manifest.availability.testnet_beta_ready, manifest.availability.production_ready
         )),
-        "DA manifest carries locally verified committee signatures and optional external DA receipt evidence, and only claims production DA readiness for signed production SLA receipts",
+        "DA readiness is bound to the current provider-neutral certificate",
     );
     push_check(
         &mut checks,
@@ -12904,12 +12279,12 @@ fn final_l1_da_availability_preflight_ready(submission: &Value) -> bool {
     }
     let Ok(expected_availability) = da_availability_evidence(
         &manifest.session_id,
+        manifest.chunk_index,
         &manifest.court_bundle_hash,
         &manifest.molecule_transaction_hash,
         &manifest.segment_root,
         &manifest.proof_molecule_hex,
         manifest.local_da_published,
-        manifest.availability.external_receipt.clone(),
         manifest.availability.provider_neutral_certificate.clone(),
     ) else {
         return false;
@@ -13755,7 +13130,7 @@ fn verify_session_finality_checks(
             certificate_ok,
             Some(format!("quorum power {} height {} round {}", 3, tm.height, tm.round)),
             Some(format!("quorum power {}, finalised {}", tm.quorum_power, tm.finalised)),
-            "WeightedPrecommit precommit certificate verifies against the fixture engine",
+            "Tendermint precommit certificate verifies against the fixture engine",
         );
         push_check(
             checks,
@@ -13763,7 +13138,7 @@ fn verify_session_finality_checks(
             tm.quorum_power == 3,
             Some("3".to_owned()),
             Some(tm.quorum_power.to_string()),
-            "bundle WeightedPrecommit quorum power matches the fixture engine",
+            "bundle Tendermint quorum power matches the fixture engine",
         );
     } else {
         let committee_config = static_fixture_committee_config();
@@ -13806,8 +13181,8 @@ fn verify_session_finality_checks(
 fn parse_session_consensus(consensus: &str) -> Result<ConsensusKind> {
     match consensus {
         "static-closed-committee" => Ok(ConsensusKind::StaticClosedCommittee),
-        "proof-of-authority" | "poa" => Ok(ConsensusKind::ProofOfAuthority),
-        "tendermint" | "weighted-precommit" => Ok(ConsensusKind::Tendermint),
+        "proof-of-authority" => Ok(ConsensusKind::ProofOfAuthority),
+        "tendermint" => Ok(ConsensusKind::Tendermint),
         other => Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     }
 }
@@ -14139,7 +13514,7 @@ fn finality_evidence_for_block(
                 })
                 .collect();
             let weighted_precommit_evidence = WeightedPrecommitEvidenceReport {
-                consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
+                consensus_kind: ConsensusKind::Tendermint.as_str(),
                 block_hash: hex::encode(block_hash),
                 quorum_power: 3,
                 height: block.number,
@@ -14213,7 +13588,7 @@ fn static_evidence_report_from_input(input: StaticCommitteeEvidenceInput) -> Sta
 
 fn weighted_precommit_evidence_report_from_input(input: WeightedPrecommitEvidenceInput) -> WeightedPrecommitEvidenceReport {
     WeightedPrecommitEvidenceReport {
-        consensus_kind: ConsensusKind::WeightedPrecommit.as_str(),
+        consensus_kind: ConsensusKind::Tendermint.as_str(),
         block_hash: input.block_hash,
         quorum_power: input.quorum_power,
         height: input.height,
@@ -14279,8 +13654,8 @@ struct RuntimeSmokeReport {
 fn runtime_smoke(consensus: &str) -> Result<RuntimeSmokeReport> {
     let consensus_kind = match consensus {
         "static-closed-committee" => ConsensusKind::StaticClosedCommittee,
-        "proof-of-authority" | "poa" => ConsensusKind::ProofOfAuthority,
-        "tendermint" | "weighted-precommit" => ConsensusKind::Tendermint,
+        "proof-of-authority" => ConsensusKind::ProofOfAuthority,
+        "tendermint" => ConsensusKind::Tendermint,
         other => return Err(CliError::InvalidFixture(format!("unknown consensus engine: {other}"))),
     };
 
@@ -14410,7 +13785,7 @@ mod tests {
         let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = write_temp_json(&format!("{label}-court"), &bundle);
-        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let da_manifest_path = write_temp_json(&format!("{label}-da"), &da_manifest);
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
             .expect("settlement intent");
@@ -14441,7 +13816,7 @@ mod tests {
         assert_eq!(report.per_tx_cycles.len(), 4);
         assert!(report.per_tx_cycles.iter().all(|c| *c > 0), "each tx consumed positive cycles");
         assert_eq!(report.scheduler_commitment.len(), 64, "scheduler commitment is 32-byte hex");
-        // The block is finalised by the static committee. (WeightedPrecommit
+        // The block is finalised by the static committee. (Tendermint
         // evidence is only produced for weighted_precommit sessions; the
         // static-closed-committee fixture here finalises via the static path.)
         assert!(report.finalised);
@@ -15252,67 +14627,6 @@ mod tests {
         )
     }
 
-    fn write_external_da_receipt(payload_hash: &str, segment_root: &str) -> PathBuf {
-        write_external_da_receipt_with_sla(payload_hash, segment_root, false)
-    }
-
-    fn write_production_external_da_receipt(payload_hash: &str, segment_root: &str) -> PathBuf {
-        write_external_da_receipt_with_sla(payload_hash, segment_root, true)
-    }
-
-    fn write_external_da_receipt_with_sla(payload_hash: &str, segment_root: &str, production: bool) -> PathBuf {
-        let schema = "myelin-external-da-receipt";
-        let provider = "fixture-external-da";
-        let namespace = "session-court-payloads";
-        let receipt_id = format!("receipt-{payload_hash}-{segment_root}");
-        let availability_window = if production { "production-retention-30d" } else { "testnet-beta-retention-7d" };
-        let service_level = production.then_some("production");
-        let retention_seconds = production.then_some(30 * 24 * 60 * 60);
-        let retrieval_endpoint = production.then_some("https://da.example.invalid/session-court-payloads");
-        let audit_log_commitment = production.then_some("a5".repeat(32));
-        let message_hash = external_da_receipt_provider_message_hash(&ExternalDaReceiptSignatureFields {
-            schema,
-            provider,
-            namespace,
-            payload_hash,
-            segment_root,
-            receipt_id: &receipt_id,
-            availability_window,
-            service_level,
-            retention_seconds,
-            retrieval_endpoint,
-            audit_log_commitment: audit_log_commitment.as_deref(),
-        });
-        let secp = Secp256k1::new();
-        let secret_key = SecretKey::from_slice(&[0x44u8; 32]).expect("static external DA provider key is valid");
-        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-        let provider_pubkey_hash = secp256k1_pubkey_hash20(&public_key);
-        let message = Message::from_digest_slice(&message_hash).expect("external DA receipt message hash is valid");
-        let signature = secp.sign_ecdsa_recoverable(&message, &secret_key);
-        let (recovery_id, compact_signature) = signature.serialize_compact();
-        let mut signature_bytes = [0u8; 65];
-        signature_bytes[..64].copy_from_slice(&compact_signature);
-        signature_bytes[64] = recovery_id.to_i32() as u8;
-        let mut receipt = serde_json::json!({
-                "schema": schema,
-                "provider": provider,
-                "namespace": namespace,
-                "payload_hash": payload_hash,
-                "segment_root": segment_root,
-                "receipt_id": receipt_id,
-                "availability_window": availability_window,
-                "provider_pubkey_hash": hex::encode(provider_pubkey_hash),
-                "provider_signature": hex::encode(signature_bytes)
-        });
-        if production {
-            receipt["service_level"] = Value::String("production".to_owned());
-            receipt["retention_seconds"] = Value::Number(serde_json::Number::from(30 * 24 * 60 * 60));
-            receipt["retrieval_endpoint"] = Value::String("https://da.example.invalid/session-court-payloads".to_owned());
-            receipt["audit_log_commitment"] = Value::String("a5".repeat(32));
-        }
-        write_temp_json(if production { "external-da-receipt-production" } else { "external-da-receipt" }, &receipt)
-    }
-
     fn production_da_manifest_fixture(label: &str) -> (SessionDaManifestReport, PathBuf, PathBuf, PathBuf) {
         static NEXT_DA_FIXTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = NEXT_DA_FIXTURE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -15324,22 +14638,18 @@ mod tests {
         let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = write_temp_json(&format!("{label}-court"), &bundle);
-        let in_memory_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("in-memory DA manifest");
-        let receipt_path =
-            write_production_external_da_receipt(&in_memory_manifest.molecule_transaction_hash, &in_memory_manifest.segment_root);
+        let in_memory_manifest = session_da_manifest(bundle_path.clone(), None).expect("in-memory DA manifest");
         let certificate_path = write_provider_neutral_da_certificate(&in_memory_manifest, label);
         let storage_dir = std::env::temp_dir().join(format!("myelin-{label}-da-store-{}-{nonce}", std::process::id()));
         let _ = std::fs::remove_dir_all(&storage_dir);
         let manifest = session_da_manifest_with_certificate(
             bundle_path.clone(),
             Some(storage_dir.clone()),
-            Some(receipt_path.clone()),
             Some(certificate_path.clone()),
             Some(100),
         )
         .expect("production DA manifest");
-        let _ = std::fs::remove_file(certificate_path);
-        (manifest, bundle_path, receipt_path, storage_dir)
+        (manifest, bundle_path, certificate_path, storage_dir)
     }
 
     fn write_provider_neutral_da_certificate(manifest: &SessionDaManifestReport, label: &str) -> PathBuf {
@@ -15880,7 +15190,7 @@ mod tests {
             Some(court_deployment),
         )
         .expect("production court economics fixture");
-        let (da_manifest, bundle_path, receipt_path, storage_dir) =
+        let (da_manifest, bundle_path, certificate_path, storage_dir) =
             production_da_manifest_fixture("readiness-final-settlement-production-da");
         let submission = serde_json::json!({
             "schema": "myelin-session-ckb-final-script-submission",
@@ -15933,7 +15243,7 @@ mod tests {
             "rpc_error": null
         });
         let _ = std::fs::remove_file(bundle_path);
-        let _ = std::fs::remove_file(receipt_path);
+        let _ = std::fs::remove_file(certificate_path);
         let _ = std::fs::remove_dir_all(storage_dir);
         write_temp_json(&format!("readiness-live-final-settlement-production-submission-{label_hash}"), &submission)
     }
@@ -16092,7 +15402,7 @@ mod tests {
         assert!(report.ckb_projection.wire_encoded);
 
         // The static-closed-committee evidence is reported for completeness;
-        // the WeightedPrecommit evidence is the active finality path.
+        // the Tendermint evidence is the active finality path.
         let tm = report.weighted_precommit_evidence.as_ref().expect("weighted_precommit evidence must be present");
         assert_eq!(tm.consensus_kind, "tendermint");
         assert_eq!(tm.quorum_power, 3);
@@ -16102,7 +15412,7 @@ mod tests {
         assert!(tm.finalised);
         assert_eq!(tm.signatures.len(), 3);
 
-        // The static-committee and WeightedPrecommit block hashes MUST agree: both
+        // The static-committee and Tendermint block hashes MUST agree: both
         // engines sign the same canonical MyelinBlock (same data fields,
         // same data-binding block hash), but with different signature
         // domains. The two engines cannot drift on what was finalised.
@@ -16113,14 +15423,14 @@ mod tests {
             "static and weighted_precommit must sign the same canonical block hash"
         );
 
-        // The WeightedPrecommit signatures must be domain-separated from the static
+        // The Tendermint signatures must be domain-separated from the static
         // committee signatures. The two sets of signatures should differ
         // even though the underlying block hash is the same.
         let static_signatures: Vec<&str> = report.static_committee_evidence.signatures.iter().map(|s| s.signature.as_str()).collect();
         let weighted_precommit_signatures: Vec<&str> = tm.signatures.iter().map(|s| s.signature.as_str()).collect();
         assert_ne!(
             static_signatures, weighted_precommit_signatures,
-            "WeightedPrecommit precommit signatures must be domain-separated from static-committee signatures"
+            "Tendermint precommit signatures must be domain-separated from static-committee signatures"
         );
 
         let bundle_path =
@@ -16135,7 +15445,7 @@ mod tests {
         assert!(verification.checks.iter().any(|check| check.name == "block-hash-recomputes"));
         assert!(verification.checks.iter().any(|check| check.name == "evidence-block-hash-matches-canonical-block"));
         // The static-committee-certificate check must NOT be present when
-        // WeightedPrecommit evidence is in the bundle; otherwise the bundle would
+        // Tendermint evidence is in the bundle; otherwise the bundle would
         // be claiming both engines.
         assert!(!verification.checks.iter().any(|check| check.name == "committee-certificate"));
     }
@@ -16301,7 +15611,7 @@ mod tests {
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
 
-        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         assert_eq!(manifest.schema, "myelin-session-da-manifest");
         assert_eq!(manifest.da_profile, "single-segment-merkle");
         assert_eq!(manifest.payload_kind, "session-court-molecule-transaction");
@@ -16358,7 +15668,7 @@ mod tests {
         let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&storage_dir);
 
-        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), None).expect("durable DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone())).expect("durable DA manifest");
         assert!(manifest.local_da_published);
         assert!(manifest.segment_sealed);
         let storage_display = storage_dir.display().to_string();
@@ -16382,244 +15692,6 @@ mod tests {
     }
 
     #[test]
-    fn session_da_manifest_binds_external_da_receipt_evidence() {
-        let open = session_open_fixture("static-closed-committee").expect("open session");
-        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-external-{}.json", std::process::id()));
-        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
-        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
-        let _ = std::fs::remove_file(open_path);
-        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-external-{}.json", std::process::id()));
-        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
-        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
-        let _ = std::fs::remove_file(commit_path);
-        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-external-{}.json", std::process::id()));
-        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let in_memory_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("in-memory DA manifest");
-        let receipt_path = write_external_da_receipt(&in_memory_manifest.molecule_transaction_hash, &in_memory_manifest.segment_root);
-        let mut bad_receipt_json: Value = serde_json::from_slice(&std::fs::read(&receipt_path).expect("read external DA receipt"))
-            .expect("external DA receipt JSON");
-        bad_receipt_json["provider_signature"] = Value::String("00".repeat(65));
-        let bad_receipt_path = write_temp_json("external-da-receipt-bad-signature", &bad_receipt_json);
-        let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-external-store-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&storage_dir);
-
-        let bad_receipt_error = session_da_manifest(bundle_path.clone(), None, Some(bad_receipt_path.clone()))
-            .expect_err("external DA receipt with bad provider signature should be rejected");
-        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), Some(receipt_path.clone()))
-            .expect("external DA receipt manifest");
-        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-manifest-external-{}.json", std::process::id()));
-        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        let verification = verify_session_da_manifest(manifest_path.clone(), bundle_path.clone(), Some(storage_dir.clone()))
-            .expect("verify external DA manifest");
-        let mut tampered = manifest.clone();
-        tampered.availability.external_receipt.as_mut().expect("external receipt").receipt_id = "tampered-receipt".to_owned();
-        let tampered_path =
-            std::env::temp_dir().join(format!("myelin-session-da-manifest-external-tamper-{}.json", std::process::id()));
-        std::fs::write(&tampered_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
-        let tampered_verification = verify_session_da_manifest(tampered_path.clone(), bundle_path.clone(), Some(storage_dir.clone()))
-            .expect("verify tampered external DA manifest");
-        let _ = std::fs::remove_file(manifest_path);
-        let _ = std::fs::remove_file(tampered_path);
-        let _ = std::fs::remove_file(receipt_path);
-        let _ = std::fs::remove_file(bad_receipt_path);
-        let _ = std::fs::remove_file(bundle_path);
-        let _ = std::fs::remove_dir_all(storage_dir);
-
-        assert!(
-            bad_receipt_error.to_string().contains("provider_signature does not match provider_pubkey_hash"),
-            "{bad_receipt_error}"
-        );
-        assert!(manifest.local_da_published);
-        assert_eq!(manifest.availability.external_receipt_count, 1);
-        assert!(manifest.availability.external_receipt_checked);
-        assert!(manifest.availability.external_receipt.as_ref().is_some_and(|receipt| {
-            receipt.schema == "myelin-external-da-receipt"
-                && receipt.payload_hash == manifest.molecule_transaction_hash
-                && receipt.segment_root == manifest.segment_root
-                && receipt.signature_scheme == "secp256k1-recoverable-blake3-pubkey-hash20"
-                && receipt.provider_pubkey_hash.len() == 40
-                && receipt.provider_signature.len() == 130
-                && receipt.provider_message_hash.len() == 64
-                && receipt.provider_signature_verified
-                && receipt.service_level.is_none()
-                && receipt.retention_seconds.is_none()
-                && receipt.retrieval_endpoint.is_none()
-                && receipt.audit_log_commitment.is_none()
-                && !receipt.production_guarantee_checked
-                && receipt.receipt_hash.len() == 64
-                && receipt.receipt_commitment.len() == 64
-        }));
-        assert!(manifest.availability.testnet_beta_ready);
-        assert!(!manifest.availability.production_ready);
-        assert!(verification.valid);
-        assert!(verification.checks.iter().all(|check| check.ok));
-        assert!(!tampered_verification.valid);
-        assert!(tampered_verification.checks.iter().any(|check| check.name == "da-availability-commitment" && !check.ok));
-    }
-
-    #[test]
-    fn session_da_manifest_treats_one_signed_sla_receipt_as_testnet_evidence_only() {
-        let open = session_open_fixture("static-closed-committee").expect("open session");
-        let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-production-{}.json", std::process::id()));
-        std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
-        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
-        let _ = std::fs::remove_file(open_path);
-        let commit_path = std::env::temp_dir().join(format!("myelin-session-commit-da-production-{}.json", std::process::id()));
-        std::fs::write(&commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
-        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
-        let _ = std::fs::remove_file(commit_path);
-        let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-production-{}.json", std::process::id()));
-        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let in_memory_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("in-memory DA manifest");
-        let receipt_path =
-            write_production_external_da_receipt(&in_memory_manifest.molecule_transaction_hash, &in_memory_manifest.segment_root);
-        let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-production-store-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&storage_dir);
-
-        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), Some(receipt_path.clone()))
-            .expect("production external DA receipt manifest");
-        let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-manifest-production-{}.json", std::process::id()));
-        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        let verification = verify_session_da_manifest(manifest_path.clone(), bundle_path.clone(), Some(storage_dir.clone()))
-            .expect("verify production DA manifest");
-
-        let _ = std::fs::remove_file(manifest_path);
-        let _ = std::fs::remove_file(receipt_path);
-        let _ = std::fs::remove_file(bundle_path);
-        let _ = std::fs::remove_dir_all(storage_dir);
-
-        let receipt = manifest.availability.external_receipt.as_ref().expect("production external receipt");
-        assert_eq!(receipt.service_level.as_deref(), Some("production"));
-        assert_eq!(receipt.retention_seconds, Some(30 * 24 * 60 * 60));
-        assert!(receipt.retrieval_endpoint.as_deref().is_some_and(|endpoint| endpoint.starts_with("https://")));
-        assert!(receipt.audit_log_commitment.as_ref().is_some_and(|commitment| commitment.len() == 64));
-        assert!(receipt.production_guarantee_checked);
-        assert!(manifest.local_da_published);
-        assert!(manifest.availability.external_receipt_checked);
-        assert!(manifest.availability.testnet_beta_ready);
-        assert!(!manifest.availability.production_ready);
-        assert!(verification.valid);
-        assert!(verification.checks.iter().all(|check| check.ok));
-    }
-
-    #[test]
-    fn da_availability_testnet_beta_ready_keys_off_receipt_presence_not_just_checked() {
-        // XD-02 regression: `testnet_beta_ready`, `external_receipt_count`, and
-        // `external_receipt.is_some()` must stay in lockstep. Previously
-        // beta-readiness was derived from `external_receipt_checked` (the
-        // signature-verification boolean) while the count was derived from
-        // receipt presence — two different sources of truth. This test builds
-        // the availability evidence with NO external receipt and asserts the
-        // commitment-only shape: count 0, not checked, not beta-ready, not
-        // production-ready. The previous bug only surfaced when a receipt was
-        // present but unsigned; that path is covered by the signed-production
-        // test above. Here we pin the no-receipt invariant directly.
-        let session_id = [0xaa; 32];
-        let session_id_hex = hex::encode(session_id);
-        let court_bundle_hash_hex = hex::encode([0xbb; 32]);
-        let molecule_hash_hex = hex::encode([0xcc; 32]);
-        let segment_root_hex = hex::encode([0xdd; 32]);
-        let proof_hex = hex::encode([0xee; 32]);
-
-        let availability = da_availability_evidence(
-            &session_id_hex,
-            &court_bundle_hash_hex,
-            &molecule_hash_hex,
-            &segment_root_hex,
-            &proof_hex,
-            true,
-            None,
-            None,
-        )
-        .expect("commitment-only availability evidence");
-
-        assert_eq!(availability.external_receipt_count, 0, "no receipt -> count 0");
-        assert!(availability.external_receipt.is_none(), "no receipt -> None");
-        assert!(!availability.external_receipt_checked, "no receipt -> not checked");
-        assert!(!availability.testnet_beta_ready, "no receipt -> not beta-ready");
-        assert!(!availability.production_ready, "no receipt -> not production-ready");
-    }
-
-    #[test]
-    fn session_external_da_receipt_helper_feeds_production_da_manifest() {
-        let open = session_open_fixture("static-closed-committee").expect("open session");
-        let open_path = write_temp_json("external-da-helper-open", &open);
-        let commit = session_commit_from_open(open_path.clone(), 0).expect("commit session");
-        let _ = std::fs::remove_file(open_path);
-        let commit_path = write_temp_json("external-da-helper-commit", &commit);
-        let bundle = session_court_bundle(commit_path.clone(), 0).expect("court bundle");
-        let _ = std::fs::remove_file(commit_path);
-        let bundle_path = write_temp_json("external-da-helper-court", &bundle);
-        let in_memory_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("in-memory DA manifest");
-        let signing_request = session_external_da_receipt(SessionExternalDaReceiptArgs {
-            payload_hash: in_memory_manifest.molecule_transaction_hash.clone(),
-            segment_root: in_memory_manifest.segment_root.clone(),
-            provider: "fixture-external-da".to_owned(),
-            namespace: "session-court-payloads".to_owned(),
-            receipt_id: "helper-receipt-0001".to_owned(),
-            availability_window: "production-retention-30d".to_owned(),
-            service_level: Some("production".to_owned()),
-            retention_seconds: Some(30 * 24 * 60 * 60),
-            retrieval_endpoint: Some("https://da.example.invalid/session-court-payloads/helper-receipt-0001".to_owned()),
-            audit_log_commitment: Some(format!("0x{}", "a5".repeat(32))),
-            provider_secret_key: None,
-            provider_pubkey_hash: None,
-            provider_signature: None,
-            signing_request: true,
-            out: None,
-        })
-        .expect("generate external DA signing request");
-        let provider_message_hash =
-            signing_request["provider_message_hash"].as_str().and_then(parse_hex_32).expect("provider message hash");
-        let (provider_pubkey_hash, provider_signature) =
-            sign_recoverable_pubkey_hash20(&provider_message_hash, &"44".repeat(32), "external DA provider secret key")
-                .expect("external provider signs request");
-        assert_eq!(signing_request["schema"], "myelin-external-da-receipt-signing-request");
-        let receipt = session_external_da_receipt(SessionExternalDaReceiptArgs {
-            payload_hash: in_memory_manifest.molecule_transaction_hash.clone(),
-            segment_root: in_memory_manifest.segment_root.clone(),
-            provider: "fixture-external-da".to_owned(),
-            namespace: "session-court-payloads".to_owned(),
-            receipt_id: "helper-receipt-0001".to_owned(),
-            availability_window: "production-retention-30d".to_owned(),
-            service_level: Some("production".to_owned()),
-            retention_seconds: Some(30 * 24 * 60 * 60),
-            retrieval_endpoint: Some("https://da.example.invalid/session-court-payloads/helper-receipt-0001".to_owned()),
-            audit_log_commitment: Some(format!("0x{}", "a5".repeat(32))),
-            provider_secret_key: None,
-            provider_pubkey_hash: Some(provider_pubkey_hash),
-            provider_signature: Some(provider_signature),
-            signing_request: false,
-            out: None,
-        })
-        .expect("generate externally signed external DA receipt");
-        let receipt_path = write_temp_json("external-da-helper-receipt", &receipt);
-        let certificate_path = write_provider_neutral_da_certificate(&in_memory_manifest, "external-da-helper");
-        let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-helper-store-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&storage_dir);
-
-        let manifest = session_da_manifest_with_certificate(
-            bundle_path.clone(),
-            Some(storage_dir.clone()),
-            Some(receipt_path.clone()),
-            Some(certificate_path.clone()),
-            Some(100),
-        )
-        .expect("DA manifest accepts helper-generated receipt and provider-neutral certificate");
-
-        let _ = std::fs::remove_file(receipt_path);
-        let _ = std::fs::remove_file(certificate_path);
-        let _ = std::fs::remove_file(bundle_path);
-        let _ = std::fs::remove_dir_all(storage_dir);
-
-        let receipt = manifest.availability.external_receipt.as_ref().expect("external receipt");
-        assert!(receipt.provider_signature_verified);
-        assert!(receipt.production_guarantee_checked);
-        assert!(manifest.availability.external_receipt_checked);
-        assert!(manifest.availability.production_ready);
-    }
-
-    #[test]
     fn session_da_manifest_rejects_tampered_segment_root() {
         let open = session_open_fixture("static-closed-committee").expect("open session");
         let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-tamper-{}.json", std::process::id()));
@@ -16633,7 +15705,7 @@ mod tests {
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-tamper-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
 
-        let mut manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let mut manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         manifest.segment_root = "11".repeat(32);
 
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-manifest-tamper-{}.json", std::process::id()));
@@ -16663,7 +15735,7 @@ mod tests {
             std::env::temp_dir().join(format!("myelin-session-court-da-availability-tamper-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
 
-        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let cases: [DaManifestTamperCase; 9] = [
             ("availability-commitment", |manifest| manifest.availability.availability_commitment = "22".repeat(32)),
             ("availability-payload-hash", |manifest| manifest.availability.payload_hash = "23".repeat(32)),
@@ -16691,6 +15763,31 @@ mod tests {
     }
 
     #[test]
+    fn provider_certificate_is_reverified_on_manifest_import() {
+        let (manifest, bundle, certificate_path, storage) = production_da_manifest_fixture("certificate-import");
+        let path = write_temp_json("certificate-import-manifest", &manifest);
+        assert!(verify_session_da_manifest(path.clone(), bundle.clone(), Some(storage.clone())).unwrap().valid);
+        for corruption in 0..3 {
+            let mut changed = manifest.clone();
+            let evidence = changed.availability.provider_neutral_certificate.as_mut().unwrap();
+            match corruption {
+                0 => evidence.certificate.receipts[0].signature[0] ^= 1,
+                1 => evidence.certificate.blob.chunk_index += 1,
+                _ => evidence.evaluation_epoch = u64::MAX,
+            }
+            fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(verify_session_da_manifest(path.clone(), bundle.clone(), Some(storage.clone())).is_err());
+        }
+        let mut obsolete = serde_json::to_value(&manifest).unwrap();
+        obsolete["availability"]["external_receipt"] = serde_json::json!({});
+        assert!(serde_json::from_value::<SessionDaManifestReport>(obsolete).is_err());
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(bundle);
+        let _ = fs::remove_file(certificate_path);
+        let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
     fn session_da_anchor_package_binds_verified_manifest_into_ckb_projectable_celltx() {
         let open = session_open_fixture("static-closed-committee").expect("open session");
         let open_path = std::env::temp_dir().join(format!("myelin-session-open-da-anchor-{}.json", std::process::id()));
@@ -16705,7 +15802,7 @@ mod tests {
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
         let storage_dir = std::env::temp_dir().join(format!("myelin-session-da-anchor-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&storage_dir);
-        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone()), None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), Some(storage_dir.clone())).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-anchor-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
@@ -16763,7 +15860,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-submit-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-submit-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
@@ -16812,7 +15909,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-rpc-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-rpc-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
@@ -16857,7 +15954,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-stale-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-stale-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
@@ -16888,7 +15985,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-rpc-mismatch-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-rpc-mismatch-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let package = session_da_anchor_package(manifest_path.clone(), bundle_path.clone()).expect("DA anchor package");
@@ -16921,7 +16018,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-da-anchor-tamper-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let manifest_path = std::env::temp_dir().join(format!("myelin-session-da-anchor-tamper-{}.json", std::process::id()));
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
@@ -16953,7 +16050,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
 
@@ -17091,7 +16188,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-economics-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-economics-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
 
@@ -17145,7 +16242,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-package-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-package-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -17443,7 +16540,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-submit-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-submit-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -17498,7 +16595,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-rpc-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-rpc-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -17549,7 +16646,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-settle-rpc-mismatch-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-settle-rpc-mismatch-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -19918,7 +19015,8 @@ mod tests {
         let mut submission =
             serde_json::from_slice::<Value>(&std::fs::read(&base_submission_path).expect("read final script submission"))
                 .expect("final script submission JSON");
-        let (da_manifest, bundle_path, receipt_path, storage_dir) = production_da_manifest_fixture("readiness-final-l1-production-da");
+        let (da_manifest, bundle_path, certificate_path, storage_dir) =
+            production_da_manifest_fixture("readiness-final-l1-production-da");
         submission["da_manifest"] = serde_json::to_value(&da_manifest).expect("DA manifest JSON");
         let submission_path = write_temp_json("readiness-final-l1-production-da-manifest", &submission);
         bind_readiness_submission(&submission_path, &mut context, &mut economics, &mut inclusion);
@@ -19950,7 +19048,7 @@ mod tests {
         let _ = std::fs::remove_file(base_submission_path);
         let _ = std::fs::remove_file(submission_path);
         let _ = std::fs::remove_file(bundle_path);
-        let _ = std::fs::remove_file(receipt_path);
+        let _ = std::fs::remove_file(certificate_path);
         let _ = std::fs::remove_dir_all(storage_dir);
 
         assert!(report.final_l1_script_submission_ready);
@@ -20516,7 +19614,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-package-tamper-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-package-tamper-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -20559,7 +19657,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-authority-lineage-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-authority-lineage-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -20602,7 +19700,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-authority-auth-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-authority-auth-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
         let intent = session_settlement_intent(bundle_path.clone(), da_manifest_path.clone(), "disputed-close", 60_000, 60_000)
@@ -20684,7 +19782,7 @@ mod tests {
         let _ = std::fs::remove_file(commit_path);
         let bundle_path = std::env::temp_dir().join(format!("myelin-session-court-premature-{}.json", std::process::id()));
         std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let da_manifest = session_da_manifest(bundle_path.clone(), None, None).expect("DA manifest");
+        let da_manifest = session_da_manifest(bundle_path.clone(), None).expect("DA manifest");
         let da_manifest_path = std::env::temp_dir().join(format!("myelin-session-da-premature-{}.json", std::process::id()));
         std::fs::write(&da_manifest_path, serde_json::to_vec(&da_manifest).unwrap()).unwrap();
 

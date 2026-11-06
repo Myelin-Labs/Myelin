@@ -31,7 +31,7 @@
 
 // Source types
 #define SOURCE_INPUT         0x01
-#define SOURCE_GROUP_INPUT   0x0100
+#define SOURCE_GROUP_INPUT   0x0100000000000001
 
 // Field types for LOAD_INPUT_BY_FIELD
 #define FIELD_SINCE          0x01

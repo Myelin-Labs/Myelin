@@ -7,8 +7,7 @@
 //!
 //! This module implements the canonical Molecule wire layout for Myelin's
 //! CKB-style VM-facing structures. Molecule ABI `0x8001` is the launch/public
-//! VM ABI. Non-Molecule VM object ABI versions are rejected by the runtime
-//! negotiator.
+//! VM ABI. Non-Molecule VM object ABI versions are rejected by the runtime.
 
 use crate::celltx::{CellDep, CellInput, CellOutput, CellTx, DepType, OutPoint, Script};
 use crate::serialization::{SerializationError, VmAbiError};
@@ -68,7 +67,7 @@ impl CkbSecp256k1Blake160SighashAllLockConfig {
 
     /// Build a config using a CKB dep-group cell dependency.
     pub fn with_dep_group(type_hash: [u8; 32], dep_group_out_point: OutPoint) -> Self {
-        Self::new(ckb_secp256k1_blake160_sighash_all_type_hash(type_hash), ckb_dep_group_cell_dep(dep_group_out_point))
+        Self::new(type_hash, ckb_dep_group_cell_dep(dep_group_out_point))
     }
 
     /// Return the configured standard lock cell dependency.
@@ -216,12 +215,6 @@ impl CkbSecp256k1Blake160MultisigAllLockConfig {
     }
 }
 
-/// Identity helper that documents that the argument must be the CKB system
-/// script type hash, not a Myelin Blake3 script hash.
-pub fn ckb_secp256k1_blake160_sighash_all_type_hash(type_hash: [u8; 32]) -> [u8; 32] {
-    type_hash
-}
-
 /// Build a CKB dep-group cell dependency.
 pub fn ckb_dep_group_cell_dep(dep_group_out_point: OutPoint) -> CellDep {
     CellDep { out_point: dep_group_out_point, dep_type: DepType::DepGroup }
@@ -238,21 +231,6 @@ pub fn ckb_secp256k1_blake160_sighash_all_lock_script(
 /// Build a CKB built-in TYPE_ID script from already-known 32-byte args.
 pub fn ckb_type_id_script(args: &[u8; 32]) -> Script {
     Script::new(CKB_TYPE_ID_CODE_HASH, CKB_SCRIPT_HASH_TYPE_TYPE, args.to_vec())
-}
-
-/// Molecule serializer for VM-facing data.
-pub struct MoleculeSerializer;
-
-impl MoleculeSerializer {
-    /// Molecule VM ABI support is available in this build.
-    pub const fn is_available() -> bool {
-        true
-    }
-
-    /// Molecule-based VM ABI.
-    pub const fn abi_version() -> u16 {
-        0x8001
-    }
 }
 
 /// Molecule serialization errors.
@@ -1715,12 +1693,6 @@ mod tests {
             extra_hash: [0x70; 32],
             dao: [0x80; 32],
         }
-    }
-
-    #[test]
-    fn molecule_is_available() {
-        assert!(MoleculeSerializer::is_available());
-        assert_eq!(MoleculeSerializer::abi_version(), 0x8001);
     }
 
     #[test]

@@ -14,7 +14,7 @@ finalisation.
 The repository is cloned at:
 
 ```text
-$HOME/RustroverProjects/teeworlds
+${MYELIN_ROOT}/../teeworlds
 ```
 
 The recommended acceptance gate is:
@@ -24,19 +24,20 @@ cd $MYELIN_ROOT
 scripts/myelin_teeworlds_acceptance.sh
 ```
 
-For the full Myelin release audit, including the stale-semantics scan,
-dependency check, focused Rust tests, runtime smoke, Session L2 checks, and
-both consensus modes, run:
+Run this integration through the shared evidence entry point:
 
 ```bash
-cd $MYELIN_ROOT
-scripts/myelin_production_gate.sh
+cd "$MYELIN_ROOT"
+scripts/myelin_production_gate.sh --lane teeworlds --out target/teeworlds-validation
 ```
+
+The core profile does not run Teeworlds. See the
+[validation profiles](operations/production-gate.md) for required release scope.
 
 By default it uses:
 
 ```text
-TEEWORLDS_ROOT=$HOME/RustroverProjects/teeworlds
+TEEWORLDS_ROOT=${MYELIN_ROOT}/../teeworlds
 OUTPUT_DIR=/tmp/myelin-teeworlds-acceptance
 TICKS=300
 CLIENTS=1
@@ -58,7 +59,7 @@ block, the VM probe succeeds, and every court-bundle verifier check passes.
 The reusable fixture entry point is the existing Rust command:
 
 ```bash
-cd $HOME/RustroverProjects/teeworlds/rust-tools
+cd ${MYELIN_ROOT}/../teeworlds/rust-tools
 cargo run --bin teeworlds-cli -- utils build-scripted-tape \
   --ticks 300 \
   --clients 1 \
@@ -102,11 +103,11 @@ cargo run -p myelin-cli -- teeworlds verify-court-bundle \
   --out reports/teeworlds-court-bundle-verify.json
 
 cargo run -p myelin-cli -- teeworlds doctor \
-  --teeworlds-root $HOME/RustroverProjects/teeworlds \
+  --teeworlds-root ${MYELIN_ROOT}/../teeworlds \
   --out reports/teeworlds-doctor.json
 
 cargo run -p myelin-cli -- teeworlds build-fixture \
-  --teeworlds-root $HOME/RustroverProjects/teeworlds \
+  --teeworlds-root ${MYELIN_ROOT}/../teeworlds \
   --replayer path/to/replayer_stripped \
   --tape path/to/tape.bin \
   --map path/to/stripped.map \
@@ -142,12 +143,12 @@ committee certificate. This is the executable court-input bundle; it is not yet
 the CKB on-chain adjudication script.
 
 The local environment now builds the real CKB replayer at
-`$HOME/RustroverProjects/teeworlds/ckb/build/replayer_stripped`. The
+`${MYELIN_ROOT}/../teeworlds/ckb/build/replayer_stripped`. The
 build requires Homebrew CMake, LLVM tools, and `ld.lld`; on this macOS machine
 the working CKB build command is:
 
 ```bash
-cd $HOME/RustroverProjects/teeworlds/ckb
+cd ${MYELIN_ROOT}/../teeworlds/ckb
 PATH="/opt/homebrew/opt/llvm/bin:$PATH" \
   make CLANG=/opt/homebrew/opt/llvm/bin/clang LD=/opt/homebrew/bin/ld.lld
 ```
@@ -231,7 +232,7 @@ consume inside an on-chain or formally specified adjudication flow.
 Local adaptation applied to the cloned test repository:
 
 ```bash
-cd $HOME/RustroverProjects/teeworlds/rust-tools
+cd ${MYELIN_ROOT}/../teeworlds/rust-tools
 cargo update -p fixed --precise 1.30.0
 cargo check
 ```

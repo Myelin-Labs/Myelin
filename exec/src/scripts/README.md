@@ -97,39 +97,6 @@ let expected_digest = [0u8; 32];
 let witness = expected_digest.into_iter().chain([0x01]).collect::<Vec<_>>();
 ```
 
-### 4. HTLC (Hash Time Locked Contract)
-
-**Source**: `fixtures/htlc.rs`
-**Binary**: `fixtures/htlc.elf` (768KB)
-
-**Features**:
-- Two spending paths:
-  1. Recipient path: secret preimage + signature
-  2. Sender timeout path: signature after timelock expires
-- Supports all four lock types (absolute/relative block number/timestamp)
-- Uses blake3 for secret hash verification
-- Uses a deterministic fixture-only signature rule in tests, not real secp256k1 verification
-
-**Script Args** (105 bytes):
-- `[0..32]`: secret_hash (blake3)
-- `[32..64]`: recipient_pubkey (32 bytes)
-- `[64..96]`: sender_pubkey (32 bytes)
-- `[96]`: lock_type (0-3)
-- `[97..105]`: lock_value (u64)
-
-**Witness Format**:
-- Recipient: `<signature (64)> <secret (32)> <0x01>`
-- Sender: `<signature (64)> <0x00>`
-
-**Usage:**
-```rust
-use myelin_exec::scripts::{htlc_code_hash, HTLC_SCRIPT};
-
-let code_hash = htlc_code_hash();
-let args = build_htlc_args(secret_hash, recipient_pubkey, sender_pubkey, lock_type, lock_value);
-let lock = Script::new(code_hash, 0, args);
-```
-
 ### 5. Always Success (Testing Only)
 
 **Code**: real RISC-V ELF fixture
@@ -148,90 +115,9 @@ let lock = Script {
 };
 ```
 
-### 6. Secp256k1 + Blake3 Lock (Production-Ready)
-
-**File**: `secp256k1_blake3_lock.c`
-
-**Functionality**:
-- Verifies secp256k1 signatures using **blake3** for hashing (Myelin-specific!)
-- Args: pubkey hash (20 bytes, blake3 of pubkey)
-- Witness: recoverable signature (65 bytes, r + s + v), optionally followed by 1-byte sighash flag
-- Loads the canonical per-input ECDSA sighash from VM syscall `3004`
-- Verifies every witness in the current input group against syscall `3002`
-- Fail-closed semantics: returns 1 (failure) on any error path
-
-**Security Features**:
-- Strict `LOAD_SCRIPT` args boundary validation (`args_len == 20` + out-of-bounds rejection)
-- Low-S signature enforcement (syscall 3002 rejects non-canonical high-S signatures)
-- Canonical ECDSA sighash binding (per-input via syscall 3004)
-
-**Build**:
-```bash
-# Using RISC-V GNU toolchain
-riscv64-unknown-elf-gcc -O3 -nostdlib -nostartfiles \
-    -fno-builtin-printf -fno-builtin-memcmp \
-    -Wl,-Ttext=0x0 \
-    -o secp256k1_blake3_lock.elf \
-    secp256k1_blake3_lock.c
-
-riscv64-unknown-elf-objcopy -O binary \
-    secp256k1_blake3_lock.elf \
-    secp256k1_blake3_lock.bin
-
-# Get code hash
-cargo run -p myelin-exec --example fixture_hashes -- secp256k1_blake3_lock.bin
-```
-
-**Verification**:
-- Script-level regression tests: `cargo test -p myelin-exec --lib`
-- Consensus integration: `cargo test -p myelin-consensus --features vm --lib`
-- Syscall 3002 tests: `exec/src/vm/syscalls/secp256k1_verify.rs` (5 test cases covering valid signatures, tampered signatures, invalid recovery ids, high-S attacks)
-
-**Build**:
-```bash
-# Install RISC-V toolchain
-# https://github.com/riscv-collab/riscv-gnu-toolchain
-
-# Compile
-riscv64-unknown-elf-gcc -O3 -nostdlib -nostartfiles \
-    -fno-builtin-printf -fno-builtin-memcmp \
-    -Wl,-Ttext=0x0 \
-    -o secp256k1_blake3_lock.elf \
-    secp256k1_blake3_lock.c
-
-# Extract binary
-riscv64-unknown-elf-objcopy -O binary \
-    secp256k1_blake3_lock.elf \
-    secp256k1_blake3_lock.bin
-
-# Get code hash (for use in transactions)
-blake3sum secp256k1_blake3_lock.bin
-
-# If blake3sum/b3sum is unavailable, use workspace helper
-cargo run -p myelin-exec --example fixture_hashes -- secp256k1_blake3_lock.bin
-
-# For fixture ELFs, use the batch builder (also writes CODE_HASHES.blake3)
-bash exec/src/scripts/fixtures/build_fixtures.sh
-```
-
-**Usage**:
-```rust
-// In transaction
-let pubkey = /* secp256k1 public key (33 bytes compressed) */;
-let pubkey_hash = &blake3::hash(&pubkey).as_bytes()[0..20];
-
-let lock = Script {
-    code_hash: blake3::hash(&secp256k1_lock_binary).into(),
-    hash_type: 0,
-    args: pubkey_hash.to_vec(),
-};
-
-let output = CellOutput {
-    capacity: 10000,
-    lock,
-    type_: None,
-};
-```
+The obsolete custom-ABI HTLC and secp256k1 lock fixtures have been removed.
+Fixtures use the canonical CKB group-source encoding. Signature syscalls are
+covered by their VM tests; these test scripts do not constitute deployable locks.
 
 ## Key Differences from CKB
 

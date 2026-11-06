@@ -14,6 +14,19 @@ pub(crate) fn schema_hash(kind: ConsensusKind) -> Hash32 {
 }
 
 pub(crate) fn encode(proof: &FinalityProof) -> Result<Vec<u8>> {
+    // Validate caller-owned containers before creating an owned wire copy.
+    match proof {
+        FinalityProof::StaticClosedCommittee(certificate) => {
+            if certificate.signatures.len() > MAX_SIGNATURES {
+                return Err(ConsensusError::ProofCodec("too many committee signatures".into()));
+            }
+            for signature in &certificate.signatures {
+                validate_id(&signature.validator_id)?;
+            }
+        }
+        FinalityProof::ProofOfAuthority(seal) => validate_id(&seal.authority_id)?,
+        FinalityProof::Tendermint(decision) => validate_decision(decision)?,
+    }
     let payload = ProofWire::from(proof);
     validate_payload(&payload)?;
     let payload_bytes = serde_json::to_vec(&payload).map_err(codec)?;
@@ -158,22 +171,24 @@ fn validate_payload(payload: &ProofWire) -> Result<()> {
             }
             Ok(())
         }
-        ProofWire::Tendermint { decision } => {
-            if decision.precommits.len() > MAX_SIGNATURES {
-                return Err(ConsensusError::ProofCodec("too many Tendermint precommits".to_owned()));
-            }
-            for TendermintVote { step, validator_id, signature, .. } in &decision.precommits {
-                if *step != TendermintStep::Precommit {
-                    return Err(ConsensusError::ProofCodec("Tendermint decision contains a non-precommit vote".to_owned()));
-                }
-                validate_id(validator_id)?;
-                if signature.len() != 64 {
-                    return Err(ConsensusError::ProofCodec("Tendermint signature must be exactly 64 bytes".to_owned()));
-                }
-            }
-            Ok(())
+        ProofWire::Tendermint { decision } => validate_decision(decision),
+    }
+}
+
+fn validate_decision(decision: &TendermintDecision) -> Result<()> {
+    if decision.precommits.len() > MAX_SIGNATURES {
+        return Err(ConsensusError::ProofCodec("too many Tendermint precommits".to_owned()));
+    }
+    for TendermintVote { step, validator_id, signature, .. } in &decision.precommits {
+        if *step != TendermintStep::Precommit {
+            return Err(ConsensusError::ProofCodec("Tendermint decision contains a non-precommit vote".to_owned()));
+        }
+        validate_id(validator_id)?;
+        if signature.len() != 64 {
+            return Err(ConsensusError::ProofCodec("Tendermint signature must be exactly 64 bytes".to_owned()));
         }
     }
+    Ok(())
 }
 
 fn validate_signatures(signatures: &[SignatureWire]) -> Result<()> {

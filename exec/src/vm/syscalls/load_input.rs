@@ -8,7 +8,6 @@ use super::utils::{store_data, INDEX_OUT_OF_BOUND};
 use super::{InputField, Source, LOAD_INPUT_BY_FIELD_SYSCALL_NUMBER, LOAD_INPUT_SYSCALL_NUMBER};
 use crate::celltx::{CellInput, CellTx};
 use crate::serialization::molecule_compat::{serialize_cell_input_molecule, serialize_outpoint_molecule};
-use crate::serialization::VmAbiFormat;
 use crate::vm::{transferred_byte_cycles, VmSemantics};
 use ckb_vm::{
     registers::{A0, A3, A4, A5, A7},
@@ -22,19 +21,12 @@ use std::sync::Arc;
 pub struct LoadInput {
     tx: Arc<CellTx>,
     group_input_indices: Vec<usize>,
-    abi_format: VmAbiFormat,
     semantics: VmSemantics,
 }
 
 impl LoadInput {
     pub fn new(tx: Arc<CellTx>, group_input_indices: Vec<usize>) -> Self {
-        Self { tx, group_input_indices, abi_format: VmAbiFormat::Molecule, semantics: VmSemantics::MyelinExtended }
-    }
-
-    /// Select the VM ABI wire format used by full input loads.
-    pub fn with_abi_format(mut self, abi_format: VmAbiFormat) -> Self {
-        self.abi_format = abi_format;
-        self
+        Self { tx, group_input_indices, semantics: VmSemantics::MyelinExtended }
     }
 
     pub fn with_semantics(mut self, semantics: VmSemantics) -> Self {
@@ -58,9 +50,7 @@ impl LoadInput {
     }
 
     fn serialize_input(&self, input: &CellInput) -> Result<Vec<u8>, VMError> {
-        match self.abi_format {
-            VmAbiFormat::Molecule => serialize_cell_input_molecule(input).map_err(|e| VMError::External(e.to_string())),
-        }
+        serialize_cell_input_molecule(input).map_err(|e| VMError::External(e.to_string()))
     }
 }
 
@@ -78,7 +68,7 @@ impl<M: SupportMachine> Syscalls<M> for LoadInput {
         }
 
         let index = machine.registers()[A3].to_u64() as usize;
-        let source = Source::parse_from_u64_for_semantics(machine.registers()[A4].to_u64(), self.semantics)?;
+        let source = Source::parse_from_u64(machine.registers()[A4].to_u64())?;
 
         // Get input
         let input = match self.get_input(source, index) {
@@ -112,7 +102,6 @@ impl<M: SupportMachine> Syscalls<M> for LoadInput {
 mod tests {
     use super::*;
     use crate::serialization::molecule_compat::serialize_cell_input_molecule;
-    use crate::serialization::VmAbiFormat;
     use crate::vm::syscalls::SUCCESS;
     use crate::vm::{ScriptVersion, VmSemantics};
     use ckb_vm::{
@@ -145,7 +134,7 @@ mod tests {
         machine.set_register(A4, 0x01);
         machine.set_register(A7, LOAD_INPUT_SYSCALL_NUMBER);
 
-        let mut syscall = LoadInput::new(tx, vec![0]).with_abi_format(VmAbiFormat::Molecule);
+        let mut syscall = LoadInput::new(tx, vec![0]);
         let handled = syscall.ecall(&mut machine).expect("load input syscall should succeed");
 
         assert!(handled);
@@ -178,7 +167,7 @@ mod tests {
         machine.set_register(A4, Source::Input as u64);
         machine.set_register(A7, LOAD_INPUT_SYSCALL_NUMBER);
 
-        let mut syscall = LoadInput::new(tx, vec![0]).with_abi_format(VmAbiFormat::Molecule);
+        let mut syscall = LoadInput::new(tx, vec![0]);
         let handled = syscall.ecall(&mut machine).expect("load input syscall should succeed");
 
         assert!(handled);
