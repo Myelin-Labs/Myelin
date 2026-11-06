@@ -10,19 +10,48 @@ Branch: `codex/p1-issues`.
 
 | Issue | Deliverable | Status |
 | --- | --- | --- |
-| #7 | Versioned cross-session protocol ADR, failure model, golden vectors | RFC and reference vectors implemented locally; publication pending |
-| #8 | Isolated handoff gates, competing consumers, restart and atomicity checks | Implemented and verified locally; publication pending |
-| #9 | Genesis-bound aggregate resource budgets and host isolation | Protocol budgets and Linux worker verified locally; bounded archive/recovery and isolated bundle replay are integrated, with real filesystem-capacity recovery evidence; publication pending |
-| #10 | Replayable application authorization of issued protocol effects | Execution/replay boundary, trust classes, reusable scarce/copyable policies and adversarial checks implemented locally; trusted-code archive replay covers transfer and cancellation/refund; archived transfer replay also passes isolation/empty-container restore; complete historical build provenance is retained with #13; publication pending |
-| #11 | Shared-store lock/consume/cancel/refund reference state machine | Signed payloads, lock/intake, competing targets, cancellation/refund and consumed-lock retirement implemented locally; exact continuation now inherits outstanding obligations with bounded canonical ownership, fresh cancellation authorization, CLI/restart/crash and archive replay checks; publication pending |
-| #12 | Durable command journal and unknown-outcome reconciliation | Durable original-command storage, reservations, reconstruction and exact receipt/business-result recovery implemented locally; signed later-epoch absence recovery and remote submission/reconnect adapter are implemented; standalone inventory/turn/fixed-tick examples now pass local crash/replay acceptance; both downstream integrations and independent local release artifacts are verified under #19; publication pending |
-| #13 | Portable offline evidence bundles and replayer manifests | Bounded inventory/export, independent trust, protocol dependencies, finality audit, pinned sandbox replay and offline OCI restore pass; complete typed build kits export/restore and reproduce the original native binaries offline, whose original verifier replays the same history/result; all three command/fixed-tick example archives now pass original-program replay after source deletion; local requirement mapping recorded below; publication pending |
-| #14 | Successor compatibility, migration and command inheritance | Typed continuation/compatibility/migration, atomic converted genesis, authority separation and outstanding-obligation inheritance implemented locally; isolated historical bytecode migration and signed-invalid-output rejection pass after source deletion; full target/predecessor conflict checks, successful/unsupported CLI examples and crash checks pass; publication pending |
-| #15 | Authoritative cross-host writer fencing and migration drills | Single-authority canonical gateway, epoch/watermark enforcement and certified effect ledger implemented locally; mTLS service/client and journal adapter pass real local network/process fault drills; explicit shared canonical ledger and signed remote claim terminal reconciliation pass lost-response/racing-terminal/reopen drills; original acceptance clauses are mapped below; publication pending |
-| #18 | Archive retention, bounded recovery and dependency preservation | Bounded audit/replay, checkpoint lookup, hot-to-cold retention, exact pin rebinding, online backup/restore and terminal payload compaction implemented locally; Linux superseded archive payload collection checks owned databases/checkpoints, protected roots, active readers and complete replacement dependency coverage, with restart after process death; final publication now reserves its complete validation sweep before reading, exposing the next finite grant and preventing repeated-prefix livelock; long-history, many-session and 2/8/32-authority-rotation measurements and reference RPO/RTO objectives recorded; publication pending |
-| #19 | Shared game adapters, conformance and downstream adoption | Shared command/fixed-tick profile, query and result adapter with three native examples implemented locally; explicit tick clock, integer/RNG policy and replayable control events use the same journal/recovery contracts; Chrome/WASM example-rule conformance passes exact native roots/results and checkpoint restoration; all three examples have complete build/runtime archives and isolated original-program replay; Chess and Neon Miner now use shared adapters/journal/fenced recovery in separate worktrees; real HTTP retry/restart/isolation, explicit Chess seat admission, complete Miner campaign and original-executable replay pass; independently pinned source packages and actual read-only release container builds/restart/offline replay pass locally; publication pending |
-| #20 | Reproducible workload, fault, recovery and isolation measurements | Existing entrypoint covers inventory/turn/tick rules, strict CellTx and authorized match-to-inventory rewards at three scales, four triggers and shared/separate processes; 72 normal host cases and history/fault drills, 24 strict CellTx cases, 27 reward cases and two capacity cases pass; controlled TCP evidence providers pass slow/offline/lost-reply/restart drills; actual ext4 capacity exhaustion passes both layouts, independent services progress during the fault, and all original receipts survive remount/restart/archive replay; nine reward/provider and eight cross-class regressions pass on the quota source; existing authority/network drills satisfy cross-worker fencing without another gate; real Chess SQLite write outage preserves canonical receipts and independent progress; 30 storage-breakdown cases pass; original acceptance mapping is complete below; publication pending |
-| #21 | Portable CI acceptance lanes and exact release evidence | One validation entry point selects required profiles/lanes and records exact source, commands, artifacts and pass/fail/skip outcomes; Linux/macOS core workflow implemented locally; a frozen core snapshot passes in a fresh offline container, current local core passes and real browser evidence is recorded separately; local lane-scope/evidence mapping recorded below; publication pending; hosted workflow execution has not been observed |
+| #7 | Versioned cross-session protocol ADR, failure model, golden vectors | RFC and reference vectors implemented locally; published in PR #23 |
+| #8 | Isolated handoff gates, competing consumers, restart and atomicity checks | Implemented and verified locally; published in PR #23 |
+| #9 | Genesis-bound aggregate resource budgets and host isolation | Protocol budgets and Linux worker verified locally; bounded archive/recovery and isolated bundle replay are integrated, with real filesystem-capacity recovery evidence; published in PR #23 |
+| #10 | Replayable application authorization of issued protocol effects | Execution/replay boundary, trust classes, reusable scarce/copyable policies and adversarial checks implemented locally; trusted-code archive replay covers transfer and cancellation/refund; archived transfer replay also passes isolation/empty-container restore; complete historical build provenance is retained with #13; published in PR #23 |
+| #11 | Shared-store lock/consume/cancel/refund reference state machine | Signed payloads, lock/intake, competing targets, cancellation/refund and consumed-lock retirement implemented locally; exact continuation now inherits outstanding obligations with bounded canonical ownership, fresh cancellation authorization, CLI/restart/crash and archive replay checks; published in PR #23 |
+| #12 | Durable command journal and unknown-outcome reconciliation | Durable original-command storage, reservations, reconstruction and exact receipt/business-result recovery implemented locally; signed later-epoch absence recovery and remote submission/reconnect adapter are implemented; standalone inventory/turn/fixed-tick examples now pass local crash/replay acceptance; both downstream integrations and independent local release artifacts are verified under #19; published in PR #23 |
+| #13 | Portable offline evidence bundles and replayer manifests | Bounded inventory/export, independent trust, protocol dependencies, finality audit, pinned sandbox replay and offline OCI restore pass; complete typed build kits export/restore and reproduce the original native binaries offline, whose original verifier replays the same history/result; all three command/fixed-tick example archives now pass original-program replay after source deletion; local requirement mapping recorded below; published in PR #23 |
+| #14 | Successor compatibility, migration and command inheritance | Typed continuation/compatibility/migration, atomic converted genesis, authority separation and outstanding-obligation inheritance implemented locally; isolated historical bytecode migration and signed-invalid-output rejection pass after source deletion; full target/predecessor conflict checks, successful/unsupported CLI examples and crash checks pass; published in PR #23 |
+| #15 | Authoritative cross-host writer fencing and migration drills | Single-authority canonical gateway, epoch/watermark enforcement and certified effect ledger implemented locally; mTLS service/client and journal adapter pass real local network/process fault drills; explicit shared canonical ledger and signed remote claim terminal reconciliation pass lost-response/racing-terminal/reopen drills; original acceptance clauses are mapped below; published in PR #23 |
+| #18 | Archive retention, bounded recovery and dependency preservation | Bounded audit/replay, checkpoint lookup, hot-to-cold retention, exact pin rebinding, online backup/restore and terminal payload compaction implemented locally; Linux superseded archive payload collection checks owned databases/checkpoints, protected roots, active readers and complete replacement dependency coverage, with restart after process death; final publication now reserves its complete validation sweep before reading, exposing the next finite grant and preventing repeated-prefix livelock; long-history, many-session and 2/8/32-authority-rotation measurements and reference RPO/RTO objectives recorded; published in PR #23 |
+| #19 | Shared game adapters, conformance and downstream adoption | Shared command/fixed-tick profile, query and result adapter with three native examples implemented locally; explicit tick clock, integer/RNG policy and replayable control events use the same journal/recovery contracts; Chrome/WASM example-rule conformance passes exact native roots/results and checkpoint restoration; all three examples have complete build/runtime archives and isolated original-program replay; Chess and Neon Miner now use shared adapters/journal/fenced recovery in separate worktrees; real HTTP retry/restart/isolation, explicit Chess seat admission, complete Miner campaign and original-executable replay pass; independently pinned source packages and actual read-only release container builds/restart/offline replay pass locally; published in PR #23 |
+| #20 | Reproducible workload, fault, recovery and isolation measurements | Existing entrypoint covers inventory/turn/tick rules, strict CellTx and authorized match-to-inventory rewards at three scales, four triggers and shared/separate processes; 72 normal host cases and history/fault drills, 24 strict CellTx cases, 27 reward cases and two capacity cases pass; controlled TCP evidence providers pass slow/offline/lost-reply/restart drills; actual ext4 capacity exhaustion passes both layouts, independent services progress during the fault, and all original receipts survive remount/restart/archive replay; nine reward/provider and eight cross-class regressions pass on the quota source; existing authority/network drills satisfy cross-worker fencing without another gate; real Chess SQLite write outage preserves canonical receipts and independent progress; 30 storage-breakdown cases pass; original acceptance mapping is complete below; published in PR #23 |
+| #21 | Portable CI acceptance lanes and exact release evidence | One validation entry point selects required profiles/lanes and records exact source, commands, artifacts and pass/fail/skip outcomes; Linux/macOS core workflow implemented locally; a frozen core snapshot passes in a fresh offline container, current local core passes and real browser evidence is recorded separately; local lane-scope/evidence mapping recorded below; published in PR #23; hosted execution and current check status are linked below |
+
+## Publication and hosted validation
+
+The implementation and all 63 original acceptance mappings are published in
+[Myelin PR #23](https://github.com/Myelin-Labs/Myelin/pull/23). Downstream adoption
+is published independently in [Chess PR #1](https://github.com/UTXOPlay/myelin-chess/pull/1)
+and [Neon Miner PR #1](https://github.com/UTXOPlay/myelin-neon-miner/pull/1).
+Miner preserves the pre-existing UI changes in a separate signed baseline commit.
+Publication here means reviewable source and evidence; it does not imply a merged
+main branch, a production deployment, or a larger release-profile pass.
+
+The first hosted attempt could not start its retired macOS 14 runner. After
+selecting macOS 15, [run 42257169685](https://github.com/Myelin-Labs/Myelin/actions/runs/42257169685)
+passed formatting and strict Clippy on both platforms but failed workspace tests.
+Ubuntu 22.04's bubblewrap lacked --disable-userns; its replacement is the upstream
+0.13.1 release, built after SHA-256 verification without weakening the sandbox.
+The macOS image selected OpenSSL 1.1.1w. Its default configuration and the fixture
+command both supplied basicConstraints, producing an invalid duplicate extension.
+The same CertificateParseError was reproduced locally at the same test line.
+A fixture-owned minimal OpenSSL configuration removes the ambient extension.
+All nine existing authority-network tests then passed with OpenSSL 1.1.1w and
+4.0.3; no tests, gates or version branches were added.
+
+Those repairs are signed commit 8fb2c7bf66578c913a9fe82377a9a8cb02cbd6c5.
+The [PR checks](https://github.com/Myelin-Labs/Myelin/pull/23/checks) carry the
+current hosted result; each uploaded report binds its own exact checkout and
+artifacts. These scoped repair results do not replace the complete hosted core
+outcome. Earlier failures remain failures, and the frozen local campaigns below
+retain their original source identities.
 
 ## Scope fidelity
 
@@ -132,7 +161,7 @@ the source claim terminal. Reopen preserves Consumed/Retired/Cancelled/Reclaimed
 outcomes and total assets; both transfer applications replay to their exact roots.
 This uses the existing network suite and transfer executor, without a new lane.
 Local implementation/evidence is complete for these declared #15 boundaries;
-publication remains pending. Application deployment and #20 latency measurements
+the implementation is published in PR #23. Application deployment and #20 latency measurements
 are separately scoped, not implicit claims of these drills.
 
 The same retained fencing evidence satisfies #20's explicit "cross-worker fencing
@@ -873,6 +902,6 @@ keys. Physical multi-host deployment and official application recognition were n
 exercised; they are not extra acceptance gates for #13/#21. CKB settlement and
 adoption by two independent downstream games retain their separately declared scope.
 At that earlier validation, archive GC and long-history measurements remained
-open. The newer collection and measurement work is tracked above; multi-epoch
-dependency and remaining deployment measurements are outstanding.
-The overall P1 goal remains active.
+open. The newer collection, multi-epoch and workload measurements are tracked above
+with their own exact source and report identities. Deployment qualification
+outside these reference workloads remains a separate operator responsibility.
