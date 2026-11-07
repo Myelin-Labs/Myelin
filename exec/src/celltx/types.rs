@@ -78,7 +78,7 @@ pub enum CellOwnership {
     Shared,
     /// Bounded multi-party session (e.g. payment channel)
     /// Advisory in Phase 1: scheduler-equivalent to Shared.
-    /// Product-distinct for CellScript but does not affect conflict_hash scheduling.
+    /// Distinct in application metadata but does not affect conflict_hash scheduling.
     Party,
     /// Read-only after creation
     Immutable,
@@ -183,7 +183,7 @@ pub struct RuntimeCellSemantics {
 /// These axes are validated for contradictions but are primarily consumed
 /// by future compiler, ProofPlan, settlement, and audit layers.
 ///
-/// Rule: CellScript/ProofPlan are the semantic source of truth;
+/// Rule: The executed program and its verified proof obligations define semantics;
 /// TypedCellDecl is generated/normalised metadata, not an independent language.
 ///
 /// See `docs/TYPED_CELL_CLASSIFICATION_GOVERNANCE.md` §9.
@@ -209,17 +209,17 @@ pub struct TypedCellSemanticMetadata {
 ///   contradictions but not consumed by the scheduler in Phase 1.
 ///
 /// Three hard rules prevent TypedCellDecl from becoming a second semantic
-/// authority that conflicts with VM, CellScript, or ProofPlan:
+/// authority that conflicts with the VM, application program, or verified proof obligations:
 ///
 /// 1. VM never consumes typed-cell semantic axes. VM only executes.
 /// 2. Runtime consumes only scheduling-critical metadata:
 ///    ownership + conflict_key + witness envelope.
-/// 3. CellScript/ProofPlan are the semantic source of truth.
+/// 3. The executed program and its verified proof obligations define semantics.
 ///    TypedCellDecl is generated/normalised metadata, not an independent language.
 ///
 /// Anti-override rule:
 /// TypedCellDecl must not introduce verifier semantics that are not derivable
-/// from CellScript source, ProofPlan obligations, or runtime scheduler requirements.
+/// from application program semantics, verified proof obligations, or runtime scheduler requirements.
 ///
 /// See `docs/TYPED_CELL_CLASSIFICATION_GOVERNANCE.md` for full governance.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -50,7 +50,7 @@ fn initial(plan: &CellPlan, index: u32) -> CellTransitionExecutor {
 fn initial_outpoint(plan: &CellPlan, index: u32) -> OutPoint {
     OutPoint::new(hash(format!("myelin:workload:cells:{}:{index}", plan.seed).as_bytes()), 0)
 }
-fn verifier() -> Arc<dyn CellScriptVerifier> {
+fn verifier() -> Arc<dyn CellTxScriptVerifier> {
     Arc::new(|tx: &CellTx, inputs: &[ResolvedStateInput]| {
         let mut provider = SimpleDataProvider::new();
         provider.add_cell(

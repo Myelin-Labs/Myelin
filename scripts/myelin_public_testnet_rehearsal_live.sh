@@ -90,7 +90,7 @@ role_config() {
     da-anchor)
       role_slug="da-anchor"
       package_path="$REHEARSAL_DIR/session-da-anchor-package.json"
-      verifier_source="$REHEARSAL_DIR/da-anchor-carrier.cell"
+      verifier_artifact="$REHEARSAL_DIR/da-anchor-carrier.artifact.json"
       verifier_role="${CKB_TESTNET_DA_VERIFIER_ROLE:-carrier}"
       verifier_code_hash="${CKB_TESTNET_DA_VERIFIER_CODE_HASH:-}"
       verifier_dep_tx_hash="${CKB_TESTNET_DA_VERIFIER_DEP_TX_HASH:-}"
@@ -105,7 +105,7 @@ role_config() {
     settlement)
       role_slug="settlement"
       package_path="$REHEARSAL_DIR/session-settlement-package.json"
-      verifier_source="$REHEARSAL_DIR/settlement-carrier.cell"
+      verifier_artifact="$REHEARSAL_DIR/settlement-carrier.artifact.json"
       verifier_role="${CKB_TESTNET_SETTLEMENT_VERIFIER_ROLE:-carrier}"
       verifier_code_hash="${CKB_TESTNET_SETTLEMENT_VERIFIER_CODE_HASH:-}"
       verifier_dep_tx_hash="${CKB_TESTNET_SETTLEMENT_VERIFIER_DEP_TX_HASH:-}"
@@ -120,7 +120,7 @@ role_config() {
     settlement-final)
       role_slug="settlement-final"
       package_path="$REHEARSAL_DIR/session-settlement-package.json"
-      verifier_source="$REHEARSAL_DIR/settlement-final.cell"
+      verifier_artifact="$REHEARSAL_DIR/settlement-final.artifact.json"
       verifier_role="final-l1-script"
       verifier_code_hash="${CKB_TESTNET_SETTLEMENT_FINAL_VERIFIER_CODE_HASH:-}"
       verifier_dep_tx_hash="${CKB_TESTNET_SETTLEMENT_FINAL_VERIFIER_DEP_TX_HASH:-}"
@@ -152,7 +152,7 @@ run_role() {
   role_config "$role"
 
   require_file "$package_path"
-  require_file "$verifier_source"
+  require_file "$verifier_artifact"
   require_value "${role}_input_tx_hash" "$input_tx_hash"
   require_value "${role}_input_index" "$input_index"
   require_value "${role}_input_capacity_shannons" "$input_capacity"
@@ -214,7 +214,7 @@ run_role() {
       --verifier-code-hash "$verifier_code_hash" \
       --verifier-code-dep-tx-hash "$verifier_dep_tx_hash" \
       --verifier-code-dep-index "$verifier_dep_index" \
-      --verifier-source "$verifier_source" \
+      --verifier-artifact "$verifier_artifact" \
       --verifier-role "$verifier_role" \
       --witness "$witness" \
       --rpc-url "$CKB_TESTNET_RPC" \

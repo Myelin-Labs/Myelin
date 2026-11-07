@@ -23,7 +23,7 @@ __pycache__/
 
 # Cargo
 !Cargo.lock
-!cellscript/**/Cargo.lock
+!integrations/**/Cargo.lock
 
 # Documentation
 /target/doc/

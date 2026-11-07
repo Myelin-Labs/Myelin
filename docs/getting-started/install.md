@@ -7,9 +7,8 @@ submission) needs extra pieces — those are documented at the bottom.
 ## 1. Rust
 
 Myelin's development toolchain is pinned by `rust-toolchain.toml`; its
-declared workspace MSRV remains in `Cargo.toml`. Upstream CellScript is
-an independent process boundary and uses the separate Rust toolchain
-recorded in `cellscript-adapter/cellscript-toolchain.lock.json`.
+declared workspace MSRV remains in `Cargo.toml`. Language-specific integrations
+have separate workspaces and are not required to build Myelin.
 
 ```bash
 # Install rustup if you don't already have it
@@ -51,16 +50,16 @@ swap that for the release binary whenever you want a faster shell.
 
 ## 4. Parent CKB devnet for the full gate
 
-The production gate starts an isolated integration chain from the parent
-CKB checkout, reproduces the exact CellScript compiler, deploys four
-verifiers, and exercises valid and invalid transactions:
+The CKB profile builds the standalone Rust counter-game court and runs actual
+opening, challenge, settlement, recovery and reorg transactions on an isolated
+chain. It requires the pinned CKB binary and the fixture's Rust toolchain:
 
 ```bash
-CKB_ROOT=/absolute/ckb scripts/myelin_production_gate.sh --profile ckb --out target/ckb-validation
+CKB_BIN=/absolute/path/to/ckb scripts/myelin_production_gate.sh --profile ckb --out target/ckb-validation
 ```
 
-The selected CKB profile requires both compiler reproduction and devnet acceptance;
-missing inputs fail that profile. Use `--profile core` for independent core work.
+See [the microgame court](../architecture/ckb-microgame.md) for exact versions,
+claims and retained replay evidence. No source-language compiler is required.
 
 ## 5. Verify
 

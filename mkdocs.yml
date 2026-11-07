@@ -153,7 +153,7 @@ nav:
       - Native execution workers: architecture/native-workers.md
       - Cross-session protocol: architecture/cross-session-protocol.md
       - Proposed DEX architecture: architecture/dex.md
-      - CellScript & typed-cell metadata: architecture/cellscript.md
+      - Contract artifacts: architecture/contract-artifacts.md
       - Execution pipeline: architecture/exec-pipeline.md
       - CellDAG scheduler: architecture/scheduler.md
       - State & data availability: architecture/state.md

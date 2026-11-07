@@ -43,7 +43,7 @@ pub const MYELIN_VM_ISA: u8 = 0x07; // IMC + B + MOP
 /// Whether this build installs CKB VM v2 spawn/IPC syscalls in the verifier.
 ///
 /// The feature is explicit because spawn/IPC is a larger execution surface than
-/// the basic CKB court path. CellScript advanced profiles may require it, while
+/// the basic CKB court path. Extended application profiles may require it, while
 /// Teeworlds court fixtures do not.
 pub const CKB_SPAWN_IPC_SYSCALLS_ENABLED: bool = cfg!(feature = "vm-ipc");
 

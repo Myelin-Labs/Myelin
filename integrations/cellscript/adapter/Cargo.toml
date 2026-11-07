@@ -9,6 +9,8 @@ description = "Fail-closed process adapter from Myelin to a pinned CellScript co
 blake3.workspace = true
 hex.workspace = true
 myelin-exec.workspace = true
+myelin-ckb-adapter.workspace = true
+myelin-hashes = { version = "0.31.0", path = "../../../crypto/hashes" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

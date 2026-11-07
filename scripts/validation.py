@@ -13,12 +13,12 @@ import sys
 import time
 
 
-LANES = ("core", "cellscript", "ckb-devnet", "teeworlds", "browser", "bundle-container", "bundle-build")
-PROFILES = {"core": ("core",), "ckb": ("core", "cellscript", "ckb-devnet"),
+LANES = ("core", "ckb-devnet", "teeworlds", "browser", "bundle-container", "bundle-build")
+PROFILES = {"core": ("core",), "ckb": ("core", "ckb-devnet"),
             "games": ("core", "teeworlds", "browser", "bundle-container", "bundle-build"), "full": LANES}
 FIXTURES = ("myelin-exec/vm-ipc,myelin-session-worker/test-fixture,myelin-session-transfer/test-fixture,"
             "myelin-session-authority/test-fixture,myelin-session-bundle/test-fixture")
-REMOVED_FLAGS = ("RUN_TEEWORLDS", "RUN_CELLSCRIPT_TOOLCHAIN", "RUN_CKB_DEVNET", "RUN_BUNDLE_CONTAINER",
+REMOVED_FLAGS = ("RUN_TEEWORLDS", "RUN_CKB_DEVNET", "RUN_BUNDLE_CONTAINER",
                  "RUN_BUNDLE_BUILD", "RUN_BROWSER_CONFORMANCE")
 SCRATCH = ("ckb-devnet/build", "ckb-devnet/court/chain", "bundle-build/evidence/reproduction/image-store", "bundle-build/evidence/reproduction/run-store",
            "bundle-container/evidence/loaded-store", "bundle-container/evidence/loaded-run")
@@ -184,9 +184,6 @@ class Run:
                  ["--binary", str(target / "debug/examples/shared_store_transfer"),
                   "--remote-binary", str(target / "debug/examples/remote_receipt"),
                   "--terminal-binary", str(target / "debug/examples/remote_transfer"), "--output", str(self.out / "transfer.json")])
-        elif name == "cellscript":
-            step("reproduce-compiler", [script("myelin_cellscript_toolchain_gate.sh")],
-                 {"CELLSCRIPT_EVIDENCE_ROOT": str(self.out / "cellscript/evidence")})
         elif name == "ckb-devnet":
             fixture = self.root / "fixtures/ckb-microgame/Cargo.toml"
             build = self.out / "ckb-devnet/build"

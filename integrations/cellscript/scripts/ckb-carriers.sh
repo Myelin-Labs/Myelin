@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INTEGRATION_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$INTEGRATION_ROOT/../.." && pwd)"
 CKB_ROOT="${CKB_ROOT:-"$ROOT/../ckb"}"
 CKB_BIN="${CKB_BIN:-"$CKB_ROOT/target/debug/ckb"}"
 RPC_PORT="${RPC_PORT:-18314}"
@@ -68,7 +69,7 @@ require_cmd curl
 require_cmd jq
 require_cmd python3
 
-cargo run -q -p myelin-cellscript-adapter -- verify "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION"
+cargo run --locked --manifest-path "$INTEGRATION_ROOT/Cargo.toml" -q -p myelin-cellscript-adapter -- verify "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION"
 
 if [[ ! -x "$CKB_BIN" ]]; then
   echo "CKB binary not found or not executable: $CKB_BIN" >&2
@@ -157,7 +158,7 @@ place_entry_witness_payload_hex() {
   local payload_hex="$1"
   local witness_json
   witness_json="$(
-    cargo run --locked -q -p myelin-cellscript-adapter -- \
+    cargo run --locked --manifest-path "$INTEGRATION_ROOT/Cargo.toml" -q -p myelin-cellscript-adapter -- \
       place-entry-witness "$payload_hex"
   )"
   if ! jq -e '
@@ -179,17 +180,17 @@ entry_witness_hex() {
 }
 
 compile_carrier_verifiers() {
-  cp "$ROOT/fixtures/cellscript/da-anchor-carrier.cell" "$WORKDIR/myelin/da-anchor-carrier.cell"
-  cp "$ROOT/fixtures/cellscript/settlement-carrier.cell" "$WORKDIR/myelin/settlement-carrier.cell"
-  cp "$ROOT/fixtures/cellscript/da-anchor-final.cell" "$WORKDIR/myelin/da-anchor-final.cell"
-  cp "$ROOT/fixtures/cellscript/settlement-final.cell" "$WORKDIR/myelin/settlement-final.cell"
-  cargo run -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
+  cp "$INTEGRATION_ROOT/fixtures/da-anchor-carrier.cell" "$WORKDIR/myelin/da-anchor-carrier.cell"
+  cp "$INTEGRATION_ROOT/fixtures/settlement-carrier.cell" "$WORKDIR/myelin/settlement-carrier.cell"
+  cp "$INTEGRATION_ROOT/fixtures/da-anchor-final.cell" "$WORKDIR/myelin/da-anchor-final.cell"
+  cp "$INTEGRATION_ROOT/fixtures/settlement-final.cell" "$WORKDIR/myelin/settlement-final.cell"
+  cargo run --locked --manifest-path "$INTEGRATION_ROOT/Cargo.toml" -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
     "$WORKDIR/myelin/da-anchor-carrier.cell" "$WORKDIR/myelin/da-anchor-carrier.elf" verify_da_anchor_carrier
-  cargo run -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
+  cargo run --locked --manifest-path "$INTEGRATION_ROOT/Cargo.toml" -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
     "$WORKDIR/myelin/settlement-carrier.cell" "$WORKDIR/myelin/settlement-carrier.elf" verify_settlement_carrier
-  cargo run -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
+  cargo run --locked --manifest-path "$INTEGRATION_ROOT/Cargo.toml" -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
     "$WORKDIR/myelin/da-anchor-final.cell" "$WORKDIR/myelin/da-anchor-final.elf" verify_final_da_publication
-  cargo run -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
+  cargo run --locked --manifest-path "$INTEGRATION_ROOT/Cargo.toml" -q -p myelin-cellscript-adapter -- compile "$CELLSCRIPT_BIN" "$CELLSCRIPT_ATTESTATION" \
     "$WORKDIR/myelin/settlement-final.cell" "$WORKDIR/myelin/settlement-final.elf" verify_final_settlement
 
   da_verifier_code_hash="0x$("$CELLSCRIPT_BIN" ckb-hash --file "$WORKDIR/myelin/da-anchor-carrier.elf" --json | jq -r '.hash')"
@@ -941,7 +942,7 @@ submit_and_verify_carrier() {
     --verifier-code-hash "$verifier_code_hash_for_carrier" \
     --verifier-code-dep-tx-hash "$verifier_deploy_tx_hash" \
     --verifier-code-dep-index "$verifier_code_dep_index_for_carrier" \
-    --verifier-source "$verifier_source_path" \
+    --verifier-artifact "${verifier_source_path%.cell}.artifact.json" \
     --verifier-role "$verifier_role" \
     --witness 0x \
     --outputs-validator passthrough \
@@ -1128,7 +1129,7 @@ PY
     --verifier-code-hash "$verifier_code_hash_for_carrier" \
     --verifier-code-dep-tx-hash "$verifier_deploy_tx_hash" \
     --verifier-code-dep-index "$verifier_code_dep_index_for_carrier" \
-    --verifier-source "$verifier_source_path" \
+    --verifier-artifact "${verifier_source_path%.cell}.artifact.json" \
     --verifier-role "$verifier_role" \
     --witness "$witness_hex" \
     ${multisig_signer_args[@]+"${multisig_signer_args[@]}"} \
@@ -1323,7 +1324,7 @@ PY
     exit 1
   fi
   local verifier_source_hash
-  verifier_source_hash="$(jq -r '.carrier_verifier.cellscript_source_hash // empty' "$submission_path")"
+  verifier_source_hash="$(jq -r '.carrier_verifier.artifact.source_sha256 // empty' "$submission_path")"
 
   jq -n \
     --arg label "$label" \

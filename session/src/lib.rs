@@ -1727,12 +1727,12 @@ fn make_outbox_message(
 }
 
 /// Script verifier boundary for the built-in finite-Cell executor.
-pub trait CellScriptVerifier: Send + Sync + 'static {
+pub trait CellTxScriptVerifier: Send + Sync + 'static {
     /// Verify the exact transaction against inputs resolved from its pre-state.
     fn verify(&self, tx: &CellTx, resolved_inputs: &[ResolvedStateInput]) -> std::result::Result<u64, String>;
 }
 
-impl<F> CellScriptVerifier for F
+impl<F> CellTxScriptVerifier for F
 where
     F: Fn(&CellTx, &[ResolvedStateInput]) -> std::result::Result<u64, String> + Send + Sync + 'static,
 {
@@ -1750,7 +1750,7 @@ where
 pub struct CellTransitionExecutor {
     engine: StateTransitionEngine,
     state_root: Hash32,
-    verifier: Arc<dyn CellScriptVerifier>,
+    verifier: Arc<dyn CellTxScriptVerifier>,
 }
 
 impl fmt::Debug for CellTransitionExecutor {
@@ -1761,13 +1761,13 @@ impl fmt::Debug for CellTransitionExecutor {
 
 impl CellTransitionExecutor {
     /// Bind a complete live-cell state to an external strict verifier.
-    pub fn new(mut state: CellStateTree, verifier: Arc<dyn CellScriptVerifier>) -> Self {
+    pub fn new(mut state: CellStateTree, verifier: Arc<dyn CellTxScriptVerifier>) -> Self {
         let state_root = state.root().as_bytes();
         Self { engine: StateTransitionEngine::new(state), state_root, verifier }
     }
 
     /// Restore a complete snapshot. All scripts/data are rehashed while decoding.
-    pub fn from_snapshot(snapshot: &[u8], verifier: Arc<dyn CellScriptVerifier>) -> Result<Self> {
+    pub fn from_snapshot(snapshot: &[u8], verifier: Arc<dyn CellTxScriptVerifier>) -> Result<Self> {
         Ok(Self::new(decode_cell_snapshot(snapshot)?, verifier))
     }
 

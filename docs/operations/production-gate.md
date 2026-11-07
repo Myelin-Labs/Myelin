@@ -20,7 +20,7 @@ the profile cannot pass. No previous report is imported as a current pass.
 | Profile | Required lanes |
 | --- | --- |
 | `core` (default) | core |
-| `ckb` | core, cellscript, ckb-devnet |
+| `ckb` | core, ckb-devnet |
 | `games` | core, teeworlds, browser, bundle-container, bundle-build |
 | `full` | all seven lanes |
 
@@ -32,8 +32,7 @@ A core pass never counts as a CKB/game release profile pass.
 | Lane | Commands and requirements |
 | --- | --- |
 | core | Tool versions, Rust fmt, diff whitespace, one all-target/all-feature Clippy pass, one workspace test pass with VM IPC and all four process fixtures, Python boundary tests, transfer CLI restart drill |
-| cellscript | Locked compiler/SDK reproduction and four integration contracts; Git, jq, native compiler dependencies and network for the locked upstream sources/toolchains; optional `CELLSCRIPT_TOOLCHAIN_ROOT` |
-| ckb-devnet | Controlled local chain and actual contract acceptance; `CKB_ROOT` (default sibling `ckb`) or `CKB_BIN`, jq/curl, free configured RPC/P2P ports; compiler attestation from the selected cellscript lane or explicit `CELLSCRIPT_ATTESTATION` and `CELLSCRIPT_BIN` |
+| ckb-devnet | Strict Rust microgame court, actual transactions and offline replay; pinned `CKB_BIN`, Rust 1.95.0 with RISC-V target, Clang, Python cryptography and free loopback ports. See [court](../architecture/ckb-microgame.md). |
 | teeworlds | Actual external replay workload and reproducibility report; `TEEWORLDS_ROOT` (default sibling `teeworlds`) with its compiled replayer, map and config |
 | browser | Native/WASM exact roots/results; `MYELIN_BROWSER`, `MYELIN_WASM_BINDGEN`, Node 22+, Rust wasm32 target; binding CLI must match Cargo.lock (0.2.118) |
 | bundle-container | Fresh offline container restore; Linux namespaces, bubblewrap and Podman; evidence from selected core, or explicit `MYELIN_BUNDLE_EVIDENCE` and operator-trusted `MYELIN_TRUSTED_BUNDLE_CLI` |
@@ -112,7 +111,7 @@ pass/fail/skip states and reasons, exact commands, wall times, exit codes, tool
 versions in logs, platform/CPU information and GitHub run identifiers when present.
 The source identity binds HEAD, dirty state and a SHA-256 inventory of the actual
 Git-listed working-tree files, including uncommitted files. This includes Cargo.lock,
-Rust/CellScript toolchain locks and fixture bytes. The complete source identity is
+Rust toolchain locks and fixture bytes. The complete source identity is
 checked again at the end; changes during validation fail the overall report.
 A dirty-tree pass does not assert that HEAD alone contains the tested changes.
 

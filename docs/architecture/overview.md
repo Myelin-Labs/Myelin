@@ -20,7 +20,7 @@ flowchart LR
 
 | Module | Owns | Does not own |
 | --- | --- | --- |
-| External CellScript compiler + `myelin-cellscript-adapter` | source compilation, attestation, access templates | final conflict hashes or live Cell selection |
+| Application artifact producer | program bytes, build provenance, access templates | final conflict hashes or live Cell selection |
 | `myelin-mempool` | admission, root binding, physical conflict and RBF rules | VM success or state mutation |
 | `myelin-exec` + `myelin-state` | CellDAG ordering, `CkbStrict` script verification, atomic root-bound transitions | production timing or finality |
 | `myelin-session-producer` | `Instant`, `Interval`, lazy `Open`, `Never`, reservations, count/byte caps | VM validity, finality, or durable head mutation |

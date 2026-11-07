@@ -145,7 +145,7 @@ about **where** work happens, not **what** work means:
   "flowchart": { "curve": "basis", "padding": 12 }
 }}%%
 flowchart LR
-    A["CellScript source"]:::source
+    A["Application source / prebuilt program"]:::source
     B["typed-cell metadata<br/>+ VM artefact"]:::artefact
     C["CellTx<br/>(Myelin)"]:::tx
     D["Producer<br/>one reserved candidate"]:::sched
@@ -166,7 +166,7 @@ flowchart LR
     classDef evidence fill:#C7D2FE,stroke:#7C3AED,color:#1E293B;
 ```
 
-The spine is implemented by the external CellScript adapter plus
+The spine consumes language-independent artifacts and is implemented by
 `myelin-exec`, `myelin-state`, `myelin-mempool`, `myelin-consensus`,
 `myelin-session`, `myelin-session-producer`, `myelin-session-runtime`, the
 RocksDB store, and the evidence adapters. The next pages break those parts

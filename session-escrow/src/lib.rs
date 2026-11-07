@@ -14,7 +14,7 @@ use myelin_exec::{
     ckb_raw_transaction_hash_molecule, ckb_script_hash_molecule, serialize_script_molecule, CellDep, CellInput, CellOutput, CellTx,
     OutPoint, ProjectionStage, Script,
 };
-use myelin_session::{decode_cell_snapshot, CellScriptVerifier, FinalisedBlockRecord, Hash32};
+use myelin_session::{decode_cell_snapshot, CellTxScriptVerifier, FinalisedBlockRecord, Hash32};
 use myelin_state::ResolvedStateInput;
 use secp256k1::{schnorr::Signature, Message, Secp256k1, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
@@ -415,7 +415,7 @@ pub trait EscrowApplicationBinding: Send + Sync {
 /// strict verifier; this decorator never creates an always-success shortcut.
 pub struct EscrowCellVerifier {
     terms: EscrowTerms,
-    delegate: Arc<dyn CellScriptVerifier>,
+    delegate: Arc<dyn CellTxScriptVerifier>,
     application: Arc<dyn EscrowApplicationBinding>,
 }
 
@@ -423,7 +423,7 @@ impl EscrowCellVerifier {
     /// Bind exact terms to a mandatory base verifier.
     pub fn new(
         terms: EscrowTerms,
-        delegate: Arc<dyn CellScriptVerifier>,
+        delegate: Arc<dyn CellTxScriptVerifier>,
         application: Arc<dyn EscrowApplicationBinding>,
     ) -> Result<Self, EscrowError> {
         terms.validate()?;
@@ -466,7 +466,7 @@ impl EscrowCellVerifier {
     }
 }
 
-impl CellScriptVerifier for EscrowCellVerifier {
+impl CellTxScriptVerifier for EscrowCellVerifier {
     fn verify(&self, tx: &CellTx, resolved_inputs: &[ResolvedStateInput]) -> std::result::Result<u64, String> {
         let cycles = self.delegate.verify(tx, resolved_inputs)?;
         self.verify_escrow_transition(tx, resolved_inputs).map_err(|error| error.to_string())?;

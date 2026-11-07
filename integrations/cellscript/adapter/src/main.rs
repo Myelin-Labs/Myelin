@@ -46,6 +46,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 target_profile: "ckb",
                 entry_action: entry_action.as_deref(),
             })?;
+            let program = fs::read(&artifact)?;
+            let manifest = myelin_ckb_adapter::artifact::ContractArtifact {
+                version: 1,
+                execution_profile: "ckb-strict-vm2".into(),
+                format: "riscv64-elf".into(),
+                artifact: artifact.file_name().ok_or("artifact has no file name")?.into(),
+                artifact_sha256: format!("0x{}", hex::encode(myelin_hashes::sha256(&program))),
+                code_hash: format!("0x{}", hex::encode(myelin_exec::ckb_cell_data_hash(&program))),
+                compiler_identity: format!("CellScript {} git:{}", result.compiler_version, result.compiler_revision),
+                source_sha256: Some(format!("0x{}", hex::encode(myelin_hashes::sha256(&fs::read(&source)?)))),
+                entry: entry_action.unwrap_or_else(|| "default".into()),
+                witness_abi: result.target_profile_witness_abi.clone(),
+                dependencies: vec![],
+            };
+            manifest.verify(&program, &manifest.code_hash, &[])?;
+            fs::write(artifact.with_extension("artifact.json"), serde_json::to_vec_pretty(&manifest)?)?;
             println!("{}", serde_json::to_string(&result)?);
         }
         Some("place-entry-witness") => {

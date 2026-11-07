@@ -24,9 +24,8 @@ running it, and proving it works against a real (or mock) CKB node.
 
     ---
 
-    The `scripts/myelin_ckb_devnet_smoke.sh` script: live carrier
-    submissions, type-script execution, and live rejection of
-    tampered carriers on a parent CKB devnet.
+    The strict Rust microgame: actual deposits, proposals, challenge, settlement,
+    timeout, abort and reorg transactions with retained offline replay.
 
 -   [Workload measurements](workload-measurements.md)
 
@@ -59,4 +58,4 @@ Use the single [validation entry point](production-gate.md) with an explicit
 profile or lane. Each invocation retains `report.json`, exact commands, logs and
 artifact hashes in its new output directory. Unselected integrations are marked
 skipped; a selected lane with missing inputs fails. A core-only pass makes no
-CellScript, CKB, Teeworlds, browser or complete-build acceptance claim.
+CKB, Teeworlds, browser or complete-build acceptance claim.

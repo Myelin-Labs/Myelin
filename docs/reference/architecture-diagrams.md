@@ -12,7 +12,7 @@ you can lift it directly into a slide deck or external doc.
 
 ## 1 — Runtime spine (home page)
 
-The full CellScript → CellTx → CellDAG → VM → state root →
+The full Artifact → CellTx → CellDAG → VM → state root →
 evidence pipeline.
 
 ```mermaid
@@ -29,7 +29,7 @@ evidence pipeline.
   }
 }}%%
 flowchart LR
-    A["CellScript source"]:::source
+    A["Application source / program"]:::source
     B["typed-cell metadata<br/>+ VM artefact"]:::artefact
     C["CellTx<br/>(Myelin)"]:::tx
     D["CellDAG<br/>scheduler"]:::sched
@@ -365,7 +365,7 @@ must pass. See [production validation](../operations/production-gate.md).
 flowchart TB
     A["Explicit profile / lane selection"]:::step
     B["Core, when selected<br/>fmt + diff → Clippy → workspace tests<br/>→ Python boundaries → transfer CLI"]:::step
-    C["Selected external lanes<br/>CellScript · CKB devnet · Teeworlds<br/>Browser · bundle container · archived build"]:::step
+    C["Selected external lanes<br/>CKB devnet · Teeworlds<br/>Browser · bundle container · archived build"]:::step
     D["Report: pass / fail / skip<br/>Source identity · commands · logs · artifact hashes"]:::step
 
     A --> B --> C --> D

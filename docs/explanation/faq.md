@@ -61,19 +61,17 @@ or a turnkey permissionless sidechain node.
 
 ### Can CellScript contracts run on Myelin?
 
-Yes, through its CellTx/CKB-strict execution path. CellScript compiles `.cell`
-source into a RISC-V ELF and metadata. The pinned compiler adapter checks the
-artifact, target profile and witness ABI; the application supplies the code
-CellDeps, input/output Cells and witnesses. Myelin resolves scheduling accesses
-from actual state and verifies the lock/type script groups before committing.
+Yes. An external integration can compile them to a RISC-V ELF using the existing
+`ckb` profile and export a [generic contract artifact](../architecture/contract-artifacts.md).
+Myelin consumes the artifact, dependencies and encoded witnesses; its core does
+not invoke or depend on the compiler. The optional integration lives in
+`integrations/cellscript`, outside the root Cargo workspace.
 
-This requires the contract's dependencies and syscalls to fit the admitted
-execution profile. Uploading source or a blob to DA does not deploy an executable
-contract, and running the ELF in Myelin does not deploy it on CKB L1. The current
-adapter uses the `ckb` target and `WitnessArgs.input_type` entry payload; it does
-not accept the old raw entry-witness format. See the
-[CellScript adapter](../architecture/cellscript.md) and
-[execution/state/finality flow](../concepts/what-is-myelin.md).
+The program's dependencies and syscalls must fit the admitted execution profile.
+Publishing a blob to DA does not deploy an executable contract. Executing a program
+in Myelin also does not deploy it on CKB L1. Application state, time, entropy and
+resource rules belong to Myelin's application configuration; no compiler-specific
+`myelin` target profile is required.
 
 ## CKB concepts
 
@@ -197,11 +195,10 @@ each step does.
 
 ### How do I run the devnet smoke?
 
-You need a local CKB devnet first (via OffCKB or a parent `ckb`
-checkout). Then:
+Use the pinned CKB binary; the selected profile starts an isolated chain:
 
 ```bash
-scripts/myelin_ckb_devnet_smoke.sh
+CKB_BIN=/absolute/path/to/ckb scripts/myelin_production_gate.sh --profile ckb --out target/ckb-validation
 ```
 
 See [Local CKB devnet smoke](../operations/devnet-smoke.md).
@@ -269,16 +266,16 @@ reach it, the labels should reflect that.
 Write the script in Rust (or C, or JS for the JS-VM), compile to a
 RISC-V ELF, deploy it as a Cell dep, and reference it from a
 CellTx's `cell_deps[]`. The verifier will load it like any other
-CellScript.
+compiled program.
 
-See [CellScript & typed-cell metadata](../architecture/cellscript.md)
+See [Contract artifacts](../architecture/contract-artifacts.md)
 for the compiler-side contract.
 
 ### How do I write typed-cell metadata?
 
-You don't, usually. The compiler emits typed-cell metadata from
-your CellScript source. If you need to write it manually (for an
-experiment), see the `TypedCellDecl` API in `myelin-exec`.
+The application or an optional compiler adapter provides normalized metadata.
+See the `TypedCellDecl` API in `myelin-exec`. Source-language labels never become
+trusted conflict keys; Myelin resolves accesses against concrete state.
 
 ### How do I debug a failing VM execution?
 

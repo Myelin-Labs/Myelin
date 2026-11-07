@@ -99,7 +99,7 @@ fills across RFQs.
 
 ## Determinism of the fill rule
 
-The fill rule is encoded as a CellScript type script. Because the
+The fill rule is encoded as a CKB type script. Because the
 rule is deterministic:
 
 - Given the same fill receipt, the same state root transition.
@@ -134,7 +134,7 @@ fn build_fill_chunk(
 }
 ```
 
-The `fill_rule_script_dep()` references the CellScript type
+The `fill_rule_script_dep()` references the CKB type
 script that encodes the fill rule.
 
 ## What disputes look like

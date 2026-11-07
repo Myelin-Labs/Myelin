@@ -43,7 +43,7 @@ assert_eq!(output, restored);
 当前 Molecule 编码。不存在 ABI 选择器或协商接口；artifact trailer 只接受
 `VM_ABI_VERSION`（`0x8001`），其余版本直接报错。
 
-CellScript metadata 通过 `runtime.vm_abi.version` 声明 ABI。RISC-V ELF 可以附带
+构建产物元数据可以声明 VM ABI。RISC-V ELF 可以附带
 固定 ABI trailer；代码哈希覆盖完整 artifact，loader 在交给 CKB-VM 前验证并去掉
 trailer。普通 CKB ELF 无需 Myelin trailer。非 ELF artifact 的 sidecar metadata
 仍需单独认证，不能自动成为链上事实。
