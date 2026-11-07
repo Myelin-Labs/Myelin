@@ -63,3 +63,105 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 1
+
+  ckb-court:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      manifest: ${{ steps.identity.outputs.manifest }}
+      artifact: ${{ steps.recovery.outputs.artifact-id }}
+      artifact-url: ${{ steps.recovery.outputs.artifact-url }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+      - name: Install the strict fixture toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+          python -m pip install cryptography==50.0.0
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --target riscv64imac-unknown-none-elf
+          curl --fail --location --retry 3 -o "$RUNNER_TEMP/ckb.tar.gz" https://github.com/nervosnetwork/ckb/releases/download/v0.209.0/ckb_v0.209.0_x86_64-unknown-linux-gnu.tar.gz
+          echo "cf6766e7ffe8096740f33491748dec14ec5ec302bc7051cdb59996930138cacd  $RUNNER_TEMP/ckb.tar.gz" | sha256sum --check
+          tar -xf "$RUNNER_TEMP/ckb.tar.gz" -C "$RUNNER_TEMP"
+          echo "CKB_BIN=$RUNNER_TEMP/ckb_v0.209.0_x86_64-unknown-linux-gnu/ckb" >> "$GITHUB_ENV"
+      - name: Run the existing CKB lane
+        run: scripts/myelin_production_gate.sh --lane ckb-devnet --out target/court-validation
+      - id: identity
+        name: Retain the independently passed archive identity
+        run: |
+          python - <<'PY'
+          import json, os
+          value = json.load(open('target/court-validation/ckb-devnet/package.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('manifest=' + value['manifest_sha256'] + '\n')
+          PY
+      - id: recovery
+        name: Publish the test-asset recovery package to the external provider
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ckb-court-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/court-validation/ckb-devnet/court/evidence
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1
+      - name: Retain execution logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ckb-court-logs-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            target/court-validation/report.json
+            target/court-validation/ckb-devnet/*.log
+            target/court-validation/ckb-devnet/court/*.log
+          if-no-files-found: error
+          retention-days: 7
+
+  ckb-recovery:
+    needs: ckb-court
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+      - name: Retrieve through the external artifact provider on a fresh host
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ckb-court-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/retrieved-court
+      - name: Verify the independent identity before executing the archived verifier
+        env:
+          EXPECTED_MANIFEST: ${{ needs.ckb-court.outputs.manifest }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path('target/retrieved-court')
+          assert hashlib.sha256((root / 'manifest.json').read_bytes()).hexdigest() == os.environ['EXPECTED_MANIFEST']
+          manifest = json.loads((root / 'manifest.json').read_text())
+          assert hashlib.sha256((root / 'replayer').read_bytes()).hexdigest() == manifest['files']['replayer']['sha256']
+          (root / 'replayer').chmod(0o755)
+          PY
+          python -m pip install cryptography==50.0.0
+      - name: Reexecute retrieved proofs without the operator node or storage
+        env:
+          EXPECTED_MANIFEST: ${{ needs.ckb-court.outputs.manifest }}
+          RECOVERY_ARTIFACT: ${{ needs.ckb-court.outputs.artifact }}
+          RECOVERY_URL: ${{ needs.ckb-court.outputs.artifact-url }}
+        run: |
+          python scripts/myelin_microgame_archive.py verify --evidence target/retrieved-court --replayer target/retrieved-court/replayer --manifest-sha256 "$EXPECTED_MANIFEST" --provider "$RECOVERY_URL" --artifact-id "$RECOVERY_ARTIFACT" --out target/court-provider-retrieval.json
+      - name: Retain the independent retrieval receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ckb-provider-retrieval-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/court-provider-retrieval.json
+          if-no-files-found: error
+          retention-days: 7

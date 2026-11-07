@@ -70,6 +70,8 @@ pub struct BundleStore {
     sessions: BTreeMap<Hash32, SessionIndex>,
     commands: BTreeMap<(Hash32, Hash32), (u64, usize)>,
     handoffs: BTreeMap<Hash32, BlobId>,
+    remote_handoffs: BTreeMap<Hash32, crate::HandoffImportInventory>,
+    remote_completions: BTreeMap<Hash32, crate::HandoffCompletionInventory>,
     evidence: BTreeMap<(Hash32, Hash32), (BlobId, u64)>,
 }
 
@@ -291,7 +293,15 @@ impl BundleStore {
                 SessionIndex { inventory: inventory.clone(), config: genesis.config, verifier, checkpoints: BTreeSet::new() },
             );
         }
-        let mut store = Self { directory, sessions, commands: BTreeMap::new(), handoffs: BTreeMap::new(), evidence: BTreeMap::new() };
+        let mut store = Self {
+            directory,
+            sessions,
+            commands: BTreeMap::new(),
+            handoffs: BTreeMap::new(),
+            remote_handoffs: BTreeMap::new(),
+            remote_completions: BTreeMap::new(),
+            evidence: BTreeMap::new(),
+        };
         for session in store.sessions.values() {
             for blob in &session.inventory.handoffs {
                 let handoff = StoredHandoff::decode(&store.bytes(*blob)?).map_err(integrity)?;
@@ -300,10 +310,75 @@ impl BundleStore {
                 }
             }
         }
+        for session in store.sessions.values() {
+            for inventory in &session.inventory.remote_handoffs {
+                let record = myelin_session::HandoffInboxRecord::decode(&store.bytes(inventory.proof)?).map_err(integrity)?;
+                let registry = store.directory.remote_imports.as_ref().ok_or_else(|| {
+                    BundleError::new(
+                        ErrorCode::UnknownTrustAnchor,
+                        "remote archive requires independently configured import verifiers",
+                    )
+                })?;
+                let verified = registry.verify(&record).map_err(integrity)?;
+                let source = myelin_session::SessionConfig::decode(&record.proof.source_config).map_err(integrity)?;
+                if verified.policy().target_genesis != session.config.commitment()
+                    || source.session_id != inventory.source.session_id
+                    || source.commitment() != inventory.source.genesis_commitment
+                    || source.application_profile != inventory.source.profile
+                {
+                    return Err(integrity("external proof differs from source/target inventory"));
+                }
+                let consensus = store.directory.read_blob(inventory.source.consensus, 1024 * 1024)?;
+                let config = ConsensusConfig::from_toml_str(std::str::from_utf8(&consensus).map_err(integrity)?).map_err(integrity)?;
+                let verifier = RegisteredFinalityVerifier::new(config).map_err(integrity)?;
+                if verifier.descriptor().commitment() != source.consensus_module_commitment {
+                    return Err(integrity("external source consensus artifact differs from genesis"));
+                }
+                let id = verified.handoff().id();
+                if store.remote_handoffs.insert(id, inventory.clone()).is_some() {
+                    return Err(integrity("duplicate remote handoff inventory"));
+                }
+            }
+        }
         let ids: Vec<_> = store.sessions.keys().copied().collect();
         for id in ids {
             let inventory = store.session(id)?.inventory.clone();
             let mut expected_handoffs = BTreeSet::new();
+            let mut expected_completions = BTreeSet::new();
+            for completion in &inventory.remote_completions {
+                let bytes = store.bytes(completion.retirement)?;
+                let retirement = FinalisedBlockRecord::decode_for_config(&bytes, &store.session(id)?.config).map_err(integrity)?;
+                let action = retirement
+                    .handoff_actions
+                    .iter()
+                    .find(|action| action.action.handoff_id() == completion.handoff_id)
+                    .ok_or_else(|| missing("remote retirement action absent"))?;
+                let HandoffAction::RemoteRetire { proof, .. } = &action.action else {
+                    return Err(integrity("completion inventory names another action"));
+                };
+                let registry = store.directory.remote_imports.as_ref().ok_or_else(|| {
+                    BundleError::new(ErrorCode::UnknownTrustAnchor, "remote completion needs independent peer verifiers")
+                })?;
+                proof.verify(registry, &store.session(id)?.config, &action.handoff).map_err(integrity)?;
+                let (_, target) = registry.configs(proof.import_policy).map_err(integrity)?;
+                if target.session_id != completion.target.session_id
+                    || target.commitment() != completion.target.genesis_commitment
+                    || target.application_profile != completion.target.profile
+                {
+                    return Err(integrity("completion target inventory differs from local trust"));
+                }
+                let consensus = store.directory.read_blob(completion.target.consensus, 1024 * 1024)?;
+                let config = ConsensusConfig::from_toml_str(std::str::from_utf8(&consensus).map_err(integrity)?).map_err(integrity)?;
+                if RegisteredFinalityVerifier::new(config).map_err(integrity)?.descriptor().commitment()
+                    != target.consensus_module_commitment
+                {
+                    return Err(integrity("completion consensus artifact differs from target genesis"));
+                }
+                if store.remote_completions.insert(completion.handoff_id, completion.clone()).is_some() {
+                    return Err(integrity("duplicate remote completion"));
+                }
+            }
+
             let mut outbox = BTreeMap::new();
             for height in 0..inventory.blocks.len() as u64 {
                 crate::work::checkpoint(ArchiveStage::Index, Some(format!("{}:{height}", BlobId(id).hex())), 0)?;
@@ -325,6 +400,18 @@ impl BundleStore {
                         return Err(integrity("duplicate command identity in archived history"));
                     }
                 }
+                for action in &record.handoff_actions {
+                    if matches!(action.action, HandoffAction::RemoteRetire { .. }) {
+                        expected_completions.insert(action.action.handoff_id());
+                        let declared = store
+                            .remote_completions
+                            .get(&action.action.handoff_id())
+                            .ok_or_else(|| missing("remote completion inventory absent"))?;
+                        if declared.retirement != inventory.blocks[height as usize] {
+                            return Err(integrity("completion names another retirement block"));
+                        }
+                    }
+                }
                 expected_handoffs.extend(record.issued_handoffs.iter().map(SessionHandoff::id));
                 expected_handoffs.extend(record.consumed_handoff_ids);
                 expected_handoffs.extend(record.handoff_actions.iter().map(|a| a.action.handoff_id()));
@@ -335,6 +422,9 @@ impl BundleStore {
                     }
                 }
             }
+            if expected_completions != inventory.remote_completions.iter().map(|completion| completion.handoff_id).collect() {
+                return Err(integrity("completion inventory differs from actual source actions"));
+            }
             let declared: BTreeSet<_> = inventory.handoffs.iter().copied().collect();
             let required: BTreeSet<_> = expected_handoffs
                 .iter()
@@ -342,6 +432,12 @@ impl BundleStore {
                 .collect::<crate::Result<_>>()?;
             if declared != required {
                 return Err(integrity("session handoff inventory differs from its actual blocks"));
+            }
+            let declared_remote: BTreeSet<_> = inventory.remote_handoffs.iter().map(|r| r.proof).collect();
+            let required_remote: BTreeSet<_> =
+                expected_handoffs.iter().filter_map(|id| store.remote_handoffs.get(id).map(|r| r.proof)).collect();
+            if declared_remote != required_remote {
+                return Err(integrity("external proof inventory differs from actual handoff dependencies"));
             }
             for blob in &inventory.evidence {
                 let record = EvidenceRecord::decode(&store.bytes(*blob)?).map_err(integrity)?;
@@ -393,19 +489,23 @@ impl BundleStore {
                 for handoff in &record.consumed_handoff_ids {
                     crate::work::io(0)?;
                     let h = self.handoff(*handoff)?.handoff;
-                    deps.insert(self.block_id(h.source_session_id, h.source_height)?);
-                    if let Some(requirement) = h.evidence_requirement {
-                        let (blob, _) = self
-                            .evidence
-                            .get(&(h.source_session_id, requirement.message_id))
-                            .ok_or_else(|| missing("consumed handoff's required evidence is absent"))?;
-                        let evidence = EvidenceRecord::decode(&self.bytes(*blob)?).map_err(integrity)?;
-                        if evidence.descriptor.commitment() != requirement.pipeline_commitment
-                            || evidence.receipts.len() <= requirement.minimum_stage_index as usize
-                        {
-                            return Err(integrity("consumed handoff's required evidence stage differs"));
+                    if let Some(import) = self.remote_handoffs.get(handoff) {
+                        deps.insert(import.proof);
+                    } else {
+                        deps.insert(self.block_id(h.source_session_id, h.source_height)?);
+                        if let Some(requirement) = h.evidence_requirement {
+                            let (blob, _) = self
+                                .evidence
+                                .get(&(h.source_session_id, requirement.message_id))
+                                .ok_or_else(|| missing("consumed handoff's required evidence is absent"))?;
+                            let evidence = EvidenceRecord::decode(&self.bytes(*blob)?).map_err(integrity)?;
+                            if evidence.descriptor.commitment() != requirement.pipeline_commitment
+                                || evidence.receipts.len() <= requirement.minimum_stage_index as usize
+                            {
+                                return Err(integrity("consumed handoff's required evidence stage differs"));
+                            }
+                            deps.insert(*blob);
                         }
-                        deps.insert(*blob);
                     }
                 }
                 for action in &record.handoff_actions {
@@ -439,18 +539,49 @@ impl BundleStore {
         for (id, blob) in &self.handoffs {
             let stored = self.handoff(*id)?;
             let deps = edges.entry(*blob).or_default();
-            deps.insert(self.block_id(stored.handoff.source_session_id, stored.handoff.source_height)?);
+            if let Some(import) = self.remote_handoffs.get(id) {
+                deps.insert(import.proof);
+            } else {
+                deps.insert(self.block_id(stored.handoff.source_session_id, stored.handoff.source_height)?);
+            }
             {
                 let lifecycle = &stored.lifecycle;
                 for at in match &lifecycle.terminal {
                     HandoffTerminal::Issued => vec![],
                     HandoffTerminal::Consumed { at } | HandoffTerminal::Cancelled { at } => vec![at],
                     HandoffTerminal::Reclaimed { cancelled_at, reclaimed_at } => vec![cancelled_at, reclaimed_at],
+                    HandoffTerminal::Retired { retired_at, .. } if self.remote_completions.contains_key(id) => vec![retired_at],
                     HandoffTerminal::Retired { consumed_at, retired_at } => vec![consumed_at, retired_at],
                 } {
                     deps.insert(self.block_id(at.session_id, at.height)?);
                 }
             }
+        }
+        for import in self.remote_handoffs.values() {
+            let source = &import.source;
+            let deps = edges.entry(import.proof).or_default();
+            deps.extend([
+                source.consensus,
+                source.execution.program,
+                source.execution.replayer,
+                source.execution.rules,
+                source.execution.build_inputs,
+                source.execution.toolchain,
+            ]);
+            deps.extend(source.execution.runtime_dependencies.iter().copied());
+        }
+        for completion in self.remote_completions.values() {
+            let target = &completion.target;
+            let deps = edges.entry(completion.retirement).or_default();
+            deps.extend([
+                target.consensus,
+                target.execution.program,
+                target.execution.replayer,
+                target.execution.rules,
+                target.execution.build_inputs,
+                target.execution.toolchain,
+            ]);
+            deps.extend(target.execution.runtime_dependencies.iter().copied());
         }
         for ((session, _), (blob, height)) in &self.evidence {
             edges.entry(*blob).or_default().insert(self.block_id(*session, *height)?);
@@ -565,6 +696,24 @@ impl SessionStore for BundleStore {
     }
     fn load_handoff(&self, id: Hash32) -> std::result::Result<Option<StoredHandoff>, StoreError> {
         self.handoffs.contains_key(&id).then(|| self.handoff(id).map_err(backend)).transpose()
+    }
+    fn load_handoff_import(&self, id: Hash32) -> std::result::Result<Option<myelin_session::VerifiedHandoffImport>, StoreError> {
+        let Some(inventory) = self.remote_handoffs.get(&id) else { return Ok(None) };
+        let registry = self
+            .directory
+            .remote_imports
+            .as_ref()
+            .ok_or_else(|| StoreError::Corrupt("archive import verifier configuration absent".into()))?;
+        let bytes = self.bytes(inventory.proof).map_err(backend)?;
+        let record = myelin_session::HandoffInboxRecord::decode(&bytes).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        let verified = registry.verify(&record).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        if verified.handoff().id() != id {
+            return Err(StoreError::Corrupt("archive remote proof identity mismatch".into()));
+        }
+        Ok(Some(verified))
+    }
+    fn handoff_import_registry(&self) -> Option<Arc<myelin_session::HandoffImportRegistry>> {
+        self.directory.remote_imports.clone()
     }
     fn load_evidence(&self, id: Hash32, message: Hash32) -> std::result::Result<Option<EvidenceRecord>, StoreError> {
         self.evidence

@@ -192,7 +192,7 @@ impl RecoveryAudit {
                 }
                 // An interrupted dependency check must not advance the cursor.
                 let mut candidate = state.audited.clone();
-                audit_record(&state.genesis, self.verifier.as_ref(), &mut candidate, &record)?;
+                audit_record(&state.genesis.config, self.verifier.as_ref(), &mut candidate, &record)?;
                 audit_indexes(store, &state.genesis, &record)?;
                 state.audited = candidate;
                 store.usage.lock().expect("private recovery usage lock").blocks += 1;
@@ -339,6 +339,16 @@ impl SessionStore for MeteredStore {
     fn load_handoff(&self, id: Hash32) -> std::result::Result<Option<StoredHandoff>, StoreError> {
         self.read(RECORD_RESERVATION, || self.inner.load_handoff(id), |v| v.as_ref().map(encoded).transpose().map(|n| n.unwrap_or(0)))
     }
+    fn handoff_import_registry(&self) -> Option<std::sync::Arc<crate::HandoffImportRegistry>> {
+        self.inner.handoff_import_registry()
+    }
+    fn load_handoff_import(&self, id: Hash32) -> std::result::Result<Option<crate::VerifiedHandoffImport>, StoreError> {
+        self.read(
+            RECORD_RESERVATION,
+            || self.inner.load_handoff_import(id),
+            |value| value.as_ref().map(|import| import.retained_size()).transpose().map(|n| n.unwrap_or(0)),
+        )
+    }
     fn load_checkpoint_before(&self, _: Hash32, _: u64) -> std::result::Result<StateCheckpoint, StoreError> {
         forbidden()
     }
@@ -441,10 +451,11 @@ fn audit_indexes(store: &MeteredStore, genesis: &SessionGenesis, record: &Finali
         {
             return Err(SessionError::Recovery("handoff consumption index does not match audited history".to_owned()));
         }
-        let source_genesis = store.load_genesis(stored.handoff.source_session_id)?;
-        validate_handoff_trust(&genesis.config, &source_genesis.config)?;
-        let source = store.load_block(stored.handoff.source_session_id, stored.handoff.source_height)?;
-        validate_handoff_source(&source_genesis.config, &source, &stored.handoff)?;
+        let source = crate::resolve_handoff_source(store, &stored.handoff)?;
+        crate::validate_remote_consumption(&genesis.config, &source.config, record, &stored.handoff)?;
+        handoff_usage.add_remote_proof(&genesis.config.commit_limits, source.proof_bytes())?;
+        source.validate_target(&genesis.config)?;
+        crate::validate_handoff_evidence(store, &stored.handoff, &source)?;
     }
     Ok(())
 }

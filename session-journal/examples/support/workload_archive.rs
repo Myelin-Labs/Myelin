@@ -255,7 +255,13 @@ pub(super) fn export_sessions(
     }
     sessions.sort_by_key(|s| s.session_id);
     trust.sort_by_key(|s| s.session_id);
-    let export = ExportPlan { roots: sessions.iter().map(|s| s.session_id).collect(), sessions, artifacts, limits: limits.clone() };
+    let export = ExportPlan {
+        remote_sessions: vec![],
+        roots: sessions.iter().map(|s| s.session_id).collect(),
+        sessions,
+        artifacts,
+        limits: limits.clone(),
+    };
     let start = Instant::now();
     let (output, usage) = drive(ArchiveTask::export(store, export, root.join("archive"))?, &root.join("archive-work.jsonl"))?;
     let ArchiveOutput::Exported(manifest) = output else { unreachable!() };

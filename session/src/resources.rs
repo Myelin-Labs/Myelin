@@ -27,6 +27,7 @@ pub struct CommitResourceLimits {
     pub max_snapshot_bytes: u64,
     /// Complete encoded FinalisedBlockRecord, including its unpruned snapshot,
     /// finality proof and record envelope. Not the sum of database index writes.
+    /// Also caps aggregate retained external handoff proofs read by one transition.
     pub max_record_bytes: u64,
 }
 
@@ -215,9 +216,14 @@ pub(crate) fn snapshot_commitment(limits: &CommitResourceLimits, bytes: u64) -> 
 pub struct HandoffUsage {
     payload: u64,
     authorization: u64,
+    remote_proofs: u64,
 }
 
 impl HandoffUsage {
+    pub fn add_remote_proof(&mut self, limits: &CommitResourceLimits, bytes: u64) -> Result<()> {
+        self.remote_proofs = add("remote_handoff_proof_bytes", self.remote_proofs, bytes)?;
+        check("remote_handoff_proof_bytes", self.remote_proofs, limits.max_record_bytes)
+    }
     pub fn add(&mut self, limits: &CommitResourceLimits, payload: usize, authorization: usize) -> Result<()> {
         self.payload = add("handoff_payload_bytes", self.payload, payload as u64)?;
         check("handoff_payload_bytes", self.payload, limits.max_handoff_payload_bytes)?;

@@ -1,8 +1,11 @@
 //! A deterministic reference application with explicit scarce-transfer and
 //! copyable-receipt policies. It requires owner signatures and source disposition;
-//! it does not implement a bridge, remote uniqueness, custody or L1 adjudication.
+//! remote scarce coordination uses an explicit trusted terminal authority.
+//! It does not implement a trustless bridge, custody or L1 adjudication.
 mod codec;
+mod remote;
 mod state;
+pub use remote::{RemoteEvidenceCheck, TransferImportVerifier};
 pub use state::{AssetAccount, PendingLock, Receipt, TransferExecutor, TransferState};
 
 use myelin_session::{
@@ -89,7 +92,7 @@ pub struct SourceIdentity {
 impl SourceIdentity {
     pub fn from_config(config: &SessionConfig) -> Result<Self> {
         config.validate().map_err(|e| Error::Policy(e.to_string()))?;
-        let ProtocolEffectsPolicy::Application { policy_hash } = config.protocol_effects else {
+        let Some(policy_hash) = config.protocol_effects.application_policy_hash() else {
             return Err(Error::Policy("reference transfer requires an application-verified policy".into()));
         };
         Ok(Self {
@@ -143,8 +146,8 @@ impl TransferTarget {
 #[serde(deny_unknown_fields)]
 pub struct TransferPayload {
     pub deployment_id: Hash32,
-    /// Operator-selected identity of one shared uniqueness store. Merely using
-    /// the same value in independent stores does not make their commits atomic.
+    /// Identity of the genesis-bound coordination policy. A shared-store label
+    /// alone never supplies uniqueness across independent stores.
     pub uniqueness_domain: Hash32,
     pub kind: TransferKind,
     pub intake_schema: Hash32,
@@ -327,10 +330,20 @@ impl Default for TransferLimits {
     }
 }
 
+/// The uniqueness owner is a typed part of application genesis. An opaque
+/// shared-store label cannot enable remote scarce intake.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum TransferCoordination {
+    SharedStore,
+    Remote { terminal: myelin_session::RemoteTerminalPolicy },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransferPolicy {
     pub deployment_id: Hash32,
+    pub coordination: TransferCoordination,
     pub uniqueness_domain: Hash32,
     pub kind: TransferKind,
     pub limits: TransferLimits,
@@ -341,6 +354,17 @@ impl TransferPolicy {
     pub fn validate(&self) -> Result<()> {
         if self.deployment_id == [0; 32] || self.uniqueness_domain == [0; 32] {
             return Err(Error::Policy("zero deployment/uniqueness domain".into()));
+        }
+        if let TransferCoordination::Remote { terminal } = &self.coordination {
+            terminal.validate().map_err(|e| Error::Policy(e.to_string()))?;
+            if self.kind != TransferKind::Scarce
+                || self.uniqueness_domain != terminal.commitment().map_err(|e| Error::Policy(e.to_string()))?
+            {
+                return Err(Error::Policy("remote scarce domain differs from typed terminal policy".into()));
+            }
+            if self.accepted_sources.iter().any(|source| source.session_id != terminal.source_session) {
+                return Err(Error::Unsupported("remote forwarding and multiple sources are disabled"));
+            }
         }
         for value in [self.limits.max_accounts, self.limits.max_pending, self.limits.max_receipts, self.limits.max_nonces] {
             if value == 0 || value > bounded_codec::MAX_SEQUENCE_ITEMS as u32 {
@@ -360,13 +384,19 @@ impl TransferPolicy {
     }
     pub fn commitment(&self) -> Result<Hash32> {
         self.validate()?;
-        codec::hash(b"myelin:reference-transfer-policy:v1", self)
+        codec::hash(b"myelin:reference-transfer-policy:v2", self)
     }
     pub fn effect_policy(&self) -> Result<ProtocolEffectsPolicy> {
-        Ok(ProtocolEffectsPolicy::Application { policy_hash: self.commitment()? })
+        let policy_hash = self.commitment()?;
+        Ok(match &self.coordination {
+            TransferCoordination::SharedStore => ProtocolEffectsPolicy::Application { policy_hash },
+            TransferCoordination::Remote { terminal } => {
+                ProtocolEffectsPolicy::RemoteApplication { policy_hash, terminal: terminal.clone() }
+            }
+        })
     }
     pub fn intake_policy(&self) -> Result<Hash32> {
-        codec::hash(b"myelin:reference-transfer-intake:v1", &self.commitment()?)
+        codec::hash(b"myelin:reference-transfer-intake:v2", &self.commitment()?)
     }
     pub fn bind_config(&self, config: &mut SessionConfig) -> Result<()> {
         config.protocol_effects = self.effect_policy()?;
@@ -389,10 +419,10 @@ impl TransferPolicy {
 }
 
 pub fn input_schema() -> Hash32 {
-    *blake3::hash(b"myelin:reference-transfer-commands:v3").as_bytes()
+    *blake3::hash(b"myelin:reference-transfer-commands:v4").as_bytes()
 }
 pub fn state_codec() -> Hash32 {
-    *blake3::hash(b"myelin:reference-transfer-state:v1").as_bytes()
+    *blake3::hash(b"myelin:reference-transfer-state:v2").as_bytes()
 }
 
 impl myelin_session::HandoffRetentionPolicy for TransferPolicy {
@@ -419,6 +449,7 @@ impl myelin_session::HandoffRetentionPolicy for TransferPolicy {
 #[derive(Clone)]
 pub struct SourceBindings {
     policy_commitment: Hash32,
+    remote_registry: Option<std::sync::Arc<myelin_session::HandoffImportRegistry>>,
     inheritance: Option<(Hash32, std::collections::BTreeMap<Hash32, usize>)>,
 }
 impl SourceBindings {
@@ -428,25 +459,50 @@ impl SourceBindings {
         if !policy.accepted_sources.is_empty() {
             return Err(Error::Source("source dependencies require store/archived-genesis validation".into()));
         }
-        Ok(Self { policy_commitment: policy.commitment()?, inheritance: None })
+        Ok(Self { policy_commitment: policy.commitment()?, remote_registry: None, inheritance: None })
+    }
+    pub fn from_registry(policy: &TransferPolicy, registry: std::sync::Arc<myelin_session::HandoffImportRegistry>) -> Result<Self> {
+        let mut bindings = Self::from_configs(policy, |id| {
+            let anchor = policy
+                .accepted_sources
+                .iter()
+                .find(|source| source.session_id == id)
+                .ok_or_else(|| Error::Source("unrecognized source".into()))?;
+            registry
+                .source_config(id, anchor.genesis_commitment)
+                .ok_or_else(|| Error::Source("registered source config absent".into()))
+        })?;
+        bindings.remote_registry = Some(registry);
+        Ok(bindings)
     }
     pub fn from_store<S: SessionStore>(policy: &TransferPolicy, store: &S) -> Result<Self> {
-        Self::from_genesis(policy, |id| store.load_genesis(id).map_err(|e| Error::Source(e.to_string())))
+        let mut bindings = Self::from_configs(policy, |id| {
+            let anchor = policy
+                .accepted_sources
+                .iter()
+                .find(|source| source.session_id == id)
+                .ok_or_else(|| Error::Source("unrecognized source config".into()))?;
+            if let Some(config) =
+                store.handoff_import_registry().and_then(|registry| registry.source_config(id, anchor.genesis_commitment))
+            {
+                return Ok(config);
+            }
+            store.load_genesis(id).map(|genesis| genesis.config).map_err(|e| Error::Source(e.to_string()))
+        })?;
+        bindings.remote_registry = store.handoff_import_registry();
+        Ok(bindings)
     }
     /// Resolve immutable source records through a read-only authority/catalog
     /// without exposing the canonical store's mutation capability.
-    pub fn from_genesis(
-        policy: &TransferPolicy,
-        mut genesis: impl FnMut(Hash32) -> Result<myelin_session::SessionGenesis>,
-    ) -> Result<Self> {
+    pub fn from_configs(policy: &TransferPolicy, mut genesis: impl FnMut(Hash32) -> Result<SessionConfig>) -> Result<Self> {
         policy.validate()?;
         for anchor in &policy.accepted_sources {
             let actual = genesis(anchor.session_id)?;
-            if SourceIdentity::from_config(&actual.config)? != *anchor {
+            if SourceIdentity::from_config(&actual)? != *anchor {
                 return Err(Error::Source("source genesis differs from pinned allowlist".into()));
             }
         }
-        Ok(Self { policy_commitment: policy.commitment()?, inheritance: None })
+        Ok(Self { policy_commitment: policy.commitment()?, remote_registry: None, inheritance: None })
     }
     fn for_state<S: SessionStore>(config: &SessionConfig, state: &TransferState, store: &S) -> Result<Self> {
         let mut bindings = Self::from_store(state.policy(), store)?;
@@ -510,6 +566,14 @@ pub enum TransferCommand {
         target_genesis: Hash32,
         #[serde(deserialize_with = "bounded_codec::bounded_vec")]
         approvals: Vec<ContinuationApproval>,
+    },
+    /// An exclusive terminal decision must precede the canonical source cancel.
+    RemoteCancel {
+        handoff_id: Hash32,
+        #[serde(deserialize_with = "bounded_codec::bounded_bytes")]
+        authorization: Vec<u8>,
+        #[serde(deserialize_with = "bounded_codec::bounded_bytes")]
+        certificate: Vec<u8>,
     },
 }
 impl TransferCommand {
@@ -578,6 +642,16 @@ fn verify_handoff(handoff: &myelin_session::SessionHandoff) -> Result<(Hash32, T
         evidence_requirement: handoff.evidence_requirement.clone(),
     })
 }
+pub(crate) fn verify_cancellation(genesis: Hash32, handoff: &myelin_session::SessionHandoff, authorization: &[u8]) -> Result<()> {
+    let (transfer_id, payload) = verify_handoff(handoff)?;
+    let digest = cancellation_digest(genesis, transfer_id, handoff.id(), payload.owner)?;
+    let key = XOnlyPublicKey::from_slice(&payload.owner).map_err(|e| Error::Authorization(e.to_string()))?;
+    let sig = Signature::from_slice(authorization).map_err(|e| Error::Authorization(e.to_string()))?;
+    Secp256k1::verification_only()
+        .verify_schnorr(&sig, &Message::from_digest(digest), &key)
+        .map_err(|_| Error::Authorization("cancellation owner signature is invalid".into()))
+}
+
 fn cancellation_digest(genesis: Hash32, transfer_id: Hash32, handoff_id: Hash32, owner: Hash32) -> Result<Hash32> {
     codec::hash(b"myelin:reference-transfer-cancel:v1", &(genesis, transfer_id, handoff_id, owner))
 }

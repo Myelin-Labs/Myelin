@@ -62,7 +62,7 @@ nonspendable source backing after verifying the exact consuming block.
 
 ## Commitments, budgets and replay
 
-All lifecycle blocks use version 6 and MREC envelope 13. The current record
+All lifecycle blocks use version 6 and MREC envelope 14. The current record
 contains resolved actions, original snapshot size and any typed successor receipt.
 The action commitment always uses `myelin:handoff-lifecycle-actions:v2`.
 
@@ -83,7 +83,7 @@ portable dependency/artifact verification remains #13.
 
 ## Current storage format
 
-Only MREC envelope 13, session block 6 and RocksDB schema 15 are accepted.
+Only MREC envelope 14, session block 6 and RocksDB schema 16 are accepted.
 Every config binds resource limits and an explicit protocol-effects policy.
 Every block records its original snapshot byte count, and every successor carries
 its typed transition receipt. Historical record/store decoders and schema-marker

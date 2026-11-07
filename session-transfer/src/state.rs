@@ -180,6 +180,13 @@ impl TransferState {
 
     fn issue(&mut self, binding: &SourceIdentity, intent: &HandoffIntent, expected_id: Hash32) -> Result<TransferEvent> {
         let (id, payload) = verify_intent(intent)?;
+        if let TransferCoordination::Remote { terminal } = &self.policy.coordination {
+            if binding.session_id != terminal.source_session
+                || !matches!(payload.target, TransferTarget::Session { session_id, .. } if session_id == terminal.target_session)
+            {
+                return Err(Error::Unsupported("remote forwarding or another target"));
+            }
+        }
         self.policy.matches_payload(&payload)?;
         if payload.source != *binding || id != expected_id {
             return Err(Error::Authorization("source genesis or command transfer ID mismatch".into()));
@@ -283,7 +290,9 @@ impl TransferState {
                 self.pending.remove(index);
                 Ok(TransferEvent::Reclaimed { transfer_id, handoff_id, amount: payload.amount })
             }
-            (myelin_session::HandoffAction::Retire { .. }, None) if action.cancelled_at.is_none() => {
+            (myelin_session::HandoffAction::Retire { .. } | myelin_session::HandoffAction::RemoteRetire { .. }, None)
+                if action.cancelled_at.is_none() =>
+            {
                 let i = self
                     .accounts
                     .binary_search_by_key(&(payload.asset, payload.owner), |a| (a.asset, a.owner))
@@ -429,6 +438,19 @@ impl TransferExecutor {
         {
             return Err(Error::Policy("executor policy, source bindings or profile differs from genesis".into()));
         }
+        if let TransferCoordination::Remote { terminal } = &state.policy.coordination {
+            if config.predecessor.is_some()
+                || (config.session_id != terminal.source_session && config.session_id != terminal.target_session)
+            {
+                return Err(Error::Unsupported("remote coordination has one original source and fixed target"));
+            }
+            sources
+                .remote_registry
+                .as_ref()
+                .ok_or_else(|| Error::Policy("remote coordination requires independently configured terminal trust".into()))?
+                .terminal_registration(config, terminal.commitment().map_err(|e| Error::Policy(e.to_string()))?)
+                .map_err(|e| Error::Policy(e.to_string()))?;
+        }
         Ok(Self { root: state.root()?, state, binding: SourceIdentity::from_config(config)?, sources })
     }
     pub fn state(&self) -> &TransferState {
@@ -497,9 +519,40 @@ impl TransferExecutor {
                     transfer_id,
                 )?,
                 TransferCommand::Cancel { handoff_id, authorization } => {
+                    if matches!(next.policy.coordination, TransferCoordination::Remote { .. }) {
+                        return Err(Error::Authorization("remote cancellation requires its exclusive terminal certificate".into()));
+                    }
                     let action = lifecycle.next().ok_or_else(|| Error::Policy("missing cancellation witness".into()))?;
                     if action.action != (myelin_session::HandoffAction::Cancel { handoff_id }) {
                         return Err(Error::Policy("wrong cancellation action".into()));
+                    }
+                    next.lifecycle(&self.binding, action, Some(&authorization))?
+                }
+                TransferCommand::RemoteCancel { handoff_id, authorization, certificate } => {
+                    let TransferCoordination::Remote { terminal } = &next.policy.coordination else {
+                        return Err(Error::Unsupported("remote cancellation requires remote coordination"));
+                    };
+                    if self.binding.session_id != terminal.source_session {
+                        return Err(Error::Authorization("only the original remote source can cancel".into()));
+                    }
+                    let action = lifecycle.next().ok_or_else(|| Error::Policy("missing cancellation witness".into()))?;
+                    if action.action != (myelin_session::HandoffAction::Cancel { handoff_id }) {
+                        return Err(Error::Policy("wrong cancellation action".into()));
+                    }
+                    let (_, payload) = verify_handoff(&action.handoff)?;
+                    let TransferTarget::Session { genesis_commitment: target, .. } = payload.target else {
+                        return Err(Error::Unsupported("remote policy targets"));
+                    };
+                    let cert = myelin_session::RemoteTerminalCertificate::decode(&certificate)
+                        .map_err(|e| Error::Authorization(e.to_string()))?;
+                    let verified = cert
+                        .verify(terminal, self.binding.genesis_commitment, target, handoff_id)
+                        .map_err(|e| Error::Authorization(e.to_string()))?;
+                    let digest =
+                        myelin_session::remote_cancellation_digest(self.binding.genesis_commitment, handoff_id, &authorization)
+                            .map_err(|e| Error::Authorization(e.to_string()))?;
+                    if verified.decision() != &(myelin_session::RemoteTerminalDecision::Cancelled { authorization_digest: digest }) {
+                        return Err(Error::Authorization("terminal decision does not cancel this exact owner authorization".into()));
                     }
                     next.lifecycle(&self.binding, action, Some(&authorization))?
                 }
@@ -512,8 +565,25 @@ impl TransferExecutor {
                 }
                 TransferCommand::Retire { handoff_id } => {
                     let action = lifecycle.next().ok_or_else(|| Error::Policy("missing retirement witness".into()))?;
-                    if !matches!(&action.action, myelin_session::HandoffAction::Retire { handoff_id: id, .. } if *id == handoff_id) {
+                    if !matches!(&action.action, myelin_session::HandoffAction::Retire { handoff_id: id, .. } | myelin_session::HandoffAction::RemoteRetire { handoff_id: id, .. } if *id == handoff_id)
+                    {
                         return Err(Error::Policy("wrong retirement action".into()));
+                    }
+                    match (&next.policy.coordination, &action.action) {
+                        (TransferCoordination::Remote { terminal }, myelin_session::HandoffAction::RemoteRetire { proof, .. }) => {
+                            let registry = self
+                                .sources
+                                .remote_registry
+                                .as_ref()
+                                .ok_or_else(|| Error::Source("remote completion trust unavailable".into()))?;
+                            let (source, _) = registry.configs(proof.import_policy).map_err(|e| Error::Source(e.to_string()))?;
+                            if source.commitment() != self.binding.genesis_commitment || source.session_id != terminal.source_session {
+                                return Err(Error::Authorization("remote retirement source mismatch".into()));
+                            }
+                            proof.verify(registry, source, &action.handoff).map_err(|e| Error::Authorization(e.to_string()))?;
+                        }
+                        (TransferCoordination::SharedStore, myelin_session::HandoffAction::Retire { .. }) => {}
+                        _ => return Err(Error::Unsupported("retirement coordination/proof mismatch")),
                     }
                     next.lifecycle(&self.binding, action, None)?
                 }
@@ -524,6 +594,9 @@ impl TransferExecutor {
                     context.timestamp_ms,
                 )?,
                 TransferCommand::Continue { target_genesis, approvals } => {
+                    if matches!(next.policy.coordination, TransferCoordination::Remote { .. }) {
+                        return Err(Error::Unsupported("remote continuation and forwarding are disabled"));
+                    }
                     let target = successor.as_ref().ok_or_else(|| Error::Policy("continuation has no successor config".into()))?;
                     if target_genesis != target.commitment()
                         || target.initial_state_root != self.root

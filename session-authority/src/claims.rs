@@ -203,6 +203,9 @@ impl<E: TransitionExecutor> SessionAuthority<E> {
         let inner = self.locked()?;
         let ledger = &inner.ledger_session.ledger;
         let _commits = ledger.commit_lock()?;
+        if inner.chain.config().protocol_effects.remote_terminal().is_some() {
+            return Err(invalid("remote scarce claims require terminal-authority lookup and retained consumption evidence; local Missing/Issued is not terminal exclusion"));
+        }
         let epoch = inner.ownership.grants.last().ok_or_else(|| invalid("claim issuer has no active writer"))?.epoch;
         if epoch < minimum_epoch {
             return Err(AuthorityError::Fenced("claim observation precedes required migration epoch".into()));

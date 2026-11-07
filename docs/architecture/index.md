@@ -4,6 +4,8 @@
 - [Proposed Myelin DEX architecture](dex.md)
 - [Session safety integration contracts](session-safety.md)
 - [Replayable source-effect authorization](protocol-effects.md)
+- [Independent-store proof and terminal protocol](remote-handoff.md)
+- [Strict CKB microgame court](ckb-microgame.md)
 - [Shared-store reference transfer policy](reference-transfer.md)
 - [Authoritative handoff cancellation and refund](handoff-lifecycle.md)
 - [Durable original-command journal](command-journal.md)

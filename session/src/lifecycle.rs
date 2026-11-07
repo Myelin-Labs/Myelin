@@ -75,11 +75,15 @@ pub enum HandoffAction {
     Cancel { handoff_id: Hash32 },
     Reclaim { handoff_id: Hash32 },
     Retire { handoff_id: Hash32, consumed_at: HandoffBlockReference },
+    RemoteRetire { handoff_id: Hash32, proof: crate::RemoteConsumptionProof },
 }
 impl HandoffAction {
     pub fn handoff_id(&self) -> Hash32 {
         match self {
-            Self::Cancel { handoff_id } | Self::Reclaim { handoff_id } | Self::Retire { handoff_id, .. } => *handoff_id,
+            Self::Cancel { handoff_id }
+            | Self::Reclaim { handoff_id }
+            | Self::Retire { handoff_id, .. }
+            | Self::RemoteRetire { handoff_id, .. } => *handoff_id,
         }
     }
 }
@@ -102,7 +106,7 @@ impl ResolvedHandoffAction {
             return Err(SessionError::Continuity("lifecycle action requires an earlier owned handoff".into()));
         }
         match (&self.action, &self.cancelled_at) {
-            (HandoffAction::Cancel { .. }, None) => Ok(()),
+            (HandoffAction::Cancel { .. } | HandoffAction::RemoteRetire { .. }, None) => Ok(()),
             (HandoffAction::Retire { consumed_at, .. }, None)
                 if consumed_at.session_id != session_id || consumed_at.height < height =>
             {
@@ -186,6 +190,10 @@ impl StoredHandoff {
         }
         let l = &mut self.lifecycle;
         l.terminal = match (&l.terminal, &resolved.action) {
+            (HandoffTerminal::Issued, HandoffAction::RemoteRetire { proof, .. }) => {
+                let record = crate::FinalisedBlockRecord::decode(&proof.target_record)?;
+                HandoffTerminal::Retired { consumed_at: HandoffBlockReference::from_block(&record.block), retired_at: at }
+            }
             (HandoffTerminal::Issued, HandoffAction::Cancel { .. }) => HandoffTerminal::Cancelled { at },
             (HandoffTerminal::Consumed { at: consumed }, HandoffAction::Retire { consumed_at, .. }) if consumed == consumed_at => {
                 HandoffTerminal::Retired { consumed_at: consumed.clone(), retired_at: at }
@@ -291,6 +299,15 @@ pub fn validate_handoff_action<S: SessionStore>(
 ) -> Result<Vec<HandoffBlockReference>> {
     action.validate_for(owner.session_id, height)?;
     let lineage = handoff_owner_lineage(store, owner, &action.handoff)?;
+    if let HandoffAction::RemoteRetire { proof, .. } = &action.action {
+        if owner.session_id != action.handoff.source_session_id {
+            return Err(SessionError::Continuity("remote retirement forbids forwarding".into()));
+        }
+        let registry = store
+            .handoff_import_registry()
+            .ok_or_else(|| SessionError::Continuity("remote retirement requires independent peer trust".into()))?;
+        proof.verify(&registry, owner, &action.handoff)?;
+    }
     if let Some(at) = &action.cancelled_at {
         if at.session_id != owner.session_id
             && !lineage.iter().any(|seal| seal.session_id == at.session_id && at.height <= seal.height)
@@ -316,9 +333,8 @@ pub fn validate_consumption_record(at: &HandoffBlockReference, handoff: Hash32, 
 /// full application authorization replay or claim Byzantine-storage safety.
 pub fn audit_handoff_lifecycle<S: SessionStore>(store: &S, stored: &StoredHandoff) -> Result<()> {
     stored.validate_lifecycle()?;
-    let source = store.load_genesis(stored.handoff.source_session_id)?;
-    let issued = store.load_block(stored.handoff.source_session_id, stored.handoff.source_height)?;
-    validate_handoff_source(&source.config, &issued, &stored.handoff)?;
+    let source = crate::resolve_handoff_source(store, &stored.handoff)?;
+    let issued = source.record;
     let l = &stored.lifecycle;
     if l.issued_at != HandoffBlockReference::from_block(&issued.block) {
         return Err(SessionError::Recovery("lifecycle issuance block mismatch".into()));
@@ -335,15 +351,32 @@ pub fn audit_handoff_lifecycle<S: SessionStore>(store: &S, stored: &StoredHandof
     let id = stored.handoff.id();
     match &l.terminal {
         HandoffTerminal::Issued => Ok(()),
-        HandoffTerminal::Consumed { at } | HandoffTerminal::Retired { consumed_at: at, .. } => {
+        HandoffTerminal::Consumed { at } => {
             let record = referenced_record(store, at)?;
-            if record.consumed_handoff_ids.iter().filter(|h| **h == id).count() != 1 {
-                return Err(SessionError::Recovery("lifecycle consumption is absent from target block".into()));
+            validate_consumption_record(at, id, &record)
+        }
+        HandoffTerminal::Retired { consumed_at, retired_at } => {
+            let retirement = referenced_record(store, retired_at)?;
+            let remote = retirement.handoff_actions.iter().find(|action| action.action.handoff_id() == id).and_then(|action| {
+                if let HandoffAction::RemoteRetire { proof, .. } = &action.action {
+                    Some(proof)
+                } else {
+                    None
+                }
+            });
+            if let Some(proof) = remote {
+                let registry = store
+                    .handoff_import_registry()
+                    .ok_or_else(|| SessionError::Recovery("remote retirement trust unavailable".into()))?;
+                let source = store.load_genesis(stored.handoff.source_session_id)?.config;
+                let target = proof.verify(&registry, &source, &stored.handoff)?;
+                validate_consumption_record(consumed_at, id, &target)?;
+                matches_action(retired_at, HandoffAction::RemoteRetire { handoff_id: id, proof: proof.clone() }, None)
+            } else {
+                let target = referenced_record(store, consumed_at)?;
+                validate_consumption_record(consumed_at, id, &target)?;
+                matches_action(retired_at, HandoffAction::Retire { handoff_id: id, consumed_at: consumed_at.clone() }, None)
             }
-            if let HandoffTerminal::Retired { retired_at, .. } = &l.terminal {
-                matches_action(retired_at, HandoffAction::Retire { handoff_id: id, consumed_at: at.clone() }, None)?;
-            }
-            Ok(())
         }
         HandoffTerminal::Cancelled { at } => matches_action(at, HandoffAction::Cancel { handoff_id: id }, None),
         HandoffTerminal::Reclaimed { cancelled_at, reclaimed_at } => {
@@ -365,6 +398,9 @@ pub(crate) fn audit_actions<S: SessionStore>(store: &S, record: &FinalisedBlockR
             (HandoffAction::Cancel { .. }, HandoffTerminal::Cancelled { at: c }) => *c == at,
             (HandoffAction::Retire { consumed_at, .. }, HandoffTerminal::Retired { consumed_at: c, retired_at: r }) => {
                 *r == at && consumed_at == c
+            }
+            (HandoffAction::RemoteRetire { proof, .. }, HandoffTerminal::Retired { consumed_at: c, retired_at: r }) => {
+                *r == at && HandoffBlockReference::from_block(&FinalisedBlockRecord::decode(&proof.target_record)?.block) == *c
             }
             (HandoffAction::Cancel { .. }, HandoffTerminal::Reclaimed { cancelled_at: c, .. }) => *c == at,
             (HandoffAction::Reclaim { .. }, HandoffTerminal::Reclaimed { cancelled_at: c, reclaimed_at: r }) => {

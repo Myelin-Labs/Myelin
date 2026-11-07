@@ -4,7 +4,7 @@
 
 Myelin is an off-chain finite-Cell ledger runtime. It reuses CKB-shaped transactions and CKB-VM verification while adding session scheduling, local state roots, closed-validator finality, DA evidence, and dispute/settlement input packages.
 
-It is not a CKB full node, a source-chain fork, a permissionless consensus system, or a deployed L1 court.
+It is not a CKB full node, a source-chain fork, a permissionless consensus system, or a deployed public-network L1 court.
 
 ## Continuous chain and application modules
 
@@ -49,9 +49,31 @@ independently maintained participant balances.
 
 Application integrations live in external modules. The Veloren adapter in the sibling checkout journals authoritative game events before mutation, commits strict-VM Cell transitions under PoA/committee/Tendermint, reconciles an optional receipt inventory from the conserved ledger, and exposes the exit builders. Its embedded local signer driver is a controlled session deployment, not a distributed or permissionless L2.
 
+## Independent services and actual court scope
+
+The chain/session module already combines deterministic execution, finality and
+atomic persistence; it is more than a DA module. A complete CKB application
+sidechain still needs its own application/VM profile, writer and consensus model,
+data availability and custody/exit protocol. CellScript's CKB-shaped program
+bytes alone do not supply these deployment and economic rules.
+
+The [independent-store handoff reference](architecture/remote-handoff.md) now
+verifies external source proofs with separately pinned genesis/consensus/rules,
+retains a bounded inbox and commits consumption atomically at the target. Its
+scarce test assets use one explicit trusted durable terminal authority to order
+consume against cancel. Unknown outcomes retain their lock and original target
+candidate. This is asynchronous coordination under named trust assumptions.
+
+The [CKB microgame court](architecture/ckb-microgame.md) deploys a strict CKB-VM
+rule verifier and exercises actual devnet opening, commit/finalize/challenge,
+settlement, timeout, duplicate/stale exits and reorg handling. It separates
+application execution, authority attestation, external evidence retrieval, script
+validity and inclusion/depth. This narrow test-asset evidence does not promote
+generic court bundles or larger games into a public-network court deployment.
+
 ## Format boundaries
 
-Current records use MREC 13, block 6 and RocksDB schema 15. Journal format is v2;
-bundle format is v2. Decoders reject older formats rather than upgrading them.
+Current records use MREC 14, block 6 and RocksDB schema 16. Journal format is v2;
+bundle format is v3. Decoders reject older formats rather than upgrading them.
 Hash domains are explicit, and independent vectors cover protocol commitments.
 There is no separate identity-register gate.

@@ -69,7 +69,7 @@ fn plan_for(configs: &[&SessionConfig], validator: &myelin_consensus::CommitteeS
             },
         })
         .collect();
-    ExportPlan { roots: vec![configs.last().unwrap().session_id], sessions, artifacts, limits: test_limits() }
+    ExportPlan { remote_sessions: vec![], roots: vec![configs.last().unwrap().session_id], sessions, artifacts, limits: test_limits() }
 }
 
 fn consensus_toml(validator: &myelin_consensus::CommitteeSigner) -> String {
@@ -82,6 +82,8 @@ fn consensus_toml(validator: &myelin_consensus::CommitteeSigner) -> String {
 
 #[path = "support/dependencies.rs"]
 mod dependencies;
+#[path = "support/remote.rs"]
+mod remote;
 
 #[cfg(target_os = "linux")]
 #[path = "support/dependency_measurements.rs"]

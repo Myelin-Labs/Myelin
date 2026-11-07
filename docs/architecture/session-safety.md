@@ -193,7 +193,7 @@ it does not turn the existing fixed-participant ledger into an open DEX ledger.
 
 ## Current formats
 
-Only MREC 13, block 6 and RocksDB schema 15 are supported. Earlier records and
+Only MREC 14, block 6 and RocksDB schema 16 are supported. Earlier records and
 stores are rejected; there is no schema-marker upgrade or historical decoder.
 Schema 13 atomically indexes each retained archival checkpoint by height and
 block hash. Lookup seeks one index entry and verifies its referenced block,

@@ -35,6 +35,7 @@ struct RecordRef<'a> {
     request_data_commitments: &'a [Hash32],
     snapshot_bytes: u64,
     handoff_actions: &'a [ResolvedHandoffAction],
+    remote_terminals: &'a [RemoteTerminalCertificate],
 }
 
 impl FinalisedBlockRecord {
@@ -54,6 +55,7 @@ impl FinalisedBlockRecord {
             request_data_commitments: &self.request_data_commitments,
             snapshot_bytes: self.resource_snapshot_bytes,
             handoff_actions: &self.handoff_actions,
+            remote_terminals: &self.remote_terminals,
         }
     }
 
@@ -139,6 +141,7 @@ impl<E: TransitionExecutor> PreparedBlock<E> {
             request_data_commitments: &self.request_data_commitments,
             snapshot_bytes: self.snapshot.len() as u64,
             handoff_actions: &self.handoff_actions,
+            remote_terminals: &self.remote_terminals,
         };
         record_size(&record, limit)?;
         Ok(())

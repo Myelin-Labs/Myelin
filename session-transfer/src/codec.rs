@@ -3,6 +3,13 @@ use myelin_session::bounded_codec;
 use serde::{de::DeserializeOwned, Serialize};
 
 const HEADER: usize = 46;
+fn version(magic: &[u8; 4]) -> u16 {
+    if magic == b"MTRS" {
+        2
+    } else {
+        1
+    }
+}
 
 pub(crate) fn encode<T: Serialize>(magic: &[u8; 4], value: &T, cap: usize) -> Result<Vec<u8>> {
     let cap = cap.min(bounded_codec::MAX_RECORD_BYTES);
@@ -11,7 +18,7 @@ pub(crate) fn encode<T: Serialize>(magic: &[u8; 4], value: &T, cap: usize) -> Re
     let body = postcard::to_allocvec(value).map_err(|e| Error::Codec(e.to_string()))?;
     let mut bytes = Vec::with_capacity(HEADER + body.len());
     bytes.extend(magic);
-    bytes.extend(1u16.to_le_bytes());
+    bytes.extend(version(magic).to_le_bytes());
     bytes.extend((body.len() as u64).to_le_bytes());
     bytes.extend(blake3::hash(&body).as_bytes());
     bytes.extend(body);
@@ -22,7 +29,7 @@ pub(crate) fn decode<T: DeserializeOwned + Serialize>(magic: &[u8; 4], bytes: &[
     if bytes.len() < HEADER
         || bytes.len() > cap.min(bounded_codec::MAX_RECORD_BYTES)
         || !bytes.starts_with(magic)
-        || bytes[4..6] != 1u16.to_le_bytes()
+        || bytes[4..6] != version(magic).to_le_bytes()
     {
         return Err(Error::Codec("invalid transfer record envelope/version/size".into()));
     }

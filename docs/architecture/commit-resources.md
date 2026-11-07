@@ -60,7 +60,7 @@ Checksums, exact envelope lengths and trailing-byte rejection remain required.
 
 ## Current storage format
 
-Only MREC envelope 13, session block 6 and RocksDB schema 15 are accepted.
+Only MREC envelope 14, session block 6 and RocksDB schema 16 are accepted.
 Every config binds resource limits and an explicit protocol-effects policy.
 Every block records its original snapshot byte count, and every successor carries
 its typed transition receipt. Historical record/store decoders and schema-marker

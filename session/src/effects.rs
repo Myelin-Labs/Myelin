@@ -14,16 +14,42 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub enum ProtocolEffectsPolicy {
     Disabled,
-    AuthorityMetadata { policy_hash: Hash32 },
-    Application { policy_hash: Hash32 },
+    AuthorityMetadata {
+        policy_hash: Hash32,
+    },
+    Application {
+        policy_hash: Hash32,
+    },
+    /// A kernel-visible, genesis-bound exclusive terminal domain. Its presence
+    /// requires consumption certificates regardless of physical store placement.
+    RemoteApplication {
+        policy_hash: Hash32,
+        terminal: crate::RemoteTerminalPolicy,
+    },
 }
 
 impl ProtocolEffectsPolicy {
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::Disabled => Ok(()),
+            Self::RemoteApplication { policy_hash, terminal } if *policy_hash != [0; 32] => terminal.validate(),
             Self::AuthorityMetadata { policy_hash } | Self::Application { policy_hash } if *policy_hash != [0; 32] => Ok(()),
             _ => Err(SessionError::ProtocolEffects("effect policy hash must not be zero".into())),
+        }
+    }
+
+    /// Recognize either application trust class without discarding its terminal scope.
+    pub fn application_policy_hash(&self) -> Option<Hash32> {
+        match self {
+            Self::Application { policy_hash } | Self::RemoteApplication { policy_hash, .. } => Some(*policy_hash),
+            _ => None,
+        }
+    }
+    /// Kernel-enforced coordination, independent of store/transport registration.
+    pub fn remote_terminal(&self) -> Option<&crate::RemoteTerminalPolicy> {
+        match self {
+            Self::RemoteApplication { terminal, .. } => Some(terminal),
+            _ => None,
         }
     }
 
@@ -41,6 +67,13 @@ impl ProtocolEffectsPolicy {
             Self::Application { policy_hash } => {
                 h.update(&[2]);
                 h.update(policy_hash);
+            }
+            Self::RemoteApplication { policy_hash, terminal } => {
+                h.update(&[3]);
+                h.update(policy_hash);
+                // Fixed scalar fields serialize even before config validation;
+                // hashing an invalid proposed config must not panic on its keys.
+                h.update(&postcard::to_allocvec(terminal).expect("fixed terminal fields serialize"));
             }
         }
         *h.finalize().as_bytes()
@@ -112,6 +145,14 @@ impl ProtocolEffectsContext {
         if self.has_source_effects() && self.policy == ProtocolEffectsPolicy::Disabled {
             return Err(SessionError::ProtocolEffects("source effects are disabled by genesis".into()));
         }
+        if let Some(terminal) = self.policy.remote_terminal() {
+            if !self.successor_config.is_empty()
+                || (!self.issued_handoffs.is_empty() && self.source_session_id != terminal.source_session)
+                || self.issued_handoffs.iter().any(|intent| intent.target != crate::HandoffTarget::Session(terminal.target_session))
+            {
+                return Err(SessionError::ProtocolEffects("remote domains forbid forwarding, continuation and policy targets".into()));
+            }
+        }
         let mut seen = std::collections::HashSet::new();
         for intent in &self.issued_handoffs {
             intent.validate()?;
@@ -141,13 +182,21 @@ impl ProtocolEffectsContext {
 /// This checks only the declared source trust class. Application intake still
 /// verifies the source policy allowlist, payload semantics and disposition.
 pub fn validate_handoff_trust(target: &SessionConfig, source: &SessionConfig) -> Result<()> {
-    match &target.protocol_effects {
-        ProtocolEffectsPolicy::Disabled => Err(SessionError::ProtocolEffects("handoff intake is disabled by genesis".into())),
-        ProtocolEffectsPolicy::Application { .. } if !matches!(source.protocol_effects, ProtocolEffectsPolicy::Application { .. }) => {
-            Err(SessionError::ProtocolEffects("authority metadata cannot become an application-verified handoff".into()))
-        }
-        _ => Ok(()),
+    match (target.protocol_effects.remote_terminal(), source.protocol_effects.remote_terminal()) {
+        (Some(target_policy), Some(source_policy))
+            if target_policy == source_policy
+                && source.session_id == source_policy.source_session
+                && target.session_id == target_policy.target_session => {}
+        (None, None) => {}
+        _ => return Err(SessionError::ProtocolEffects("remote terminal domains cannot be downgraded, forwarded or changed".into())),
     }
+    if target.protocol_effects == ProtocolEffectsPolicy::Disabled {
+        return Err(SessionError::ProtocolEffects("handoff intake is disabled by genesis".into()));
+    }
+    if target.protocol_effects.application_policy_hash().is_some() && source.protocol_effects.application_policy_hash().is_none() {
+        return Err(SessionError::ProtocolEffects("authority metadata cannot become an application-verified handoff".into()));
+    }
+    Ok(())
 }
 
 /// Check a handoff's exact source record and genesis linkage, including the

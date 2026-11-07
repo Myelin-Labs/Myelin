@@ -33,6 +33,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+myelin-session-authority.workspace = true
 myelin-session-network.workspace = true
 tempfile.workspace = true
 myelin-session-transfer.workspace = true

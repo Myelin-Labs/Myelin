@@ -110,6 +110,7 @@ fn config(plan: &RewardPlan, index: u32, initial: &TransferState, program: Hash3
 }
 fn settings(plan: &RewardPlan, pair: u32, program: Hash32) -> AnyResult<[(SessionConfig, TransferState); 2]> {
     let policy = TransferPolicy {
+        coordination: myelin_session_transfer::TransferCoordination::SharedStore,
         deployment_id: hash(b"myelin:measurement:reward-deployment"),
         uniqueness_domain: hash(format!("myelin:measurement:reward-domain:{}:{pair}", plan.seed).as_bytes()),
         kind: TransferKind::Scarce,
