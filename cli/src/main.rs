@@ -1013,18 +1013,18 @@ struct SessionCarrierSubmissionArgs {
     /// Funding lock dependency kind. Canonical CKB multisig uses `dep_group`.
     #[arg(long, default_value = "code")]
     lock_code_dep_type: String,
-    /// Deployed CellScript verifier code hash.
+    /// Deployed contract verifier code hash.
     #[arg(long)]
     verifier_code_hash: String,
-    /// Deployed CellScript verifier code dep tx hash.
+    /// Deployed contract verifier code dep tx hash.
     #[arg(long)]
     verifier_code_dep_tx_hash: String,
-    /// Deployed CellScript verifier code dep output index as a CKB hex quantity.
+    /// Deployed contract verifier code dep output index as a CKB hex quantity.
     #[arg(long)]
     verifier_code_dep_index: String,
-    /// Verifier CellScript source path. Live submission requires this to be readable.
+    /// Contract artifact manifest path. Live submission verifies the referenced ELF and code hash.
     #[arg(long)]
-    verifier_source: String,
+    verifier_artifact: String,
     /// Semantic role of the deployed verifier: carrier or final-l1-script.
     #[arg(long, default_value = "carrier")]
     verifier_role: String,
@@ -10061,13 +10061,6 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         )));
     }
     let package_commitment = format!("0x{}", hex::encode(myelin_hashes::sha256(&package_bytes)));
-    let carrier_verifier_source_hash =
-        fs::read(&args.verifier_source).ok().map(|source_bytes| format!("0x{}", hex::encode(myelin_hashes::sha256(&source_bytes))));
-    if (args.submit || accepted_tx_hash.is_some()) && carrier_verifier_source_hash.is_none() {
-        return Err(CliError::InvalidFixture(format!(
-            "live {verifier_role} submission requires --verifier-source to point to a readable CellScript source file"
-        )));
-    }
     let lock_script = Script::new(output_lock_code_hash_bytes, output_lock_hash_type, output_lock_args_bytes);
     let carrier_type_script = Script::new(verifier_code_hash_bytes, 4, carrier_type_args_bytes);
     let mut inputs = vec![CellInput::new(OutPoint::new(input_tx_hash_bytes, input_index_u32), 0)];
@@ -10082,6 +10075,22 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         CellDep { out_point: OutPoint::new(lock_dep_tx_hash_bytes, lock_dep_index_u32), dep_type: lock_dep_type },
         CellDep { out_point: OutPoint::new(verifier_dep_tx_hash_bytes, verifier_dep_index_u32), dep_type: DepType::Code },
     ]);
+    let artifact_path = Path::new(&args.verifier_artifact);
+    let verifier_artifact = if artifact_path.exists() || args.submit || accepted_tx_hash.is_some() {
+        Some(
+            myelin_ckb_adapter::artifact::ContractArtifact::load(artifact_path, &verifier_code_hash)
+                .map_err(|error| CliError::InvalidFixture(format!("--verifier-artifact: {error}")))?,
+        )
+    } else {
+        None
+    };
+    if let Some(manifest) = &verifier_artifact {
+        for dependency in &manifest.dependencies {
+            if !cell_deps.contains(dependency) {
+                cell_deps.push(dependency.clone());
+            }
+        }
+    }
     let initial_witness = if let Some(multisig) = canonical_multisig.as_ref() {
         let input_type = (!witness_bytes.is_empty()).then_some(witness_bytes.clone());
         serialize_ckb_witness_args_molecule(&multisig.placeholder_witness(input_type, None))
@@ -10390,7 +10399,7 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
         vec![
             "Live CKB carrier transaction passed test_tx_pool_accept, returned the exact hash from send_transaction, and was observed by get_transaction."
                 .to_owned(),
-            "The transaction output data carries a compact Myelin package payload enforced by the deployed CellScript carrier type script."
+            "The transaction output data carries a compact Myelin package payload enforced by the deployed contract carrier type script."
                 .to_owned(),
             "This is a deployed carrier verifier, not the final DA or court script.".to_owned(),
         ]
@@ -10413,9 +10422,8 @@ fn session_carrier_submission(args: SessionCarrierSubmissionArgs) -> Result<Valu
     };
     let carrier_verifier = serde_json::json!({
         "verifier_role": verifier_role,
-        "cellscript_source": args.verifier_source,
-        "cellscript_source_hash_algorithm": "sha256",
-        "cellscript_source_hash": carrier_verifier_source_hash,
+        "artifact_manifest": args.verifier_artifact,
+        "artifact": verifier_artifact,
         "code_hash": verifier_code_hash,
         "code_dep": {
             "out_point": { "tx_hash": verifier_dep_tx_hash, "index": verifier_dep_index },
@@ -12418,7 +12426,7 @@ fn final_l1_script_preflight_ready(submission: &Value) -> bool {
         return false;
     }
     if submission
-        .pointer("/final_script_verifier/cellscript_source_hash")
+        .pointer("/final_script_verifier/artifact/artifact_sha256")
         .and_then(Value::as_str)
         .is_none_or(|hash| normalize_ckb_tx_hash(hash).is_none())
     {
@@ -13212,7 +13220,7 @@ fn session_fixture_lock_script() -> Script {
 }
 
 fn session_fixture_code_dep_outpoint() -> OutPoint {
-    OutPoint::new(blake3_32(b"myelin:session-fixture-always-success-code-dep", b"cellscript-independent"), 0)
+    OutPoint::new(blake3_32(b"myelin:session-fixture-always-success-code-dep", b"builtin-always-success"), 0)
 }
 
 fn session_state_from_escrow_reports(escrows: &[SessionEscrowCellReport]) -> Result<CellStateTree> {
@@ -14578,6 +14586,32 @@ mod tests {
         (format!("http://{}", addr), handle)
     }
 
+    fn contract_artifact_fixture() -> (tempfile::TempDir, PathBuf, String, String) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut program = vec![0; 64];
+        program[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        program[18] = 243;
+        std::fs::write(directory.path().join("program.elf"), &program).unwrap();
+        let code_hash = format!("0x{}", hex::encode(ckb_cell_data_hash(&program)));
+        let sha256 = format!("0x{}", hex::encode(myelin_hashes::sha256(&program)));
+        let path = directory.path().join("program.artifact.json");
+        let manifest = myelin_ckb_adapter::artifact::ContractArtifact {
+            version: 1,
+            execution_profile: "ckb-strict-vm2".into(),
+            format: "riscv64-elf".into(),
+            artifact: "program.elf".into(),
+            artifact_sha256: sha256.clone(),
+            code_hash: code_hash.clone(),
+            compiler_identity: "independent fixture builder".into(),
+            source_sha256: None,
+            entry: "main".into(),
+            witness_abi: "fixture-v1".into(),
+            dependencies: vec![],
+        };
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        (directory, path, code_hash, sha256)
+    }
+
     fn write_temp_json<T: Serialize>(label: &str, value: &T) -> PathBuf {
         static NEXT_TEMP_JSON_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = NEXT_TEMP_JSON_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -15034,7 +15068,7 @@ mod tests {
             "pre_submit_verifier_code_dep_data_hash_matches": true,
             "final_script_verifier": {
                 "verifier_role": "final-l1-script",
-                "cellscript_source_hash": format!("0x{}", "42".repeat(32))
+                "artifact": { "artifact_sha256": format!("0x{}", "42".repeat(32)) }
             },
             "rpc_error": null
         });
@@ -15139,7 +15173,7 @@ mod tests {
             "pre_submit_authority_input_threshold_lock_args_matches": authority_lock_matches,
             "final_script_verifier": {
                 "verifier_role": "final-l1-script",
-                "cellscript_source_hash": format!("0x{}", "43".repeat(32))
+                "artifact": { "artifact_sha256": format!("0x{}", "43".repeat(32)) }
             },
             "rpc_result": expected_hash,
             "rpc_admission": rpc_admission_fixture(expected_hash),
@@ -15236,7 +15270,7 @@ mod tests {
             "pre_submit_authority_input_threshold_lock_args_matches": true,
             "final_script_verifier": {
                 "verifier_role": "final-l1-script",
-                "cellscript_source_hash": format!("0x{}", "43".repeat(32))
+                "artifact": { "artifact_sha256": format!("0x{}", "43".repeat(32)) }
             },
             "rpc_result": expected_hash,
             "rpc_admission": rpc_admission_fixture(expected_hash),
@@ -17635,10 +17669,12 @@ mod tests {
         let payload_bytes = decode_hex_bytes(&payload).expect("carrier payload bytes");
         let package = da_anchor_package_from_carrier_payload(&payload);
         let package_path = write_temp_json("carrier-submission-package", &package);
-        let verifier_source = std::env::temp_dir().join(format!("myelin-carrier-source-{}.cell", std::process::id()));
-        let verifier_source_bytes = b"module myelin::test_carrier\n";
-        std::fs::write(&verifier_source, verifier_source_bytes).expect("write verifier source");
-        let expected_verifier_source_hash = format!("0x{}", hex::encode(myelin_hashes::sha256(verifier_source_bytes)));
+        let (artifact_dir, verifier_artifact, artifact_code_hash, artifact_sha256) = contract_artifact_fixture();
+        let extra_dependency = CellDep { out_point: OutPoint::new([0xa1; 32], 2), dep_type: DepType::Code };
+        let mut manifest: myelin_ckb_adapter::artifact::ContractArtifact =
+            serde_json::from_slice(&std::fs::read(&verifier_artifact).unwrap()).unwrap();
+        manifest.dependencies.push(extra_dependency.clone());
+        std::fs::write(&verifier_artifact, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let carrier_capacity = 40_000_000_000u64;
         let change_capacity = 16_000_000_000u64;
         let fee = 1_000u64;
@@ -17665,10 +17701,10 @@ mod tests {
             lock_code_dep_tx_hash: format!("0x{}", "34".repeat(32)),
             lock_code_dep_index: "0x5".to_owned(),
             lock_code_dep_type: "code".to_owned(),
-            verifier_code_hash: format!("0x{}", "35".repeat(32)),
+            verifier_code_hash: artifact_code_hash.clone(),
             verifier_code_dep_tx_hash: format!("0x{}", "36".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
-            verifier_source: verifier_source.display().to_string(),
+            verifier_artifact: verifier_artifact.display().to_string(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
             multisig_signer_secret_keys: Vec::new(),
@@ -17685,7 +17721,7 @@ mod tests {
         let report =
             session_carrier_submission(build_args(Some(accepted_tx_hash.clone()))).expect("build accepted carrier submission");
         let _ = std::fs::remove_file(package_path);
-        let _ = std::fs::remove_file(verifier_source);
+        drop(artifact_dir);
 
         assert_eq!(report["schema"], "myelin-session-ckb-carrier-submission");
         assert_eq!(report["dry_run"], false);
@@ -17718,8 +17754,11 @@ mod tests {
             assert_eq!(output["lock"]["code_hash"], format!("0x{}", "37".repeat(32)));
             assert_eq!(output["lock"]["hash_type"], "type");
         }
-        assert_eq!(report["carrier_verifier"]["cellscript_source_hash_algorithm"], "sha256");
-        assert_eq!(report["carrier_verifier"]["cellscript_source_hash"], expected_verifier_source_hash);
+        assert_eq!(report["ckb_transaction_json"]["cell_deps"].as_array().unwrap().len(), 3);
+        assert_eq!(report["ckb_transaction_json"]["cell_deps"][2]["out_point"]["tx_hash"], format!("0x{}", "a1".repeat(32)));
+        assert_eq!(report["carrier_verifier"]["artifact"]["dependencies"][0], serde_json::to_value(extra_dependency).unwrap());
+        assert_eq!(report["carrier_verifier"]["artifact"]["execution_profile"], "ckb-strict-vm2");
+        assert_eq!(report["carrier_verifier"]["artifact"]["artifact_sha256"], artifact_sha256);
         assert_eq!(report["carrier_verifier"]["code_dep"], report["ckb_transaction_json"]["cell_deps"][1]);
         assert_eq!(report["carrier_verifier"]["type_script"], report["ckb_transaction_json"]["outputs"][0]["type"]);
 
@@ -17766,7 +17805,7 @@ mod tests {
             verifier_code_hash: format!("0x{}", "45".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "46".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
-            verifier_source: "da-anchor-carrier.cell".to_owned(),
+            verifier_artifact: "da-anchor-carrier.artifact.json".to_owned(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
             multisig_signer_secret_keys: Vec::new(),
@@ -17837,7 +17876,7 @@ mod tests {
             verifier_code_hash: format!("0x{}", "b5".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "b6".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
-            verifier_source: "settlement-final.cell".to_owned(),
+            verifier_artifact: "settlement-final.artifact.json".to_owned(),
             verifier_role: "final-l1-script".to_owned(),
             witness: "0x1234".to_owned(),
             multisig_signer_secret_keys: Vec::new(),
@@ -17894,7 +17933,7 @@ mod tests {
             verifier_code_hash: format!("0x{}", "c0".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "c1".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
-            verifier_source: "settlement-final.cell".to_owned(),
+            verifier_artifact: "settlement-final.artifact.json".to_owned(),
             verifier_role: "final-l1-script".to_owned(),
             witness: "0x1234".to_owned(),
             multisig_signer_secret_keys: Vec::new(),
@@ -17958,7 +17997,7 @@ mod tests {
             verifier_code_hash: format!("0x{}", "d5".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "d6".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
-            verifier_source: "settlement-final.cell".to_owned(),
+            verifier_artifact: "settlement-final.artifact.json".to_owned(),
             verifier_role: "final-l1-script".to_owned(),
             witness: "0x1234".to_owned(),
             multisig_signer_secret_keys: vec!["11".repeat(32), "22".repeat(32)],
@@ -18008,8 +18047,7 @@ mod tests {
         let payload = format!("0x{}", ["e1", "e2", "e3", "e4", "e5"].map(|byte| byte.repeat(32)).join(""));
         let package = settlement_package_from_carrier_payload(&payload);
         let package_path = write_temp_json("final-settlement-live-lock-package", &package);
-        let verifier_source = std::env::temp_dir().join(format!("myelin-final-settlement-lock-source-{}.cell", std::process::id()));
-        std::fs::write(&verifier_source, b"module myelin::final_settlement_lock\n").expect("write final verifier source");
+        let (artifact_dir, verifier_artifact, artifact_code_hash, _artifact_sha256) = contract_artifact_fixture();
         let carrier_capacity = 42_000_000_000u64;
         let change_capacity = 16_000_000_000u64;
         let fee = 1_000u64;
@@ -18025,7 +18063,7 @@ mod tests {
         let lock_code_hash = CKB_MULTISIG_V2_CODE_HASH.to_owned();
         let lock_dep_tx_hash = format!("0x{}", "b2".repeat(32));
         let lock_dep_index = "0x0".to_owned();
-        let verifier_code_hash = format!("0x{}", "f5".repeat(32));
+        let verifier_code_hash = artifact_code_hash;
         let verifier_dep_tx_hash = format!("0x{}", "f6".repeat(32));
         let verifier_dep_index = "0x1".to_owned();
         let authority_data_hash = package["settlement_authority"]["data_hash"].as_str().expect("authority data hash").to_owned();
@@ -18058,7 +18096,7 @@ mod tests {
             verifier_code_hash: verifier_code_hash.clone(),
             verifier_code_dep_tx_hash: verifier_dep_tx_hash.clone(),
             verifier_code_dep_index: verifier_dep_index.clone(),
-            verifier_source: verifier_source.display().to_string(),
+            verifier_artifact: verifier_artifact.display().to_string(),
             verifier_role: "final-l1-script".to_owned(),
             witness: "0x1234".to_owned(),
             multisig_signer_secret_keys: vec!["11".repeat(32), "22".repeat(32)],
@@ -18166,7 +18204,7 @@ mod tests {
             .expect_err("final settlement should reject authority lock mismatch before broadcast");
         authority_handle.join().expect("mock authority-lock mismatch rpc thread");
         let _ = std::fs::remove_file(package_path);
-        let _ = std::fs::remove_file(verifier_source);
+        drop(artifact_dir);
 
         assert_eq!(report["accepted_by_rpc"], true);
         assert_eq!(report["authority_threshold_lock_identity_checked"], true);
@@ -18185,8 +18223,7 @@ mod tests {
         let payload = format!("0x{}", ["61", "62", "63", "64", "65"].map(|byte| byte.repeat(32)).join(""));
         let package = da_anchor_package_from_carrier_payload(&payload);
         let package_path = write_temp_json("carrier-submission-live-package", &package);
-        let verifier_source = std::env::temp_dir().join(format!("myelin-carrier-live-source-{}.cell", std::process::id()));
-        std::fs::write(&verifier_source, b"module myelin::live_carrier\n").expect("write live verifier source");
+        let (artifact_dir, verifier_artifact, artifact_code_hash, _artifact_sha256) = contract_artifact_fixture();
         let carrier_capacity = 40_000_000_000u64;
         let change_capacity = 10_000_000_000u64;
         let fee = 1_000u64;
@@ -18195,7 +18232,7 @@ mod tests {
         let input_index = "0x0".to_owned();
         let lock_dep_tx_hash = format!("0x{}", "74".repeat(32));
         let lock_dep_index = "0x5".to_owned();
-        let verifier_code_hash = format!("0x{}", "75".repeat(32));
+        let verifier_code_hash = artifact_code_hash;
         let verifier_dep_tx_hash = format!("0x{}", "76".repeat(32));
         let verifier_dep_index = "0x1".to_owned();
         let lock_code_hash = format!("0x{}", "73".repeat(32));
@@ -18224,7 +18261,7 @@ mod tests {
             verifier_code_hash: verifier_code_hash.clone(),
             verifier_code_dep_tx_hash: verifier_dep_tx_hash.clone(),
             verifier_code_dep_index: verifier_dep_index.clone(),
-            verifier_source: verifier_source.display().to_string(),
+            verifier_artifact: verifier_artifact.display().to_string(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
             multisig_signer_secret_keys: Vec::new(),
@@ -18318,7 +18355,7 @@ mod tests {
         assert!(lock_mismatch_error.to_string().contains("carrier input lock mismatch"), "{lock_mismatch_error}");
 
         let _ = std::fs::remove_file(package_path);
-        let _ = std::fs::remove_file(verifier_source);
+        drop(artifact_dir);
 
         assert_eq!(report["dry_run"], false);
         assert_eq!(report["submit_mode"], true);
@@ -18345,8 +18382,7 @@ mod tests {
         let payload = format!("0x{}", ["91", "92", "93", "94", "95"].map(|byte| byte.repeat(32)).join(""));
         let package = da_anchor_package_from_carrier_payload(&payload);
         let package_path = write_temp_json("carrier-submission-bad-verifier-dep-package", &package);
-        let verifier_source = std::env::temp_dir().join(format!("myelin-carrier-bad-dep-source-{}.cell", std::process::id()));
-        std::fs::write(&verifier_source, b"module myelin::bad_dep_carrier\n").expect("write bad dep verifier source");
+        let (artifact_dir, verifier_artifact, artifact_code_hash, _artifact_sha256) = contract_artifact_fixture();
         let carrier_capacity = 40_000_000_000u64;
         let change_capacity = 10_000_000_000u64;
         let fee = 1_000u64;
@@ -18355,7 +18391,7 @@ mod tests {
         let input_index = "0x0".to_owned();
         let lock_dep_tx_hash = format!("0x{}", "94".repeat(32));
         let lock_dep_index = "0x5".to_owned();
-        let verifier_code_hash = format!("0x{}", "95".repeat(32));
+        let verifier_code_hash = artifact_code_hash;
         let verifier_dep_tx_hash = format!("0x{}", "96".repeat(32));
         let verifier_dep_index = "0x1".to_owned();
         let lock_code_hash = format!("0x{}", "93".repeat(32));
@@ -18411,7 +18447,7 @@ mod tests {
             verifier_code_hash,
             verifier_code_dep_tx_hash: verifier_dep_tx_hash,
             verifier_code_dep_index: verifier_dep_index,
-            verifier_source: verifier_source.display().to_string(),
+            verifier_artifact: verifier_artifact.display().to_string(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
             multisig_signer_secret_keys: Vec::new(),
@@ -18426,12 +18462,12 @@ mod tests {
         .expect_err("live carrier submission should reject mismatched verifier code dep hash");
         handle.join().expect("mock carrier preflight rejection rpc thread");
         let _ = std::fs::remove_file(package_path);
-        let _ = std::fs::remove_file(verifier_source);
+        drop(artifact_dir);
         assert!(error.to_string().contains("carrier verifier code dep data hash mismatch"), "{error}");
     }
 
     #[test]
-    fn session_carrier_submission_rejects_live_submit_without_readable_verifier_source() {
+    fn session_carrier_submission_rejects_live_submit_without_readable_verifier_artifact() {
         let payload = format!("0x{}", ["81", "82", "83", "84", "85"].map(|byte| byte.repeat(32)).join(""));
         let package = da_anchor_package_from_carrier_payload(&payload);
         let package_path = write_temp_json("carrier-submission-missing-source-package", &package);
@@ -18465,7 +18501,7 @@ mod tests {
             verifier_code_hash: format!("0x{}", "85".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "86".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
-            verifier_source: "/tmp/myelin-missing-carrier-source.cell".to_owned(),
+            verifier_artifact: "/tmp/myelin-missing-carrier-artifact.json".to_owned(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
             multisig_signer_secret_keys: Vec::new(),
@@ -18477,14 +18513,9 @@ mod tests {
             accepted_tx_hash: None,
             out: None,
         })
-        .expect_err("live carrier submission should require readable verifier source");
+        .expect_err("live carrier submission should require a verified artifact");
         let _ = std::fs::remove_file(package_path);
-        assert!(
-            error
-                .to_string()
-                .contains("live carrier submission requires --verifier-source to point to a readable CellScript source file"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("--verifier-artifact: invalid contract artifact:"), "{error}");
     }
 
     #[test]
@@ -18517,7 +18548,7 @@ mod tests {
             verifier_code_hash: format!("0x{}", "55".repeat(32)),
             verifier_code_dep_tx_hash: format!("0x{}", "56".repeat(32)),
             verifier_code_dep_index: "0x1".to_owned(),
-            verifier_source: "da-anchor-carrier.cell".to_owned(),
+            verifier_artifact: "da-anchor-carrier.artifact.json".to_owned(),
             verifier_role: "carrier".to_owned(),
             witness: "0x1234".to_owned(),
             multisig_signer_secret_keys: Vec::new(),
@@ -20179,9 +20210,9 @@ mod tests {
     }
 
     #[test]
-    fn ckb_create_cell_reports_cellscript_deployment_capacity_shortfall() {
+    fn ckb_create_cell_reports_contract_deployment_capacity_shortfall() {
         let artifact = std::env::temp_dir().join(format!("myelin-capacity-plan-{}.elf", std::process::id()));
-        std::fs::write(&artifact, vec![0x7f; 38_628]).expect("write representative CellScript artifact");
+        std::fs::write(&artifact, vec![0x7f; 38_628]).expect("write representative contract artifact");
         let mut args = create_cell_args(format!("0x{}", "71".repeat(20)));
         args.input_capacity_shannons = 999_999_900_000;
         args.data_file = Some(artifact.clone());

@@ -170,7 +170,7 @@ fn build_streaming_chunk(
 }
 ```
 
-The `accumulator_script_dep()` references the CellScript type
+The `accumulator_script_dep()` references the CKB type
 script that encodes the per-session accumulation rule (which
 sources count, what the per-unit bound is, what the fee basis is).
 
@@ -200,7 +200,7 @@ Streaming payments with Myelin are best when:
 - The session has a clear bounded duration (minutes to days).
 - The per-unit amount is fixed or has a clear rule.
 - The payee is willing to lock escrow capacity upfront.
-- The dispute rule is simple enough to encode in a CellScript.
+- The dispute rule is simple enough to encode in a CKB script.
 
 For more complex flows (variable amounts, multi-party, contingent
 settlement), the pattern is similar but the accumulator script

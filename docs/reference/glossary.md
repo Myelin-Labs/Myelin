@@ -34,10 +34,10 @@ input OutPoints, consumed Cells, created Cells, read references,
 typed-cell conflict hashes, and declared read/write domains. See
 [CellDAG scheduler](../architecture/scheduler.md).
 
-**CellScript** — The language Myelin's application code is written
-in. Myelin invokes one exact upstream compiler through the attested
-`myelin-cellscript-adapter`; the compiler source is not vendored.
-See [CellScript & typed-cell metadata](../architecture/cellscript.md).
+**CellScript** — One optional source language that can produce CKB programs for
+Myelin. Its compiler adapter and examples live in an independent integration
+workspace. Myelin consumes [contract artifacts](../architecture/contract-artifacts.md)
+and does not require this language or compiler.
 
 **CellTx** — A unit of state transition: consumes Cells, creates
 Cells, carries witnesses and dep references. See
@@ -74,7 +74,7 @@ CellTxs would conflict if both wrote to the same element. See
 **Conflict hash** — A Myelin scheduler-domain hash derived from the
 full type-script identity and one canonical state-resolved conflict-key
 value. It is not accepted directly from compiler metadata. See
-[CellScript & typed-cell metadata](../architecture/cellscript.md).
+[Contract artifacts](../architecture/contract-artifacts.md).
 
 **Court bundle** — A self-contained input to the future CKB court
 verifier: chunk payload bytes, CKB Molecule tx bytes, projection
@@ -102,7 +102,7 @@ the same exit code on every node. See
 [What is CKB-VM?](../concepts/what-is-ckb-vm.md).
 
 **Devnet smoke** — The local CKB devnet smoke script
-(`scripts/myelin_ckb_devnet_smoke.sh`) that runs live carrier
+(`scripts/myelin_ckb_microgame.py`) that runs actual microgame
 submissions against a parent CKB devnet. See
 [Local CKB devnet smoke](../operations/devnet-smoke.md).
 
@@ -283,7 +283,7 @@ a matching `type`. See
 Myelin authenticates the artifact/metadata digests, then resolves access
 locations against concrete Cell state; compiler binding names are not trusted
 conflict keys. See
-[CellScript & typed-cell metadata](../architecture/cellscript.md).
+[Contract artifacts](../architecture/contract-artifacts.md).
 
 ## V
 

@@ -39,8 +39,8 @@ pub struct ConflictEntry {
 /// Scheduler accesses authenticated and bound to one raw transaction.
 ///
 /// This is a sidecar admission object. It is deliberately not decoded from
-/// transaction witnesses by CellDAG: callers must obtain it from the
-/// CellScript artifact adapter or another trusted metadata source.
+/// transaction witnesses by CellDAG: callers must obtain it from
+/// an application artifact adapter or another trusted metadata source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchedulerPlan {
     txid: [u8; 32],

@@ -19,7 +19,7 @@
 - [Execution pipeline](exec-pipeline.md)
 - [CellDAG scheduler](scheduler.md)
 - [Mempool and RBF](mempool.md)
-- [CellScript adapter](cellscript.md)
+- [Contract artifacts](contract-artifacts.md)
 - [CKB projection stages](projection.md)
 - [Closed-validator finality](consensus.md)
 - [Continuous session lifecycle](../interactions/session-flow.md)

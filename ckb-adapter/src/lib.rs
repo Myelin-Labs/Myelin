@@ -3,6 +3,8 @@
 
 //! Fail-closed evidence adapter to an authoritative CKB node.
 
+pub mod artifact;
+
 use merkle_cbt::{merkle_tree::Merge, MerkleProof, CBMT};
 use myelin_exec::{
     ckb_cell_data_hash, ckb_header_hash_molecule, ckb_raw_transaction_hash_molecule, parse_ckb_dep_group_data, CellDep, CellInput,

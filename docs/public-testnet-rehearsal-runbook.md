@@ -89,7 +89,7 @@ The rehearsal operator must also have:
 
 ```text
 1. a funded public CKB testnet cell;
-2. compiled CellScript DA-anchor and settlement verifier artefacts;
+2. compiled DA-anchor and settlement verifier artifact manifests and ELF files;
 3. operator custody policy JSON labelled for rehearsal;
 4. operator runbook JSON labelled for rehearsal;
 5. external DA receipt JSON, either real provider evidence or explicitly
@@ -116,15 +116,12 @@ Secret files are rehearsal-only, must remain mode `0600`, and must never be
 copied into tracked evidence. Production custody requires an external signing
 ceremony; pass repeated `--signature` values to `ckb create-cell` instead.
 
-Copy the tracked Myelin CellScript verifier sources into the rehearsal
-artefact directory before submission:
-
-```bash
-cp fixtures/cellscript/da-anchor-carrier.cell "$MYELIN_REHEARSAL_DIR/"
-cp fixtures/cellscript/settlement-carrier.cell "$MYELIN_REHEARSAL_DIR/"
-cp fixtures/cellscript/da-anchor-final.cell "$MYELIN_REHEARSAL_DIR/"
-cp fixtures/cellscript/settlement-final.cell "$MYELIN_REHEARSAL_DIR/"
-```
+Provide independently built verifier manifests and their referenced ELF files in
+the rehearsal directory. Use the [generic artifact format](architecture/contract-artifacts.md)
+and match each deployed Data2 code hash. The live helper expects
+`da-anchor-carrier.artifact.json`, `settlement-carrier.artifact.json` and
+`settlement-final.artifact.json`. A compiler integration may produce them; the
+core preparation helper does not copy or compile source files.
 
 Copy the evidence document starters:
 
@@ -375,7 +372,7 @@ cargo run -p myelin-cli -- session carrier-submission \
   --verifier-code-hash "$CKB_TESTNET_DA_VERIFIER_CODE_HASH" \
   --verifier-code-dep-tx-hash "$CKB_TESTNET_DA_VERIFIER_DEP_TX_HASH" \
   --verifier-code-dep-index "$CKB_TESTNET_DA_VERIFIER_DEP_INDEX" \
-  --verifier-source "$MYELIN_REHEARSAL_DIR/da-anchor-carrier.cell" \
+  --verifier-artifact "$MYELIN_REHEARSAL_DIR/da-anchor-carrier.artifact.json" \
   --witness "$CKB_TESTNET_DA_WITNESS" \
   --rpc-url "$CKB_TESTNET_RPC" \
   --submit \
@@ -413,11 +410,11 @@ The Session final-script surface accepts only the current CKB
 `secp256k1_blake160_multisig_all` v2 identity (`hash_type=data1`,
 `dep_type=dep_group`, 20-byte config-hash args). It requires checked deployment
 evidence in the package and rejects any transaction whose lock code hash, hash
-type, or DepGroup differs from that evidence. The parent CKB devnet gate
-exercises this exact path: canonical multisig owns `WitnessArgs.lock`, the
-CellScript entry payload is placed in `WitnessArgs.input_type`, and the final
-signed transaction is accepted by the parent full node. Tamper and competing
-settlement probes must be rejected.
+type, or DepGroup differs from that evidence. The optional compiler-specific carrier drill exercises this composition:
+canonical multisig owns `WitnessArgs.lock`, while the application payload uses
+`WitnessArgs.input_type`. The root CKB profile exercises the Rust microgame court
+separately. Each application must verify its exact ABI and signed transaction
+against a full node; an ABI label alone is not execution evidence.
 
 For public testnet, first build the transaction without `--submit`, sign the
 reported `canonical_ckb_multisig.signing_message`

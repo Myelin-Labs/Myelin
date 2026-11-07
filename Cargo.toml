@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
+exclude = ["integrations/cellscript"]
 members = [
     "ckb-adapter",
-    "cellscript-adapter",
     "cli",
     "consensus",
     "core-utils",
@@ -50,7 +50,6 @@ blake3 = { version = "1.8.2"}
 log = "0.4.20"
 libc = "0.2.189"
 myelin-exec = { version = "0.31.0", path = "exec" }
-myelin-cellscript-adapter = { version = "0.31.0", path = "cellscript-adapter" }
 myelin-ckb-adapter = { version = "0.31.0", path = "ckb-adapter" }
 myelin-consensus = { version = "0.31.0", path = "consensus" }
 myelin-cli = { version = "0.31.0", path = "cli" }

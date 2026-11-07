@@ -54,7 +54,7 @@ Application integrations live in external modules. The Veloren adapter in the si
 The chain/session module already combines deterministic execution, finality and
 atomic persistence; it is more than a DA module. A complete CKB application
 sidechain still needs its own application/VM profile, writer and consensus model,
-data availability and custody/exit protocol. CellScript's CKB-shaped program
+data availability and custody/exit protocol. an external compiler's CKB-shaped program
 bytes alone do not supply these deployment and economic rules.
 
 The [independent-store handoff reference](architecture/remote-handoff.md) now

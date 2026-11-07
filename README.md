@@ -31,7 +31,7 @@ CKB already gives applications deterministic Cell transitions and script verific
 flowchart TB
     subgraph BUILD["1. Compile"]
         direction LR
-        CS["CellScript source"] --> CA["Pinned compiler adapter"] --> TX["CellTx + access template"]
+        CS["Application source or prebuilt program"] --> CA["Artifact producer"] --> TX["CellTx + access template"]
     end
 
     subgraph PRODUCE["2. Reserve one candidate"]
@@ -62,7 +62,7 @@ flowchart TB
 
 Four rules keep the modules from trusting data outside their remit:
 
-- **CellScript describes access; Myelin resolves identity.** Compiler metadata is an access template, never a trusted final conflict key.
+- **Applications describe access; Myelin resolves identity.** Compiler metadata is an access template, never a trusted final conflict key.
 - **CellDAG schedules transactions; CKB-VM verifies scripts.** Scheduling is outside the VM and does not change script semantics.
 - **Consensus finalizes a session result; it does not make execution valid.** VM verification and state transition are consensus-independent.
 - **Evidence stages are earned from receipts.** A caller cannot promote a projection with a boolean flag.
@@ -270,19 +270,18 @@ flowchart TB
 
 The pure `project_cell_tx_to_ckb` function is defined to stop at **wire encoded**. Higher claims exist only in `CkbEvidenceProjection` and its linked receipts. Confirmation depth is operational finality evidence, not a claim of absolute CKB irreversibility.
 
-## CellScript is external and reproducible
+## Language-independent contract artifacts
 
-The compiler is not vendored. Myelin owns its protocol fixtures and connects to one exact upstream compiler through `myelin-cellscript-adapter`.
+Myelin consumes compiled programs, transactions and application metadata. It does not
+require a source language or compiler. The [artifact contract](docs/architecture/contract-artifacts.md)
+binds the exact ELF to its SHA-256, CKB Data2 code hash, execution profile, entry,
+witness ABI, deployment dependencies and build provenance. Live carrier submission
+accepts `--verifier-artifact`; source files are optional provenance.
 
-| Component | Locked version |
-| --- | --- |
-| CellScript release | `v0.31.0` |
-| CellScript pinned revision | `v0.31.0` / `5fd4c4690512b3df4cd5a46d64194d7d4d3b9491` (exact release tag, no private patch) |
-| Entry witness placement | `WitnessArgs.input_type` via `cellscript-witnessargs-input-type-v2` |
-| Compiler CKB SDK | v5.1.0 at `1fbf3d4c9b35ef90bdb9e6621a8d26edde6325ce` |
-| Lock file | [`cellscript-adapter/cellscript-toolchain.lock.json`](cellscript-adapter/cellscript-toolchain.lock.json) |
-
-The adapter verifies compiler identity, source revision, target profile, metadata schema, and source/artifact/metadata digests. Upgrades are explicit lock changes followed by fixture and devnet gates; Myelin never follows a mutable parent branch at runtime.
+The optional [CellScript integration](integrations/cellscript/README.md) has its own
+Cargo workspace, lock, compiler reproduction and carrier acceptance commands. It
+is excluded from root builds and validation profiles. It produces the same generic
+artifact format using the existing upstream `ckb` profile.
 
 ## Current capabilities and limits
 
@@ -291,7 +290,7 @@ The adapter verifies compiler identity, source revision, target profile, metadat
 | Typed Cell execution, state-resolved conflicts, atomic state roots | Supported and validated |
 | Strict local CKB-VM verification with a shared transaction cycle budget | Supported and validated |
 | Static committee, rotating PoA, and full-round Tendermint closed-validator finality | Supported and validated |
-| Exact CellScript v0.31.0 reproduction | Pinned and release-gated |
+| Language-specific compiler reproduction | Optional integration workspace |
 | Live CKB admission, commitment, transaction proof, depth, and reorg checks | Exercised on parent devnet and public testnet |
 | Standard-lock transaction admission and commitment on public CKB testnet | Exercised with finalized evidence |
 | Canonical CKB `secp256k1_blake160_multisig_all` construction and verification | Public-testnet 2-of-3 create/spend exercised |
@@ -310,7 +309,7 @@ Run local workspace and process validation:
 scripts/myelin_production_gate.sh --profile core --out target/validation
 ```
 
-Select `--profile ckb` for locked CellScript reproduction plus parent CKB devnet acceptance,
+Select `--profile ckb` for the core plus strict Rust microgame CKB devnet acceptance,
 or choose independent lanes with `--lane`. Each selected lane is required; missing tools
 fail that profile. The default core profile explicitly skips external integrations.
 Reports bind the exact working tree, commands, logs and artifacts. See
@@ -333,8 +332,7 @@ Reports bind the exact working tree, commands, logs and artifacts. See
 | [`session-escrow/`](session-escrow) | inspect optional funded-session accounting and evidence-bound exit construction |
 | [`wallet-auth/`](wallet-auth) | inspect CKB wallet identity and login/PoA signature helpers |
 | [`ckb-adapter/`](ckb-adapter) | produce or verify authoritative CKB evidence receipts |
-| [`cellscript-adapter/`](cellscript-adapter) | inspect the pinned compiler process boundary |
-| [`fixtures/cellscript/`](fixtures/cellscript) | inspect Myelin-owned verifier sources |
+| [`integrations/cellscript/`](integrations/cellscript) | optional independently locked compiler integration |
 | [`cli/`](cli) | run session, court, DA, settlement, and CKB evidence workflows |
 
 ## Documentation
@@ -347,7 +345,7 @@ Reports bind the exact working tree, commands, logs and artifacts. See
 | How does the independent Veloren research fork integrate? | [Veloren integration](docs/integrations/veloren-research-fork.md) |
 | Where does Myelin differ from CKB? | [Semantic deviations](MYELIN_CKB_SEMANTIC_DEVIATIONS.md) |
 | How are evidence stages verified? | [CKB projection audit](MYELIN_CKB_PROJECTION_AUDIT.md) |
-| How does the compiler boundary work? | [CellScript integration](docs/architecture/cellscript.md) |
+| How does the compiler boundary work? | [Contract artifacts](docs/architecture/contract-artifacts.md) |
 | How do I use every CLI command? | [CLI reference](docs/operations/cli.md) |
 | What does the merge-readiness gate run? | [Production gate](docs/operations/production-gate.md) |
 | What changed in v0.31.0? | [Release record](docs/releases/myelin-0.31.0.md) |

@@ -69,12 +69,8 @@ THRESHOLD_LOCK_CODE_HASH="${MYELIN_THRESHOLD_LOCK_CODE_HASH:-0x36c971b8d41fbd94a
 THRESHOLD_LOCK_CODE_DEP_TX_HASH="${MYELIN_THRESHOLD_LOCK_CODE_DEP_TX_HASH:-0x2eefdeb21f3a3edf697c28a52601b4419806ed60bb427420455cc29a090b26d5}"
 THRESHOLD_LOCK_CODE_DEP_INDEX="${MYELIN_THRESHOLD_LOCK_CODE_DEP_INDEX:-0x0}"
 
-run_step "Copy rehearsal sources and operator starter documents" bash -c '
+run_step "Copy operator starter documents" bash -c '
   set -euo pipefail
-  cp fixtures/cellscript/da-anchor-carrier.cell "$0/"
-  cp fixtures/cellscript/settlement-carrier.cell "$0/"
-  cp fixtures/cellscript/da-anchor-final.cell "$0/"
-  cp fixtures/cellscript/settlement-final.cell "$0/"
   cp docs/templates/public-testnet-rehearsal/operator-custody-policy.json "$0/"
   cp docs/templates/public-testnet-rehearsal/operator-runbook.json "$0/"
 ' "$REHEARSAL_DIR"

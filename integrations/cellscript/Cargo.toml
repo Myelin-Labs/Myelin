@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["adapter"]
+
+[workspace.dependencies]
+blake3 = "1.8.2"
+hex = { version = "0.4.3", features = ["serde"] }
+myelin-exec = { version = "0.31.0", path = "../../exec" }
+myelin-ckb-adapter = { version = "0.31.0", path = "../../ckb-adapter" }
+serde = { version = "1.0.225", features = ["derive", "rc"] }
+serde_json = { version = "1.0.145", features = ["arbitrary_precision"] }
+thiserror = "1.0.50"
+tempfile = "3.8.1"

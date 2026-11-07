@@ -256,7 +256,7 @@ devnet. The latter is local-chain evidence, not a public testnet deployment.
 For the devnet path specifically, two extra pieces of evidence are
 required:
 
-1. The DA-anchor and settlement CellScript carrier verifiers must
+1. The DA-anchor and settlement CKB carrier verifiers must
    be deployed on the devnet.
 2. The compact-payload carriers (160 bytes each) must match the
    declared `type.args` (`ckb_data_hash(carrier_payload) ||
