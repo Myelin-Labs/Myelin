@@ -46,6 +46,7 @@ fn remote_target_archive_retains_proofs_and_source_artifacts_after_both_database
     store.import_handoff(&HandoffInboxRecord { policy: policy_id, proof }).unwrap();
     let request = intake_request(&target, ids.clone());
     commit(&mut target, &source.verifier, &source.validator, request);
+    #[cfg(target_os = "linux")]
     let expected = target.head().clone();
     let mut plan = plan_for(&[&target_cfg], &source.validator, &input);
     plan.remote_sessions.push(ExportSession {
