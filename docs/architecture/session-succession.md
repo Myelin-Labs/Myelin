@@ -25,8 +25,8 @@ The generic runtime cannot infer the semantics of an application snapshot.
 
 ## Record and commitment boundary
 
-All blocks use version 6 and MREC envelope 13. Successor declarations always
-include a typed transition receipt in the canonical record. Store schema 15
+All blocks use version 6 and MREC envelope 14. Successor declarations always
+include a typed transition receipt in the canonical record. Store schema 16
 rejects earlier databases. Application-authorized state conversion is a current
 protocol operation; it is independent of storage format upgrades, which are unsupported.
 

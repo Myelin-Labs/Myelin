@@ -359,7 +359,7 @@ fn execute_record<E: TransitionExecutor>(
     let session_id = genesis.config.session_id;
     let height = record.block.number;
     let pre_root = replay_head.state_root;
-    audit_record(genesis, verifier, replay_head, record)?;
+    audit_record(&genesis.config, verifier, replay_head, record)?;
     if executor.state_root() != pre_root {
         return Err(SessionError::Replay(format!("executor pre-root mismatch at height {height}")));
     }
@@ -384,10 +384,11 @@ fn execute_record<E: TransitionExecutor>(
             {
                 return Err(SessionError::Replay(format!("handoff consumption marker mismatch at height {height}")));
             }
-            let source = store.load_genesis(stored.handoff.source_session_id)?;
-            crate::validate_handoff_trust(&genesis.config, &source.config)?;
-            let source_record = store.load_block(stored.handoff.source_session_id, stored.handoff.source_height)?;
-            crate::validate_handoff_source(&source.config, &source_record, &stored.handoff)?;
+            let source = crate::resolve_handoff_source(store, &stored.handoff)?;
+            crate::validate_remote_consumption(&genesis.config, &source.config, record, &stored.handoff)?;
+            handoff_usage.add_remote_proof(&genesis.config.commit_limits, source.proof_bytes())?;
+            source.validate_target(&genesis.config)?;
+            crate::validate_handoff_evidence(store, &stored.handoff, &source)?;
             Ok(stored.handoff)
         })
         .collect::<Result<Vec<_>>>()?;

@@ -1,8 +1,8 @@
 //! One canonical store can host multiple independently fenced
 //! sessions. Raw writable store handles never escape to application workers.
 use crate::{protocol, AuthorityError, Result};
-use myelin_session::{Hash32, SessionGenesis, SessionStore};
-use myelin_session_store_rocksdb::RocksSessionStore;
+use myelin_session::{HandoffImportRegistry, HandoffInboxRecord, Hash32, SessionGenesis, SessionStore};
+use myelin_session_store_rocksdb::{RemoteImportOutcome, RemoteInboxLimits, RocksSessionStore};
 use std::{
     collections::HashSet,
     path::Path,
@@ -16,11 +16,28 @@ pub struct CanonicalLedger {
 }
 impl CanonicalLedger {
     pub fn open(path: impl AsRef<Path>) -> Result<Arc<Self>> {
-        Ok(Arc::new(Self {
-            store: Arc::new(RocksSessionStore::open(path).map_err(protocol::session)?),
-            active: Mutex::new(HashSet::new()),
-            commits: Mutex::new(()),
-        }))
+        Self::from_store(RocksSessionStore::open(path).map_err(protocol::session)?)
+    }
+    pub fn open_with_handoff_imports(
+        path: impl AsRef<Path>,
+        registry: Arc<HandoffImportRegistry>,
+        limits: RemoteInboxLimits,
+    ) -> Result<Arc<Self>> {
+        Self::from_store(
+            RocksSessionStore::open(path)
+                .map_err(protocol::session)?
+                .with_handoff_imports(registry, limits)
+                .map_err(protocol::session)?,
+        )
+    }
+    fn from_store(store: RocksSessionStore) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self { store: Arc::new(store), active: Mutex::new(HashSet::new()), commits: Mutex::new(()) }))
+    }
+    /// Ordered against canonical target commits. Only explicit external proofs
+    /// are imported; raw writable store capabilities remain inside the authority.
+    pub fn import_handoff(&self, record: &HandoffInboxRecord) -> Result<RemoteImportOutcome> {
+        let _commit = self.commit_lock()?;
+        self.store.import_handoff(record).map_err(protocol::session)
     }
     /// Genesis records are immutable application dependencies, not writable
     /// store capabilities or permission to activate a restored authority.

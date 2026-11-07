@@ -141,6 +141,8 @@ nav:
       - Session safety contracts: architecture/session-safety.md
       - Source-effect authorization: architecture/protocol-effects.md
       - Reference transfer policy: architecture/reference-transfer.md
+      - Independent-store handoffs: architecture/remote-handoff.md
+      - Strict CKB microgame court: architecture/ckb-microgame.md
       - Handoff lifecycle: architecture/handoff-lifecycle.md
       - Command journal: architecture/command-journal.md
       - Native command applications: architecture/command-applications.md

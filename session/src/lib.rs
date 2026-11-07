@@ -21,6 +21,8 @@ mod evidence;
 mod lifecycle;
 mod record_size;
 mod recovery;
+mod remote;
+mod remote_terminal;
 mod replay;
 mod resources;
 mod succession;
@@ -46,6 +48,15 @@ pub use recovery::{
     PausedRecovery, RecoveryAudit, RecoveryBudget, RecoveryCancellation, RecoveryOutcome, RecoveryPauseReason, RecoveryProgress,
     RecoveryUsage,
 };
+pub use remote::{
+    resolve_handoff_source, validate_handoff_evidence, verify_remote_block, HandoffEvidenceProof, HandoffImportKind,
+    HandoffImportPolicy, HandoffImportRegistry, HandoffImportVerifier, HandoffInboxRecord, HandoffProofBundle,
+    RemoteFinalityVerifiers, ResolvedHandoffSource, VerifiedHandoffImport, MAX_REMOTE_PROOF_BYTES, REMOTE_HANDOFF_FORMAT_VERSION,
+};
+pub use remote_terminal::{
+    remote_cancellation_digest, validate_remote_consumption, RemoteConsumptionProof, RemoteTerminalCertificate,
+    RemoteTerminalDecision, RemoteTerminalPolicy, VerifiedRemoteTerminal, MAX_REMOTE_TERMINAL_BYTES, REMOTE_TERMINAL_VERSION,
+};
 pub use replay::{PausedReplay, RangeReplay, RangeReplayReceipt, ReplayAnchor, ReplayOutcome};
 pub use resources::{CommitResourceLimits, HandoffUsage};
 pub use succession::{MigrationArtifact, SuccessorState, SuccessorTransition};
@@ -63,7 +74,7 @@ use std::{collections::HashSet, fmt, sync::Arc};
 pub type Hash32 = [u8; 32];
 
 const RECORD_MAGIC: &[u8; 4] = b"MREC";
-pub const RECORD_FORMAT_VERSION: u16 = 13;
+pub const RECORD_FORMAT_VERSION: u16 = 14;
 pub const SESSION_BLOCK_VERSION: u32 = 6;
 const RECORD_HEADER_BYTES: usize = 4 + 2 + 8 + 32;
 const SNAPSHOT_MAGIC: &[u8; 4] = b"MSNP";
@@ -130,6 +141,12 @@ impl SessionConfig {
         }
         self.application_profile.validate()?;
         self.protocol_effects.validate()?;
+        if let Some(terminal) = self.protocol_effects.remote_terminal() {
+            if self.predecessor.is_some() || (self.session_id != terminal.source_session && self.session_id != terminal.target_session)
+            {
+                return Err(SessionError::InvalidConfig("remote terminal policy requires its fixed original source/target".into()));
+            }
+        }
         self.commit_limits.validate()?;
         resources::check("transactions", self.max_block_transactions as u64, codec::MAX_SEQUENCE_ITEMS as u64)?;
         resources::check("transaction_bytes", self.max_block_bytes, codec::MAX_RECORD_BYTES as u64)?;
@@ -467,12 +484,42 @@ pub struct PreparedBlock<E: TransitionExecutor> {
     consumed_handoffs: Vec<SessionHandoff>,
     handoff_actions: Vec<ResolvedHandoffAction>,
     request_data_commitments: Vec<Hash32>,
+    remote_terminals: Vec<RemoteTerminalCertificate>,
 }
 
 impl<E: TransitionExecutor> PreparedBlock<E> {
     /// Candidate block to propose and sign through the selected consensus plugin.
+    /// Attach separately signed terminal evidence without changing the candidate hash.
+    /// Commit rechecks every certificate against local import trust and this exact block.
+    pub fn with_remote_terminals(mut self, certificates: Vec<RemoteTerminalCertificate>) -> Self {
+        self.remote_terminals = certificates;
+        self
+    }
+
     pub fn block(&self) -> &MyelinBlock {
         &self.block
+    }
+
+    /// Build the exact retained candidate for terminal-authority admission. This
+    /// does not commit it. The target finality proof is still independently checked.
+    pub fn candidate_record(&self, proof: FinalityProof, module: Hash32) -> FinalisedBlockRecord {
+        FinalisedBlockRecord {
+            block: self.block.clone(),
+            consensus_module_commitment: module,
+            proof,
+            transactions: self.transactions.clone(),
+            state_snapshot: self.snapshot.clone(),
+            outbox: self.outbox.clone(),
+            frame: self.frame.clone(),
+            frame_input: self.frame_input.clone(),
+            successor: self.successor.clone(),
+            issued_handoffs: self.issued_handoffs.clone(),
+            consumed_handoff_ids: self.consumed_handoffs.iter().map(SessionHandoff::id).collect(),
+            request_data_commitments: self.request_data_commitments.clone(),
+            resource_snapshot_bytes: self.snapshot.len() as u64,
+            handoff_actions: self.handoff_actions.clone(),
+            remote_terminals: self.remote_terminals.clone(),
+        }
     }
 
     /// Exact head used for construction and execution.
@@ -539,6 +586,9 @@ pub struct FinalisedBlockRecord {
     pub resource_snapshot_bytes: u64,
     /// Replayable lifecycle witnesses in the current record format.
     pub handoff_actions: Vec<ResolvedHandoffAction>,
+    /// External consume authorizations bind the exact signed candidate. They
+    /// are retained for commit, recovery and offline application replay.
+    pub remote_terminals: Vec<RemoteTerminalCertificate>,
 }
 
 impl FinalisedBlockRecord {
@@ -584,6 +634,7 @@ impl FinalisedBlockRecord {
             return Err(SessionError::Codec("unsupported session block version".into()));
         }
         self.check_successor_format()?;
+        remote_terminal::validate_terminal_envelope(self)?;
         if let Some(successor) = &self.successor {
             successor.validate_source(config, self.frame_input.root())?;
             if !self.state_snapshot.is_empty() {
@@ -600,7 +651,7 @@ impl FinalisedBlockRecord {
             resources::check("consumed_handoffs", count as u64, limits.max_consumed_handoffs)?;
         }
         if !self.handoff_actions.is_empty() {
-            if !matches!(config.protocol_effects, ProtocolEffectsPolicy::Application { .. }) {
+            if config.protocol_effects.application_policy_hash().is_none() {
                 return Err(SessionError::Continuity("lifecycle actions require an application policy".into()));
             }
             let mut seen = self.consumed_handoff_ids.iter().copied().collect::<HashSet<_>>();
@@ -870,6 +921,16 @@ pub trait SessionStore: Send + Sync + 'static {
     fn load_handoff(&self, handoff_id: Hash32) -> std::result::Result<Option<StoredHandoff>, StoreError> {
         let _ = handoff_id;
         Ok(None)
+    }
+    /// An explicit independently reverified external source. Local-only stores
+    /// have no imports; remote-aware stores must not fake local `load_block`.
+    fn load_handoff_import(&self, handoff_id: Hash32) -> std::result::Result<Option<VerifiedHandoffImport>, StoreError> {
+        let _ = handoff_id;
+        Ok(None)
+    }
+    /// Local composition configuration, never proof-supplied authority keys.
+    fn handoff_import_registry(&self) -> Option<Arc<HandoffImportRegistry>> {
+        None
     }
 }
 
@@ -1210,21 +1271,10 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
                 return Err(SessionError::Continuity("handoff target policy mismatch or handoff expired".to_owned()));
             }
             audit_handoff_lifecycle(self.store.as_ref(), &stored)?;
-            let source_genesis = self.store.load_genesis(stored.handoff.source_session_id)?;
-            validate_handoff_trust(&self.config, &source_genesis.config)?;
-            let source = self.store.load_block(stored.handoff.source_session_id, stored.handoff.source_height)?;
-            validate_handoff_source(&source_genesis.config, &source, &stored.handoff)?;
-            if let Some(requirement) = &stored.handoff.evidence_requirement {
-                let evidence = self
-                    .store
-                    .load_evidence(stored.handoff.source_session_id, requirement.message_id)?
-                    .ok_or_else(|| SessionError::Continuity("required handoff evidence is absent".to_owned()))?;
-                if evidence.descriptor.commitment() != requirement.pipeline_commitment
-                    || evidence.receipts.len() <= requirement.minimum_stage_index as usize
-                {
-                    return Err(SessionError::Continuity("required handoff evidence stage has not been reached".to_owned()));
-                }
-            }
+            let source = resolve_handoff_source(self.store.as_ref(), &stored.handoff)?;
+            handoff_usage.add_remote_proof(limits, source.proof_bytes())?;
+            source.validate_target(&self.config)?;
+            validate_handoff_evidence(self.store.as_ref(), &stored.handoff, &source)?;
             consumed_handoffs.push(stored.handoff);
         }
         let mut handoff_actions = Vec::with_capacity(request.handoff_actions.len());
@@ -1240,6 +1290,7 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
             audit_handoff_lifecycle(self.store.as_ref(), &stored)?;
             let cancelled_at = match (&action, &stored.lifecycle.terminal) {
                 (HandoffAction::Cancel { .. }, HandoffTerminal::Issued) => None,
+                (HandoffAction::RemoteRetire { .. }, HandoffTerminal::Issued) => None,
                 (HandoffAction::Reclaim { .. }, HandoffTerminal::Cancelled { at }) => Some(at.clone()),
                 (HandoffAction::Retire { consumed_at, .. }, HandoffTerminal::Consumed { at }) if consumed_at == at => {
                     let target = self.store.load_block(at.session_id, at.height)?;
@@ -1252,7 +1303,7 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
             validate_handoff_action(self.store.as_ref(), &self.config, height, &resolved)?;
             handoff_actions.push(resolved);
         }
-        if !handoff_actions.is_empty() && !matches!(self.config.protocol_effects, ProtocolEffectsPolicy::Application { .. }) {
+        if !handoff_actions.is_empty() && self.config.protocol_effects.application_policy_hash().is_none() {
             return Err(SessionError::Continuity("lifecycle actions require an application policy".into()));
         }
         let mut candidate = self.executor.clone();
@@ -1427,6 +1478,7 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
             consumed_handoffs,
             handoff_actions,
             request_data_commitments,
+            remote_terminals: vec![],
         };
         // An empty proof gives a strict lower bound before consensus work.
         prepared.check_record_size(&self.config.consensus_module_commitment, &[], limits.max_record_bytes)?;
@@ -1478,8 +1530,13 @@ impl<E: TransitionExecutor, S: SessionStore> SessionChain<E, S> {
             consumed_handoff_ids: prepared.consumed_handoffs.iter().map(SessionHandoff::id).collect(),
             request_data_commitments: prepared.request_data_commitments,
             handoff_actions: prepared.handoff_actions,
+            remote_terminals: prepared.remote_terminals,
         };
         record.validate_resources(&self.config)?;
+        for handoff in &prepared.consumed_handoffs {
+            let source = resolve_handoff_source(self.store.as_ref(), handoff)?;
+            validate_remote_consumption(&self.config, &source.config, &record, handoff)?;
+        }
         self.store.commit_block(&self.head, &new_head, &record)?;
         self.executor = prepared.executor;
         self.head = new_head.clone();
@@ -1525,26 +1582,26 @@ fn genesis_head(genesis: &SessionGenesis) -> SessionHead {
 }
 
 fn audit_record(
-    genesis: &SessionGenesis,
+    config: &SessionConfig,
     verifier: &dyn FinalityVerifier,
     head: &mut SessionHead,
     record: &FinalisedBlockRecord,
 ) -> Result<()> {
-    record.validate_resources(&genesis.config)?;
+    record.validate_resources(config)?;
     if head.sealed_by_successor.is_some() {
         return Err(SessionError::Recovery("a block appears after the session was sealed".to_owned()));
     }
     if record.block.parent_hash != head.block_hash
         || record.block.number != head.next_height()?
-        || record.block.session_id != genesis.config.session_id
+        || record.block.session_id != config.session_id
         || record.block.state_root_before != head.state_root
         || record.block.timestamp_ms < head.timestamp_ms
         || record.frame.input_start != head.input_position
         || record.frame.logical_time_start != head.logical_time
-        || record.block.consensus_kind != genesis.config.consensus_kind
-        || record.block.application_profile_commitment != genesis.config.application_profile.commitment()
+        || record.block.consensus_kind != config.consensus_kind
+        || record.block.application_profile_commitment != config.application_profile.commitment()
         || record.block.execution_frame_commitment != record.frame.commitment()
-        || record.consensus_module_commitment != genesis.config.consensus_module_commitment
+        || record.consensus_module_commitment != config.consensus_module_commitment
     {
         return Err(SessionError::Recovery(format!("invalid chain linkage at height {}", record.block.number)));
     }
@@ -1557,8 +1614,8 @@ fn audit_record(
             record.block.number
         )));
     }
-    record.frame.validate(&genesis.config.application_profile, &record.frame_input)?;
-    if record.frame.session_id != genesis.config.session_id
+    record.frame.validate(&config.application_profile, &record.frame_input)?;
+    if record.frame.session_id != config.session_id
         || record.frame.height != record.block.number
         || record.frame.state_root_before != record.block.state_root_before
         || record.frame.state_root_after != record.block.state_root_after
@@ -1567,11 +1624,11 @@ fn audit_record(
         return Err(SessionError::Recovery(format!("execution frame mismatch at height {}", record.block.number)));
     }
     if let Some(successor) = &record.successor {
-        successor.validate_source(&genesis.config, record.frame_input.root())?;
-        if successor.source_session_id != genesis.config.session_id
+        successor.validate_source(config, record.frame_input.root())?;
+        if successor.source_session_id != config.session_id
             || successor.source_height != record.block.number
             || successor.source_state_root != record.block.state_root_after
-            || successor.source_application_profile_commitment != genesis.config.application_profile.commitment()
+            || successor.source_application_profile_commitment != config.application_profile.commitment()
             || successor.target_config.initial_input_position != record.frame.input_end
             || successor.target_config.initial_logical_time != record.frame.logical_time_end
             || successor.target_config.initial_timestamp_ms != record.block.timestamp_ms
@@ -1584,11 +1641,11 @@ fn audit_record(
     for handoff in &record.issued_handoffs {
         handoff.validate(record.block.timestamp_ms)?;
         let handoff_id = handoff.id();
-        if handoff.source_session_id != genesis.config.session_id
+        if handoff.source_session_id != config.session_id
             || handoff.source_height != record.block.number
             || handoff.source_state_root != record.block.state_root_after
-            || handoff.source_application_profile_commitment != genesis.config.application_profile.commitment()
-            || handoff.source_consensus_module_commitment != genesis.config.consensus_module_commitment
+            || handoff.source_application_profile_commitment != config.application_profile.commitment()
+            || handoff.source_consensus_module_commitment != config.consensus_module_commitment
             || !handoff_ids.insert(handoff_id)
             || !record.block.data_commitments.contains(&handoff_id)
         {
@@ -1599,7 +1656,7 @@ fn audit_record(
     if record.consumed_handoff_ids.iter().any(|handoff_id| {
         !consumed_ids.insert(*handoff_id)
             || !record.block.data_commitments.contains(&continuity::handoff_consumption_commitment(
-                genesis.config.session_id,
+                config.session_id,
                 record.block.number,
                 *handoff_id,
             ))
@@ -1625,7 +1682,7 @@ fn audit_record(
         return Err(SessionError::Recovery(format!("finality verifier result mismatch at height {}", record.block.number)));
     }
     *head = SessionHead {
-        session_id: genesis.config.session_id,
+        session_id: config.session_id,
         finalised_height: Some(record.block.number),
         block_hash: record.block.hash(),
         state_root: record.block.state_root_after,
@@ -2284,6 +2341,8 @@ struct FinalisedBlockWire {
     snapshot_bytes: u64,
     #[serde(deserialize_with = "crate::codec::bounded_vec")]
     handoff_actions: Vec<ResolvedHandoffAction>,
+    #[serde(deserialize_with = "crate::codec::bounded_vec")]
+    remote_terminals: Vec<RemoteTerminalCertificate>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2345,6 +2404,7 @@ impl TryFrom<FinalisedBlockWire> for FinalisedBlockRecord {
             request_data_commitments: value.request_data_commitments,
             resource_snapshot_bytes: value.snapshot_bytes,
             handoff_actions: value.handoff_actions,
+            remote_terminals: value.remote_terminals,
         })
     }
 }

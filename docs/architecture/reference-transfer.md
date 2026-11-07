@@ -3,7 +3,7 @@
 `myelin-session-transfer` supplies a reusable deterministic application for P1
 #10/#11. It implements owner-authorized issuance, target intake, authoritative
 scarce-transfer cancellation, later refund, consumed-lock retirement and exact
-continuation with inherited obligations. Its atomicity is limited to a shared store.
+continuation with inherited obligations. This page describes its shared-store branch. The [independent-store protocol](remote-handoff.md) uses typed terminal coordination and a different explicit trust/availability model.
 
 ## Identity and authorization
 
@@ -114,7 +114,7 @@ target/debug/examples/shared_store_transfer cancel /tmp/myelin-continuation-demo
 target/debug/examples/shared_store_transfer refund /tmp/myelin-continuation-demo scarce
 ```
 
-Continuation is one standalone `Continue` command under command schema v3. Every
+Continuation is one standalone `Continue` command under command schema v4. Every
 account owner and receipt recipient must sign, once in sorted order, the digest
 of `(source_genesis, current_state_root, complete_target_config_commitment)`
 under `myelin:reference-transfer-continuation:v1`. The application profile,
@@ -190,7 +190,7 @@ and incompatible genesis identities all fail. The output reports retirement
 capability and the exact consuming/retiring references.
 
 `scripts/myelin_transfer_retirement_acceptance.py --binary /absolute/path/shared_store_transfer
---output /absolute/path/result.json` runs the example as separate processes for
+--remote-binary /absolute/path/remote_receipt --terminal-binary /absolute/path/remote_transfer --output /absolute/path/result.json` runs the examples as separate processes for
 both target modes, checks repeated operations and failed transitions, preserves
 current command behavior, and writes the binary digest plus every exit status. It only uses
 its own temporary local stores.

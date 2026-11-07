@@ -21,8 +21,10 @@ fn open_transfer(
     cfg: &SessionConfig,
     initial: &TransferState,
 ) -> myelin_session_authority::Result<SessionAuthority<TransferExecutor>> {
-    let sources =
-        SourceBindings::from_genesis(initial.policy(), |id| ledger.genesis(id).map_err(|e| Error::Source(e.to_string()))).unwrap();
+    let sources = SourceBindings::from_configs(initial.policy(), |id| {
+        ledger.genesis(id).map(|genesis| genesis.config).map_err(|e| Error::Source(e.to_string()))
+    })
+    .unwrap();
     let executor = TransferExecutor::new(cfg, initial.clone(), sources.clone()).unwrap();
     let (_, finality) = transfers::consensus();
     let consensus = ConsensusConfig::proof_of_authority(ProofOfAuthorityConfig {
@@ -364,8 +366,10 @@ async fn remote_claim_terminals_survive_lost_replies_fencing_and_shared_ledger_r
     assert_eq!(source_account.locked, 0);
     assert_eq!(source_account.available + target_state.account(transfers::ASSET, transfers::recipient()).unwrap().available, 100);
     for (server, (cfg, initial)) in [(&source, &configs[0]), (&target, &configs[1])] {
-        let sources =
-            SourceBindings::from_genesis(initial.policy(), |id| ledger.genesis(id).map_err(|e| Error::Source(e.to_string()))).unwrap();
+        let sources = SourceBindings::from_configs(initial.policy(), |id| {
+            ledger.genesis(id).map(|genesis| genesis.config).map_err(|e| Error::Source(e.to_string()))
+        })
+        .unwrap();
         let cfg = cfg.clone();
         let head = server.authority.head().unwrap();
         let replay = server

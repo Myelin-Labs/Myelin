@@ -1,0 +1,10 @@
+[package]
+name = "myelin-microgame-court"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+ckb-std = { version = "=1.1.0", features = ["type-id", "build-with-clang"] }
+ckb-hash = { version = "=1.1.1", default-features = false, features = ["ckb-contract"] }

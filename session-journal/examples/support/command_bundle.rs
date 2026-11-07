@@ -117,6 +117,7 @@ pub fn export(kind: Kind, root: &Path, input: &Path, destination: &Path) -> AnyR
         signer.validator_id()
     );
     let plan = ExportPlan {
+        remote_sessions: vec![],
         roots: vec![cfg.session_id],
         sessions: vec![ExportSession { session_id: cfg.session_id, network, consensus_toml, execution }],
         artifacts: sources.into_values().collect(),

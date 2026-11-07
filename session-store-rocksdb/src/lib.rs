@@ -6,9 +6,11 @@
 mod archive;
 mod capture;
 mod handoff_storage;
+mod remote;
 pub use archive::{ArchiveRecordSource, ArchiveReference, ArchivedBlock, OffloadOutcome, RetentionHold, RetentionWindow};
 pub use capture::{SnapshotHead, SnapshotInventory, SnapshotLimits};
 pub use handoff_storage::HandoffCompaction;
+pub use remote::{RemoteImportOutcome, RemoteInboxLimits};
 
 use myelin_session::{
     CommandReceipt, ConsensusWal, EvidenceRecord, FinalisedBlockRecord, Hash32, OutboxMessage, PendingDelivery, SessionGenesis,
@@ -22,7 +24,7 @@ use rocksdb::{
 use std::{collections::HashSet, path::Path, sync::Arc};
 
 const SCHEMA_KEY: &[u8] = b"\0myelin-session-store-schema";
-const SCHEMA_VERSION: &[u8] = b"15";
+const SCHEMA_VERSION: &[u8] = b"16";
 const KEY_GENESIS: u8 = b'g';
 const KEY_HEAD: u8 = b'h';
 const KEY_BLOCK: u8 = b'b';
@@ -79,6 +81,7 @@ pub struct RocksSessionStore {
     archival_checkpoint_interval: u64,
     max_network_queue_messages: u64,
     max_network_queue_bytes: u64,
+    remote: Option<remote::RemoteInbox>,
 }
 
 impl RocksSessionStore {
@@ -143,6 +146,7 @@ impl RocksSessionStore {
             archival_checkpoint_interval: store_options.archival_checkpoint_interval,
             max_network_queue_messages: store_options.max_network_queue_messages,
             max_network_queue_bytes: store_options.max_network_queue_bytes,
+            remote: None,
         })
     }
 
@@ -481,28 +485,25 @@ impl SessionStore for RocksSessionStore {
             if !stored.handoff.accepts_target(&genesis.config) || record.block.timestamp_ms > stored.handoff.expires_at_ms {
                 return Err(StoreError::Conflict("handoff target policy mismatch or handoff expired".to_owned()));
             }
-            let source_bytes = transaction
-                .get(session_key(KEY_GENESIS, stored.handoff.source_session_id))
-                .map_err(backend)?
-                .ok_or_else(|| StoreError::NotFound("handoff source genesis".into()))?;
-            let source_genesis = SessionGenesis::decode(&source_bytes).map_err(corrupt)?;
-            myelin_session::validate_handoff_trust(&genesis.config, &source_genesis.config).map_err(corrupt)?;
-            let source_bytes =
-                self.transaction_block_bytes(&transaction, stored.handoff.source_session_id, stored.handoff.source_height)?;
-            let source_record = FinalisedBlockRecord::decode_for_config(&source_bytes, &source_genesis.config).map_err(corrupt)?;
-            myelin_session::validate_handoff_source(&source_genesis.config, &source_record, &stored.handoff).map_err(corrupt)?;
-            if let Some(requirement) = &stored.handoff.evidence_requirement {
-                let evidence_bytes = transaction
-                    .get_for_update(evidence_key(stored.handoff.source_session_id, requirement.message_id), false)
-                    .map_err(backend)?
-                    .ok_or_else(|| StoreError::Conflict("required handoff evidence is absent".to_owned()))?;
-                let evidence = EvidenceRecord::decode(&evidence_bytes).map_err(corrupt)?;
-                if evidence.descriptor.commitment() != requirement.pipeline_commitment
-                    || evidence.receipts.len() <= requirement.minimum_stage_index as usize
-                {
-                    return Err(StoreError::Conflict("required handoff evidence stage has not been reached".to_owned()));
+            let source = myelin_session::resolve_handoff_source(self, &stored.handoff).map_err(corrupt)?;
+            myelin_session::validate_remote_consumption(&genesis.config, &source.config, record, &stored.handoff).map_err(corrupt)?;
+            handoff_usage.add_remote_proof(limits, source.proof_bytes()).map_err(corrupt)?;
+            source.validate_target(&genesis.config).map_err(corrupt)?;
+            if !source.evidence_was_independently_verified() {
+                if let Some(requirement) = &stored.handoff.evidence_requirement {
+                    let evidence_bytes = transaction
+                        .get_for_update(evidence_key(stored.handoff.source_session_id, requirement.message_id), false)
+                        .map_err(backend)?
+                        .ok_or_else(|| StoreError::Conflict("required handoff evidence is absent".to_owned()))?;
+                    let evidence = EvidenceRecord::decode(&evidence_bytes).map_err(corrupt)?;
+                    if evidence.descriptor.commitment() != requirement.pipeline_commitment
+                        || evidence.receipts.len() <= requirement.minimum_stage_index as usize
+                    {
+                        return Err(StoreError::Conflict("required handoff evidence stage has not been reached".to_owned()));
+                    }
                 }
             }
+            let source_record = source.record;
             if stored.lifecycle.issued_at != myelin_session::HandoffBlockReference::from_block(&source_record.block) {
                 return Err(StoreError::Corrupt("lifecycle issuer block mismatch".into()));
             }
@@ -553,7 +554,10 @@ impl SessionStore for RocksSessionStore {
                 (myelin_session::HandoffTerminal::Consumed { at }, myelin_session::HandoffAction::Retire { consumed_at, .. }) => {
                     consumed_at == at
                 }
-                (myelin_session::HandoffTerminal::Issued, myelin_session::HandoffAction::Cancel { .. }) => true,
+                (
+                    myelin_session::HandoffTerminal::Issued,
+                    myelin_session::HandoffAction::Cancel { .. } | myelin_session::HandoffAction::RemoteRetire { .. },
+                ) => true,
                 (myelin_session::HandoffTerminal::Cancelled { at }, myelin_session::HandoffAction::Reclaim { .. }) => {
                     action.cancelled_at.as_ref() == Some(at)
                 }
@@ -764,12 +768,21 @@ impl SessionStore for RocksSessionStore {
         .map(|stored| {
             let timestamp = match source_timestamp {
                 Some(timestamp) => timestamp,
-                None => self.load_block(stored.handoff.source_session_id, stored.handoff.source_height)?.block.timestamp_ms,
+                None => match self.verified_handoff_import(handoff_id)? {
+                    Some(import) => FinalisedBlockRecord::decode(&import.proof().issuing_block).map_err(corrupt)?.block.timestamp_ms,
+                    None => self.load_block(stored.handoff.source_session_id, stored.handoff.source_height)?.block.timestamp_ms,
+                },
             };
             stored.handoff.validate(timestamp).map_err(corrupt)?;
             Ok(stored)
         })
         .transpose()
+    }
+    fn load_handoff_import(&self, id: Hash32) -> Result<Option<myelin_session::VerifiedHandoffImport>, StoreError> {
+        self.verified_handoff_import(id)
+    }
+    fn handoff_import_registry(&self) -> Option<Arc<myelin_session::HandoffImportRegistry>> {
+        self.remote.as_ref().map(|remote| remote.registry.clone())
     }
 }
 

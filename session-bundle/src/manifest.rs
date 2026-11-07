@@ -3,9 +3,9 @@ use myelin_session::{ApplicationProfile, Hash32};
 use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-pub const FORMAT: &str = "myelin-session-bundle-v2";
+pub const FORMAT: &str = "myelin-session-bundle-v3";
 const EXECUTION_DOMAIN: &[u8] = b"myelin:bundle-execution:v2";
-const MANIFEST_DOMAIN: &[u8] = b"myelin:bundle-manifest:v2";
+const MANIFEST_DOMAIN: &[u8] = b"myelin:bundle-manifest:v3";
 
 /// Lowercase BLAKE3 hex is also the complete blob filename. No supplied path is
 /// interpreted by the importer.
@@ -106,6 +106,7 @@ pub enum BlobKind {
     Checkpoint,
     Block,
     Handoff,
+    HandoffImport,
     Evidence,
     Consensus,
     Program,
@@ -169,8 +170,48 @@ pub struct SessionInventory {
     /// later select a suffix but must report its checkpoint assurance separately.
     pub blocks: Vec<BlobId>,
     pub handoffs: Vec<BlobId>,
+    pub remote_handoffs: Vec<HandoffImportInventory>,
+    pub remote_completions: Vec<HandoffCompletionInventory>,
     pub evidence: Vec<BlobId>,
     pub execution: ExecutionArtifacts,
+}
+
+/// Exact external source artifacts required by a target's imported proof. This
+/// is not a declaration that the target store contains the source's full history.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteSessionInventory {
+    pub network: Hash32,
+    pub session_id: Hash32,
+    pub genesis_commitment: Hash32,
+    pub profile: ApplicationProfile,
+    pub consensus: BlobId,
+    pub execution: ExecutionArtifacts,
+}
+impl RemoteSessionInventory {
+    pub fn proposed_anchor(&self) -> TrustAnchor {
+        TrustAnchor {
+            network: self.network,
+            session_id: self.session_id,
+            genesis_commitment: self.genesis_commitment,
+            profile_commitment: self.profile.commitment(),
+            execution_commitment: self.execution.commitment(),
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffImportInventory {
+    pub proof: BlobId,
+    pub source: RemoteSessionInventory,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffCompletionInventory {
+    pub handoff_id: Hash32,
+    pub retirement: BlobId,
+    pub target: RemoteSessionInventory,
 }
 
 /// Obtained independently of a bundle. A key in a downloaded bundle is never
@@ -260,6 +301,19 @@ impl BundleManifest {
                     format!("no external genesis/profile/execution anchor for session {}", BlobId(session.session_id).hex()),
                 ));
             }
+            for peer in session
+                .remote_handoffs
+                .iter()
+                .map(|import| &import.source)
+                .chain(session.remote_completions.iter().map(|completion| &completion.target))
+            {
+                if !anchors.contains(&peer.proposed_anchor()) {
+                    return Err(BundleError::new(
+                        ErrorCode::UnknownTrustAnchor,
+                        "remote source lacks an independent genesis/profile/execution anchor",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -300,6 +354,7 @@ impl BundleManifest {
             Ok(())
         };
         let mut block_count = 0usize;
+        let mut source_sessions: BTreeSet<_> = self.sessions.iter().map(|s| s.session_id).collect();
         for s in &self.sessions {
             crate::work::io(0)?;
             if [s.network, s.session_id, s.genesis_commitment].contains(&[0; 32]) {
@@ -336,6 +391,62 @@ impl BundleManifest {
                         return Err(invalid("duplicate artifact in one session role"));
                     }
                     require(*id, role)?;
+                }
+            }
+            if !s.remote_handoffs.windows(2).all(|pair| pair[0].proof < pair[1].proof) {
+                return Err(invalid("remote proof inventory is duplicated or unsorted"));
+            }
+            for remote in &s.remote_handoffs {
+                require(remote.proof, BlobKind::HandoffImport)?;
+            }
+            if !s.remote_completions.windows(2).all(|pair| pair[0].handoff_id < pair[1].handoff_id) {
+                return Err(invalid("remote completions duplicated or unsorted"));
+            }
+            for completion in &s.remote_completions {
+                require(completion.retirement, BlobKind::Block)?;
+                if completion.handoff_id == [0; 32] || !s.blocks.contains(&completion.retirement) {
+                    return Err(invalid("remote completion must name this source's retirement block"));
+                }
+            }
+            for source in
+                s.remote_handoffs.iter().map(|remote| &remote.source).chain(s.remote_completions.iter().map(|remote| &remote.target))
+            {
+                if [source.network, source.session_id, source.genesis_commitment].contains(&[0; 32])
+                    || source.session_id == s.session_id
+                {
+                    return Err(invalid("invalid external source identity"));
+                }
+                source_sessions.insert(source.session_id);
+                if source_sessions.len() > limits.sessions {
+                    return Err(BundleError::new(ErrorCode::Limit, "local and external source session budget exceeded"));
+                }
+                source.profile.validate().map_err(|e| invalid(e.to_string()))?;
+                if source.profile.program_digest != source.execution.program.0 {
+                    return Err(invalid("external source program differs from its profile"));
+                }
+                for (id, role) in [
+                    (source.consensus, BlobKind::Consensus),
+                    (source.execution.program, BlobKind::Program),
+                    (source.execution.replayer, BlobKind::Replayer),
+                    (source.execution.rules, BlobKind::Rules),
+                    (source.execution.build_inputs, BlobKind::BuildInputs),
+                    (source.execution.toolchain, BlobKind::Toolchain),
+                ] {
+                    require(id, role)?;
+                }
+                if source.execution.target.is_empty()
+                    || source.execution.target.len() > 128
+                    || source.execution.runner_abi.is_empty()
+                    || source.execution.runner_abi.len() > 128
+                    || !sorted_unique(&source.execution.runtime_dependencies)
+                {
+                    return Err(invalid("invalid external source execution identity"));
+                }
+                for id in &source.execution.runtime_dependencies {
+                    require(*id, BlobKind::RuntimeDependency)?;
+                }
+                if let Some(runtime) = &source.execution.runtime {
+                    runtime.validate(&source.execution.runtime_dependencies)?;
                 }
             }
             if s.execution.target.is_empty()

@@ -6,6 +6,8 @@
 //! This reference is a trusted single authority, not Byzantine/quorum HA. Restoring
 //! a second authority from backup with the same secrets is outside its safety model.
 
+mod terminal;
+pub use terminal::{TerminalAuthority, TerminalAuthorityConfig};
 mod protocol;
 pub use protocol::*;
 mod reconciliation;
@@ -20,8 +22,8 @@ pub mod network;
 
 use myelin_consensus::{CommitteeSigner, ConsensusConfig, FinalityProof, SelectedConsensus};
 use myelin_session::{
-    BlockRequest, CommandIdentity, CommandStatus, FinalisedBlockRecord, Hash32, OutboxMessage, SessionChain, SessionConfig,
-    SessionHead, SessionStore, StoreError, TransitionExecutor,
+    BlockRequest, CommandIdentity, CommandStatus, FinalisedBlockRecord, HandoffBlockReference, Hash32, OutboxMessage, SessionChain,
+    SessionConfig, SessionHead, SessionStore, StoreError, TransitionExecutor,
 };
 use myelin_session_runtime::RegisteredFinalityVerifier;
 use myelin_session_store_rocksdb::RocksSessionStore;
@@ -33,7 +35,7 @@ use std::{
 };
 
 const EPOCH_KEY: &[u8] = b"myelin-authoritative-writer-epochs";
-const MAGIC: &[u8] = b"MFEN\x01";
+const MAGIC: &[u8] = b"MFEN\x02";
 const MAX_EPOCHS: usize = 1024;
 const MAX_EPOCH_BYTES: usize = 4 * 1024 * 1024;
 
@@ -76,6 +78,7 @@ struct Ownership {
     /// Intent is durable before signing; recovery permits exactly this next
     /// head or the retained head, never an arbitrary stale canonical backup.
     pending_head: Option<Vec<u8>>,
+    remote_pending: Option<terminal::RemotePending>,
 }
 struct Inner<E: TransitionExecutor> {
     ledger_session: ledger::LedgerSession,
@@ -146,6 +149,7 @@ impl<E: TransitionExecutor> SessionAuthority<E> {
                     grants: vec![],
                     canonical_head: initial_head(&config.session).encode().map_err(protocol::session)?,
                     pending_head: None,
+                    remote_pending: None,
                 };
                 persist(&db, &value)?;
                 value
@@ -240,6 +244,9 @@ impl<E: TransitionExecutor> SessionAuthority<E> {
     /// Timeouts, wall clock, discovery leases and routing changes never grant it.
     pub fn grant(&self, request: GrantRequest) -> Result<WriterGrant> {
         let mut inner = self.locked()?;
+        if inner.ownership.remote_pending.is_some() {
+            return Err(AuthorityError::Fenced("remote terminal outcome is pending".into()));
+        }
         if request.policy != self.policy.commitment() {
             return Err(AuthorityError::Authorization("wrong fencing policy".into()));
         }
@@ -283,35 +290,11 @@ impl<E: TransitionExecutor> SessionAuthority<E> {
     pub fn commit(
         &self,
         authorization: CommitAuthorization,
-        mut request: BlockRequest,
+        request: BlockRequest,
         authority_now_ms: u64,
     ) -> Result<CanonicalReceipt> {
         let mut inner = self.locked()?;
-        let grant =
-            inner.ownership.grants.last().cloned().ok_or_else(|| AuthorityError::Fenced("no writer has been granted".into()))?;
-        if authorization.policy != self.policy.commitment()
-            || authorization.epoch != grant.epoch
-            || authorization.owner != grant.owner()
-        {
-            return Err(AuthorityError::Fenced("writer epoch/owner has been revoked".into()));
-        }
-        protocol::verify(grant.owner(), authorization.digest()?, &authorization.signature)?;
-        if SessionHead::decode(&authorization.base_head).map_err(protocol::session)? != *inner.chain.head() {
-            return Err(AuthorityError::Fenced("worker backup/construction head is stale".into()));
-        }
-        if request.successor.is_some() {
-            return Err(AuthorityError::Invalid("successor changes require a separately authorized compatibility protocol".into()));
-        }
-        if authorization.request_digest != protocol::request_digest(&request)? {
-            return Err(AuthorityError::Authorization("candidate bytes changed".into()));
-        }
-        let stamp = grant.stamp(inner.chain.head().next_height().map_err(protocol::session)?, inner.chain.head().block_hash)?;
-        if request.data_commitments.contains(&stamp) {
-            return Err(AuthorityError::Invalid("worker supplied a reserved fencing stamp".into()));
-        }
-        request.data_commitments.push(stamp);
-        request.local_now_ms = authority_now_ms;
-        let prepared = inner.chain.prepare_block(request).map_err(protocol::session)?;
+        let (_, prepared) = prepare_authorized(&mut inner, &self.policy, authorization, request, authority_now_ms)?;
         let next_head = SessionHead {
             session_id: self.policy.session_id,
             finalised_height: Some(prepared.block().number),
@@ -391,6 +374,40 @@ impl<E: TransitionExecutor> SessionAuthority<E> {
         certificate.signature = inner.keys.certificates.sign(certificate.digest()?);
         Ok((certificate, message))
     }
+}
+
+fn prepare_authorized<E: TransitionExecutor>(
+    inner: &mut Inner<E>,
+    policy: &FencingPolicy,
+    authorization: CommitAuthorization,
+    mut request: BlockRequest,
+    authority_now_ms: u64,
+) -> Result<(BlockRequest, myelin_session::PreparedBlock<E>)> {
+    if inner.ownership.remote_pending.is_some() {
+        return Err(AuthorityError::Fenced("remote terminal outcome is pending; resume original candidate".into()));
+    }
+    let grant = inner.ownership.grants.last().cloned().ok_or_else(|| AuthorityError::Fenced("no writer has been granted".into()))?;
+    if authorization.policy != policy.commitment() || authorization.epoch != grant.epoch || authorization.owner != grant.owner() {
+        return Err(AuthorityError::Fenced("writer epoch/owner has been revoked".into()));
+    }
+    protocol::verify(grant.owner(), authorization.digest()?, &authorization.signature)?;
+    if SessionHead::decode(&authorization.base_head).map_err(protocol::session)? != *inner.chain.head() {
+        return Err(AuthorityError::Fenced("worker backup/construction head is stale".into()));
+    }
+    if request.successor.is_some() {
+        return Err(AuthorityError::Invalid("successor changes require a separately authorized compatibility protocol".into()));
+    }
+    if authorization.request_digest != protocol::request_digest(&request)? {
+        return Err(AuthorityError::Authorization("candidate bytes changed".into()));
+    }
+    let stamp = grant.stamp(inner.chain.head().next_height().map_err(protocol::session)?, inner.chain.head().block_hash)?;
+    if request.data_commitments.contains(&stamp) {
+        return Err(AuthorityError::Invalid("worker supplied a reserved fencing stamp".into()));
+    }
+    request.data_commitments.push(stamp);
+    request.local_now_ms = authority_now_ms;
+    let prepared = inner.chain.prepare_block(request.clone()).map_err(protocol::session)?;
+    Ok((request, prepared))
 }
 
 fn receipt<E: TransitionExecutor>(inner: &Inner<E>, height: u64) -> Result<CanonicalReceipt> {
@@ -532,6 +549,23 @@ fn reconcile_pending<E: TransitionExecutor>(inner: &mut Inner<E>) -> Result<()> 
         inner.uncertain = true;
         return Err(AuthorityError::Invalid("canonical store is behind or diverges from the durable ownership watermark".into()));
     }
+    if let Some(remote) = &inner.ownership.remote_pending {
+        let record = myelin_session::verify_remote_block(&remote.record, inner.chain.config(), inner.verifier.as_ref())
+            .map_err(protocol::session)?;
+        let after = pending.as_ref().ok_or_else(|| AuthorityError::Invalid("remote candidate has no reserved head".into()))?;
+        if HandoffBlockReference::from_block(&record.block)
+            != (HandoffBlockReference {
+                session_id: after.session_id,
+                height: after.finalised_height.ok_or_else(|| AuthorityError::Invalid("remote head missing height".into()))?,
+                block_hash: after.block_hash,
+            })
+        {
+            return Err(AuthorityError::Invalid("retained remote candidate differs from reserved head".into()));
+        }
+        if *head == before {
+            return Ok(());
+        }
+    }
     if pending.is_some() {
         // On reopen, both database locks exclude the former authority process.
         // If the block is absent, no certificate escaped; discard only that
@@ -539,6 +573,7 @@ fn reconcile_pending<E: TransitionExecutor>(inner: &mut Inner<E>) -> Result<()> 
         let mut ownership = inner.ownership.clone();
         ownership.canonical_head = head.encode().map_err(protocol::session)?;
         ownership.pending_head = None;
+        ownership.remote_pending = None;
         if let Err(error) = persist(&inner.db, &ownership) {
             inner.uncertain = true;
             return Err(AuthorityError::Uncertain(error.to_string()));

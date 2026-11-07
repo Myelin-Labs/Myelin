@@ -12,6 +12,7 @@ myelin-exec.workspace = true
 myelin-state.workspace = true
 postcard.workspace = true
 serde.workspace = true
+secp256k1.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

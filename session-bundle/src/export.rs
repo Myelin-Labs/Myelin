@@ -38,6 +38,8 @@ pub struct ExportPlan {
     /// Complete catalog, including sources, successors and opaque app-owned
     /// restore dependencies. Every entry is exported and separately recognized.
     pub sessions: Vec<ExportSession>,
+    /// Explicit artifact catalog for independently stored proof peers.
+    pub remote_sessions: Vec<ExportSession>,
     pub artifacts: Vec<ArtifactSource>,
     #[serde(default)]
     pub limits: BundleLimits,
@@ -59,7 +61,13 @@ impl Writer {
         let id = BlobId::of(bytes);
         if matches!(
             role,
-            BlobKind::Genesis | BlobKind::Head | BlobKind::Checkpoint | BlobKind::Block | BlobKind::Handoff | BlobKind::Evidence
+            BlobKind::Genesis
+                | BlobKind::Head
+                | BlobKind::Checkpoint
+                | BlobKind::Block
+                | BlobKind::Handoff
+                | BlobKind::HandoffImport
+                | BlobKind::Evidence
         ) {
             if bytes.len() < 6 || &bytes[..4] != b"MREC" {
                 return Err(integrity("exported record has no supported envelope"));
@@ -150,6 +158,26 @@ impl Writer {
 // Reject malformed artifact graphs before creating an output directory or
 // copying potentially large toolchain packages. The full combined graph is
 // validated again after deriving the mandatory session-history edges.
+fn export_execution(
+    writer: &mut Writer,
+    sources: &BTreeMap<BlobId, &ArtifactSource>,
+    execution: &ExecutionArtifacts,
+) -> crate::Result<()> {
+    for (blob, role) in [
+        (execution.program, BlobKind::Program),
+        (execution.replayer, BlobKind::Replayer),
+        (execution.rules, BlobKind::Rules),
+        (execution.build_inputs, BlobKind::BuildInputs),
+        (execution.toolchain, BlobKind::Toolchain),
+    ] {
+        writer.artifact(sources, blob, role)?;
+    }
+    for blob in &execution.runtime_dependencies {
+        writer.artifact(sources, *blob, BlobKind::RuntimeDependency)?;
+    }
+    Ok(())
+}
+
 fn validate_artifacts(sources: &BTreeMap<BlobId, &ArtifactSource>, limits: &BundleLimits) -> crate::Result<()> {
     let index: BTreeMap<_, _> = sources.keys().enumerate().map(|(i, id)| (*id, i)).collect();
     let mut remaining = vec![0usize; sources.len()];
@@ -216,8 +244,11 @@ pub(crate) fn export_inner(store: &dyn SessionStore, plan: &ExportPlan, destinat
         return Err(BundleError::new(ErrorCode::Limit, "invalid export catalog size"));
     }
     let catalog: BTreeMap<_, _> = plan.sessions.iter().map(|s| (s.session_id, s)).collect();
+    let remote_catalog: BTreeMap<_, _> = plan.remote_sessions.iter().map(|s| (s.session_id, s)).collect();
     let sources: BTreeMap<_, _> = plan.artifacts.iter().map(|s| (s.id, s)).collect();
-    if catalog.len() != plan.sessions.len()
+    if remote_catalog.len() != plan.remote_sessions.len()
+        || remote_catalog.len() > plan.limits.sessions
+        || catalog.len() != plan.sessions.len()
         || sources.len() != plan.artifacts.len()
         || plan.roots.is_empty()
         || plan.roots.iter().any(|id| !catalog.contains_key(id))
@@ -237,6 +268,8 @@ pub(crate) fn export_inner(store: &dyn SessionStore, plan: &ExportPlan, destinat
     };
     let mut captured: BTreeMap<Hash32, (SessionHead, BlobId)> = BTreeMap::new();
     let mut handoffs = BTreeMap::new();
+    let mut imports = BTreeMap::new();
+    let mut used_remote_sessions = BTreeSet::new();
     let mut evidence = BTreeMap::new();
     let mut sessions = vec![];
     let mut total_blocks = 0usize;
@@ -261,21 +294,8 @@ pub(crate) fn export_inner(store: &dyn SessionStore, plan: &ExportPlan, destinat
         if total_blocks > plan.limits.blocks {
             return Err(BundleError::new(ErrorCode::Limit, "export block budget exceeded"));
         }
-        for (blob, role) in [
-            (entry.execution.program, BlobKind::Program),
-            (entry.execution.replayer, BlobKind::Replayer),
-            (entry.execution.rules, BlobKind::Rules),
-            (entry.execution.build_inputs, BlobKind::BuildInputs),
-            (entry.execution.toolchain, BlobKind::Toolchain),
-        ] {
-            writer.artifact(&sources, blob, role)?;
-        }
-        for blob in &entry.execution.runtime_dependencies {
-            writer.artifact(&sources, *blob, BlobKind::RuntimeDependency)?;
-        }
-        if entry.consensus_toml.len() > 1024 * 1024 {
-            return Err(BundleError::new(ErrorCode::Limit, "consensus config exceeds 1 MiB"));
-        }
+        export_execution(&mut writer, &sources, &entry.execution)?;
+
         let genesis_blob = writer.add(&genesis.encode().map_err(integrity)?, BlobKind::Genesis)?;
         let head_blob = writer.add(&head.encode().map_err(integrity)?, BlobKind::Head)?;
         let checkpoint_blob = writer.add(&checkpoint.encode().map_err(integrity)?, BlobKind::Checkpoint)?;
@@ -283,6 +303,8 @@ pub(crate) fn export_inner(store: &dyn SessionStore, plan: &ExportPlan, destinat
         captured.insert(id, (head, checkpoint_blob));
         let mut blocks = Vec::with_capacity(count);
         let mut session_handoffs = BTreeSet::new();
+        let mut remote_handoffs = BTreeMap::new();
+        let mut remote_completions = BTreeMap::new();
         let mut session_evidence = BTreeSet::new();
         for height in 0..count as u64 {
             crate::work::checkpoint(ArchiveStage::Export, Some(format!("{}:{height}", BlobId(id).hex())), 0)?;
@@ -305,6 +327,34 @@ pub(crate) fn export_inner(store: &dyn SessionStore, plan: &ExportPlan, destinat
             dependencies.sort();
             dependencies.dedup();
             blocks.push(block);
+            for action in &record.handoff_actions {
+                if let myelin_session::HandoffAction::RemoteRetire { handoff_id, proof } = &action.action {
+                    let registry = store.handoff_import_registry().ok_or_else(|| missing("remote completion peer trust absent"))?;
+                    proof.verify(&registry, &genesis.config, &action.handoff).map_err(integrity)?;
+                    let (_, target) = registry.configs(proof.import_policy).map_err(integrity)?;
+                    let peer =
+                        remote_catalog.get(&target.session_id).ok_or_else(|| missing("remote completion artifact catalog absent"))?;
+                    used_remote_sessions.insert(target.session_id);
+                    export_execution(&mut writer, &sources, &peer.execution)?;
+                    let consensus = writer.add(peer.consensus_toml.as_bytes(), BlobKind::Consensus)?;
+                    remote_completions.insert(
+                        *handoff_id,
+                        HandoffCompletionInventory {
+                            handoff_id: *handoff_id,
+                            retirement: block,
+                            target: RemoteSessionInventory {
+                                network: peer.network,
+                                session_id: target.session_id,
+                                genesis_commitment: target.commitment(),
+                                profile: target.application_profile.clone(),
+                                consensus,
+                                execution: peer.execution.clone(),
+                            },
+                        },
+                    );
+                }
+            }
+
             let handoff_ids = record
                 .issued_handoffs
                 .iter()
@@ -320,6 +370,33 @@ pub(crate) fn export_inner(store: &dyn SessionStore, plan: &ExportPlan, destinat
                     return Err(BundleError::new(ErrorCode::SourceChanged, "handoff changed during export"));
                 }
                 session_handoffs.insert(blob);
+                if let Some(import) = store.load_handoff_import(handoff_id).map_err(integrity)? {
+                    let inbox = import.inbox_record().map_err(integrity)?;
+                    let source = myelin_session::SessionConfig::decode(&inbox.proof.source_config).map_err(integrity)?;
+                    let source_entry =
+                        remote_catalog.get(&source.session_id).ok_or_else(|| missing("external source artifact catalog absent"))?;
+                    used_remote_sessions.insert(source.session_id);
+                    export_execution(&mut writer, &sources, &source_entry.execution)?;
+                    let consensus = writer.add(source_entry.consensus_toml.as_bytes(), BlobKind::Consensus)?;
+                    let proof = writer.add(&inbox.encode().map_err(integrity)?, BlobKind::HandoffImport)?;
+                    if imports.insert(handoff_id, proof).is_some_and(|old| old != proof) {
+                        return Err(BundleError::new(ErrorCode::SourceChanged, "remote proof changed during export"));
+                    }
+                    remote_handoffs.insert(
+                        proof,
+                        HandoffImportInventory {
+                            proof,
+                            source: RemoteSessionInventory {
+                                network: source_entry.network,
+                                session_id: source.session_id,
+                                genesis_commitment: source.commitment(),
+                                profile: source.application_profile,
+                                consensus,
+                                execution: source_entry.execution.clone(),
+                            },
+                        },
+                    );
+                }
             }
             for message in &record.outbox {
                 crate::work::record_read()?;
@@ -341,15 +418,21 @@ pub(crate) fn export_inner(store: &dyn SessionStore, plan: &ExportPlan, destinat
             checkpoint: checkpoint_blob,
             blocks,
             handoffs: session_handoffs.into_iter().collect(),
+            remote_handoffs: remote_handoffs.into_values().collect(),
+            remote_completions: remote_completions.into_values().collect(),
             evidence: session_evidence.into_iter().collect(),
             execution: entry.execution.clone(),
         });
+    }
+    if used_remote_sessions.len() != remote_catalog.len() {
+        return Err(missing("unused external source catalog entry"));
     }
     let publication_reads = captured
         .len()
         .checked_mul(2)
         .and_then(|n| n.checked_add(handoffs.len()))
         .and_then(|n| n.checked_add(evidence.len()))
+        .and_then(|n| n.checked_add(imports.len()))
         .and_then(|n| u64::try_from(n).ok())
         .ok_or_else(|| BundleError::new(ErrorCode::Limit, "publication record count overflow"))?;
     let check_source = || -> crate::Result<bool> {
@@ -389,6 +472,16 @@ pub(crate) fn export_inner(store: &dyn SessionStore, plan: &ExportPlan, destinat
                 return Err(BundleError::new(ErrorCode::SourceChanged, "evidence stage changed"));
             }
         }
+        for (id, blob) in &imports {
+            if !crate::work::publication_check_active()? {
+                return Ok(false);
+            }
+            let value =
+                store.load_handoff_import(*id).map_err(integrity)?.ok_or_else(|| missing("remote proof removed during export"))?;
+            if BlobId::of(&value.inbox_record().map_err(integrity)?.encode().map_err(integrity)?) != *blob {
+                return Err(BundleError::new(ErrorCode::SourceChanged, "remote proof changed during export"));
+            }
+        }
         Ok(true)
     };
     let mut roots = plan.roots.clone();
@@ -407,7 +500,9 @@ pub(crate) fn export_inner(store: &dyn SessionStore, plan: &ExportPlan, destinat
     let encoded = manifest.encode()?;
     crate::work::io(encoded.len() as u64)?;
     fs::write(&pending, encoded).map_err(io)?;
-    let directory = Arc::new(BundleDirectory::open_named(destination, plan.limits.clone(), "manifest.pending")?);
+    let mut directory = BundleDirectory::open_named(destination, plan.limits.clone(), "manifest.pending")?;
+    directory.remote_imports = store.handoff_import_registry();
+    let directory = Arc::new(directory);
     let indexed = BundleStore::index(directory)?;
     for (id, dependencies) in indexed.required_edges()? {
         let i = manifest.blobs.binary_search_by_key(&id, |b| b.id).map_err(|_| missing("derived edge owner absent"))?;
@@ -419,10 +514,18 @@ pub(crate) fn export_inner(store: &dyn SessionStore, plan: &ExportPlan, destinat
     let encoded = manifest.encode()?;
     crate::work::io(encoded.len() as u64)?;
     fs::write(&pending, encoded).map_err(io)?;
-    let directory = Arc::new(BundleDirectory::open_named(destination, plan.limits.clone(), "manifest.pending")?);
+    let mut directory = BundleDirectory::open_named(destination, plan.limits.clone(), "manifest.pending")?;
+    directory.remote_imports = store.handoff_import_registry();
+    let directory = Arc::new(directory);
     // Source-local internal consistency audit. These proposed anchors are NOT
     // exported as an independent trust file and establish no official identity.
-    let anchors: Vec<_> = manifest.sessions.iter().map(SessionInventory::proposed_anchor).collect();
+    let mut anchors: Vec<_> = manifest.sessions.iter().map(SessionInventory::proposed_anchor).collect();
+    anchors.extend(manifest.sessions.iter().flat_map(|s| {
+        s.remote_handoffs
+            .iter()
+            .map(|r| r.source.proposed_anchor())
+            .chain(s.remote_completions.iter().map(|r| r.target.proposed_anchor()))
+    }));
     BundleStore::open(directory, &anchors)?;
     File::open(&pending).map_err(io)?.sync_all().map_err(io)?;
     File::open(destination.join("blobs")).map_err(io)?.sync_all().map_err(io)?;

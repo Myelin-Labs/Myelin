@@ -114,7 +114,7 @@ to implement the same policy; this code does not deploy one.
 
 ## Current storage format
 
-Only MREC envelope 13, session block 6 and RocksDB schema 15 are accepted.
+Only MREC envelope 14, session block 6 and RocksDB schema 16 are accepted.
 Every config binds resource limits and an explicit protocol-effects policy.
 Every block records its original snapshot byte count, and every successor carries
 its typed transition receipt. Historical record/store decoders and schema-marker
@@ -144,3 +144,13 @@ The unified worker block message always carries its explicit actions; an existin
 source-effect override cannot silently drop nonempty actions.
 See [the lifecycle contract](handoff-lifecycle.md) for record commitments, CAS,
 resource charging and replay.
+
+
+Remote scarce applications use `RemoteApplication { policy_hash, terminal }`.
+The kernel recognizes this genesis-bound coordination class independently of an
+inbox/transport adapter. Source and target must bind the same terminal policy and
+its exact roles. Every consumption requires the exclusive certificate for the
+exact target candidate, including when both histories are colocated or a source
+history has been copied into another store. A normal `Application` policy cannot
+import or downgrade that domain. Forwarding, continuation and policy targets are
+rejected; owner cancellation/refund semantics remain application-verified.

@@ -13,6 +13,7 @@ pub struct BundleDirectory {
     blobs: File,
     manifest: BundleManifest,
     limits: BundleLimits,
+    pub(crate) remote_imports: Option<std::sync::Arc<myelin_session::HandoffImportRegistry>>,
 }
 
 /// A completed inventory pass makes no statement about execution or finality.
@@ -166,7 +167,11 @@ impl BundleDirectory {
         // A separate mount can expose this payload directory under another
         // archive root. Its readers must also exclude collection.
         lock_directory(&blobs, exclusive)?;
-        Ok(Self { root, blobs, manifest, limits })
+        Ok(Self { root, blobs, manifest, limits, remote_imports: None })
+    }
+    pub fn with_handoff_imports(mut self, registry: std::sync::Arc<myelin_session::HandoffImportRegistry>) -> Self {
+        self.remote_imports = Some(registry);
+        self
     }
     pub fn manifest(&self) -> &BundleManifest {
         &self.manifest
@@ -180,6 +185,7 @@ impl BundleDirectory {
             blobs: self.blobs.try_clone().map_err(|e| io_error(e, "bundle handle"))?,
             manifest: self.manifest.clone(),
             limits: self.limits.clone(),
+            remote_imports: self.remote_imports.clone(),
         }))
     }
     /// Stream a checked copy into caller-owned staging. A failed digest check
@@ -294,7 +300,19 @@ impl BundleDirectory {
         Ok(InventoryReport {
             inventory: summary,
             file_packages: self.verify_file_packages()?,
-            externally_recognized_sessions: self.manifest.sessions.len(),
+            externally_recognized_sessions: self
+                .manifest
+                .sessions
+                .iter()
+                .map(|s| s.session_id)
+                .chain(self.manifest.sessions.iter().flat_map(|s| {
+                    s.remote_handoffs
+                        .iter()
+                        .map(|r| r.source.session_id)
+                        .chain(s.remote_completions.iter().map(|r| r.target.session_id))
+                }))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             host_replay: VerificationStage::NotRun,
             ckb_vm: VerificationStage::NotRun,
             finality: VerificationStage::NotRun,

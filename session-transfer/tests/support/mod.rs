@@ -18,6 +18,7 @@ pub fn recipient() -> Hash32 {
 }
 pub fn policy(kind: TransferKind) -> TransferPolicy {
     TransferPolicy {
+        coordination: myelin_session_transfer::TransferCoordination::SharedStore,
         deployment_id: [1; 32],
         uniqueness_domain: [2; 32],
         kind,

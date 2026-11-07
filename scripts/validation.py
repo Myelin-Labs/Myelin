@@ -20,7 +20,7 @@ FIXTURES = ("myelin-exec/vm-ipc,myelin-session-worker/test-fixture,myelin-sessio
             "myelin-session-authority/test-fixture,myelin-session-bundle/test-fixture")
 REMOVED_FLAGS = ("RUN_TEEWORLDS", "RUN_CELLSCRIPT_TOOLCHAIN", "RUN_CKB_DEVNET", "RUN_BUNDLE_CONTAINER",
                  "RUN_BUNDLE_BUILD", "RUN_BROWSER_CONFORMANCE")
-SCRATCH = ("bundle-build/evidence/reproduction/image-store", "bundle-build/evidence/reproduction/run-store",
+SCRATCH = ("ckb-devnet/build", "ckb-devnet/court/chain", "bundle-build/evidence/reproduction/image-store", "bundle-build/evidence/reproduction/run-store",
            "bundle-container/evidence/loaded-store", "bundle-container/evidence/loaded-run")
 
 
@@ -181,19 +181,29 @@ class Run:
             metadata = step("cargo-metadata", ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"])
             target = Path(json.loads(metadata.read_text())["target_directory"])
             step("transfer-cli", python("myelin_transfer_retirement_acceptance.py") +
-                 ["--binary", str(target / "debug/examples/shared_store_transfer"), "--output", str(self.out / "transfer.json")])
+                 ["--binary", str(target / "debug/examples/shared_store_transfer"),
+                  "--remote-binary", str(target / "debug/examples/remote_receipt"),
+                  "--terminal-binary", str(target / "debug/examples/remote_transfer"), "--output", str(self.out / "transfer.json")])
         elif name == "cellscript":
             step("reproduce-compiler", [script("myelin_cellscript_toolchain_gate.sh")],
                  {"CELLSCRIPT_EVIDENCE_ROOT": str(self.out / "cellscript/evidence")})
         elif name == "ckb-devnet":
-            toolchain = Path(self.env.get("CELLSCRIPT_TOOLCHAIN_ROOT", "/tmp/myelin-cellscript-toolchain-5fd4c469"))
-            compiled_here = self.report["lanes"]["cellscript"]["status"] == "passed"
-            attestation = (self.out / "cellscript/evidence/compiler-attestation.json" if compiled_here else
-                           Path(self.required("CELLSCRIPT_ATTESTATION")))
-            destination = self.out / "ckb-devnet/chain"
-            step("live-devnet", [script("myelin_ckb_devnet_smoke.sh")],
-                 {"CELLSCRIPT_BIN": self.env.get("CELLSCRIPT_BIN", str(toolchain / "CellScript/target/release/cellc")),
-                  "CELLSCRIPT_ATTESTATION": str(attestation), "WORKDIR": str(destination), "REPORT": str(destination / "report.json")})
+            fixture = self.root / "fixtures/ckb-microgame/Cargo.toml"
+            build = self.out / "ckb-devnet/build"
+            evidence = self.out / "ckb-devnet/court/evidence"
+            program = build / "riscv64imac-unknown-none-elf/release/myelin-microgame-court"
+            replayer = build / "release/myelin-microgame-replay"
+            step("court-toolchain", ["rustc", "+1.95.0", "-vV"])
+            step("court-format", ["cargo", "+1.95.0", "fmt", "--all", "--manifest-path", str(fixture), "--", "--check"])
+            step("court-program", ["cargo", "+1.95.0", "build", "--locked", "--release", "--manifest-path", str(fixture),
+                 "--target-dir", str(build), "--target", "riscv64imac-unknown-none-elf", "-p", "myelin-microgame-court"],
+                 {"CARGO_TARGET_RISCV64IMAC_UNKNOWN_NONE_ELF_RUSTFLAGS": "-C target-feature=-a -C passes=lower-atomic"})
+            step("court-replayer", ["cargo", "+1.95.0", "build", "--locked", "--release", "--manifest-path", str(fixture),
+                 "--target-dir", str(build), "-p", "myelin-microgame-replay"])
+            step("court-transactions", python("myelin_ckb_microgame.py") + ["--ckb", self.required("CKB_BIN"), "--program", str(program),
+                 "--replayer", str(replayer), "--out", str(evidence.parent)])
+            step("court-package", python("myelin_microgame_archive.py") + ["package", "--evidence", str(evidence),
+                 "--replayer", str(replayer), "--out", str(self.out / "ckb-devnet/package.json")])
         elif name == "teeworlds":
             destination = self.out / "teeworlds/evidence"
             step("game-acceptance", [script("myelin_teeworlds_acceptance.sh")], {"OUTPUT_DIR": str(destination)})

@@ -4,8 +4,9 @@ Status: protocol RFC with implemented local reference paths. This ADR addresses
 issue #7; the shared-store transfer, source authorization, succession and fencing
 implementations are described in their linked contracts. The generic envelope
 below remains a proposal, separate from the current stored-record codec.
-Remote scarce transfers remain outside v1 and require #16/#17 terminal-state
-coordination.
+The separate [independent-store reference](remote-handoff.md) implements #16/#17
+with explicit external source proofs and a trusted exclusive terminal authority.
+It is not an implementation of the proposed generic envelope below.
 
 ## Decision and supported scope
 
@@ -253,7 +254,7 @@ Names below define protocol categories; the current APIs expose some as
 
 ## Current storage format
 
-Only MREC envelope 13, session block 6 and RocksDB schema 15 are accepted.
+Only MREC envelope 14, session block 6 and RocksDB schema 16 are accepted.
 Every config binds resource limits and an explicit protocol-effects policy.
 Every block records its original snapshot byte count, and every successor carries
 its typed transition receipt. Historical record/store decoders and schema-marker
@@ -278,6 +279,7 @@ their declared order; verification rejects duplicate nodes and cyclic edges.
 The new envelope remains proposed until its corresponding types, bounded codec,
 authorization and offline verifier pass their own vectors and negative tests.
 
-Acceptance of this ADR does not complete implementation issues #9–#15 or remote
-protocol issues #16/#17. Deployment of a CKB bridge/court remains a separate
-acceptance path.
+Acceptance of the proposed envelope does not by itself implement an application
+protocol. The current local and remote references have their own implementations
+and evidence. The [strict microgame court](ckb-microgame.md) supplies a separate
+actual devnet rule-verification path; public-network deployment remains separate.

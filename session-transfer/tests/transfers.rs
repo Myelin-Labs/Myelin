@@ -273,7 +273,7 @@ fn source_state_is_independent_of_batch_boundaries_and_imports_are_canonical() {
         bad.push(0);
         assert!(TransferState::decode(&bad).is_err());
         let mut bad = bytes;
-        bad[4] = 2;
+        bad[4] = bad[4].checked_add(1).unwrap();
         assert!(TransferState::decode(&bad).is_err());
     }
     assert_eq!(roots[0], roots[1]);

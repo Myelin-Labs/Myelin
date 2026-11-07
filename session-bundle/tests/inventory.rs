@@ -69,6 +69,8 @@ fn fixture() -> (BundleManifest, BTreeMap<BlobId, Vec<u8>>) {
         checkpoint,
         blocks: vec![],
         handoffs: vec![],
+        remote_handoffs: vec![],
+        remote_completions: vec![],
         evidence: vec![],
         execution,
     };

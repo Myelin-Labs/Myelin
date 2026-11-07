@@ -14,6 +14,12 @@ Claims must follow evidence, in this order:
 | 7 | committed block stayed canonical through configured confirmation depth | implemented as depth-based `finalized` evidence |
 | 8 | deployed public-testnet court adjudicated a disputed chunk | not implemented |
 
+The [strict microgame reference](../architecture/ckb-microgame.md) demonstrates
+actual game-rule adjudication on an isolated CKB devnet, plus separate offline VM
+replay, inclusion/depth receipts and reorg handling. Its external-provider
+retrieval receipt is a separate availability result. It does not establish the
+public-testnet level-8 claim for this fixture or another application.
+
 Local court-bundle `valid = true` means the host evidence package is internally consistent. It does not move the bundle to level 4 or 6; `court_verifiable` remains false.
 
 Closed-validator finality says a configured quorum signed one Myelin session block. It does not establish permissionless L2 security.

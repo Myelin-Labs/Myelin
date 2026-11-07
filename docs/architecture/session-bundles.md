@@ -14,8 +14,33 @@ kits into session exports without changing historical execution mappings or
 raising individual-blob limits. The original transfer and all three command/tick
 example programs replay archived histories after their source databases are
 removed. The [P1 acceptance record](../plans/p1-delivery.md) maps the retained
-clean-container/build reports and their frozen source identities; publication
-remains pending. Other applications require their own program/policy acceptance.
+clean-container/build reports and their frozen source identities; that P1 work
+was published through [PR #23](https://github.com/Myelin-Labs/Myelin/pull/23).
+Other applications require their own program/policy acceptance.
+
+## Independent-store handoff dependencies
+
+An imported source remains external. A target bundle includes its verified inbox
+proof, pinned source consensus configuration and complete source execution/build
+artifact references in `remote_handoffs`. These entries require independent
+source genesis/profile/execution anchors as well as the target anchor. The proof
+blob depends on all source artifacts; the target block and permanent handoff
+marker depend on that proof. Missing proofs or source artifacts reject.
+
+`BundleDirectory::with_handoff_imports` supplies locally configured finality,
+application and evidence verifiers. A downloaded inbox record cannot configure
+these verifiers. `BundleStore::load_block` does not invent source history from
+an import; source proof verification uses the explicit import port. Recovery and
+target application replay use the same resolution rule as live execution.
+
+The current format is v3 and current RocksDB schema is 16. Earlier formats are
+rejected rather than imported/upgraded. Historical archives retain their original
+interpreter. The [remote reference](remote-handoff.md) verifies explicit source
+proofs and terminal-authorized scarce intake. Source retirement records contain
+flat foreign target consumption evidence in `remote_completions`; the graph
+retains the target's consensus/program/build dependencies under a separate target
+anchor. Neither path invents foreign local history. A finality proof is not a
+source application-history replay or a cross-ledger atomic database transaction.
 
 ## Layout and exact identities
 
@@ -26,12 +51,12 @@ bundle/
     <64 lowercase hex BLAKE3 digest>
 ```
 
-The manifest uses format `myelin-session-bundle-v2`. It is canonical compact JSON
+The manifest uses format `myelin-session-bundle-v3`. It is canonical compact JSON
 in the field order of `BundleManifest` and its nested Rust structs, with no
 trailing newline. Import decodes and re-encodes, requiring exact byte equality;
 unknown/duplicate fields and alternate encodings reject. Blob identifiers are
 strict lowercase 32-byte hex strings, never arbitrary filenames or URLs.
-The manifest commitment is BLAKE3 over `myelin:bundle-manifest:v2` followed by
+The manifest commitment is BLAKE3 over `myelin:bundle-manifest:v3` followed by
 those complete canonical bytes.
 
 The manifest records the Myelin version and required persistence versions,
@@ -59,7 +84,7 @@ source issuance and required evidence; refunds depend on cancellation; successor
 genesis depends on the sealed predecessor block. Typed successor receipts also
 require their compatibility declaration/vectors or migration-program artifacts;
 export retains these automatically from the explicit artifact catalog. Record
-envelope 13 carries all current blocks, including typed transitions.
+envelope 14 carries all current blocks, including typed transitions.
 Auxiliary terminal indexes
 depend on the issuance and terminal blocks they reference. Recovery verifies the
 reverse links without adding graph cycles. Both predecessor and successor must
@@ -235,7 +260,7 @@ content-checked record; it does not scan all preceding blocks.
 
 ## Hot retention and durable archive pins
 
-RocksDB schema 15 supports explicit cold block references. A block is relocated
+RocksDB schema 16 supports explicit cold block references. A block is relocated
 only after the configured `ArchiveRecordSource` supplies bytes exactly equal to
 the hot encoding, with the pinned length and BLAKE3 digest. One synchronous WAL
 transaction replaces the hot block key with a 77-byte manifest/blob/length pin.
@@ -327,7 +352,7 @@ index bytes saved after replacing each payload with its marker. It does not clai
 immediate SST space reclamation. Permanent command/handoff identities still grow
 with lifetime activity, and archive roots remain pinned; compaction alone cannot
 establish a fixed total storage bound or authorize archive deletion. RocksDB schema
-15 is required, with no decoder or upgrade path for prior store schemas. MREC and
+16 is required, with no decoder or upgrade path for prior store schemas. MREC and
 block wire formats are unchanged.
 
 ### Bulk retention
@@ -930,7 +955,7 @@ exporter/package changes are not silently attributed to that old build.
 
 ### Retirement dependencies
 
-The current MREC 13 envelope carries retirement blocks and terminal handoff indexes.
+The current MREC 14 envelope carries retirement blocks and terminal handoff indexes.
 A retiring source block depends on the exact target consumption block as well as
 its original issuance. A retired index retains both consuming and retiring
 references; removing a source pending lock does not allow either history to be
